@@ -8,4 +8,3 @@ export const applyVerifiedRichSnapshot = (tabs, id, content) => {
   })
   return changed ? next : tabs
 }
-

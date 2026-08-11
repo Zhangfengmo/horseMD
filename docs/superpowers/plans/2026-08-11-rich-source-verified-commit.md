@@ -128,4 +128,3 @@ Node assertion scripts.
    address only evidence-backed findings.
 5. Update the architecture report with a table separating fixed current
    defects, verified non-causes, and preventive follow-up work.
-

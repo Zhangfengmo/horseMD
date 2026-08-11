@@ -26,4 +26,3 @@ const invalid = applyVerifiedRichSnapshot(next, 'a', null)
 assert.equal(invalid, next)
 
 console.log('PASS verified rich snapshot updates only App content/pending state')
-

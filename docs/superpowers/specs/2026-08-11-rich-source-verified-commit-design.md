@@ -154,4 +154,3 @@ The implementation is accepted only when all of the following hold:
 6. Slash-created code/math blocks pass the same verified commit route.
 7. Existing preservation, source-map, list, source-transaction, desktop build,
    and mobile build checks remain green.
-
