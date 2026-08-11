@@ -348,7 +348,13 @@ export default function Editor({
           expectedDoc = requestedExpectedDoc || viewRef.current?.state.doc
           const verificationStartedAt = performance.now()
           const result = sourceCommitter.commit({
-            candidates: [preserved.markdown, ...fallbackCandidates],
+            candidates: [
+              {
+                markdown: preserved.markdown,
+                durableContext: preserved.durableContext || null
+              },
+              ...fallbackCandidates
+            ],
             expectedDoc,
             canonical
           })

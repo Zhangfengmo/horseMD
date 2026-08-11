@@ -49,6 +49,7 @@ import {
 import {
   mapTableSourceChange,
   normalizeSerializerEmptyTableCells,
+  tableDurableContext,
 } from './lib/markdown-preservation/tables.js'
 
 export {
@@ -109,6 +110,15 @@ export function preserveRichMarkdownSource(source, previousCanonical, nextCanoni
       sourceMarkdown,
       result.trailingNewlineGrowth
     )
+    if (result.preserved !== false && !result.durableContext) {
+      const durableContext = tableDurableContext({
+        authored: sourceMarkdown,
+        previousCanonical,
+        nextCanonical,
+        parseTables: options.parseTables
+      })
+      if (durableContext) result.durableContext = durableContext
+    }
   }
   // Test-only opt-in diagnostics. Production never creates this array; CDP
   // regressions can enable it before typing to capture the first fail-closed
@@ -306,7 +316,10 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
       preserved: true,
       reason: tableChange.kind === 'table-structure'
         ? 'table-structure'
-        : `table-${tableChange.kind}`
+        : `table-${tableChange.kind}`,
+      ...(tableChange.durableContext
+        ? { durableContext: tableChange.durableContext }
+        : {})
     }
   }
   if (tableChange.status === 'unowned') {

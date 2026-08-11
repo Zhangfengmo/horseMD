@@ -117,32 +117,6 @@ const normalizeNode = (node, definitions) => {
     if (children.length === 1 && children[0].type === 'text' && !children[0].value.trim()) {
       children.length = 0
     }
-    // An authored table cell holding only `<br />` is HorseMD's spelling for
-    // an EMPTY cell (normalizeEmptyTableCells); the canonical serializes it as
-    // truly empty. The two must compare equal.
-    if (
-      node.type === 'tableCell' &&
-      children.length === 1 &&
-      children[0].type === 'html' &&
-      BR_RE.test(String(children[0].value || '').trim())
-    ) {
-      children.length = 0
-    }
-    // GFM renders every table rectangularly: rows with fewer cells than the
-    // header are padded with empty cells and excess cells are ignored. The
-    // editor's table model is always rectangular too, so its canonical spells
-    // out every cell while authored rows may omit trailing ones — both are
-    // one table. Normalize each row to the delimiter column count.
-    if (node.type === 'table' && children.length) {
-      const columns = (Array.isArray(out.align) && out.align.length) || children[0]?.children?.length || 0
-      if (columns) {
-        for (const row of children) {
-          if (row.type !== 'tableRow' || !Array.isArray(row.children)) continue
-          while (row.children.length < columns) row.children.push({ type: 'tableCell', children: [] })
-          if (row.children.length > columns) row.children.length = columns
-        }
-      }
-    }
     // The editor normalizes single-line `$$x^2$$` display math into the
     // multi-line spelling on parse (editor-math.js normalizeDisplayMath);
     // preservation keeps the author's single-line bytes. Both spellings are

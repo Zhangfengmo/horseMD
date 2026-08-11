@@ -86,25 +86,40 @@ check('display math spellings pass', () => {
   assert.ok(roundTripPreserved('$$x^2$$\n', '$$\nx^2\n$$\n'))
 })
 
-check('non-rectangular table rows pass (GFM padding)', () => {
-  // GFM pads short rows with empty cells and ignores excess cells; the
-  // editor's table model is always rectangular, so its canonical spells out
-  // every cell while authored rows may omit trailing ones.
-  assert.ok(roundTripPreserved('| a | b |\n| - | - |\n| c |\n', '| a | b |\n| - | - |\n| c |  |\n'))
-  assert.ok(roundTripPreserved(
-    '| x | y | z |\n| - | - | - |\n| 1 |\n| 2 | 3 | 4 |\n',
-    '| x | y | z |\n| - | - | - |\n| 1 |  |  |\n| 2 | 3 | 4 |\n'
-  ))
-  assert.ok(roundTripPreserved('| a | b |\n| - | - |\n| c | d | e |\n', '| a | b |\n| - | - |\n| c | d |\n'))
+check('generic round-trip comparison never drops or moves table cells', () => {
+  // Legal short rows are normalized by the configured editor parse adapter,
+  // not by weakening this generic MDAST comparator. In particular, excess
+  // non-empty cells must never be truncated to manufacture equivalence.
+  assert.equal(
+    roundTripPreserved('| a | b |\n| - | - |\n| c |\n', '| a | b |\n| - | - |\n| c |  |\n'),
+    false
+  )
+  assert.equal(
+    roundTripPreserved('| a | b |\n| - | - |\n| c | d | e |\n', '| a | b |\n| - | - |\n| c | d |\n'),
+    false
+  )
+  assert.equal(
+    roundTripPreserved('| a | b |\n| - | - |\n| left | right |\n', '| a | b |\n| - | - |\n| right | left |\n'),
+    false
+  )
 })
 
-check('empty table cell <br /> spelling passes', () => {
-  // An authored `<br />`-only cell is HorseMD's spelling for an empty cell
-  // (normalizeEmptyTableCells); the canonical serializes it as truly empty.
-  assert.ok(roundTripPreserved(
+check('generic round-trip comparison retains a sole authored table break', () => {
+  // Without explicit serializer provenance, `<br />` is authored content.
+  // Empty-cell placeholder cleanup happens earlier at serializer-owned call
+  // sites and must not be inferred here from spelling alone.
+  assert.equal(roundTripPreserved(
     '| a | <br /> |\n| - | - |\n| b | <br /> |\n',
     '| a |  |\n| - | - |\n| b |  |\n'
-  ))
+  ), false)
+  assert.equal(roundTripPreserved(
+    '| a | <br> |\n| - | - |\n| b | value |\n',
+    '| a |  |\n| - | - |\n| b | value |\n'
+  ), false)
+  assert.equal(roundTripPreserved(
+    '| a | text<br>tail |\n| - | - |\n| b | value |\n',
+    '| a | texttail |\n| - | - |\n| b | value |\n'
+  ), false)
 })
 
 check('whole-document paste keeps heading level (B2)', () => {

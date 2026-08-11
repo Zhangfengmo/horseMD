@@ -337,6 +337,9 @@ for (const fixture of [
   const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
   assert.equal(result.status, 'patched', 'row/alignment changes replace their owning parsed table')
   assert.equal(result.kind, 'table-structure')
+  assert.deepEqual(result.durableContext, {
+    emptyTableCells: [{ table: 0, row: 2, column: 1 }]
+  }, 'structural ownership exposes only the serializer placeholder it proved empty')
   assert.equal(result.markdown, [
     'before-sentinel',
     '| one | two |',
@@ -396,6 +399,19 @@ for (const fixture of [
   const insertedRows = parseTables(inserted.markdown).tables[0].rows
   assert.equal(insertedRows[2].cells[0].units.length, 0, 'the inserted all-placeholder row clears its first cell')
   assert.equal(insertedRows[2].cells[1].units.length, 0, 'the inserted all-placeholder row clears its second cell')
+
+  const appendedBesideEmpty = mapGfmTableChange({
+    authored: table([before, emptySource]),
+    previousCanonical: table([before, emptyCanonical]),
+    nextCanonical: table([before, emptyCanonical, emptyCanonical]),
+    parseTables
+  })
+  assert.equal(
+    appendedBesideEmpty.status,
+    'patched',
+    'appending an indistinguishable empty row is safe when every possible owner has proven empty provenance'
+  )
+  assert.equal(parseTables(appendedBesideEmpty.markdown).tables[0].rows.length, 4)
 
   const deleted = mapGfmTableChange({
     authored: table([before, emptySource, after]),

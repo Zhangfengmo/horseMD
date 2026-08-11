@@ -4,6 +4,7 @@ import { unified } from 'unified'
 import {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
+  getGfmTableDurableContext,
   getGfmTableSourceParser,
   mapGfmTableChange,
   normalizeGfmTableSerializerPlaceholders
@@ -16,6 +17,7 @@ const defaultParseTables = getGfmTableSourceParser(
 export {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
+  getGfmTableDurableContext,
   getGfmTableSourceParser,
   mapGfmTableChange
 }
@@ -24,6 +26,11 @@ export const parseGfmTableSource = (markdown, parseTables = defaultParseTables) 
   parseTables(String(markdown ?? ''))
 
 export const mapTableSourceChange = (options) => mapGfmTableChange({
+  ...options,
+  parseTables: options?.parseTables || defaultParseTables
+})
+
+export const tableDurableContext = (options) => getGfmTableDurableContext({
   ...options,
   parseTables: options?.parseTables || defaultParseTables
 })

@@ -12,6 +12,10 @@ import {
   normalizedOffsetFromRaw
 } from './markdown-source-view.js'
 
+export {
+  areDurablyEquivalent as areSourceDocumentsEquivalent
+} from '../components/editor-durable-semantics.js'
+
 const unsafeInlineSyntax = /[`*_{}\[\]<>#|\\]/
 const unsafeAtBlockStart = /^(?:[-+>]|\d+[.)])/u
 const leadingSpaceSentinel = '\u200B'
@@ -117,106 +121,6 @@ const diagnostic = (value) => {
   if (globalThis.__hmSourceTransactionLog.length > 200) {
     globalThis.__hmSourceTransactionLog.shift()
   }
-}
-
-const semanticJson = (node) => {
-  if (!node?.toJSON) return null
-  const visit = (value) => {
-    if (!value || typeof value !== 'object') return value
-    const next = { ...value }
-    if (next.type === 'text' && typeof next.text === 'string') {
-      // HorseMD inserts U+200B only to keep authored leading spaces from being
-      // reinterpreted as Markdown indentation. It is an internal source
-      // sentinel, not visible ProseMirror content.
-      next.text = next.text.replaceAll(leadingSpaceSentinel, '')
-    }
-    if (next.type === 'heading' && next.attrs) {
-      next.attrs = { ...next.attrs }
-      // Heading ids are derived by the live editor and regenerated after parse;
-      // they are not authored Markdown semantics.
-      delete next.attrs.id
-      if (!Object.keys(next.attrs).length) delete next.attrs
-    }
-    if (
-      (next.type === 'bullet_list' || next.type === 'ordered_list' || next.type === 'list_item') &&
-      next.attrs
-    ) {
-      next.attrs = { ...next.attrs }
-      // Crepe input rules keep transient loose/tight metadata as booleans,
-      // while parserCtx reconstructs the same list with string attrs. Authored
-      // spacing remains protected by the raw source candidate; this attr is
-      // serializer formatting state, not a different visible document.
-      delete next.attrs.spread
-      if (!Object.keys(next.attrs).length) delete next.attrs
-    }
-    if ((next.type === 'table_cell' || next.type === 'table_header') && next.attrs) {
-      next.attrs = { ...next.attrs }
-      // Column resizing is persisted as ProseMirror layout metadata for the
-      // mounted table, but GFM Markdown has no colwidth syntax. Alignment and
-      // spans remain semantic; only the non-serializable width is ignored.
-      delete next.attrs.colwidth
-      if (!Object.keys(next.attrs).length) delete next.attrs
-    }
-    if (Array.isArray(next.content)) {
-      next.content = next.content
-        .map(visit)
-        .filter((child) => !(child?.type === 'text' && !child.text))
-      if (!next.content.length) delete next.content
-    }
-    if (next.type === 'list_item' && Array.isArray(next.content)) {
-      next.content = next.content.map((child) => {
-        const invisibleParagraph = child?.type === 'paragraph' && (
-          !child.content?.length || child.content.every((inline) => (
-            inline?.type === 'text' &&
-            !inline.marks?.length &&
-            !String(inline.text || '').trim()
-          ))
-        )
-        if (!invisibleParagraph) return child
-        const { content: _content, ...emptyParagraph } = child
-        return emptyParagraph
-      })
-    }
-    if (next.type === 'table_cell' || next.type === 'table_header') {
-      // Milkdown spells an otherwise empty table-cell paragraph as a single
-      // block hardbreak when it reparses the serializer's internal `<br />`
-      // placeholder. The mounted table still owns an empty paragraph. Treat
-      // only that exact internal shape as empty; inline/user-authored breaks
-      // and breaks beside text remain semantic content.
-      next.content = next.content?.map((child) => {
-        const onlyChild = child?.content?.length === 1 ? child.content[0] : null
-        if (
-          child?.type === 'paragraph' &&
-          onlyChild?.type === 'hardbreak' &&
-          onlyChild?.attrs?.isInline === false
-        ) {
-          return { type: 'paragraph' }
-        }
-        return child
-      })
-    }
-    if (Array.isArray(next.marks)) next.marks = next.marks.map(visit)
-    return next
-  }
-  const result = visit(node.toJSON())
-  if (result?.type === 'doc' && Array.isArray(result.content)) {
-    // Blank lines are raw Markdown spacing, not parser-level paragraph nodes.
-    // Crepe temporarily represents them as empty top-level paragraphs while a
-    // user is typing; the parser drops those nodes on reopen. Their exact byte
-    // count is protected by source slots/hints, so semantic comparison ignores
-    // only these top-level empty paragraphs (never nested quote/list content).
-    result.content = result.content.filter((child) => !(
-      child?.type === 'paragraph' && !child?.content?.length
-    ))
-  }
-  return result
-}
-
-export const areSourceDocumentsEquivalent = (parsed, expected) => {
-  const left = semanticJson(parsed)
-  const right = semanticJson(expected)
-  if (!left || !right) return false
-  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 export function mapPlainTextTransactionsToSource({

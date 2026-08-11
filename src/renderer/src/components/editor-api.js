@@ -195,8 +195,16 @@ export function createEditorApi({
         ? sourceCommitter.parse(canonical)
         : viewRef.current?.state.doc
       if (canonical === canonicalMarkdownRef.current) {
+        const unchanged = preserveSource(
+          lastMarkdownRef.current,
+          canonicalMarkdownRef.current,
+          canonical
+        )
         const committed = sourceCommitter.commit({
-          candidates: [lastMarkdownRef.current],
+          candidates: [{
+            markdown: lastMarkdownRef.current,
+            durableContext: unchanged?.durableContext || null
+          }],
           expectedDoc,
           canonical,
           shouldPublish: false
@@ -236,7 +244,10 @@ export function createEditorApi({
       const committed = sourceCommitter.commit({
         candidates: scratch
           ? [preserved.markdown, canonicalSourceFallback(canonical)]
-          : [preserved.markdown],
+          : [{
+              markdown: preserved.markdown,
+              durableContext: preserved.durableContext || null
+            }],
         expectedDoc,
         canonical,
         shouldPublish: false
@@ -314,12 +325,13 @@ export function createEditorApi({
       // source remains untouched and the user's visible edits are not trapped
       // solely in renderer memory.
       const canonical = canonicalForSource(serializeCurrentDocument())
-      return sourceCommitter.select({
+      const selected = sourceCommitter.select({
         candidates: [generatedScratchMarkdown(canonical), canonicalSourceFallback(canonical)],
         expectedDoc: generatedScratchRef?.current
           ? sourceCommitter.parse(canonical)
           : viewRef.current?.state.doc
       })
+      return selected.ok ? selected.markdown : null
     } catch {
       return null
     }

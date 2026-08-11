@@ -353,6 +353,25 @@ const matchStructuralRowOwnership = ({
       : null
   }
 
+  const appendedRow = nextTable.rows.at(-1)
+  const appendedProvenEmpty = (
+    nextTable.rows.length === previousTable.rows.length + 1 &&
+    appendedRow?.cells.every((cell) => isSerializerPlaceholderCell(cell, nextModel)) &&
+    previousTable.rows.every((previousRow, index) => rowsCanShareProvenance({
+      authoredRow: authoredTable.rows[index],
+      authoredModel,
+      previousRow,
+      previousModel,
+      nextRow: nextTable.rows[index],
+      nextModel
+    }))
+  )
+  if (appendedProvenEmpty) {
+    return nextTable.rows.map((_, index) => (
+      index < previousTable.rows.length ? index : null
+    ))
+  }
+
   const rowOwnership = matchRows(false)
   if (!rowOwnership) return null
   // The safe pass treats an unanchored placeholder row as empty. Re-run with
@@ -385,6 +404,7 @@ const normalizeCanonicalWithTableProvenance = ({
       for (const nextCell of nextRow.cells) {
         if (!isSerializerPlaceholderCell(nextCell, nextModel)) continue
         let replacement = ''
+        let provenEmptyPlaceholder = true
         if (authoredTable && previousTable) {
           const previousRowIndex = rowOwnership
             ? rowOwnership[nextRow.index]
@@ -404,6 +424,7 @@ const normalizeCanonicalWithTableProvenance = ({
             nextModel
           )
           if (semanticUnits.length) {
+            provenEmptyPlaceholder = false
             if (!authoredCell?.contentRange) continue
             replacement = authoredModel.view.raw.slice(
               authoredCell.contentRange.start,
@@ -411,11 +432,23 @@ const normalizeCanonicalWithTableProvenance = ({
             )
           }
         }
-        replacements.push({ range: nextCell.contentRange, replacement })
+        replacements.push({
+          range: nextCell.contentRange,
+          replacement,
+          provenEmptyPlaceholder,
+          table: nextIndex,
+          row: nextRow.index,
+          column: nextCell.column
+        })
       }
     }
   }
-  if (!replacements.length) return { raw: nextModel.view.raw, model: nextModel }
+  const durableContext = {
+    emptyTableCells: replacements
+      .filter(({ provenEmptyPlaceholder }) => provenEmptyPlaceholder)
+      .map(({ table, row, column }) => ({ table, row, column }))
+  }
+  if (!replacements.length) return { raw: nextModel.view.raw, model: nextModel, durableContext }
   replacements.sort((left, right) => right.range.start - left.range.start)
   const raw = replacements.reduce(
     (value, { range, replacement }) => (
@@ -429,7 +462,86 @@ const normalizeCanonicalWithTableProvenance = ({
   } catch {
     return null
   }
-  return isValidGfmTableSourceModel(model, raw) ? { raw, model } : null
+  return isValidGfmTableSourceModel(model, raw) ? { raw, model, durableContext } : null
+}
+
+const durableContextForModels = ({
+  authoredModel,
+  previousModel,
+  nextModel,
+  parseTables
+}) => {
+  if (authoredModel.tables.length !== previousModel.tables.length) return null
+  const tableOwnership = []
+  if (previousModel.tables.length === nextModel.tables.length) {
+    for (let index = 0; index < nextModel.tables.length; index += 1) {
+      const authoredTable = authoredModel.tables[index]
+      const previousTable = previousModel.tables[index]
+      const nextTable = nextModel.tables[index]
+      if (!authoredMatchesPrevious(authoredTable, authoredModel, previousTable, previousModel)) {
+        return null
+      }
+      const rowOwnership = previousTable.rows.length === nextTable.rows.length
+        ? nextTable.rows.map((_, row) => row)
+        : matchStructuralRowOwnership({
+            authoredTable,
+            authoredModel,
+            previousTable,
+            previousModel,
+            nextTable,
+            nextModel
+          })
+      if (!rowOwnership) return null
+      tableOwnership.push({ nextIndex: index, previousIndex: index, rowOwnership })
+    }
+  } else if (nextModel.tables.length === previousModel.tables.length + 1) {
+    const inserted = unmatchedTableIndex(previousModel, nextModel)
+    if (inserted == null) return null
+    nextModel.tables.forEach((_, nextIndex) => tableOwnership.push({
+      nextIndex,
+      previousIndex: nextIndex === inserted
+        ? null
+        : nextIndex < inserted ? nextIndex : nextIndex - 1
+    }))
+  } else if (previousModel.tables.length === nextModel.tables.length + 1) {
+    const removed = unmatchedTableIndex(nextModel, previousModel)
+    if (removed == null) return null
+    nextModel.tables.forEach((_, nextIndex) => tableOwnership.push({
+      nextIndex,
+      previousIndex: nextIndex < removed ? nextIndex : nextIndex + 1
+    }))
+  } else {
+    return null
+  }
+  return normalizeCanonicalWithTableProvenance({
+    authoredModel,
+    previousModel,
+    nextModel,
+    tableOwnership,
+    parseTables
+  })?.durableContext || null
+}
+
+export function getGfmTableDurableContext({
+  authored,
+  previousCanonical,
+  nextCanonical,
+  parseTables
+}) {
+  const values = [
+    String(authored ?? ''),
+    String(previousCanonical ?? ''),
+    String(nextCanonical ?? '')
+  ]
+  const models = parseModels(parseTables, values)
+  if (!models) return null
+  const [authoredModel, previousModel, nextModel] = models
+  return durableContextForModels({
+    authoredModel,
+    previousModel,
+    nextModel,
+    parseTables
+  })
 }
 
 const materializeMissingCell = ({ authoredModel, table, row, column, nextCell, nextModel }) => {
@@ -675,6 +787,12 @@ export function mapGfmTableChange({
     return { status: 'unowned', reason: 'invalid-table-change-range' }
   }
   const canonicalChange = commonChange(previousModel.view.text, nextModel.view.text)
+  const durableContext = durableContextForModels({
+    authoredModel,
+    previousModel,
+    nextModel,
+    parseTables
+  })
 
   if (previousModel.tables.length !== nextModel.tables.length) {
     const exact = exactBaselineTableCountChange({
@@ -689,7 +807,8 @@ export function mapGfmTableChange({
       status: 'patched',
       markdown: source.slice(0, exact.sourceRange.start) + replacement + source.slice(exact.sourceRange.end),
       kind: 'table-structure',
-      sourceRange: exact.sourceRange
+      sourceRange: exact.sourceRange,
+      ...(durableContext ? { durableContext } : {})
     }
   }
 
@@ -749,7 +868,8 @@ export function mapGfmTableChange({
       status: 'patched',
       markdown: source,
       kind: 'cell-text',
-      sourceRange: authoredModel.tables[index].range
+      sourceRange: authoredModel.tables[index].range,
+      ...(durableContext ? { durableContext } : {})
     }
   }
 
@@ -809,7 +929,8 @@ export function mapGfmTableChange({
       status: 'patched',
       markdown: source.slice(0, authoredTable.range.start) + replacement + source.slice(authoredTable.range.end),
       kind: 'table-structure',
-      sourceRange: authoredTable.range
+      sourceRange: authoredTable.range,
+      ...(durableContext ? { durableContext } : {})
     }
   }
 
@@ -839,7 +960,8 @@ export function mapGfmTableChange({
         materialized.replacement +
         source.slice(materialized.sourceRange.end),
       kind: 'materialized-cell',
-      sourceRange: materialized.sourceRange
+      sourceRange: materialized.sourceRange,
+      ...(durableContext ? { durableContext } : {})
     }
   }
 
@@ -881,6 +1003,7 @@ export function mapGfmTableChange({
     status: 'patched',
     markdown: source.slice(0, sourceRange.start) + replacement + source.slice(sourceRange.end),
     kind: 'cell-text',
-    sourceRange
+    sourceRange,
+    ...(durableContext ? { durableContext } : {})
   }
 }
