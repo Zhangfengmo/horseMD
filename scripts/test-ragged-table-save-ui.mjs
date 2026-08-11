@@ -107,12 +107,29 @@ const targetForCase = (table) => {
     : caseName === 'escaped-pipe'
       ? '| a \\| b<br>tail |'
       : null
-  const targetIndex = targetLine == null
+  const bodyRowIndex = targetLine == null
     ? table.editableIndex
     : table.body.findIndex((row) => row.line === targetLine)
-  assert.ok(targetIndex >= 0, 'case target cell is missing from the authored fixture')
+  assert.ok(bodyRowIndex >= 0, 'case target cell is missing from the authored fixture')
+  const raw = table.body[bodyRowIndex].line.trim().replace(/^\||\|$/g, '')
+  let firstCell = ''
+  let escaped = false
+  for (const character of raw) {
+    if (escaped) {
+      firstCell += character
+      escaped = false
+    } else if (character === '\\') {
+      escaped = true
+    } else if (character === '|') {
+      break
+    } else {
+      firstCell += character
+    }
+  }
   return {
-    index: targetIndex,
+    // Authored tables exclude the header here. `tbody tr` includes it at 0.
+    bodyRowIndex,
+    expectedCellText: firstCell.trim().replace(/<br\s*\/?>/gi, ''),
     token: 'editedX',
     rawEnter: caseName === 'hardbreak'
   }
@@ -144,14 +161,19 @@ const visibleTableRows = (app) => app.evaluate(`(() => {
   )
 })()`)
 
-const editPoint = (app, bodyIndex) => app.evaluate(`((bodyIndex) => {
+const editPoint = (app, bodyRowIndex) => app.evaluate(`((bodyRowIndex) => {
   const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent !== null)
   const table = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].find((node) => node.offsetParent !== null)
-  const cell = table?.querySelectorAll('tbody tr')[bodyIndex]?.querySelector('td:first-child')
+  // Milkdown emits the table header as tbody row 0, so authored body row n is
+  // DOM row n + 1. Keep this conversion at the DOM boundary.
+  const cell = table?.querySelectorAll('tbody tr')[bodyRowIndex + 1]?.querySelector('td:first-child')
   const target = cell?.querySelector('p') || cell
   const rect = target?.getBoundingClientRect()
-  return rect ? { x: Math.round(rect.left + Math.min(14, rect.width / 2)), y: Math.round((rect.top + rect.bottom) / 2) } : null
-})(${bodyIndex})`)
+  return rect ? {
+    text: cell.textContent || '',
+    point: { x: Math.round(rect.left + Math.min(14, rect.width / 2)), y: Math.round((rect.top + rect.bottom) / 2) }
+  } : null
+})(${bodyRowIndex})`)
 
 const visibleSource = (app) => app.evaluate(`(
   [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)?.value ?? null
@@ -219,7 +241,10 @@ async function main() {
     app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [fixture] })
     await waitFor(async () => (await visibleTableRows(app)).length, 'ragged GFM table did not render')
     const rows = await visibleTableRows(app)
-    assert.equal(rows.length >= fixtureTable.editableIndex + 1, true, 'complete table row is missing from the DOM')
+    assert.equal(rows.length >= fixtureTable.editableIndex + 2, true, 'complete table row is missing from the DOM after its tbody header row')
+    const targetCell = await editPoint(app, target.bodyRowIndex)
+    assert.ok(targetCell, 'target table cell was not available')
+    assert.equal(targetCell.text, target.expectedCellText, 'target body-row coordinate did not resolve to the expected table cell before input')
 
     if (caseName === 'consecutive') {
       const shortDomRows = rows.filter((row) => fixtureTable.shortRows.some((raw) => row[0] === raw.replace(/^\|\s*|\s*\|$/g, '').replace(/\\\|/g, '|').replace(/<br\s*\/?>/gi, '')))
@@ -230,10 +255,8 @@ async function main() {
       }
     }
 
-    const point = await editPoint(app, target.index)
-    assert.ok(point, 'target table cell was not available')
-    await click(app, point)
-    await click(app, point)
+    await click(app, targetCell.point)
+    await click(app, targetCell.point)
     await pressKey(app.send, { key: 'End', code: 'End' })
     if (target.rawEnter) await pressKey(app.send, { key: 'Enter', code: 'Enter' })
     await typeTextLikeUser(app.send, target.token)
