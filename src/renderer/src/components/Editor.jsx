@@ -41,6 +41,7 @@ import {
   replaceMarkdownListBlock,
   restoreTypedBulletMarker
 } from '../markdown-source-preservation.js'
+import { roundTripPreserved } from '../lib/markdown-preservation/roundtrip.js'
 import { pmPosToMarkdownOffset } from './editor-source-map.js'
 
 // Every mounted rich editor registers itself here. A rich-text tab stays mounted
@@ -289,6 +290,43 @@ export default function Editor({
       richFlushPending = false
       pendingRichBlockKey = null
     }
+    // The single commit point for every rich→source transaction in this
+    // editor: markdownUpdated, frontmatter, inline code, and both list
+    // conversions all publish through here. The fail-closed check and the
+    // round-trip acceptance gate therefore cannot be skipped by any individual
+    // path — that omission is what used to poison the baselines permanently.
+    // A false return leaves both baselines and every pending flag untouched;
+    // a later callback or forced flush retries the cumulative delta.
+    const commitCanonicalResult = (preserved, canonical, { skipRoundTrip = false } = {}) => {
+      // The gate double-parses the full document; on very large documents that
+      // is a per-keystroke-batch main-thread cost, so the hot path defers to
+      // the durability boundaries (flushMarkdown gates every save, source
+      // switch, and export unconditionally — corrupted bytes still cannot
+      // reach disk or the source view).
+      const gateSkipped = skipRoundTrip || String(canonical || '').length > 120000
+      if (
+        !preserved ||
+        preserved.preserved === false ||
+        (!gateSkipped && !roundTripPreserved(preserved.markdown, canonical))
+      ) {
+        // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
+        if (Array.isArray(globalThis.__hmGateLog) && preserved && preserved.preserved !== false) {
+          globalThis.__hmGateLog.push({
+            origin: 'commit',
+            reason: preserved.reason || 'unknown',
+            candidate: preserved.markdown,
+            canonical
+          })
+        }
+        userEditUntil = Date.now() + 1000
+        return false
+      }
+      lastMarkdownRef.current = preserved.markdown
+      canonicalMarkdownRef.current = canonical
+      clearRichFlushPending()
+      onChange?.(preserved.markdown, false)
+      return true
+    }
     const pendingRawMarkdownPasteRef = { current: null }
     let pendingListConversion = null
     let pendingMarkdownInputIntent = null
@@ -316,7 +354,13 @@ export default function Editor({
       try {
         const pos = getPos?.()
         if (!Number.isFinite(pos)) return
-        const canonical = canonicalForSource(crepe.getMarkdown())
+        // Frontmatter transactions are plugin-owned and can run before Crepe's
+        // cached getMarkdown() snapshot catches up. Serialize the live
+        // ProseMirror document, matching save/source-switch durability rules.
+        const liveView = viewRef.current
+        const canonical = canonicalForSource(
+          liveView ? crepe.editor.ctx.get(serializerCtx)(liveView.state.doc) : crepe.getMarkdown()
+        )
         // If a future Milkdown release emits markdownUpdated for atom attrs,
         // that listener has already committed this transaction.
         if (canonical === canonicalMarkdownRef.current) return
@@ -331,15 +375,22 @@ export default function Editor({
               nextOffset
             })
           : null
-        const committed = markdown || preserveRichMarkdownSource(
-          lastMarkdownRef.current,
-          canonicalMarkdownRef.current,
-          canonical
-        ).markdown
-        lastMarkdownRef.current = committed
-        canonicalMarkdownRef.current = canonical
-        clearRichFlushPending()
-        onChange?.(committed, false)
+        // The exact frontmatter block patch is the primary candidate; when it
+        // is unavailable or rejected by the acceptance gate, the generic
+        // preservation mapping still owns the fallback.
+        const committed = markdown
+          ? commitCanonicalResult({ markdown, preserved: true, reason: 'frontmatter-block' }, canonical)
+          : false
+        if (!committed) {
+          commitCanonicalResult(
+            preserveRichMarkdownSource(
+              lastMarkdownRef.current,
+              canonicalMarkdownRef.current,
+              canonical
+            ),
+            canonical
+          )
+        }
       } catch {
         // The live editor remains correct; the normal markdownUpdated callback
         // still owns fallback serialization if a mapper/plugin is unavailable.
@@ -357,23 +408,14 @@ export default function Editor({
           : crepe.getMarkdown()
         const canonical = canonicalForSource(markdown)
         if (canonical === canonicalMarkdownRef.current) return
-        const preserved = preserveRichMarkdownSource(
-          lastMarkdownRef.current,
-          canonicalMarkdownRef.current,
+        commitCanonicalResult(
+          preserveRichMarkdownSource(
+            lastMarkdownRef.current,
+            canonicalMarkdownRef.current,
+            canonical
+          ),
           canonical
         )
-        // Never confirm a canonical baseline for an edit whose authored source
-        // ownership was not proven. Advancing here used to hide the failed
-        // inline-code transaction until a later save/source switch became
-        // permanently fail-closed.
-        if (preserved.preserved === false) {
-          userEditUntil = Date.now() + 1000
-          return
-        }
-        lastMarkdownRef.current = preserved.markdown
-        canonicalMarkdownRef.current = canonical
-        clearRichFlushPending()
-        onChange?.(preserved.markdown, false)
       } catch {
         // The editor remains usable if serialization is transiently unavailable;
         // normal markdownUpdated remains the fallback for ordinary input.
@@ -501,22 +543,31 @@ export default function Editor({
           const view = viewRef.current
           const serializer = crepe.editor.ctx.get(serializerCtx)
           const canonical = canonicalForSource(serializer(view.state.doc))
-          const preserved = preserveRichMarkdownSource(
-            sourceBeforeConversion,
-            canonicalBeforeConversion,
-            canonical
-          )
           // Wrapping a paragraph has no visible-text delta. This transaction
           // changes only the exact pre-transaction paragraph, so its authored
           // source line is more precise than a whole-document structural diff.
           const exactLineFallback = canonical !== canonicalBeforeConversion
             ? convertSourceParagraphLineToList(sourceBeforeConversion, sourceOffset, targetType)
             : null
-          const markdown = exactLineFallback || preserved.markdown
-          lastMarkdownRef.current = markdown
-          canonicalMarkdownRef.current = canonical
-          clearRichFlushPending()
-          onChange?.(markdown, false)
+          // The exact-line patch is the primary candidate; when it is
+          // unavailable or rejected by the acceptance gate, the generic
+          // preservation mapping still owns the fallback.
+          const committed = exactLineFallback
+            ? commitCanonicalResult(
+                { markdown: exactLineFallback, preserved: true, reason: 'exact-line-conversion' },
+                canonical
+              )
+            : false
+          if (!committed) {
+            commitCanonicalResult(
+              preserveRichMarkdownSource(
+                sourceBeforeConversion,
+                canonicalBeforeConversion,
+                canonical
+              ),
+              canonical
+            )
+          }
         } catch {
           // markdownUpdated remains the authoritative fallback if a serializer
           // plugin is temporarily unavailable during editor teardown.
@@ -623,13 +674,13 @@ export default function Editor({
       if (
         pendingListConversion === pending &&
         pending?.convertedSource &&
-        pending?.convertedCanonical
+        pending?.convertedCanonical &&
+        commitCanonicalResult(
+          { markdown: pending.convertedSource, preserved: true, reason: 'list-conversion' },
+          pending.convertedCanonical
+        )
       ) {
-        lastMarkdownRef.current = pending.convertedSource
-        canonicalMarkdownRef.current = pending.convertedCanonical
-        clearRichFlushPending()
         pendingListConversion = null
-        onChange?.(pending.convertedSource, false)
       }
       view.focus()
       setCtxMenu(null)
@@ -675,11 +726,16 @@ export default function Editor({
             return
           }
           let preserved
+          // A fresh scratch document deliberately restores physical characters
+          // (unescaping can create real syntax), so it is the only commit that
+          // may skip the round-trip acceptance gate.
+          let scratchCommit = false
           if (pendingPaste) {
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
             const markdown = generatedScratchMarkdownForCanonical(canonical)
             preserved = { markdown, reason: 'generated-scratch-canonical' }
+            scratchCommit = true
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical
               ? { markdown: pendingList.convertedSource }
@@ -816,28 +872,21 @@ export default function Editor({
           } else if (pendingMarkdownInputIntent) {
             pendingMarkdownInputIntent = null
           }
-          if (preserved.preserved === false) {
-            // The visible ProseMirror transaction is still real, but its raw
-            // Markdown ownership is ambiguous. Keep every pending intent and
-            // the dirty/flush flag alive; publishing the old source here would
-            // falsely mark the edit committed and let save resurrect stale
-            // bytes. A later callback or forced flush retries the cumulative
-            // delta against the same canonical baseline.
-            userEditUntil = Date.now() + 1000
+          // A fail-closed or rejected mapping did not consume the transaction:
+          // the commit point keeps the dirty/flush flag alive, so a later
+          // callback or forced flush retries the cumulative delta against the
+          // same canonical baseline. Publishing the old source here would
+          // falsely mark the edit committed and let save resurrect stale
+          // bytes. The paste snapshot must NOT be retried, though: it is a
+          // frozen byte capture, so replaying it against a newer canonical
+          // either locks permanently or publishes source missing later input —
+          // the cumulative preservation path owns the retry instead.
+          if (!commitCanonicalResult(preserved, canonical, { skipRoundTrip: scratchCommit })) {
+            pendingRawMarkdownPasteRef.current = null
             return
           }
-          // Source mapping must use the same markdown snapshot that App stores
-          // and shows in the source textarea after this user edit.
-          lastMarkdownRef.current = preserved.markdown
-          // A fail-closed source mapping did not consume the transaction.
-          // Keep the previous canonical baseline so the next callback retries
-          // the cumulative delta instead of silently declaring the lost edit
-          // synchronized and compounding offsets from a false baseline.
-          canonicalMarkdownRef.current = canonical
-          clearRichFlushPending()
           pendingRawMarkdownPasteRef.current = null
           pendingListConversion = null
-          onChange?.(preserved.markdown, false)
           userEditUntil = Date.now() + 1000
         }
       })
@@ -1026,6 +1075,12 @@ export default function Editor({
           markUserEdit,
           onStructureChange,
           isDestroyed: () => destroyed,
+          resetTransactionIntents: () => {
+            pendingRawMarkdownPasteRef.current = null
+            pendingListConversion = null
+            pendingMarkdownInputIntent = null
+            pendingMarkdownInputIntents = []
+          },
           getT: (key) => tRef.current(key),
           notify: fireToast
         })
@@ -1038,6 +1093,7 @@ export default function Editor({
           applyReviewMarkup,
           replaceMarkdown,
           flushMarkdown,
+          rebuildMarkdownFromRich,
           restoreMarkdownOffset,
           markdownOffsetFromSelection,
           markdownOffsetFromViewportTop
@@ -1110,6 +1166,7 @@ export default function Editor({
           applyReviewMarkup,
           replaceMarkdown,
           flushMarkdown,
+          rebuildMarkdownFromRich,
           restoreMarkdownOffset,
           markdownOffsetFromSelection,
           markdownOffsetFromViewportTop

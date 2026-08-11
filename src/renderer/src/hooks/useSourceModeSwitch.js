@@ -27,7 +27,8 @@ export function useSourceModeSwitch({
   focusedTabRef,
   commitAllLive,
   findStateRef,
-  richLoadingRef
+  richLoadingRef,
+  tRef
 }) {
   const [sourceModeIds, setSourceModeIds] = useState(() => new Set())
   const sourceMode = !!activeId && sourceModeIds.has(activeId)
@@ -93,7 +94,17 @@ export function useSourceModeSwitch({
   }, [editorApis, setTabs])
 
   const flushRichSource = useCallback((id) => {
-    const markdown = editorApis.current[id]?.flushMarkdown?.()
+    const api = editorApis.current[id]
+    let markdown = api?.flushMarkdown?.()
+    if (typeof markdown !== 'string' && api) {
+      // Fail-closed sync must be an exit-able state, not a dead end: the only
+      // self-service repair is editing the source, and that is exactly the
+      // view this flush gates. Offer the explicit recovery — rebuild the
+      // authored source from the live document (normalizes spelling, keeps
+      // content) — instead of silently refusing the switch.
+      if (!window.confirm(tRef.current('sync.rebuildConfirm'))) return false
+      markdown = api.rebuildMarkdownFromRich?.()
+    }
     if (typeof markdown !== 'string') return false
     const current = tabsRef.current.find((tab) => tab.id === id)
     if (!current) return false
@@ -110,7 +121,7 @@ export function useSourceModeSwitch({
         : tab
     ))
     return true
-  }, [editorApis, setTabs, tabsRef])
+  }, [editorApis, setTabs, tabsRef, tRef])
 
   const toggleSource = useCallback(() => {
     const id = activeIdRef.current
@@ -344,6 +355,7 @@ export function useSourceModeSwitch({
     sourceRef,
     sourceTextareas,
     sourceEditedIds,
-    toggleSource
+    toggleSource,
+    flushRichSource
   }
 }

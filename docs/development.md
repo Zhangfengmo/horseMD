@@ -210,6 +210,11 @@ npm run test:background-ui
 
 - `scripts/run-ui-regression.mjs` —— 串行编排真实 UI 回归，覆盖 PDF Studio、Review、Lightbox、表格、#57-#60、#66/#67、#93、#98、精确 raw-offset 与零等待输入、真实大文档模式切换、源码查找和 `电脑档案.md` 双向切换链路
 - `scripts/lib/electron-test-app.mjs`、`scripts/lib/human-input.mjs` —— 默认以隐藏且不抢原生焦点的 Electron 窗口运行 CDP；提供统一逐字符文本输入和特殊键工具
+- `scripts/lib/cdp.mjs` 会自动应答 `window.confirm`/`alert` 等原生 JS 对话框
+  （否则对话框会阻塞 renderer,所有后续 `Runtime.evaluate` 永久挂起）。默认
+  **拒绝**（对应应用内「中止」分支）；测试可用 `app.setDialogResponse(true)`
+  切换为接受，并通过 `app.dialogs` 数组断言对话框出现过（如同步恢复弹窗
+  `sync.rebuildConfirm`，见 `scripts/test-sync-recovery-ui.mjs`）。
 - `scripts/test-background-cdp-ui.mjs` —— 验证后台启动参数、初始原生焦点和隐藏窗口内逐字符输入，防止测试基础设施退化后再次抢用户窗口
 - `scripts/test-inline-code-ui.mjs` —— 用原生键盘事件逐键输入 `` `awdawdwa`outside ``，验证闭合、首尾方向键退出、新段落以代码起笔、源码边界和连续三个普通反引号；禁止用 `Input.insertText` 代替真实字符键
 - `scripts/test-issue-98-copy-undo-ui.mjs`、`scripts/test-session-restore-setting-ui.mjs` —— 验证系统剪贴板代码复制、段落纯文本无额外回车、列表纯文本无生成编号、HorseMD 内部 Markdown 结构粘贴、真实撤销及关闭会话恢复后的显式文件打开；代码复制夹具含 122 行 JSON，明确要求 CodeMirror DOM 发生虚拟化后，按钮和全选仍复制全文，而真实 Shift 选择 65 行只复制选区

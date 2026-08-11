@@ -208,7 +208,22 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
 
   const sourceVisible = sourceVisibleIndex(sourceMarkdown)
   const previousVisible = sourceVisibleIndex(previous)
-  const { start, previousEnd, nextEnd } = commonChange(previous, next)
+  let { start, previousEnd, nextEnd } = commonChange(previous, next)
+  // Two canonicals can share a PARTIAL leading marker (`# 旧标题` vs
+  // `## 新标题` share `# `), leaving the delta boundary inside a marker
+  // token. Mapping that split token as text glues the remainder onto the
+  // source's own marker (`# # 新标题` — a real whole-document-paste
+  // corruption). A block-marker token is atomic: whenever the boundary falls
+  // inside one, widen the delta to the start of its line on both canonicals
+  // (the bytes before `start` are identical, so the line start coincides).
+  const changeLineStart = previous.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+  if (start > changeLineStart) {
+    const markerRunLength = (markdown) =>
+      markdown.slice(changeLineStart).match(/^(?:(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])[ \t]+)+/)?.[0]?.length || 0
+    if (Math.max(markerRunLength(previous), markerRunLength(next)) > start - changeLineStart) {
+      start = changeLineStart
+    }
+  }
   const removedEmptyBlockquote = preserveRemovedEmptyBlockquote({
     source: sourceMarkdown,
     previous,
@@ -565,6 +580,20 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
 
   let rawStart = rawOffsetAtVisible(sourceMarkdown, startVisible)
   let rawEnd = rawOffsetAtVisible(sourceMarkdown, endVisible)
+  // When the canonical delta starts at a line start and its replacement
+  // carries that line's leading block markers, the visible-position anchor is
+  // wrong by construction: visible offsets skip marker characters, so the
+  // mapped position lands AFTER the source line's own markers and the
+  // replacement's markers are glued behind them (`# ## 新标题` — the
+  // whole-document-paste corruption). Snap the raw anchor back to the start
+  // of its source line so the replacement owns the complete line prefix.
+  if (
+    (start === 0 || previous[start - 1] === '\n') &&
+    /^(?:(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])[ \t]+)/.test(next.slice(start)) &&
+    Number.isFinite(rawStart)
+  ) {
+    rawStart = sourceMarkdown.lastIndexOf('\n', Math.max(0, rawStart - 1)) + 1
+  }
   if (
     start === previousEnd &&
     startVisible.visibleIndex === endVisible.visibleIndex &&

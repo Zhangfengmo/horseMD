@@ -1,0 +1,392 @@
+# 富文本 ↔ 源码同步架构评审报告
+
+> 日期：2026-08-11  
+> 版本：HorseMD v0.13.29（`ea4415b6459c`）  
+> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；只做诊断和架构评审，不修改产品代码。
+
+## 1. 结论
+
+这次反馈由两类问题串联而成，不能合并成一个“Backspace 小 bug”：
+
+1. **列表交互问题**：当前 Milkdown/ProseMirror 的列表 keymap 中，空列表项按
+   Backspace 走 `joinBackward`，不是“退出列表”。它会先产生列表项内的第二个空段落，
+   视觉上就是用户看到的“没有变正文，反而缩进了”。当前要退出列表，应在空列表项
+   再按一次 Enter。
+2. **同步架构问题**：HorseMD 同时维护作者源码、上一次 canonical Markdown、当前
+   ProseMirror 文档和 `tab.content`。富文本事务依靠启发式 diff 映射回作者源码；列表
+   lift/join 的中间态既会被错误地判定为“映射成功”，也可能在后续事务中变成
+   `visible-stream-mismatch`。一旦 fail-closed，保存和切源码都会调用同一个
+   `flushMarkdown()`，所以两者一起失效。
+
+保存暂停本身是必要的数据保护：它避免把旧源码当成当前富文本写回磁盘。但系统缺少
+显式冲突状态、恢复快照和可退出路径，所以保护机制最终表现成了“交互死锁”。
+
+准确的版本判断是：
+
+- 本报告复现的 `- 1.` 分歧列表映射路径由 `74b0e07` 引入；该提交包含在 v0.13.29，
+  不包含在 v0.12.62。因此具体触发路径属于 0.13.29 回归。
+- “多份真值 + canonical diff + fail-closed 后无恢复出口”是既有架构问题；即使修掉
+  当前列表形状，其他结构编辑仍可能进入同类状态。
+- v0.13.29 的发布提交 `ea4415b` 不是根因；主要代码变化来自此前的 `74b0e07`，
+  `211e64c` 又增加了若干保真分支但没有消除该状态机问题。
+
+## 2. 调查拆解与证据等级
+
+调查分为三个并行子任务和一个主线复现：
+
+| 层级 | 子任务 | 执行配置 | 产出 |
+|---|---|---|---|
+| L1 | 列表按键与 ProseMirror 树变化 | Terra / high | Enter、Backspace、lift/join 调用链及现有测试缺口 |
+| L1 | 保存、模式切换、双快照状态机 | Terra / high | `flushMarkdown() === null` 如何同时阻断两个入口 |
+| L2 | 跨模块架构、历史与迁移路线交叉审查 | Sol / xhigh | 回归归属、破坏的不变量、非补丁式路线 |
+| 主线 | 后台 Electron/CDP 逐键复现 | 当前会话 | 普通列表对照、分歧列表锁定、磁盘保护验证 |
+
+运行环境没有 Claude Sonnet/Opus 可选项，因此没有伪称使用它们；按任务层级使用了当前
+可用的 Terra（窄域追踪）和 Sol（架构审查）作为对应配置。
+
+证据分级：
+
+- **已证实**：代码调用链、当前版本归属、普通列表键盘语义、`- 1.` fixture 的完整锁定、
+  source 切换失败、保存 toast、磁盘未写。
+- **高置信推断**：用户原文件很可能经过了相同的 nested/list-continuation 状态；视觉反馈
+  与实测树变化一致。
+- **未知**：用户未提供出错文件和同步诊断日志，所以不能断言其原始 Markdown 字节一定
+  是 `- 1.`。下面的 fixture 是同类机制的稳定复现，不冒充用户原文件。
+
+## 3. 复现实证
+
+### 3.1 普通有序列表对照
+
+对普通源码：
+
+```markdown
+1. alpha
+2. beta
+3. gamma
+
+after paragraph
+```
+
+在 `gamma` 末尾执行 Enter → Backspace → Backspace → Enter：
+
+1. Enter 创建第 4 个空列表项。
+2. 第一次 Backspace 把空列表项合入第 3 项，树变成同一 `list_item` 下的
+   `paragraph("gamma") + paragraph("")`；它仍在列表内部，所以视觉上缩进。
+3. 第二次 Backspace 合并/删除这个空段落，并不等价于“在列表后创建正文”。
+4. 再按 Enter 当然重新运行 `splitListItem`，又出现序号。
+
+这个最小路径解释了用户的交互困惑，但单独执行一轮没有触发同步锁定。HorseMD 自己的
+DOM handler 不接管普通列表 Enter/Backspace；真实命令来自 Milkdown CommonMark 的
+`splitListItem` 与 `liftFirstListItem → joinBackward`。
+
+### 3.2 同类锁定的稳定复现
+
+使用会被 remark 解释为“外层 bullet wrapper + 内层 ordered list”的作者源码：
+
+```markdown
+# test
+
+- 1. alpha
+- 2. beta
+
+paragraph below
+```
+
+在 `beta` 开头按 Backspace × 3、Enter、Backspace，每步约 300ms。这个序列对应用户
+“删除序号、继续退格、重新换行、再调整”的结构 churn。逐步日志为：
+
+| 步骤 | preserve 结果 | 作者源码快照 |
+|---|---|---|
+| Backspace 1 | `diverged-nested-list-change`，成功 | `- 1. alpha` / `- beta` |
+| Backspace 2 | 同上，成功 | 不变 |
+| Backspace 3 | 同上，成功 | `- 1. alpha` 后出现无 marker 缩进续行 `  beta` |
+| Enter | 同上，**仍报成功** | 被投影为两个分离列表：`- 1. alpha` 与 `- beta` |
+| Backspace | `visible-stream-mismatch`，失败 | 保留上一步源码，canonical 不推进 |
+
+失败后的端到端结果：
+
+- 点击源码模式：textarea 没有挂载，按钮看起来“无反应”；
+- 点击保存：显示“保存已暂停：当前富文本编辑暂时无法安全映射到源码……”；
+- 磁盘文件保持原样，没有写入旧快照或错误快照。
+
+这里最关键的证据不是最后一次 `preserved:false`，而是前一次 Enter 被判定为
+`preserved:true`，却已经改变了源码中的列表块身份。最终拒绝只是较早“假成功”的后果。
+
+另一个普通列表 churn 对照也观察到一次错误成功：中间态被映射成
+`gamma<br />after paragraph`，随后再进入 `unmapped-structural-change`。这说明问题并不只限于
+`- 1.` fixture；后者只是目前最稳定、最短的锁定复现。
+
+### 3.3 时序依赖
+
+同类操作在 20/100/300ms 的按键间隔下会改变 `markdownUpdated` 的批次边界。调查中观察到：
+
+- 分步回调可在最后一笔进入 `visible-stream-mismatch`；
+- 更快批次可能走另一 handler 并暂时返回成功；
+- 某些批次会让内部 `<br />` 占位符物化进候选作者源码。
+
+正确的同步结果不应取决于 200ms 左右的监听器分批方式。当前实现处理的是“两个全文
+canonical 快照之差”，不是用户的逻辑命令或 ProseMirror transaction，因此这种差异是
+架构模型的直接产物。
+
+## 4. 当前数据流和失败状态机
+
+```text
+磁盘
+  ↓ open
+tab.content / tabsRef
+  ↓ initialContent
+lastMarkdownRef ───────────────┐  最后提交的作者源码
+                               │
+canonicalMarkdownRef ──────────┼─ preserveRichMarkdownSource(...)
+                               │
+PM view.state.doc → serializer ┘  当前可见富文本 → next canonical
+                    │
+        ┌───────────┴───────────┐
+        │ preserved:true        │ preserved:false
+        │ 推进两份 ref           │ 冻结两份 ref
+        │ onChange → tab.content│ PM 继续保留可见编辑
+        │ 清 pending             │ pending 保留
+        └───────────────────────┴───────────────
+                                                ↓
+                                      flushMarkdown() = null
+                                      ├─ 保存：toast + 不写盘
+                                      └─ 切源码：静默 return
+```
+
+关键实现位置：
+
+- 双快照：`src/renderer/src/components/Editor.jsx:179-183`
+- 用户编辑/pending 与跨 block flush：`Editor.jsx:224-271`
+- `markdownUpdated` 对账与失败冻结：`Editor.jsx:650-840`
+- 强制序列化与 `null` 合同：`components/editor-api.js:169-216`
+- 保存读取 live PM：`App.jsx:520-534`
+- 保存拒绝及 toast：`hooks/useFileOps.js:384-397`
+- 源码切换静默拒绝：`hooks/useSourceModeSwitch.js:95-120`
+
+保存与源码切换并没有共享一个显式 `syncError` 对象；它们只是共享同一个失败谓词
+`flushMarkdown() === null`。`reason` 在 API 边界被压扁，UI 无法区分保真拒绝、序列化异常
+或编辑器生命周期未就绪。
+
+## 5. 根因分层
+
+### 5.1 表示层：三份事实不可逆
+
+作者 Markdown 必须保留 marker、空行、缩进、CRLF 和局部写法；ProseMirror 只保存语义树；
+serializer 又生成规范化 Markdown。三者并非双射。例如 `- 1. text` 的作者意图在 PM 中会
+成为两层列表，原始 token 身份已经丢失。当前系统却要求每次富文本编辑后把 canonical 的
+局部差异无损投回作者字节。
+
+### 5.2 映射层：启发式 handler 返回值被当作证明
+
+`preserveRichMarkdownSource()` 按 visible stream、表格、列表、行区间等多个 handler
+依次尝试；某个 handler 返回结果就视为 `preserved:true`。系统没有通用后置条件来证明：
+
+```text
+parse(preservedMarkdown) 的语义结构 == 当前 PM doc
+且未编辑 raw span 的字节保持不变
+```
+
+所以“映射器没有认输”不等于“结果正确”。本次链条正是先错误成功、后失败锁定。
+
+### 5.3 列表中间态：零宽结构没有稳定身份
+
+`flatListItemRows()` 对 marker 行会剥离尾部 `<br />`，但 tokenless continuation 分支把
+缩进的 `<br />` 当普通正文；`normalizeEmptyListItems()` 又只识别带 marker 的空列表项。
+更根本的问题是：`  beta` 无法仅凭字符串判断它是 list lift 的新状态、原有列表续行，
+还是作者有意的缩进文本。正则只能猜邻接关系，无法恢复 transaction 的语义身份。
+
+### 5.4 事务层：批次边界代替逻辑版本
+
+系统用 DOM 事件、pending flag、TTL 和约 200ms 的 `markdownUpdated` 批处理推断一次用户编辑。
+没有单调 revision，也没有“这个结果基于哪一版 PM/source”的 compare-and-swap 提交规则。
+因此相同按键序列被不同方式分批时，可走不同 handler 并产生不同源码。
+
+### 5.5 失败层：fail-closed 正确，但没有恢复协议
+
+冻结源码和磁盘是正确的安全边界，不能为了让按钮重新可用而删除。问题在于系统没有一级
+同步状态，也没有保存当前 PM canonical recovery snapshot。用户只能继续编辑或 Undo，期待
+累计 delta 恰好重新可映射；源码入口本身又被锁住。
+
+### 5.6 投影层：visible map 不符合 Markdown 语法（多语言矩阵补充，2026-08-11）
+
+对 15 种「普通段落中的代码元字符」做简单文档 + test.md 原结构两组对照后确认：
+上游根因不是“列表解析”或某种语言，而是 **visible projection 不符合 Markdown grammar**。
+不同语言只是提供了不同触发字符；裸 `*` 在简单文档中通常被 fallback 救回，与重复文本、
+复杂块结构叠加时才稳定变成 `visible-stream-mismatch`。
+
+三个缺陷类别：
+
+1. **单个 `*`、单独 `_` 被无条件当成 Markdown 语法**（`mode-visible-map.js:226`，未实现
+   CommonMark delimiter-flanking 规则）。`char *ptr`、`a * b`、`*args`、
+   `import * as React`、`"$*"`、`SELECT *`、`_ = value` 全部产生假分歧。
+2. **`<` 和 `&` 的 canonical 转义链不完整**（白名单 `mode-visible-map.js:114` 不含
+   `<`/`&`；任意 `<...>` 又可能被近似 HTML 规则整个删除，`:183`）。
+   `std::vector<int*>`、`&T`、`#include <stdio.h>` 在唯一文本块中也可直接
+   `visible-stream-mismatch`，不需要重复锚点。
+3. **inline code 没有真正进入 raw 模式**：只跳过反引号，内部字符仍按 Markdown 解释。
+   `` `* _ ~ [ ]` `` 两侧可能“错得一致”而不阻断保存，但污染 caret/raw-offset 映射。
+   fenced code 无此问题（走 `mode-visible-map.js:293` raw 分支）。
+
+结论修正：
+
+- `*ptr → \*ptr` 是 serializer 的合法拼写变化，不代表语义或可见文本变化；
+- 用于光标近似定位的 `sourceVisibleIndex()` **不应成为数据提交安全性的裁决器**——
+  提交裁决必须以 parse 级语义等价为准（见 §12 验收关卡）；
+- 解析器 token span、inline-code span、fenced-code span 应成为统一语义边界（阶段 B.4）；
+- 普通正文、粗体、列表和表格单元格中出现代码符号是合法内容，要求用户改用代码块
+  只能是临时规避。
+
+## 6. 为什么已有测试全过仍漏掉
+
+`test:markdown-preservation` 和 `test:diverged-list-structure-ui` 当前均能通过，但它们证明的
+只是已枚举 fixture：
+
+1. UI 测试覆盖三次 Backspace 后切源码、保存、重开，没有继续执行 Enter → Backspace。
+2. 每次操作间等待约 700ms，没有枚举多个 callback partition。
+3. 纯函数测试多为独立输入，没有把每一步的输出作为下一步 authored source/baseline，
+   因而看不到“先假成功、再累计失败”。
+4. 测试 oracle 主要检查最终字节，没有为每次 `preserved:true` 验证 parse 后的语义等价。
+5. 普通列表与 `- 1.` 分歧列表是不同解析树，不能用前者的通过证明后者。
+
+需要把测试对象从“单个 preservation 函数样例”升级为“文档 revision 状态机”。
+
+## 7. 非补丁式修正路线
+
+### 阶段 A：让当前架构可证明、可恢复
+
+1. **显式 per-tab 同步状态**：`healthy | pending | conflicted`，携带
+   `sourceRevision`、`pmRevision`、`lastSuccessfulRevision`、失败 reason 和操作 ID。
+2. **成功结果验收**：对每次 `preserved:true` 做结构 round-trip 检查，并验证未触及字节。
+   验收失败应进入可观察冲突，不能推进 baseline。
+3. **双恢复资产**：冲突时同时保留“最后可信作者源码”和“当前 live PM 的 canonical recovery
+   snapshot”。提供导出两份、丢弃富文本回退源码、以富文本重建源码（明确会规范化）三种出口。
+4. **统一失败协议**：保存、切源码、分屏、导出、session flush 都消费同一种结构化结果；
+   源码按钮不得再静默无响应，并应允许只读查看最后可信源码。
+5. **内部占位符不变量**：在语义/CST 边界统一分类 PM 空段落；禁止 `<br />` 占位符依赖
+   多处分散正则“最后再清理”。表格 cell 和用户 HTML `<br>` 仍须保留。
+
+### 阶段 B：用显式事务替代全文快照猜测
+
+1. 收敛 serialize → map → validate → baseline commit → `tab.content` 更新为唯一
+   `DocumentRevisionCoordinator`；回调、强制 flush 和特殊命令不得分别推进 refs。
+2. 用单调 revision/CAS 替代墙钟 TTL。异步映射只能提交到它开始时对应的 source/PM revision。
+3. 扩展仓库已有的 PM step → source patch 原型：显式处理 `splitListItem`、`liftListItem`、
+   `joinBackward`、`ReplaceAroundStep`、多 step transaction 和 undo/redo。
+4. 建立 lossless Markdown CST/span/trivia 层。marker、空行、缩进、CRLF、转义是模型字段，
+   不能只存在于上一份 raw string。
+
+### 阶段 C：源码单一事实源
+
+执行 `docs/live-preview-migration-plan.md` 已规划的 CodeMirror 6 Live Preview：
+
+- Markdown 文本成为唯一可写数据模型；
+- rich/source 是同一 buffer 的 decoration/view mode；
+- 保存、光标、viewport、导出读取同一 revision；
+- 迁移期 PM/Crepe 可作为投影和兼容层，最终退役双向 heuristic preservation。
+
+这是唯一能从架构上消除“作者源码 ↔ PM canonical 双向无损对账”问题族的路线，但需要渐进
+迁移，不能作为 0.13.29 的紧急补丁。
+
+### 列表 UX 应单独决策
+
+产品需要明确“空列表项 Backspace”的合同：
+
+- 保留 ProseMirror 默认行为，则教程和交互提示应说明 Enter × 2 退出列表；
+- 若目标是 Typora/飞书式体验，应把空列表项 Backspace 定义为显式 lift/退出命令。
+
+改变 keymap 可降低触发率、改善用户体验，但不能替代同步架构修正。
+
+## 8. 建议的回归模型
+
+新增状态机测试，而不是再加一个孤立 fixture：
+
+1. 语法形态：普通 `1.`、`1)`、`- 1.`、松散列表、嵌套列表、列表后正文。
+2. 操作序列：split、Backspace join、lift、Enter、undo/redo、源码切换、立即保存、重开。
+3. 批次划分：每步 settle、相邻两步合并、整段合并；结果必须一致。
+4. 每一步断言：
+   - live PM 与 preserved source 重解析后的语义等价；
+   - 未触及作者字节保持；
+   - 作者源码不含内部 placeholder；
+   - 保存/切换读取同一 revision；
+   - 冲突时 recovery snapshot 可导出且磁盘不写。
+5. Electron 测试继续用后台 `launchBuiltElectron()` 和 `human-input.mjs` 逐键输入。
+
+## 9. 当前用户的安全操作建议
+
+- 要在列表后增加正文：当前版本在空列表项再按一次 Enter，不要用 Backspace 退出。
+- 如果已经出现保存暂停：先 Undo 回到最近一次可保存状态，再切源码或保存；不要继续大量
+  结构编辑扩大累计 delta。
+- 如果 Undo 不能恢复，在关闭应用前先把屏幕上仍可见的重要内容复制到外部临时文件。
+  当前 toast 只保证磁盘没有被旧源码覆盖，不保证未提交的 PM 编辑在关闭后可恢复。
+
+## 10. 验证与工作区说明
+
+- 后台 Electron 普通列表逐键对照已执行。
+- 后台 Electron 分歧列表锁定已执行：最后 reason 为 `visible-stream-mismatch`，源码 textarea
+  未出现，保存 toast 出现，磁盘内容未变化。
+- `npm run test:markdown-preservation`、`npm run test:diverged-list-structure-ui` 和
+  `npm run build` 用来验证当前基线及说明测试缺口；它们的通过不代表本 bug 已修复。
+- 未修改任何产品源码，也未提交、安装或发布构建。仓库中原有的
+  `electron.vite.config.mjs` 修改和 `.idea/` 未跟踪目录不属于本调查。
+
+## 11. 关键代码索引
+
+- `src/renderer/src/components/editor-dom-interactions.js:62-87`
+- `src/renderer/src/components/Editor.jsx:179-183, 224-271, 650-840`
+- `src/renderer/src/components/editor-api.js:169-216`
+- `src/renderer/src/hooks/useSourceModeSwitch.js:95-120`
+- `src/renderer/src/hooks/useFileOps.js:384-397`
+- `src/renderer/src/App.jsx:520-534`
+- `src/renderer/src/markdown-source-preservation.js:310-384, 417-474`
+- `src/renderer/src/lib/markdown-preservation/lists.js:120-150, 345-359, 1362-1635`
+- `src/renderer/src/lib/markdown-preservation/paragraphs.js:316-326`
+- `docs/nested-list-sync-bug-handoff.md`
+- `docs/rich-source-fidelity-bug-family.md`
+
+## 12. 修复分支落地情况（fix/rich-source-sync-architecture，2026-08-11）
+
+阶段 A 的以下项已在该分支实现（架构收敛，非补丁）：
+
+- **A.2 成功结果验收** → `lib/markdown-preservation/roundtrip.js`：每次
+  `preserved:true` 必须通过「结果 re-parse ≡ 当前 canonical」的语义等价关卡
+  （拼写不敏感：`-`/`*`、转义、松紧列表、`<br>` 拼写、块级 `<br />` 占位符均等价）。
+  验收失败降级为 fail-closed，不推进 baseline。§3.2 的“Enter 假成功”与真实用户文件
+  的 `\*\*}\*\*X` 损坏形态均被该关卡拒绝（`npm run test:roundtrip-acceptance` 锁定）。
+- **提交点收敛**（A.4 的前半）：Editor.jsx `commitCanonicalResult` 成为
+  markdownUpdated / frontmatter / inline code / 两个列表转换的唯一发布路径，
+  `flushMarkdown` 是 API 侧对应物；frontmatter 路径缺失的 fail-closed 检查
+  （基线投毒根因之一）随收敛消失，且改用 `serializerCtx` 序列化。
+- **A.3 恢复出口（部分）** → `editor-api.rebuildMarkdownFromRich()`：fail-closed 时
+  经用户确认（`sync.rebuildConfirm`）以 live 文档重建作者源码，接入源码切换、
+  `getMarkdownForTab`（保存/导出）；Pandoc 导出补上 null 检查。切源码不再静默无响应。
+- **列表 UX 决策已定**：空列表项 Backspace = lift 退出列表
+  （`editor-list-backspace.js`，prepend 到 `prosePluginsCtx`），从行为层消灭
+  “项内多段落 + 无 marker 续行”歧义中间态。非空项保持 preset 行为。
+
+两轮代码审查（2026-08-11）后的补充落地：
+
+- **验收关卡的语义等价关系扩展**：表格 `<br />` 单元格 ≡ 空单元格、单行/多行
+  `$$…$$` 拼写、参考式链接 vs 内联链接、U+200B 前导空格哨兵 ≡ `&#x20;`；
+  行级去转义只在「reparse 语义不变」时还原物理字符（`2\.`、`\~`、反引号等
+  不再被盲目去转义——这是 211e64c 埋下的真实保真洞）。
+- **关卡抓出并根修的三个既有 lossy 映射**（旧测试期望值随之修正，均经 parser
+  实证）：lift 续行缺块边界空行；marker 变宽不平移子行缩进（`1. Parent` 下
+  2 空格子项 reparse 成并列列表）；bullet 偏好 `-` 与相邻 `-` 列表 reparse
+  合并（改为序列化器同款交替 marker）。另修全文粘贴时 delta 边界劈开行首
+  marker token 导致的 `# # 标题` 损坏（canonical 入口 token 外扩 + raw 锚点
+  行首吸附,issue-77 回归恢复通过）。
+- **恢复出口原子化**：rebuild 同时清空全部 pending intent（paste 快照/列表
+  转换/输入规则标记），Pandoc 导出路径同步 `tab.content`/`tabsRef`；关窗前
+  草稿 flush 以 rebuild 兜底（草稿可规范化、不可丢失）。
+- **性能**：比较键按串记忆化；>120K 字符文档的热路径跳过关卡（保存/切源码/
+  导出等持久化边界仍无条件把关）。
+- **范围收敛**：空列表项 Backspace 仅在「列表末项」接管（中间项 lift 会产生
+  Markdown 无法表达的结构）；「源码+预览」分屏入口走同一 flush 守卫；
+  测试脚手架自动应答原生对话框（默认拒绝，见 docs/development.md）。
+
+未落地（后续工作，即阶段 B 的边界）：A.1 显式同步状态对象 / revision
+coordinator、§5.6 的 visible-map 语法化重写（fail-closed 的**发生率**根因，
+本分支只治「失败后果」）、关卡与应用统一 remark 管线（现用独立 GFM parser +
+归一化层近似,`\$x$` vs `$x$` 类 app 特有语义无法区分——已核验现有映射器不会
+产生这类翻转）、阶段 B/C 全部。
+- `docs/live-preview-migration-plan.md`

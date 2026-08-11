@@ -21,9 +21,23 @@ export async function connectCdp({
   const ws = new WebSocket(page.webSocketDebuggerUrl)
   const pending = new Map()
   let id = 0
+  // Native window.confirm/alert dialogs block the renderer's JS loop, which
+  // deadlocks every later Runtime.evaluate. Auto-answer them: decline by
+  // default (matches the app's abort-on-decline paths) and let a test opt into
+  // accepting via setDialogResponse(true). Every dialog is recorded so tests
+  // can assert one appeared.
+  const dialogs = []
+  let dialogAccept = false
   ws.addEventListener('message', (event) => {
     const message = JSON.parse(event.data)
-    if (!message.id || !pending.has(message.id)) return
+    if (!message.id) {
+      if (message.method === 'Page.javascriptDialogOpening') {
+        dialogs.push(message.params)
+        send('Page.handleJavaScriptDialog', { accept: dialogAccept }).catch(() => {})
+      }
+      return
+    }
+    if (!pending.has(message.id)) return
     const request = pending.get(message.id)
     pending.delete(message.id)
     if (message.error) {
@@ -59,5 +73,13 @@ export async function connectCdp({
     return response.result?.result?.value
   }
 
-  return { ws, send, evaluate }
+  await send('Page.enable').catch(() => {})
+
+  return {
+    ws,
+    send,
+    evaluate,
+    dialogs,
+    setDialogResponse: (accept) => { dialogAccept = !!accept }
+  }
 }

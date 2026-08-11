@@ -182,10 +182,14 @@ async function main() {
     await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
     await sleep(1000)
 
+    // The lifted text is a separate paragraph inside the previous item, so the
+    // authored row carries a preceding blank line: without it the indented
+    // line lazily continues the previous paragraph on reparse (the old
+    // expectation without the blank line encoded a round-trip-lossy mapping).
     const rawAfterLift = await sourceAfter(app)
     assert.equal(
       rawAfterLift,
-      authored.replace('- 2. 综合行政部', '  综合行政部'),
+      authored.replace('- 2. 综合行政部', '\n  综合行政部'),
       `removing both list levels must preserve the paragraph text (got ${JSON.stringify(rawAfterLift)})`
     )
     assert.equal(await toggleSource(app.evaluate), true, 'could not return to rich mode after lift')
@@ -193,7 +197,7 @@ async function main() {
     await save(app)
     assert.equal(
       await readFile(liftFile, 'utf8'),
-      authored.replace('- 2. 综合行政部', '  综合行政部'),
+      authored.replace('- 2. 综合行政部', '\n  综合行政部'),
       'the two-level marker removal must persist on disk'
     )
 

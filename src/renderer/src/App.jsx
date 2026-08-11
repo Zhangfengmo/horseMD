@@ -249,12 +249,19 @@ export default function App() {
     for (const id of [...liveContentRef.current.keys()]) commitLive(id)
   }, [commitLive])
 
+  const t = useCallback((key, vars) => translate(lang, key, vars), [lang])
+  // Always-current translator for stable callbacks (e.g. openPaths) that must
+  // not be recreated on every language change.
+  const tRef = useRef(t)
+  tRef.current = t
+
   const {
     sourceMode,
     sourceRef,
     sourceTextareas,
     sourceEditedIds,
-    toggleSource
+    toggleSource,
+    flushRichSource
   } = useSourceModeSwitch({
     tabs,
     activeId,
@@ -266,7 +273,8 @@ export default function App() {
     focusedTabRef,
     commitAllLive,
     findStateRef,
-    richLoadingRef
+    richLoadingRef,
+    tRef
   })
 
   // Persist per-document caret/viewport so reopening a file (session restore or
@@ -463,11 +471,6 @@ export default function App() {
     updateSettings({ themeMode: 'manual' })
   }, [updateSettings])
 
-  const t = useCallback((key, vars) => translate(lang, key, vars), [lang])
-  // Always-current translator for stable callbacks (e.g. openPaths) that must
-  // not be recreated on every language change.
-  const tRef = useRef(t)
-  tRef.current = t
   const cycleTheme = useCallback(() => {
     setTheme((cur) => {
       const i = THEMES.findIndex((x) => x.id === cur)
@@ -529,9 +532,30 @@ export default function App() {
     // A mounted rich editor returning null means source preservation could not
     // safely map the visible transaction. Never fall back to stale tab.content
     // at a durability boundary; callers must abort rather than resurrect data.
-    if (editorApi) return null
+    // The fail-closed state must still be exit-able: offer the explicit
+    // rebuild-from-rich recovery (normalizes authored spelling, keeps the
+    // document the user sees) before refusing the save/export.
+    if (editorApi) {
+      if (window.confirm(tRef.current('sync.rebuildConfirm'))) {
+        const rebuilt = editorApi.rebuildMarkdownFromRich?.()
+        if (typeof rebuilt === 'string') {
+          // The rebuild reset the editor-local baselines; the App-level truth
+          // must follow in the same operation or the two diverge again until
+          // the next markdownUpdated (export paths never write tab.content
+          // otherwise).
+          tabsRef.current = tabsRef.current.map((tab) =>
+            tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
+          )
+          setTabs((prev) => prev.map((tab) =>
+            tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
+          ))
+          return rebuilt
+        }
+      }
+      return null
+    }
     return tabsRef.current.find((tab) => tab.id === id)?.content || ''
-  }, [editorApis, sourceTextareas, tabsRef])
+  }, [editorApis, setTabs, sourceTextareas, tabsRef, tRef])
 
   // Source/rich view state and anchor restoration live in useSourceModeSwitch.
 
@@ -685,13 +709,19 @@ export default function App() {
       setSourceRichSplitId(null)
       return
     }
+    // The split's textarea reads tab.content, so entering it is a source
+    // boundary exactly like exclusive source mode: the rich buffer must flush
+    // through the same guard (including the fail-closed recovery confirm).
+    // Skipping it would expose a stale snapshot that a single keystroke in
+    // the split would sync back over the user's unmapped rich edits.
+    if (!sourceMode && !flushRichSource(tab.id)) return
     // Existing source mode owns a sensitive caret/viewport restoration path.
     // Close it through its public toggle before exposing both panes; the rich
     // editor stays mounted throughout, so this is not a re-parse.
     if (sourceMode) toggleSource()
     setSourceRichFocusedPane('source')
     setSourceRichSplitId(tab.id)
-  }, [isMobile, richForced, sourceMode, sourceRichSplitId, split, tRef, toggleSource])
+  }, [flushRichSource, isMobile, richForced, sourceMode, sourceRichSplitId, split, tRef, toggleSource])
 
   // The split has an in-panel exit in addition to the existing view-mode
   // control. Closing it returns directly to the normal rich editor instead of
@@ -954,7 +984,13 @@ export default function App() {
     const updates = new Map()
     for (const tab of tabsRef.current) {
       if (!tab.pendingRichEdit || sourceTextareas.current[tab.id]) continue
-      const markdown = editorApis.current[tab.id]?.flushMarkdown?.({ force: true })
+      const api = editorApis.current[tab.id]
+      let markdown = api?.flushMarkdown?.({ force: true })
+      // This runs while the app is closing: there is no retry after it. A
+      // fail-closed draft would silently lose the visible edits from the
+      // session snapshot, so rebuild from the live document instead — a
+      // session draft may normalize its spelling, but must not lose content.
+      if (typeof markdown !== 'string') markdown = api?.rebuildMarkdownFromRich?.()
       if (typeof markdown === 'string') updates.set(tab.id, markdown)
     }
     if (!updates.size) return

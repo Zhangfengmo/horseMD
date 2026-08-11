@@ -124,8 +124,12 @@ export function createMenuHandlers({
     const id = pickEditableId()
     if (!id) return
     const tab = tabs.find((candidate) => candidate.id === id)
+    const markdown = getMarkdownForTab(id)
+    // Same null contract as saveTab: a fail-closed sync (recovery declined)
+    // must abort instead of handing null to the exporter.
+    if (markdown == null) return
     requestPandocExport({
-      markdown: getMarkdownForTab(id),
+      markdown,
       format,
       defaultName: tab?.title || 'Untitled',
       sourcePath: tab?.path || null

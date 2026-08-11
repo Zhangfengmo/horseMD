@@ -24,7 +24,11 @@ assert.equal(
 )
 assert.equal(
   convertSourceParagraphLineToList(source, indentedOffset, 'task_list'),
-  source.replace('  Indented paragraph.', '  - [ ] Indented paragraph.')
+  // The `- Existing list item.` below would merge with a `- [ ]` row across
+  // the blank line on reparse (CommonMark same-marker continuation), while
+  // the editor keeps two separate blocks. The marker alternates to `*`
+  // exactly like the serializer does (bulletTokenAvoidingMerge).
+  source.replace('  Indented paragraph.', '  * [ ] Indented paragraph.')
 )
 assert.equal(convertSourceParagraphLineToList(source, source.indexOf('# Title'), 'bullet_list'), null)
 assert.equal(convertSourceParagraphLineToList(source, source.indexOf('Existing'), 'bullet_list'), null)

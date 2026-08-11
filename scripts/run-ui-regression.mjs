@@ -161,6 +161,18 @@ const standalone = [
     script: 'scripts/test-issue-77-source-preservation-ui.mjs'
   },
   {
+    name: 'List Backspace exit: empty-item Backspace exits into a paragraph',
+    script: 'scripts/test-list-backspace-exit-ui.mjs'
+  },
+  {
+    name: 'Sync recovery: fail-closed offers rebuild; declining keeps rich mode',
+    script: 'scripts/test-sync-recovery-ui.mjs'
+  },
+  {
+    name: 'Diverged list structure: marker deletion, lift, and insertion round-trip',
+    script: 'scripts/test-diverged-list-structure-ui.mjs'
+  },
+  {
     name: 'Paragraph source preservation: compact lines and Enter survive reopen',
     script: 'scripts/test-paragraph-source-preservation-ui.mjs'
   },

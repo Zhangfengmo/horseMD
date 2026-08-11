@@ -2,6 +2,7 @@ import {
   sourceRawFromVisibleIndex
 } from '../../mode-visible-map.js'
 import { LEADING_SPACE_SENTINEL } from '../markdown-leading-space.js'
+import { markdownComparisonKey } from './roundtrip.js'
 
 export const commonChange = (previous, next) => {
   let start = 0
@@ -251,7 +252,26 @@ export const canonicalTextToSource = (text, { restoreFreshPunctuation = false } 
       return line + newline
     }
     if (!trimmed) return line + newline
-    return translateInlineCanonicalEscapes(line, restoreFreshPunctuation) + newline
+    const translated = translateInlineCanonicalEscapes(line, restoreFreshPunctuation)
+    if (translated === line) return line + newline
+    // Restoring a physical character is only safe when the un-escaped line
+    // still MEANS the same thing: `2\.` → `2. ` creates a list marker, `\~` →
+    // `~` can open GFM strikethrough, un-escaped backticks can open a fence.
+    // Those would change the document on reparse (the round-trip acceptance
+    // gate rejects the whole commit), so keep the canonical escape whenever
+    // the translation is not provably meaning-preserving. Fresh-typed regions
+    // (`restoreFreshPunctuation`) keep their documented reinterpretation
+    // semantics: there the user physically typed the characters.
+    if (!restoreFreshPunctuation) {
+      try {
+        if (markdownComparisonKey(translated) !== markdownComparisonKey(line)) {
+          return line + newline
+        }
+      } catch {
+        return line + newline
+      }
+    }
+    return translated + newline
   }).join('')
 }
 

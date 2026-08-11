@@ -9,6 +9,9 @@ import {
   preserveGeneratedBulletMarkers,
   preserveRichMarkdownSource
 } from '../markdown-source-preservation.js'
+import { roundTripPreserved } from '../lib/markdown-preservation/roundtrip.js'
+import { withoutStandaloneEmptyBlockLines } from '../lib/markdown-preservation/paragraphs.js'
+import { normalizeEmptyListItems } from '../lib/markdown-preservation/lists.js'
 import { normalizeDisplayMath } from './editor-math.js'
 import { markdownOffsetToPmPos, pmPosToMarkdownOffset } from './editor-source-map.js'
 import { createPdfSourceFromEditor } from './editor-pdf-content.js'
@@ -38,6 +41,7 @@ export function createEditorApi({
   markUserEdit,
   onStructureChange,
   isDestroyed,
+  resetTransactionIntents,
   getT,
   notify
 }) {
@@ -207,10 +211,65 @@ export function createEditorApi({
       // the cumulative delta. Returning null prevents source mode or save from
       // presenting the stale authored bytes as if the visible edit had synced.
       if (preserved.preserved === false) return null
+      // A mapper accepting the delta is not proof the mapped bytes mean what
+      // the editor shows. A wrong `preserved:true` poisons the authored source
+      // permanently, so every commit must pass the semantic round-trip gate.
+      // A fresh scratch document deliberately restores physical characters
+      // (unescaping can create real syntax), so only that path is exempt.
+      if (!generatedScratchRef?.current && !roundTripPreserved(preserved.markdown, canonical)) {
+        // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
+        if (Array.isArray(globalThis.__hmGateLog)) {
+          globalThis.__hmGateLog.push({
+            origin: 'flush',
+            reason: preserved.reason || 'unknown',
+            candidate: preserved.markdown,
+            canonical
+          })
+        }
+        return null
+      }
       lastMarkdownRef.current = preserved.markdown
       canonicalMarkdownRef.current = canonical
       clearPendingRichFlush?.()
       return preserved.markdown
+    } catch (error) {
+      // A silent null here is indistinguishable from a fail-closed mapping to
+      // every caller; keep the error visible for diagnosis.
+      console.error('flushMarkdown failed', error)
+      if (Array.isArray(globalThis.__hmGateLog)) {
+        globalThis.__hmGateLog.push({ origin: 'flush-exception', reason: String(error?.message || error) })
+      }
+      return null
+    }
+  }
+
+  // Explicit exit from a fail-closed sync: rebuild the authored source from
+  // the live document's canonical serialization. Authored spelling (markers,
+  // escapes, spacing) is normalized, content is not — the rebuilt source is
+  // the document the user currently sees, so both baselines realign and the
+  // conflict state ends. Callers own the user consent for the normalization.
+  const rebuildMarkdownFromRich = () => {
+    if (isDestroyed?.() || !crepeRef.current) return null
+    try {
+      const canonical = canonicalForSource(serializeCurrentDocument())
+      const rebuilt = generatedScratchMarkdown(canonical)
+      // The rebuilt source must satisfy the same acceptance invariant as any
+      // commit. The fallback keeps canonical escapes (un-escaping is what can
+      // change semantics) but must still strip Crepe's internal empty-block
+      // `<br />` placeholders — raw canonical bytes would write them into the
+      // user's file, violating the source boundary invariant.
+      const markdown = roundTripPreserved(rebuilt, canonical)
+        ? rebuilt
+        : withoutStandaloneEmptyBlockLines(normalizeEmptyListItems(canonical))
+      lastMarkdownRef.current = markdown
+      canonicalMarkdownRef.current = canonical
+      clearPendingRichFlush?.()
+      // A rebuild is a full baseline reset: every pending transaction intent
+      // (paste snapshot, list conversion, input-rule markers) was captured
+      // against the PREVIOUS baselines. Replaying one after the reset would
+      // re-poison the fresh baselines, so the reset must be atomic.
+      resetTransactionIntents?.()
+      return markdown
     } catch {
       return null
     }
@@ -311,6 +370,7 @@ export function createEditorApi({
     applyReviewMarkup,
     replaceMarkdown,
     flushMarkdown,
+    rebuildMarkdownFromRich,
     restoreMarkdownOffset,
     markdownOffsetFromSelection,
     markdownOffsetFromViewportTop

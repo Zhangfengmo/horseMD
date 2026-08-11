@@ -22,6 +22,7 @@ import {
   tableCellBreakHandler,
   brToBreakRemarkPlugin
 } from './editor-tablebreak.js'
+import { listBackspaceKeymap } from './editor-list-backspace.js'
 import { mathPreviewPlugin } from './editor-math-preview.js'
 import { createInlineMathEditingPlugin } from './editor-inline-math.js'
 import { createSlashPlugin, disableCrepeSlash } from './editor-slash-menu.js'
@@ -188,6 +189,10 @@ export function createConfiguredCrepe({
     })
 
     ctx.update(prosePluginsCtx, (plugins) => [
+      // Must run BEFORE the preset keymaps in `plugins`: the CommonMark preset
+      // binds Backspace to a generic joinBackward that merges an empty list
+      // item into the previous item instead of exiting the list.
+      listBackspaceKeymap(),
       createStrikeGuardPlugin(),
       createBlockHandleGutterPlugin(),
       ...plugins,

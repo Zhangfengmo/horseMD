@@ -630,6 +630,26 @@ const listMarkerRows = (markdown, block) => markdownLines(markdown)
 // of replacing the whole canonical list tree: outer and nested levels may use
 // different compact/loose spacing, indentation, bullet characters and ordered
 // punctuation, none of which belongs to the converted level.
+// Adjacent same-marker lists separated only by blank lines merge into ONE
+// list on reparse (CommonMark), while the editor keeps them separate blocks —
+// the serializer avoids this with marker alternation (`*` next to `-`). Any
+// mapper that writes a bullet marker must respect the same rule, or the
+// committed bytes change document structure (the round-trip gate rejects it).
+export const bulletTokenAvoidingMerge = (markdown, blockStart, blockEnd, preferred = '-') => {
+  const alternate = preferred === '-' ? '*' : '-'
+  const neighborUsesPreferred = (lines, fromEnd) => {
+    const ordered = fromEnd ? [...lines].reverse() : lines
+    for (const line of ordered) {
+      if (!line.trim()) continue
+      return new RegExp(`^[ \\t]*\\${preferred}[ \\t]`).test(line)
+    }
+    return false
+  }
+  if (neighborUsesPreferred(String(markdown).slice(0, blockStart).split('\n'), true)) return alternate
+  if (neighborUsesPreferred(String(markdown).slice(blockEnd).split('\n'), false)) return alternate
+  return preferred
+}
+
 const patchConvertedListMarkers = ({ source, sourceList, previous, previousList, next, nextList }) => {
   const sourceRows = listMarkerRows(source, sourceList)
   const previousRows = listMarkerRows(previous, previousList)
@@ -638,7 +658,7 @@ const patchConvertedListMarkers = ({ source, sourceList, previous, previousList,
     return null
   }
 
-  const changes = []
+  const rowEdits = new Array(sourceRows.length).fill(null)
   for (let index = 0; index < sourceRows.length; index += 1) {
     const sourceRow = sourceRows[index]
     const previousRow = previousRows[index]
@@ -653,18 +673,59 @@ const patchConvertedListMarkers = ({ source, sourceList, previous, previousList,
 
     // Converting an ordered/task list into an unordered list has no authored
     // bullet character to carry over. Prefer HorseMD's typed-list default (`-`)
-    // instead of leaking Crepe's serializer default (`*`). This applies only
-    // to the converted level; nested rows keep their original marker tokens.
+    // instead of leaking Crepe's serializer default (`*`) — unless a `-` list
+    // sits adjacent to this block, where the preferred marker would merge the
+    // two lists on reparse. This applies only to the converted level; nested
+    // rows keep their original marker tokens.
     const token = previousRow.kind === nextRow.kind
       ? sourceRow.token
-      : nextRow.kind === 'bullet' ? '-' : nextRow.token
+      : nextRow.kind === 'bullet'
+        ? bulletTokenAvoidingMerge(source, sourceList.start, sourceList.end)
+        : nextRow.token
     const task = nextRow.task == null
       ? ''
       : `[${nextRow.task}]${sourceRow.taskSpacing || nextRow.taskSpacing || ' '}`
+    rowEdits[index] = { token, task }
+  }
+  if (!rowEdits.some(Boolean)) return null
+
+  // A WIDENING marker change moves the item's content column right, so every
+  // row nested under the converted row must shift by the same delta — `- ` →
+  // `1. ` widens the column by one; 2-space-indented children would otherwise
+  // reparse as SIBLING lists (the round-trip acceptance gate rejects that).
+  // The cascade delta keeps grandchildren aligned with their shifted parents.
+  // A NARROWING change never invalidates existing indentation, so those rows
+  // keep their authored bytes untouched.
+  const indentShift = new Array(sourceRows.length).fill(0)
+  for (let index = 0; index < sourceRows.length; index += 1) {
+    const edit = rowEdits[index]
+    if (!edit) continue
+    const delta = edit.token.length - sourceRows[index].token.length
+    if (delta <= 0) continue
+    const parentIndent = sourceRows[index].indent.length
+    const parentContentCol = parentIndent + sourceRows[index].token.length + sourceRows[index].spacing.length
+    for (let child = index + 1; child < sourceRows.length; child += 1) {
+      const childIndent = sourceRows[child].indent.length
+      if (childIndent <= parentIndent) break
+      if (childIndent >= parentContentCol) indentShift[child] += delta
+    }
+  }
+
+  const changes = []
+  for (let index = 0; index < sourceRows.length; index += 1) {
+    const edit = rowEdits[index]
+    const shift = indentShift[index]
+    if (!edit && !shift) continue
+    const sourceRow = sourceRows[index]
+    const indent = ' '.repeat(Math.max(0, sourceRow.indent.length + shift))
+    const token = edit ? edit.token : sourceRow.token
+    const task = edit ? edit.task : sourceRow.task == null
+      ? ''
+      : `[${sourceRow.task}]${sourceRow.taskSpacing || ' '}`
     changes.push({
       start: sourceRow.start,
       end: sourceRow.end,
-      text: `${sourceRow.indent}${token}${sourceRow.spacing}${task}${sourceRow.text.slice(sourceRow.prefixEnd)}`
+      text: `${indent}${token}${sourceRow.spacing}${task}${sourceRow.text.slice(sourceRow.prefixEnd)}`
     })
   }
   if (!changes.length) return null
@@ -1558,11 +1619,18 @@ export const preserveDivergedNestedListChange = ({
         // A final Backspace lifts the outer bullet item into an indented
         // continuation of the preceding item. Keep the text and replace only
         // the authored marker prefix with the canonical continuation indent.
+        // The lifted text is a SEPARATE paragraph block inside the previous
+        // item (the serializer always blank-line-separates block children), so
+        // the authored row needs a preceding blank line too — without it the
+        // indented line lazily continues the previous paragraph and the
+        // document changes on reparse (caught by the round-trip gate).
         const rawStart = sourceList.start + row.start + applyOffset
         const rawEnd = sourceList.start + row.contentStart + applyOffset
         const continuationIndent = ' '.repeat(Math.max(1, Number(nextItem.indent) || row.indent + 2))
-        output = output.slice(0, rawStart) + continuationIndent + output.slice(rawEnd)
-        applyOffset += continuationIndent.length - (rawEnd - rawStart)
+        const beforeRow = output.slice(0, rawStart)
+        const blockGap = /(?:\r?\n)[ \t]*(?:\r?\n)$/.test(beforeRow) || !/\S/.test(beforeRow) ? '' : eol
+        output = beforeRow + blockGap + continuationIndent + output.slice(rawEnd)
+        applyOffset += blockGap.length + continuationIndent.length - (rawEnd - rawStart)
       }
       if (prevItem.text !== nextItem.text) {
         const rowText = row.text

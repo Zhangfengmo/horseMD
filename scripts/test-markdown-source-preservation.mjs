@@ -763,7 +763,11 @@ assert.equal(
     previousOffset: 32,
     nextOffset: 32
   }),
-  '- [ ] Task one\n- [x] Task two\n\n- First\n   1. First child\n- Second\n',
+  // `- First` would sit adjacent to the `- [ ]` task list above: CommonMark
+  // merges same-marker lists across a blank line on reparse while the editor
+  // keeps two separate blocks. The converted level therefore alternates to
+  // `*` exactly like the serializer does (bulletTokenAvoidingMerge).
+  '- [ ] Task one\n- [x] Task two\n\n* First\n   1. First child\n* Second\n',
   'a list conversion must not duplicate an adjacent list that canonical Markdown merges into the same block'
 )
 
@@ -1514,9 +1518,13 @@ const nestedOuterMarkerRemoved = preserveRichMarkdownSource(
   '* <br />\n\n  1. 管理层（总经理）\n\n  综合行政部\n\n* <br />\n\n  3. 人力资源部\n\n'
 )
 assert.equal(nestedOuterMarkerRemoved.reason, 'diverged-nested-list-change')
+// The lifted text is a separate paragraph block inside the previous item (the
+// canonical blank-line-separates it), so the authored row must carry a
+// preceding blank line: without one the indented line lazily continues the
+// previous paragraph on reparse and the document changes across a reopen.
 assert.equal(
   nestedOuterMarkerRemoved.markdown,
-  '- 1. 管理层（总经理）\n  综合行政部\n- 3. 人力资源部\n',
+  '- 1. 管理层（总经理）\n\n  综合行政部\n- 3. 人力资源部\n',
   'lifting the outer bullet must retain its text as the preceding item continuation'
 )
 

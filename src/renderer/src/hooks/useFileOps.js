@@ -477,13 +477,20 @@ export function useFileOps({
   const exportPathWithPandoc = useCallback(async (path, format) => {
     const tab = await resolveExportTab(path)
     if (!tab) return
+    const markdown = getMarkdownForTab(tab.id)
+    // Same null contract as saveTab: a fail-closed sync (recovery declined)
+    // must abort with the explicit notice, not hand null to the exporter.
+    if (markdown == null) {
+      fireToast(tRef.current('save.sourceSyncFailed'), { sticky: true })
+      return
+    }
     requestPandocExport({
-      markdown: getMarkdownForTab(tab.id),
+      markdown,
       format,
       defaultName: tab.title || 'Untitled',
       sourcePath: tab.path || null
     })
-  }, [resolveExportTab, getMarkdownForTab, requestPandocExport])
+  }, [resolveExportTab, getMarkdownForTab, requestPandocExport, tRef])
 
   // --------- auto-reload open files edited by external programs ----------
   const watchedRef = useRef(new Set())

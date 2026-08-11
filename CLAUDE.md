@@ -402,6 +402,27 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   immediate save or source switch can lose the last input after reopen.
   `saveTab()` must call `getMarkdownForTab()` and update `tabsRef` before writing;
   `commitAllLive()` alone covers only uncontrolled source textareas.
+- **Rich→source commit protocol**: every rich transaction publishes through ONE
+  of two commit points — `commitCanonicalResult` in `Editor.jsx` (markdownUpdated,
+  frontmatter, inline code, both list conversions) or `flushMarkdown` in
+  `editor-api.js`. Both enforce fail-closed on `preserved:false` AND the
+  **round-trip acceptance gate** (`lib/markdown-preservation/roundtrip.js`): the
+  committed source must parse to the same document as the canonical (semantic,
+  spelling-insensitive; Crepe's block-level `<br />` placeholders are not
+  content). A mapper's `preserved:true` alone is NOT proof — a wrong success
+  poisons both baselines permanently (the v0.13.29 list lock-up family). Never
+  advance `lastMarkdownRef`/`canonicalMarkdownRef` outside these paths; the
+  fresh-scratch path is the only gate exemption (it deliberately unescapes).
+  Fail-closed has an explicit exit: `rebuildMarkdownFromRich()` (user-confirmed,
+  `sync.rebuildConfirm`) realigns the authored source to the live document —
+  wired into the source-mode switch, `getMarkdownForTab`, and Pandoc export null
+  checks. Locked by `npm run test:roundtrip-acceptance`.
+- **List Backspace** (`editor-list-backspace.js`): Backspace on an EMPTY list
+  item lifts it out of the list (Typora behavior). The CommonMark preset's
+  `joinBackward` merged it into the previous item as a second paragraph — the
+  marker-less continuation line that source preservation cannot own
+  unambiguously. Registered PREPENDED in `prosePluginsCtx` (before preset
+  keymaps). Non-empty items and all other Backspace cases keep preset behavior.
 - **Image host** (`ImageHostButton` + `image:upload` IPC): a Typora-style custom
   command. Renderer reads the file bytes and calls main, which writes a temp file,
   runs `<command> "<file>"`, and returns the last http(s) URL it prints. Empty
