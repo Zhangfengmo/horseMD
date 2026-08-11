@@ -380,10 +380,10 @@ export default function Editor({
         if (committed.ok && !shouldPublish) mirrorVerifiedState()
         return { ...proposed, ...committed }
       },
-      fail: ({ type, expectedDoc, capture = null }) => {
+      fail: ({ type, canonical, expectedDoc, capture = null }) => {
         const captured = capture || captureVerifiedDocument(expectedDoc)
         if (!captured) return { ok: false, type }
-        return verifiedState.commit(captured, { ok: false, type })
+        return verifiedState.fail(captured, { type, canonical })
       },
       reset: resetVerifiedState,
       diagnostics: () => verifiedState.diagnostics()
@@ -445,6 +445,7 @@ export default function Editor({
       } else if (preserved?.preserved === false) {
         commitType = sourceCommitter.fail({
           type: 'unowned-source-change',
+          canonical,
           expectedDoc: requestedCapture?.expectedDoc || viewRef.current?.state.doc,
           capture: requestedCapture
         }).type

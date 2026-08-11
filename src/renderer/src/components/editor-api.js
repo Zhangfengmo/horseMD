@@ -20,6 +20,7 @@ import { strikethroughSchema } from '@milkdown/kit/preset/gfm'
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
 import { settleEditorMarkdown } from '../lib/editor-flush-settle.js'
 import { canonicalSourceFallback } from './editor-source-verification.js'
+import { canReuseCommittedVerifiedSource } from './editor-verified-state.js'
 
 export function createEditorApi({
   viewRef,
@@ -182,11 +183,11 @@ export function createEditorApi({
       // Saves and exports pass `force` because data durability outranks that
       // optimization: a node view can have a visible transaction even if an
       // edit-intent event was missed or an asynchronous callback is delayed.
-      if (
-        !force &&
-        !hasPendingRichFlush?.() &&
-        sourceCommitter.diagnostics().status !== 'pending'
-      ) return lastMarkdownRef.current
+      if (canReuseCommittedVerifiedSource({
+        force,
+        hasPendingRichFlush: hasPendingRichFlush?.() === true,
+        status: sourceCommitter.diagnostics().status
+      })) return lastMarkdownRef.current
       // Saves and source-mode switches can occur before Milkdown publishes its
       // delayed markdownUpdated callback. Serialize the current ProseMirror
       // document instead of reading Crepe's potentially stale cached snapshot.
@@ -252,7 +253,11 @@ export function createEditorApi({
       // newer captured document may try again. Returning null prevents source
       // mode or save from presenting stale bytes as if the edit had synced.
       if (preserved.preserved === false) {
-        sourceCommitter.fail({ type: 'unowned-source-change', expectedDoc })
+        sourceCommitter.fail({
+          type: 'unowned-source-change',
+          canonical,
+          expectedDoc
+        })
         return null
       }
       const committed = sourceCommitter.commit({

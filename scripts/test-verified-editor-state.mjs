@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
-import { createVerifiedEditorState } from '../src/renderer/src/components/editor-verified-state.js'
+import {
+  canReuseCommittedVerifiedSource,
+  createVerifiedEditorState
+} from '../src/renderer/src/components/editor-verified-state.js'
 import { settleEditorMarkdown } from '../src/renderer/src/lib/editor-flush-settle.js'
 
 const doc = (name) => Object.freeze({ name })
@@ -252,6 +255,62 @@ run('a stale callback cannot poison the latest captured revision', () => {
   assert.equal(verifyCalls, 1)
   assert.equal(state.commit(latest, latestCallback).ok, true)
   assert.equal(state.snapshot().source, 'latest callback')
+})
+
+run('a stale unowned callback cannot settle the latest capture as failed', () => {
+  let verifyCalls = 0
+  const state = createVerifiedEditorState({
+    source: 'old',
+    canonical: 'old-c',
+    expectedDoc: doc0,
+    ownsProposal: ({ captured, proposal }) => proposal.canonical === `${captured.expectedDoc.name}-c`,
+    verify: ({ candidates, canonical }) => {
+      verifyCalls += 1
+      return committed(candidates[0].markdown, canonical)
+    }
+  })
+  state.capture(doc1)
+  const latest = state.capture(doc2)
+
+  assert.deepEqual(state.fail(latest, {
+    type: 'unowned-source-change',
+    canonical: 'doc-1-c'
+  }), { ok: false, type: 'pending' })
+  assert.equal(state.snapshot().pending, latest)
+  assert.equal(state.snapshot().status, 'pending')
+
+  const latestCallback = state.propose(latest, {
+    candidates: [{ markdown: 'latest callback' }],
+    canonical: 'doc-2-c'
+  })
+  assert.equal(verifyCalls, 1)
+  assert.equal(state.commit(latest, latestCallback).ok, true)
+  assert.equal(state.snapshot().source, 'latest callback')
+})
+
+run('only a committed status may reuse source without a flush', () => {
+  assert.equal(canReuseCommittedVerifiedSource({
+    force: false,
+    hasPendingRichFlush: false,
+    status: 'committed'
+  }), true)
+  for (const status of ['pending', 'semantic-loss', 'parser-error', 'unowned-source-change']) {
+    assert.equal(canReuseCommittedVerifiedSource({
+      force: false,
+      hasPendingRichFlush: false,
+      status
+    }), false, `${status} must not expose stale committed source`)
+  }
+  assert.equal(canReuseCommittedVerifiedSource({
+    force: true,
+    hasPendingRichFlush: false,
+    status: 'committed'
+  }), false)
+  assert.equal(canReuseCommittedVerifiedSource({
+    force: false,
+    hasPendingRichFlush: true,
+    status: 'committed'
+  }), false)
 })
 
 run('proposal candidates retain their own durable context', () => {

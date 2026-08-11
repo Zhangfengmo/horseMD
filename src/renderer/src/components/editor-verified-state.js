@@ -10,6 +10,12 @@ const failureType = (result) => (
     : 'unowned-source-change'
 )
 
+export const canReuseCommittedVerifiedSource = ({
+  force,
+  hasPendingRichFlush,
+  status
+}) => !force && !hasPendingRichFlush && status === 'committed'
+
 export function createVerifiedEditorState({
   source,
   canonical,
@@ -55,7 +61,7 @@ export function createVerifiedEditorState({
     return captured
   }
 
-  const propose = (captured, proposal = {}) => {
+  const guardProposal = (captured, proposal) => {
     if (!captured || captured.revision !== latestCapture) {
       return { ok: false, type: 'pending' }
     }
@@ -69,6 +75,12 @@ export function createVerifiedEditorState({
     } catch {
       return { ok: false, type: 'pending' }
     }
+    return null
+  }
+
+  const propose = (captured, proposal = {}) => {
+    const guarded = guardProposal(captured, proposal)
+    if (guarded) return guarded
     if (typeof verify !== 'function') {
       return { ok: false, type: 'parser-error' }
     }
@@ -132,6 +144,12 @@ export function createVerifiedEditorState({
     return { ok: true, type: 'committed', markdown: state.source }
   }
 
+  const fail = (captured, { type, canonical } = {}) => {
+    const guarded = guardProposal(captured, { canonical })
+    if (guarded) return guarded
+    return commit(captured, { ok: false, type })
+  }
+
   const reset = (next = {}) => {
     latestCapture = ++nextRevision
     settledFailure = null
@@ -147,5 +165,5 @@ export function createVerifiedEditorState({
     return snapshot()
   }
 
-  return { capture, propose, commit, reset, snapshot, diagnostics }
+  return { capture, propose, commit, fail, reset, snapshot, diagnostics }
 }
