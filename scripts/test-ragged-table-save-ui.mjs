@@ -1,6 +1,6 @@
 // A durable rich-save reproduction for legal GFM tables with omitted trailing
-// cells. The editor renders each row rectangularly, but an unrelated cell edit
-// must leave the authored short-row bytes alone and must not enter recovery.
+// cells. The editor renders each row rectangularly, but rich cell edits must
+// preserve authored short-row bytes and must not enter recovery.
 import assert from 'node:assert/strict'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
@@ -58,9 +58,9 @@ const tableFixtureForCase = (name) => {
     ? '| - | -- | - | -- | - |'
     : '| - | -- | --- | :---: | ---: |'
   const shortRows = name === 'hardbreak'
-    ? ['| alpha<br>beta |', '| second short |']
+    ? ['| hardbreak target |', '| second short |']
     : name === 'escaped-pipe'
-      ? ['| authored \\| pipe |', '| second short |']
+      ? ['| a \\| b<br>tail |', '| second short |']
       : ['| authored short |', '| second short |']
   return [
     '# Table save reproduction fixture',
@@ -95,10 +95,45 @@ const findRaggedTable = (source) => {
     const shortRows = body.filter((row) => row.cells < width)
     const editableIndex = body.findIndex((row) => row.cells === width)
     if (width === 5 && shortRows.length && editableIndex >= 0) {
-      return { width, shortRows: shortRows.map((row) => row.line), editableIndex }
+      return { width, body, shortRows: shortRows.map((row) => row.line), editableIndex }
     }
   }
   throw new Error('fixture needs a five-column GFM table with a short body row and a complete body row')
+}
+
+const targetForCase = (table) => {
+  const targetLine = caseName === 'hardbreak'
+    ? '| hardbreak target |'
+    : caseName === 'escaped-pipe'
+      ? '| a \\| b<br>tail |'
+      : null
+  const targetIndex = targetLine == null
+    ? table.editableIndex
+    : table.body.findIndex((row) => row.line === targetLine)
+  assert.ok(targetIndex >= 0, 'case target cell is missing from the authored fixture')
+  return {
+    index: targetIndex,
+    token: 'editedX',
+    rawEnter: caseName === 'hardbreak'
+  }
+}
+
+const assertCaseSource = (source, token, checkpoint) => {
+  assert.equal(source.includes(token), true, `${checkpoint}: edited input token is missing from source`)
+  if (caseName === 'hardbreak') {
+    assert.match(source, /hardbreak target<br\s*\/?>editedX/, `${checkpoint}: raw Enter did not round-trip as a table-cell <br>`)
+  }
+  if (caseName === 'escaped-pipe') {
+    assert.equal(source.includes('a \\| b<br>taileditedX'), true, `${checkpoint}: escaped pipe and existing <br> did not retain their authored spelling`)
+  }
+  if (caseName === 'dashes') {
+    assert.equal(source.includes('| - | -- | - | -- | - |'), true, `${checkpoint}: one/two-dash delimiter spelling changed`)
+  }
+  if (caseName === 'cell') {
+    const lines = source.split(/\r?\n/)
+    assert.equal(lines.includes('| authored short |'), true, `${checkpoint}: authored short row changed bytes`)
+    assert.equal(lines.some((line) => /^\| authored short \|\s*\|\s*\|\s*\|\s*\|$/.test(line)), false, `${checkpoint}: authored short row was padded`)
+  }
 }
 
 const visibleTableRows = (app) => app.evaluate(`(() => {
@@ -178,6 +213,7 @@ async function main() {
 
   const original = await readFile(fixture, 'utf8')
   const fixtureTable = findRaggedTable(original)
+  const target = targetForCase(fixtureTable)
   let app
   try {
     app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [fixture] })
@@ -194,31 +230,47 @@ async function main() {
       }
     }
 
-    const point = await editPoint(app, fixtureTable.editableIndex)
-    assert.ok(point, 'editable complete-row cell was not available')
+    const point = await editPoint(app, target.index)
+    assert.ok(point, 'target table cell was not available')
     await click(app, point)
     await click(app, point)
     await pressKey(app.send, { key: 'End', code: 'End' })
-    await typeTextLikeUser(app.send, '-edited')
+    if (target.rawEnter) await pressKey(app.send, { key: 'Enter', code: 'Enter' })
+    await typeTextLikeUser(app.send, target.token)
     await sleep(450)
 
     const sourceAfterEdit = await enterSourceWithoutRecovery(app, 'after real full-row cell edit')
+    assertCaseSource(sourceAfterEdit, target.token, 'source after edit')
     for (const shortRow of fixtureTable.shortRows) {
-      assert.equal(sourceAfterEdit.includes(shortRow), true, 'source mode rewrote an untouched short row')
+      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+        assert.equal(sourceAfterEdit.includes(shortRow), true, 'source mode rewrote an untouched short row')
+      }
     }
     await returnToRich(app)
     await saveWithoutRecovery(app, 'rich save')
     const saved = await readFile(fixture, 'utf8')
+    assertCaseSource(saved, target.token, 'saved disk')
     for (const shortRow of fixtureTable.shortRows) {
-      assert.equal(saved.includes(shortRow), true, 'save rewrote an untouched short row')
+      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+        assert.equal(saved.includes(shortRow), true, 'save rewrote an untouched short row')
+      }
     }
+    const sourceAfterSave = await enterSourceWithoutRecovery(app, 'after rich save')
+    assertCaseSource(sourceAfterSave, target.token, 'source after save')
 
     await stopBuiltElectron(app, { removeProfile: true })
     app = await launchBuiltElectron({ profileDir: join(root, 'reopen-profile'), port: port + 1, appArgs: [fixture] })
     await waitFor(async () => (await visibleTableRows(app)).length, 'saved ragged table did not render after cold reopen')
+    const coldRichText = await app.evaluate(`(
+      [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)?.textContent ?? ''
+    )`)
+    assert.equal(coldRichText.includes(target.token), true, 'cold reopen rich editor is missing the edited input token')
     const reopened = await enterSourceWithoutRecovery(app, 'cold reopen')
+    assertCaseSource(reopened, target.token, 'cold reopen source')
     for (const shortRow of fixtureTable.shortRows) {
-      assert.equal(reopened.includes(shortRow), true, 'cold reopen rewrote an untouched short row')
+      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+        assert.equal(reopened.includes(shortRow), true, 'cold reopen rewrote an untouched short row')
+      }
     }
     assert.equal(app.dialogs.length, 0, 'cold reopen must not show recovery')
     console.log(`PASS ragged table rich save: ${caseName}`)

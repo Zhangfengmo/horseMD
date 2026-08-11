@@ -47,10 +47,15 @@ const mapFullRowEdit = (authored, previousCanonical, from, to) => {
     'after-sentinel'
   ].join('\n')
   const parsed = parseTables(authored)
-  assert.equal(parsed.view, authored, 'parser owns the exact authored view')
+  assert.equal(typeof parsed.view, 'object', 'parser returns a source-view object rather than a replacement Markdown string')
+  assert.equal(parsed.view.raw ?? parsed.view.authored, authored, 'source view retains the exact authored bytes')
+  assert.equal(parsed.view.text, authored, 'source view exposes the authored text used for ranges')
   assert.equal(parsed.tables.length, 1, 'parser discovers the GFM table')
   assert.equal(parsed.tables[0].width, 5, 'parser gets table width from the header/delimiter')
-  assert.equal(parsed.tables[0].rows[0].missingColumns, 4, 'parser records missing trailing cells without inventing them')
+  assert.equal(parsed.tables[0].rows[0].range.start, authored.indexOf('| one | two | three | four | five |'), 'rows[0] is the header row')
+  assert.equal(parsed.tables[0].rows[0].missingColumns, 0, 'header cells are complete')
+  assert.equal(parsed.tables[0].rows[1].range.start, authored.indexOf(shortRow), 'body rows begin after the header')
+  assert.equal(parsed.tables[0].rows[1].missingColumns, 4, 'parser records missing trailing body cells without inventing them')
   const previousCanonical = rectangularEditorView(authored, [{
     authoredRow: shortRow,
     canonicalRow: '| authored short |  |  |  |  |'
@@ -61,20 +66,22 @@ const mapFullRowEdit = (authored, previousCanonical, from, to) => {
 }
 
 {
-  const shortRow = '| alpha<br>beta |'
+  const shortRow = '| authored short |'
+  const target = 'abc<br>def'
   const authored = [
     '| one | two | three |',
     '| --- | --- | --- |',
     shortRow,
-    '| editable | second | third |'
+    `| ${target} | second | third |`
   ].join('\n')
   const previousCanonical = rectangularEditorView(authored, [{
     authoredRow: shortRow,
-    canonicalRow: '| alpha<br>beta |  |  |'
+    canonicalRow: '| authored short |  |  |'
   }])
-  const mapped = mapFullRowEdit(authored, previousCanonical, 'editable', 'edited')
-  assert.equal(mapped, authored.replace('editable', 'edited'), 'a cell hard break does not make a neighboring table edit rewrite the ragged row')
-  assert.ok(mapped.includes(shortRow), 'cell <br> remains authored text rather than a synthetic empty-cell marker')
+  const mapped = mapFullRowEdit(authored, previousCanonical, target, `${target}X`)
+  assert.equal(mapped, authored.replace(target, `${target}X`), 'editing a hard-break cell patches only that cell')
+  assert.ok(mapped.includes('abc<br>defX'), 'the target cell preserves its authored <br> spelling')
+  assert.ok(mapped.includes(shortRow), 'unrelated ragged row remains byte-identical')
 }
 
 for (const delimiter of ['| - | -- | - | -- | - |', '| -- | - | -- | - | -- |']) {
@@ -95,20 +102,22 @@ for (const delimiter of ['| - | -- | - | -- | - |', '| -- | - | -- | - | -- |'])
 }
 
 {
-  const shortRow = '| authored \\| pipe |'
+  const shortRow = '| authored short |'
+  const target = 'a \\| b<br>tail'
   const authored = [
     '| one | two | three |',
     '| --- | --- | --- |',
     shortRow,
-    '| editable | second | third |'
+    `| ${target} | second | third |`
   ].join('\n')
   const previousCanonical = rectangularEditorView(authored, [{
     authoredRow: shortRow,
-    canonicalRow: '| authored \\| pipe |  |  |'
+    canonicalRow: '| authored short |  |  |'
   }])
-  const mapped = mapFullRowEdit(authored, previousCanonical, 'editable', 'edited')
-  assert.equal(mapped, authored.replace('editable', 'edited'), 'escaped pipes do not split or rewrite a ragged authored cell')
-  assert.ok(mapped.includes(shortRow), 'escaped-pipe bytes remain intact')
+  const mapped = mapFullRowEdit(authored, previousCanonical, target, `${target}X`)
+  assert.equal(mapped, authored.replace(target, `${target}X`), 'editing an escaped-pipe hard-break cell patches only that cell')
+  assert.ok(mapped.includes('a \\| b<br>tailX'), 'the target cell retains both escaped-pipe and <br> spelling')
+  assert.ok(mapped.includes(shortRow), 'unrelated ragged row remains byte-identical')
 }
 
 console.log('PASS table source model: ragged authored rows survive neighboring GFM table edits')
