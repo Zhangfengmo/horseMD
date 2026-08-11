@@ -2,6 +2,12 @@
 
 Date: 2026-08-11
 
+Status: superseded by `2026-08-11-rich-source-durable-semantics-design.md`
+
+> This document records the first verified-commit design. Real table-cell
+> transaction evidence later disproved its parser-lifecycle assumption. The
+> durable-semantics design is the implementation authority.
+
 ## Outcome
 
 HorseMD must never publish, show in source mode, export, or save a rich-editor
