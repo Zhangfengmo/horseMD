@@ -57,6 +57,86 @@ run('rejects a configured parser semantic mismatch', () => {
   }), false)
 })
 
+run('ignores live list spread metadata that source reparsing normalizes', () => {
+  const listDoc = (listSpread, itemSpread) => ({
+    toJSON: () => ({
+      type: 'doc',
+      content: [{
+        type: 'bullet_list',
+        attrs: { spread: listSpread },
+        content: [{
+          type: 'list_item',
+          attrs: { label: '•', listType: 'bullet', spread: itemSpread, checked: null },
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: 'item' }] }]
+        }]
+      }]
+    })
+  })
+  assert.equal(verifySourceDocument({
+    markdown: '- item\n',
+    expectedDoc: listDoc(false, true),
+    parseMarkdown: () => listDoc('false', 'false')
+  }), true)
+})
+
+run('ignores table column-width layout metadata that Markdown cannot encode', () => {
+  const tableDoc = (colwidth) => ({
+    toJSON: () => ({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [{
+          type: 'table_row',
+          content: [{
+            type: 'table_header',
+            attrs: { alignment: null, colspan: 1, rowspan: 1, colwidth },
+            content: [{ type: 'paragraph', content: [{ type: 'text', text: 'head' }] }]
+          }]
+        }]
+      }]
+    })
+  })
+  assert.equal(verifySourceDocument({
+    markdown: '| head |\n| --- |\n',
+    expectedDoc: tableDoc([180]),
+    parseMarkdown: () => tableDoc(null)
+  }), true)
+})
+
+run('treats only the internal empty table-cell hardbreak as an empty paragraph', () => {
+  const tableDoc = (cellContent) => ({
+    toJSON: () => ({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [{
+          type: 'table_row',
+          content: [{
+            type: 'table_cell',
+            attrs: { alignment: null, colspan: 1, rowspan: 1, colwidth: null },
+            content: [{ type: 'paragraph', ...(cellContent ? { content: cellContent } : {}) }]
+          }]
+        }]
+      }]
+    })
+  })
+  const internalPlaceholder = [{ type: 'hardbreak', attrs: { isInline: false } }]
+  assert.equal(verifySourceDocument({
+    markdown: '| <br /> |\n| --- |\n',
+    expectedDoc: tableDoc(null),
+    parseMarkdown: () => tableDoc(internalPlaceholder)
+  }), true)
+  assert.equal(verifySourceDocument({
+    markdown: '| text<br>more |\n| --- |\n',
+    expectedDoc: tableDoc(null),
+    parseMarkdown: () => tableDoc([
+      { type: 'text', text: 'text' },
+      { type: 'hardbreak', attrs: { isInline: true } },
+      { type: 'text', text: 'more' }
+    ])
+  }), false, 'user-authored table-cell breaks must remain semantic')
+})
+
 run('fails closed when the configured parser throws', () => {
   assert.equal(verifySourceDocument({
     markdown: 'anything',
@@ -129,6 +209,28 @@ run('failed commit leaves baselines pending state and publication untouched', ()
   assert.equal(sourceRef.current, 'trusted source')
   assert.equal(canonicalRef.current, 'trusted canonical')
   assert.deepEqual(events, [])
+})
+
+run('large canonical-equality commits still reject an unverified source', () => {
+  const largeCandidate = 'x'.repeat(120001)
+  const sourceRef = { current: 'trusted source' }
+  const canonicalRef = { current: 'same canonical' }
+  let cleared = false
+  const committer = createVerifiedSourceCommitter({
+    sourceRef,
+    canonicalRef,
+    parseMarkdown: () => headingDoc('wrong'),
+    clearPending: () => { cleared = true }
+  })
+  assert.deepEqual(committer.commit({
+    candidates: [largeCandidate],
+    canonical: 'same canonical',
+    expectedDoc: paragraphDoc('expected'),
+    shouldPublish: false
+  }), { ok: false, markdown: null })
+  assert.equal(sourceRef.current, 'trusted source')
+  assert.equal(canonicalRef.current, 'same canonical')
+  assert.equal(cleared, false)
 })
 
 run('durability commit can advance verified baselines without publishing twice', () => {

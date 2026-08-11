@@ -105,7 +105,83 @@ async function openApp(profile, file, appPort) {
   return app
 }
 
-async function inspectSourceWithoutRecovery(app, checkpoint) {
+async function persistFirstTableColumnWidth(app) {
+  const target = await app.evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')]
+      .find((node) => node.offsetParent)
+    const block = editor?.querySelector('.milkdown-table-block')
+    block?.scrollIntoView({ block: 'center' })
+    const cell = block?.querySelector('td')
+    const rect = cell?.getBoundingClientRect()
+    return rect ? { x: rect.right - 2, y: rect.top + rect.height / 2 } : null
+  })()`)
+  assert.ok(target, 'table column resize target was unavailable')
+  await app.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...target })
+  await sleep(180)
+  await app.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed', ...target, button: 'left', buttons: 1, clickCount: 1
+  })
+  await sleep(280)
+  await app.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved', x: target.x + 48, y: target.y, button: 'left', buttons: 1
+  })
+  await sleep(100)
+  await app.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', x: target.x + 48, y: target.y, button: 'left', buttons: 0, clickCount: 1
+  })
+  await sleep(200)
+  assert.equal(await app.evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')]
+      .find((node) => node.offsetParent)
+    return !!editor?.querySelector('.milkdown-table-block [data-colwidth]')
+  })()`), true, 'table resize did not persist live colwidth metadata')
+}
+
+async function placeCaretAtParagraphEnd(app, paragraphText) {
+  assert.equal(await app.evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')]
+      .find((node) => node.offsetParent)
+    const target = [...editor.children]
+      .find((node) => node.tagName === 'P' && node.textContent === ${JSON.stringify(paragraphText)})
+    const textNode = target?.firstChild
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false
+    target.scrollIntoView({ block: 'center' })
+    const range = document.createRange()
+    range.setStart(textNode, textNode.nodeValue.length)
+    range.collapse(true)
+    const selection = getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    editor.focus()
+    document.dispatchEvent(new Event('selectionchange'))
+    return true
+  })()`), true, 'could not place the caret at the final paragraph')
+}
+
+async function saveWithoutRecovery(app, checkpoint) {
+  await app.evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+  const outcome = await waitFor(async () => {
+    if (app.dialogs.length) return { recovery: true }
+    return await app.evaluate(`!document.querySelector('.hm-save-fab')`)
+      ? { saved: true }
+      : null
+  }, `${checkpoint}: save did not complete`)
+  if (outcome.recovery) {
+    const diagnostics = await app.evaluate(`({
+      gate: window.__hmGateLog || [],
+      preserve: (window.__hmPreserveLog || []).slice(-10)
+    })`)
+    throw new Error(`${checkpoint}: save entered recovery: ${JSON.stringify(diagnostics)}`)
+  }
+  assert.equal(app.dialogs.length, 0, `${checkpoint}: save must not enter recovery`)
+}
+
+async function inspectSourceWithoutRecovery(
+  app,
+  checkpoint,
+  expectedSource,
+  { requireAuthoredRaggedRow = true } = {}
+) {
   assert.equal(await toggleSource(app), true, `${checkpoint}: source toggle missing`)
   const outcome = await waitFor(async () => {
     if (app.dialogs.length) return { recovery: true }
@@ -121,8 +197,10 @@ async function inspectSourceWithoutRecovery(app, checkpoint) {
     )}`
   )
   assert.equal(outcome.recovery, undefined, `${checkpoint}: source switch entered recovery`)
-  assert.equal(outcome.source, expected, `${checkpoint}: authored Markdown bytes were not preserved`)
-  assert.ok(outcome.source.includes(raggedRow), `${checkpoint}: short table row was padded or removed`)
+  assert.equal(outcome.source, expectedSource, `${checkpoint}: source did not match the verified disk form`)
+  if (requireAuthoredRaggedRow) {
+    assert.ok(outcome.source.includes(raggedRow), `${checkpoint}: short table row was padded or removed`)
+  }
 }
 
 async function main() {
@@ -134,26 +212,11 @@ async function main() {
   let app
   try {
     app = await openApp('edit', file, port)
-    await app.evaluate('window.__hmPreserveLog = []')
-
-    assert.equal(await app.evaluate(`(() => {
-      const editor = [...document.querySelectorAll('.ProseMirror')]
-        .find((node) => node.offsetParent)
-      const target = [...editor.children]
-        .find((node) => node.tagName === 'P' && node.textContent === ${JSON.stringify(tail)})
-      const textNode = target?.firstChild
-      if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false
-      target.scrollIntoView({ block: 'center' })
-      const range = document.createRange()
-      range.setStart(textNode, textNode.nodeValue.length)
-      range.collapse(true)
-      const selection = getSelection()
-      selection.removeAllRanges()
-      selection.addRange(range)
-      editor.focus()
-      document.dispatchEvent(new Event('selectionchange'))
-      return true
-    })()`), true, 'could not place the caret at the final paragraph')
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
+    await placeCaretAtParagraphEnd(app, tail)
 
     // Committed input is sent one character at a time. This is not an IME
     // composition test; it exercises the real incremental editor path.
@@ -164,22 +227,52 @@ async function main() {
     )
     await sleep(500)
 
-    await inspectSourceWithoutRecovery(app, 'after rich edit')
-
-    await app.evaluate(`document.querySelector('.hm-save-fab')?.click()`)
-    await waitFor(
-      () => app.evaluate(`!document.querySelector('.hm-save-fab')`),
-      'save did not complete'
-    )
-    assert.equal(app.dialogs.length, 0, 'save must not enter recovery')
+    await inspectSourceWithoutRecovery(app, 'after rich edit', expected)
+    await saveWithoutRecovery(app, 'authored-ragged source save')
     assert.equal(await readFile(file, 'utf8'), expected, 'save changed untouched authored bytes')
 
     await stopBuiltElectron(app, { removeProfile: true })
     app = await openApp('reopen', file, port + 1)
-    await inspectSourceWithoutRecovery(app, 'cold reopen')
+    await inspectSourceWithoutRecovery(app, 'cold reopen', expected)
     assert.equal(await readFile(file, 'utf8'), expected, 'cold reopen changed disk bytes')
 
-    console.log('PASS app-parser source acceptance: ragged table, 8 code languages, edit, source, save, and reopen stay exact')
+    // A column resize is an explicit table operation and may canonicalize that
+    // table block. Its non-Markdown colwidth metadata and internal empty-cell
+    // `<br />` placeholders must still pass the live forced-save boundary.
+    await stopBuiltElectron(app, { removeProfile: true })
+    const resizedFile = join(root, 'resized-ragged-table-code-matrix.md')
+    await writeFile(resizedFile, initial)
+    app = await openApp('resize-edit', resizedFile, port + 2)
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
+    await persistFirstTableColumnWidth(app)
+    await placeCaretAtParagraphEnd(app, tail)
+    await typeTextLikeUser(app.send, inserted)
+    await waitFor(
+      () => app.evaluate(`!!document.querySelector('.hm-save-fab')`),
+      'resized table edit did not become dirty'
+    )
+    await saveWithoutRecovery(app, 'resized-table rich save')
+    const resizedSource = await readFile(resizedFile, 'utf8')
+    assert.ok(resizedSource.includes(`${tail}${inserted}`), 'resized-table edit was not saved')
+    assert.ok(resizedSource.includes('only-one-cell'), 'resized table lost its ragged-row content')
+    for (const language of ['go', 'javascript', 'typescript', 'python', 'rust', 'java', 'c', 'cpp']) {
+      assert.ok(resizedSource.includes(`\`\`\`${language}\n`), `resized save lost ${language} code`)
+    }
+    await inspectSourceWithoutRecovery(app, 'after resized-table save', resizedSource, {
+      requireAuthoredRaggedRow: false
+    })
+
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await openApp('resize-reopen', resizedFile, port + 3)
+    await inspectSourceWithoutRecovery(app, 'resized-table cold reopen', resizedSource, {
+      requireAuthoredRaggedRow: false
+    })
+    assert.equal(await readFile(resizedFile, 'utf8'), resizedSource, 'resized-table reopen changed disk bytes')
+
+    console.log('PASS app-parser source acceptance: exact ragged source and resized-table semantics survive 8 languages, save, source, and reopen')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

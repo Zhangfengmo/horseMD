@@ -320,20 +320,33 @@ export default function Editor({
     // parser is the only semantic authority allowed to commit them.
     // A false return leaves both baselines and every pending flag untouched;
     // a later callback or forced flush retries the cumulative delta.
-    const commitCanonicalResult = (preserved, canonical, { fallbackCandidates = [] } = {}) => {
+    const commitCanonicalResult = (
+      preserved,
+      canonical,
+      { fallbackCandidates = [], expectedDoc: requestedExpectedDoc = null } = {}
+    ) => {
       let markdown = null
+      let expectedDoc = null
       if (preserved && preserved.preserved !== false) {
         try {
           // ProseMirror documents are immutable. Capturing the current one at
           // the commit boundary proves the candidate against the exact editor
           // state that produced it; canonical remains only the next diff
           // baseline and is never promoted into a second semantic authority.
-          const expectedDoc = viewRef.current?.state.doc
+          expectedDoc = requestedExpectedDoc || viewRef.current?.state.doc
+          const verificationStartedAt = performance.now()
           const result = sourceCommitter.commit({
             candidates: [preserved.markdown, ...fallbackCandidates],
             expectedDoc,
             canonical
           })
+          if (Array.isArray(globalThis.__hmGateTimingLog)) {
+            globalThis.__hmGateTimingLog.push({
+              length: String(canonical || '').length,
+              durationMs: performance.now() - verificationStartedAt,
+              accepted: result.ok
+            })
+          }
           markdown = result.markdown
         } catch {
           markdown = null
@@ -1012,6 +1025,15 @@ export default function Editor({
           }
           let preserved
           let fallbackCandidates = []
+          // markdownUpdated may be delivered after a newer PM transaction is
+          // already visible. Normal documents verify against the immutable
+          // canonical snapshot owned by this callback. Large documents avoid
+          // a second full parse by capturing the immutable live PM doc; a stale
+          // callback then fails closed and the later callback/settled boundary
+          // retries it. Forced boundaries always verify the latest live doc.
+          const expectedCommitDoc = canonical.length > 120000
+            ? viewRef.current?.state.doc
+            : parseSourceMarkdown(canonical)
           if (pendingPaste) {
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
@@ -1224,7 +1246,10 @@ export default function Editor({
           // frozen byte capture, so replaying it against a newer canonical
           // either locks permanently or publishes source missing later input —
           // the cumulative preservation path owns the retry instead.
-          if (!commitCanonicalResult(preserved, canonical, { fallbackCandidates })) {
+          if (!commitCanonicalResult(preserved, canonical, {
+            fallbackCandidates,
+            expectedDoc: expectedCommitDoc
+          })) {
             pendingRawMarkdownPasteRef.current = null
             return
           }

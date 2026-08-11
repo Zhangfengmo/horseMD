@@ -31,6 +31,7 @@ export const createVerifiedSourceCommitter = ({
   clearPending,
   publish
 }) => {
+  const parse = (markdown) => parseMarkdown(String(markdown ?? ''))
   const select = ({ candidates, expectedDoc }) => selectVerifiedSource({
     candidates,
     expectedDoc,
@@ -52,5 +53,5 @@ export const createVerifiedSourceCommitter = ({
     return { ok: true, markdown }
   }
 
-  return { commit, select }
+  return { commit, parse, select }
 }

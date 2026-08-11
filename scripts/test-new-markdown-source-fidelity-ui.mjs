@@ -75,14 +75,21 @@ async function runScenario({ name, initial = '', type, expected, scenarioPort })
       () => evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`),
       `${name}: rich editor did not open`
     )
+    await evaluate('window.__hmGateLog = []')
     await focusBody(evaluate, send)
     await type({ send, evaluate })
     await sleep(800)
     await toggleSource(evaluate, send)
-    const actual = await waitFor(
-      () => visibleSource(evaluate),
-      `${name}: source mode did not open`
-    )
+    const opened = await waitFor(async () => {
+      const source = await visibleSource(evaluate)
+      if (source != null) return { source }
+      return app.dialogs.length ? { recovery: true } : null
+    }, `${name}: source mode did not open`)
+    if (opened.recovery) {
+      const gateLog = await evaluate('window.__hmGateLog')
+      throw new Error(`${name}: source verification entered recovery: ${JSON.stringify(gateLog)}`)
+    }
+    const actual = opened.source
     assert.equal(actual, expected, `${name}: newly typed Markdown source changed`)
 
     for (let cycle = 0; cycle < 2; cycle += 1) {

@@ -168,7 +168,45 @@ const semanticJson = (node) => {
       delete next.attrs.id
       if (!Object.keys(next.attrs).length) delete next.attrs
     }
+    if (
+      (next.type === 'bullet_list' || next.type === 'ordered_list' || next.type === 'list_item') &&
+      next.attrs
+    ) {
+      next.attrs = { ...next.attrs }
+      // Crepe input rules keep transient loose/tight metadata as booleans,
+      // while parserCtx reconstructs the same list with string attrs. Authored
+      // spacing remains protected by the raw source candidate; this attr is
+      // serializer formatting state, not a different visible document.
+      delete next.attrs.spread
+      if (!Object.keys(next.attrs).length) delete next.attrs
+    }
+    if ((next.type === 'table_cell' || next.type === 'table_header') && next.attrs) {
+      next.attrs = { ...next.attrs }
+      // Column resizing is persisted as ProseMirror layout metadata for the
+      // mounted table, but GFM Markdown has no colwidth syntax. Alignment and
+      // spans remain semantic; only the non-serializable width is ignored.
+      delete next.attrs.colwidth
+      if (!Object.keys(next.attrs).length) delete next.attrs
+    }
     if (Array.isArray(next.content)) next.content = next.content.map(visit)
+    if (next.type === 'table_cell' || next.type === 'table_header') {
+      // Milkdown spells an otherwise empty table-cell paragraph as a single
+      // block hardbreak when it reparses the serializer's internal `<br />`
+      // placeholder. The mounted table still owns an empty paragraph. Treat
+      // only that exact internal shape as empty; inline/user-authored breaks
+      // and breaks beside text remain semantic content.
+      next.content = next.content?.map((child) => {
+        const onlyChild = child?.content?.length === 1 ? child.content[0] : null
+        if (
+          child?.type === 'paragraph' &&
+          onlyChild?.type === 'hardbreak' &&
+          onlyChild?.attrs?.isInline === false
+        ) {
+          return { type: 'paragraph' }
+        }
+        return child
+      })
+    }
     if (Array.isArray(next.marks)) next.marks = next.marks.map(visit)
     return next
   }

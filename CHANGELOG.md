@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **源码同步架构开始迁移** — 已加入统一 ProseMirror transaction 观察器、原子 raw-source patch 原型和真实逐字事务回归。当前发布构建仍只使用原有 fail-closed 保真链路，事务实验默认关闭；新路径只在开发/专项测试中运行，待每类结构通过完整家族门禁后再逐项放行，避免用未成熟架构修改用户文件或拖慢输入。
 
 ### Fixed
-- **富文本 / 源码使用同一语义验收器** — 原文保真映射现在只负责提出候选源码；唯一 verified commit coordinator 使用 HorseMD 实际 Milkdown parser 将候选还原为 ProseMirror 文档并与当前 rich 文档比较，通过后才原子推进 source/canonical baselines、pending 状态和 App 快照。非满列 GFM 表不再因独立 GFM parser 与 Crepe 补列行为不同而误报保存暂停；保存、源码切换、导出和恢复副本也不能绕过同一验收。
+- **富文本 / 源码使用同一语义验收器** — 原文保真映射现在只负责提出候选源码；唯一 verified commit coordinator 使用 HorseMD 实际 Milkdown parser 将候选还原为 ProseMirror 文档并与当前 rich 文档比较，通过后才原子推进 source/canonical baselines、pending 状态和 App 快照。非满列 GFM 表不再因独立 GFM parser 与 Crepe 补列行为不同而误报保存暂停；列表松紧元数据、手动列宽和空 cell 内部占位也不会被误当成内容差异。保存、源码切换、导出和恢复副本不能绕过同一验收。
 - **新文档字面 Markdown 与大文档耐久边界** — 新建空文档不再无条件去掉 serializer 转义；`#`、反引号等字面字符若会改变 Markdown 语义，会保存为可安全重开的转义写法。移除 12 万字符以上热路径直接推进未验证 baseline 的例外，强制 flush 的 canonical-equality 快路径也必须证明 source 与 live ProseMirror 等价。
 - **列表退出操作与源码锁定回归** — 最后一个空列表项按 Backspace 退出为正文；若在该空正文再次按 Backspace，会按正常编辑语义重新并回上一个列表项，因此随后 Enter 会再次出现序号。完整“退出 → 并回 → 再建项 → 再退出 → 正文 → 保存 → 冷重开”已纳入真实按键回归。
 - **斜杠菜单代码块连续编辑保真** — 修复在复杂文档末尾通过 `/code` 创建代码块后，立即继续编辑代码、代码块后的正文和前文列表时，源码缺少代码围栏、切换源码被锁定或保存后内容不一致的问题。`/code` 临时查询行到 `code_block` 的转换现在作为一次原子 source 事务提交，只替换精确命中的 authored 行并保留 CRLF；重复查询无法精确定位时仍安全拒绝，不会猜测覆盖用户源码。

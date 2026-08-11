@@ -187,7 +187,14 @@ export function createEditorApi({
       // delayed markdownUpdated callback. Serialize the current ProseMirror
       // document instead of reading Crepe's potentially stale cached snapshot.
       const canonical = canonicalForSource(serializeCurrentDocument())
-      const expectedDoc = viewRef.current?.state.doc
+      const scratch = generatedScratchRef?.current
+      // Fresh documents keep an empty title/body scaffold in the live PM doc,
+      // while canonicalForSource deliberately excludes it from persisted
+      // Markdown. Compare scratch candidates with the document reconstructed
+      // from that canonical source, not with internal editor-only nodes.
+      const expectedDoc = scratch
+        ? sourceCommitter.parse(canonical)
+        : viewRef.current?.state.doc
       if (canonical === canonicalMarkdownRef.current) {
         const committed = sourceCommitter.commit({
           candidates: [lastMarkdownRef.current],
@@ -195,9 +202,18 @@ export function createEditorApi({
           canonical,
           shouldPublish: false
         })
-        return committed.ok ? committed.markdown : null
+        if (!committed.ok) {
+          if (Array.isArray(globalThis.__hmGateLog)) {
+            globalThis.__hmGateLog.push({
+              origin: 'flush-canonical-equality',
+              candidate: lastMarkdownRef.current,
+              canonical
+            })
+          }
+          return null
+        }
+        return committed.markdown
       }
-      const scratch = generatedScratchRef?.current
       const preserved = scratch
         ? {
             markdown: getGeneratedScratchMarkdown?.(canonical) || preserveGeneratedBulletMarkers(
@@ -269,7 +285,9 @@ export function createEditorApi({
       // user's file, violating the source boundary invariant.
       const committed = sourceCommitter.commit({
         candidates: [rebuilt, canonicalSourceFallback(canonical)],
-        expectedDoc: viewRef.current?.state.doc,
+        expectedDoc: generatedScratchRef?.current
+          ? sourceCommitter.parse(canonical)
+          : viewRef.current?.state.doc,
         canonical,
         shouldPublish: false
       })
@@ -299,7 +317,9 @@ export function createEditorApi({
       const canonical = canonicalForSource(serializeCurrentDocument())
       return sourceCommitter.select({
         candidates: [generatedScratchMarkdown(canonical), canonicalSourceFallback(canonical)],
-        expectedDoc: viewRef.current?.state.doc
+        expectedDoc: generatedScratchRef?.current
+          ? sourceCommitter.parse(canonical)
+          : viewRef.current?.state.doc
       })
     } catch {
       return null

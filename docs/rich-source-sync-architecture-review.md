@@ -395,6 +395,9 @@ coordinator、§5.6 的 visible-map 语法化重写（fail-closed 的**发生率
 产生这类翻转）、阶段 B/C 全部。
 - `docs/live-preview-migration-plan.md`
 
+> 上述“独立 GFM gate”和“>120K 热路径跳过关卡”记录的是合并前阶段性实现；
+> 它们已被下面 §13 的现场复现推翻并替代，不再代表 v0.13.48 候选架构。
+
 ## 13. 合并后重新定位与 verified commit 修复（v0.13.48 候选）
 
 ### 13.1 现场复现修正了原报告的触发归因
@@ -405,8 +408,8 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 普通正文只增加一个字符后，原文保真 mapper 已给出正确 candidate，但独立 gate 仍
 误判不等价，于是源码切换和保存共同进入 recovery。
 
-同一 fixture 分别放入 Go、JavaScript、TypeScript、Python、Rust、Java、C 和 C++
-围栏均得到相同结果；修复后 8 种语言全部通过。因此“Go 或某种代码高亮语言触发”
+同一 fixture 同时包含 Go、JavaScript、TypeScript、Python、Rust、Java、C 和 C++
+围栏；修复后 8 种语言全部通过。因此“Go 或某种代码高亮语言触发”
 是已排除假设，结构分歧来自表格 parser 行为。
 
 ### 13.2 已证实并修复的当前功能问题
@@ -417,6 +420,8 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 | 新建 scratch 无条件去转义可改变语义 | 字面三反引号、`#` 等 candidate 在旧路径跳过 gate，保存重开可能变 code/heading | generated candidate 与安全 canonical fallback 依序验证，冷重开比较 rich 节点类型 |
 | `>120000` 热路径推进未验证双 baseline | 可构造 `preserved:true` 但语义不等价的长文档 candidate；forced flush 因 canonical 相等提前返回 | 删除大小豁免；所有提交和 canonical-equality durability 路径均验证 live PM |
 | 成功 forced rich read 后 App mirror 可停在旧内容 | `flushMarkdown` 只返回字符串，Pandoc 等调用者不一定同步 `tab.content` | App 使用统一 `commitRichSnapshotToTab` 同步 `tabsRef`/React state，不改 `savedContent` |
+| parser 重建的非语义 attrs 造成误拒绝 | 列表 `spread` 的 boolean/string 差异、表格 resize 的 `colwidth` 无 Markdown 表达 | 等价投影仅忽略这些 serializer/layout 元数据，列表文字、marker、alignment、span 仍严格比较 |
+| resize 后空表格 cell 的内部占位造成误拒绝 | live cell 是空 paragraph，serializer 写 `<br />` 后 parser 得到唯一 `isInline:false` hardbreak | 仅在 table cell/header 内把“唯一 block hardbreak”视为空；普通/行内/带文字 `<br>` 仍是语义内容 |
 
 ### 13.3 当前生产架构风险（已收口，但不是本次用户触发的独立实证）
 
@@ -436,9 +441,11 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 - 当前 coordinator 统一了“验证 → 双 baseline → pending → publish”的原子入口，但还
   没有演进成持久化 revision/CST 日志；该方向属于阶段 B/C，不应作为本次问题的必要
   补丁。
-- 全量应用 parser 验证可能影响超大文档输入延迟。12 万字符以上真实 UI 回归已通过，
-  后续仍应在图片密集的真实长文档上保持性能门禁；性能优化不得重新允许未验证源码
-  越过 source/save/export 边界。
+- 全量应用 parser 验证可能影响超大文档输入延迟。`markdownUpdated` 在 >120K 路径
+  直接捕获 immutable live PM doc，避免为了 expected side 再做一次全量 canonical
+  parse；candidate 仍必须 parse + compare。当前 12 万字符 fixture 本机单次约 33ms，
+  功能回归与冷重开已通过，但仍应在图片密集真实长文档上保留性能门禁；优化不得
+  重新允许未验证源码越过 source/save/export 边界。
 
 ### 13.5 列表反馈的最终解释
 
@@ -456,5 +463,7 @@ Backspace 退出。完整序列已经覆盖 source、save 和冷重开。
 - `npm run test:literal-triple-backtick-source-ui`
 - `npm run test:large-source-fidelity-ui`
 - `npm run test:tail-fence-ui`
+- `npm run test:new-source-fidelity-ui`
+- `npm run test:list-conversion-ui`
 - `npm run build`
 - `npm run build:mobile`
