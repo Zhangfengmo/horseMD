@@ -120,17 +120,11 @@ const tableParserFor = (remark) => {
   return parser
 }
 
-const tableUnitItems = (cell, fallbackItems = []) => {
+const tableUnitItems = (cell) => {
   const items = []
-  for (const unit of cell.units || []) {
-    if (unit.kind === 'break') {
+  for (const unit of cell.mappingUnits || cell.units || []) {
+    if (unit.kind === 'break' || unit.kind === 'atom') {
       items.push({ rawStart: unit.range.start, rawEnd: unit.range.end, atom: true })
-      continue
-    }
-    if (unit.kind === 'opaque') {
-      items.push(...fallbackItems.filter((item) => (
-        item.rawStart >= unit.range.start && item.rawEnd <= unit.range.end
-      )))
       continue
     }
     if (unit.kind !== 'char') continue
@@ -143,9 +137,8 @@ const tableUnitItems = (cell, fallbackItems = []) => {
 }
 
 const tableCellBlock = (markdown, cell, row, mdastCell) => {
-  const fallback = mdBlock(markdown, mdastCell, 'tableCell')
   if (cell?.presence === 'present' && cell.range) {
-    const unitText = (cell.units || [])
+    const unitText = (cell.mappingUnits || cell.units || [])
       .filter((unit) => unit.kind === 'char')
       .map((unit) => unit.value || '')
       .join('')
@@ -156,9 +149,10 @@ const tableCellBlock = (markdown, cell, row, mdastCell) => {
       end: cell.range.end,
       text: semanticText,
       matchText: semanticText,
-      items: tableUnitItems(cell, fallback?.items)
+      items: tableUnitItems(cell)
     }
   }
+  const fallback = mdBlock(markdown, mdastCell, 'tableCell')
   if (fallback) return fallback
   const offset = row?.range?.end
   if (!Number.isFinite(offset)) return null
@@ -391,7 +385,7 @@ const correspondingMdBlock = (mdBlocks, pmBlocks, pmIndex) => {
   // source (empty paragraphs are blank-line separators, not markdown blocks).
   // Map its caret to the blank-line gap after the previous authored block;
   // ordinal alignment must NOT drift into the following block.
-  if (pm.textblock && !normText(pm.matchText ?? pm.text)) {
+  if (pm.textblock && !normText(pm.matchText ?? pm.text) && !(pm.items || []).length) {
     let prevMd = null
     for (let i = pmIndex - 1; i >= 0; i--) {
       const neighbor = pmBlocks[i]

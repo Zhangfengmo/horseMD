@@ -93,6 +93,67 @@ const textUnits = (view, node) => {
     : null
 }
 
+const literalUnits = (view, start, end, expected) => {
+  const units = []
+  let index = start
+  while (index < end) {
+    const value = String.fromCodePoint(view.text.codePointAt(index))
+    const range = view.rawRange(index, index + value.length)
+    if (!range) return null
+    units.push({ kind: 'char', value: value === '\n' ? ' ' : value, range })
+    index += value.length
+  }
+  return units.map((unit) => unit.value).join('') === String(expected ?? '')
+    ? units
+    : null
+}
+
+const inlineCodeMappingUnits = (view, node) => {
+  const position = positionOffsets(node.position)
+  if (!position) return null
+  const spelling = view.text.slice(position.start, position.end)
+  const opening = spelling.match(/^(`+)/)?.[1] || ''
+  const closing = spelling.match(/(`+)$/)?.[1] || ''
+  if (!opening || opening.length !== closing.length) return null
+  let start = position.start + opening.length
+  let end = position.end - closing.length
+  const inner = view.text.slice(start, end).replaceAll('\n', ' ')
+  if (
+    inner.length >= 2 &&
+    inner.startsWith(' ') &&
+    inner.endsWith(' ') &&
+    inner.trim()
+  ) {
+    start += 1
+    end -= 1
+  }
+  return literalUnits(view, start, end, node.value)
+}
+
+const mappingUnitsForNode = (view, node) => {
+  if (!node || typeof node !== 'object') return []
+  if (node.type === 'text') return textUnits(view, node) || []
+  if (node.type === 'inlineCode') return inlineCodeMappingUnits(view, node) || []
+  if (node.type === 'break') {
+    const range = rawRangeFor(view, node.position)
+    return range ? [{ kind: 'break', range }] : []
+  }
+  if (node.type === 'html') {
+    const range = rawRangeFor(view, node.position)
+    if (!range) return []
+    const spelling = view.raw.slice(range.start, range.end)
+    return [{ kind: HTML_BREAK.test(spelling) ? 'break' : 'atom', range }]
+  }
+  if (['image', 'imageReference', 'inlineMath', 'footnoteReference'].includes(node.type)) {
+    const range = rawRangeFor(view, node.position)
+    return range ? [{ kind: 'atom', range }] : []
+  }
+  if (Array.isArray(node.children)) {
+    return node.children.flatMap((child) => mappingUnitsForNode(view, child))
+  }
+  return []
+}
+
 const opaqueUnit = (view, node) => {
   const range = rawRangeFor(view, node.position)
   return range
@@ -132,13 +193,22 @@ const unitsForCell = (view, node) => {
   return { units, patchable }
 }
 
+const isUnescapedPipeAt = (text, index, lowerBound = 0) => {
+  if (text[index] !== '|') return false
+  let precedingBackslashes = 0
+  for (let cursor = index - 1; cursor >= lowerBound && text[cursor] === '\\'; cursor -= 1) {
+    precedingBackslashes += 1
+  }
+  return precedingBackslashes % 2 === 0
+}
+
 const normalizedCellContentRange = (text, position) => {
   const range = positionOffsets(position)
   if (!range) return null
   let start = range.start
   let end = range.end
   if (text[start] === '|') start += 1
-  if (end > start && text[end - 1] === '|') end -= 1
+  if (end > start && isUnescapedPipeAt(text, end - 1, start)) end -= 1
   while (start < end && (text[start] === ' ' || text[start] === '\t')) start += 1
   while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) end -= 1
   return { start, end }
@@ -151,6 +221,7 @@ const buildPresentCell = (view, node, row, column) => {
     ? view.rawRange(normalizedContent.start, normalizedContent.end)
     : null
   const { units, patchable } = unitsForCell(view, node)
+  const mappingUnits = mappingUnitsForNode(view, node)
   const positionsAreOwned = Boolean(range && contentRange && units.every((unit) => unit.range))
   return {
     row,
@@ -159,6 +230,7 @@ const buildPresentCell = (view, node, row, column) => {
     range,
     contentRange,
     units,
+    mappingUnits,
     patchable: patchable && positionsAreOwned
   }
 }
@@ -170,6 +242,7 @@ const buildMissingCell = (row, column) => ({
   range: null,
   contentRange: null,
   units: [],
+  mappingUnits: [],
   patchable: false
 })
 
@@ -273,8 +346,44 @@ const isRange = (range, rawLength) => Boolean(
   range.end <= rawLength
 )
 
+const hasValidOffsetMap = (view) => {
+  if (
+    !Array.isArray(view?.toRaw) ||
+    view.toRaw.length !== view.text.length + 1 ||
+    typeof view.rawRange !== 'function' ||
+    typeof view.rawOffset !== 'function'
+  ) return false
+  for (let index = 0; index < view.toRaw.length; index += 1) {
+    const offset = view.toRaw[index]
+    if (
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      offset > view.raw.length ||
+      (index > 0 && offset <= view.toRaw[index - 1])
+    ) return false
+  }
+  return view.toRaw.at(-1) === view.raw.length
+}
+
+const hasOrderedOwnedRanges = (items, owner, kinds, rawLength) => {
+  if (!Array.isArray(items)) return false
+  let previousEnd = owner.start
+  for (const item of items) {
+    if (
+      !kinds.includes(item?.kind) ||
+      !isRange(item.range, rawLength) ||
+      item.range.start < owner.start ||
+      item.range.end > owner.end ||
+      item.range.start < previousEnd
+    ) return false
+    previousEnd = item.range.end
+  }
+  return true
+}
+
 const isValidModel = (model, markdown) => {
   if (!model || model.view?.raw !== String(markdown ?? '') || !Array.isArray(model.tables)) return false
+  if (model.tables.length && !hasValidOffsetMap(model.view)) return false
   let previousEnd = -1
   for (let index = 0; index < model.tables.length; index += 1) {
     const table = model.tables[index]
@@ -293,6 +402,7 @@ const isValidModel = (model, markdown) => {
       !table.rows.length
     ) return false
     previousEnd = table.range.end
+    let previousRowEnd = table.range.start
     for (let rowIndex = 0; rowIndex < table.rows.length; rowIndex += 1) {
       const row = table.rows[rowIndex]
       if (
@@ -301,16 +411,28 @@ const isValidModel = (model, markdown) => {
         !isRange(row.range, model.view.raw.length) ||
         row.range.start < table.range.start ||
         row.range.end > table.range.end ||
+        row.range.start < previousRowEnd ||
         !Array.isArray(row.cells) ||
-        row.cells.length < table.width
+        row.cells.length < table.width ||
+        !Number.isInteger(row.missingColumns) ||
+        row.missingColumns < 0
       ) return false
+      previousRowEnd = row.range.end
       let sawMissing = false
+      let missingColumns = 0
+      let previousCellEnd = row.range.start
       for (let column = 0; column < row.cells.length; column += 1) {
         const cell = row.cells[column]
         if (cell?.row !== rowIndex || cell.column !== column) return false
         if (cell.presence === 'missing') {
           sawMissing = true
-          if (cell.range !== null || cell.contentRange !== null || cell.units?.length) return false
+          missingColumns += 1
+          if (
+            cell.range !== null ||
+            cell.contentRange !== null ||
+            cell.units?.length ||
+            cell.mappingUnits?.length
+          ) return false
           continue
         }
         if (cell.presence !== 'present' || sawMissing) return false
@@ -319,12 +441,25 @@ const isValidModel = (model, markdown) => {
           !isRange(cell.contentRange, model.view.raw.length) ||
           cell.range.start < row.range.start ||
           cell.range.end > row.range.end ||
+          cell.range.start < previousCellEnd ||
           cell.contentRange.start < cell.range.start ||
           cell.contentRange.end > cell.range.end ||
-          !Array.isArray(cell.units) ||
-          cell.units.some((unit) => !['char', 'break', 'opaque'].includes(unit?.kind) || !isRange(unit.range, model.view.raw.length))
+          !hasOrderedOwnedRanges(
+            cell.units,
+            cell.contentRange,
+            ['char', 'break', 'opaque'],
+            model.view.raw.length
+          ) ||
+          !hasOrderedOwnedRanges(
+            cell.mappingUnits,
+            cell.contentRange,
+            ['char', 'break', 'atom'],
+            model.view.raw.length
+          )
         ) return false
+        previousCellEnd = cell.range.end
       }
+      if (row.missingColumns !== missingColumns) return false
     }
   }
   return true
@@ -341,6 +476,10 @@ const parseModels = (parseTables, values) => {
 }
 
 const unitKey = (unit) => `${unit.kind}:${unit.kind === 'break' ? '\n' : String(unit.value ?? '')}`
+// `canonical: true` is reserved for previousCanonical/nextCanonical supplied by
+// Milkdown's serializer, where an exact sole `<br />` denotes its empty-cell
+// placeholder. Authored source always uses `canonical: false`, so the same raw
+// spelling remains a semantic break and can never be folded by this comparison.
 const cellKey = (cell, model, canonical = false) => {
   if (!cell || cell.presence === 'missing') return ''
   if (canonical && isSerializerPlaceholderCell(cell, model)) return ''
@@ -497,7 +636,7 @@ const materializeMissingCell = ({ authoredModel, table, row, column, nextCell, n
   let last = rowRaw.length - 1
   while (first <= last && (rowRaw[first] === ' ' || rowRaw[first] === '\t')) first += 1
   while (last >= first && (rowRaw[last] === ' ' || rowRaw[last] === '\t')) last -= 1
-  const hasTrailingOuterPipe = rowRaw[last] === '|'
+  const hasTrailingOuterPipe = isUnescapedPipeAt(rowRaw, last, first)
   const sourceRange = hasTrailingOuterPipe
     ? { start: row.range.start + last, end: row.range.start + last + 1 }
     : { start: row.range.end, end: row.range.end }
@@ -513,7 +652,7 @@ const materializeMissingCell = ({ authoredModel, table, row, column, nextCell, n
 const rangeTouchesChange = (range, changeRange) => {
   if (!range || !changeRange) return false
   if (changeRange.start === changeRange.end) {
-    return changeRange.start >= range.start && changeRange.start <= range.end
+    return changeRange.start >= range.start && changeRange.start < range.end
   }
   return changeRange.start < range.end && changeRange.end > range.start
 }
@@ -673,6 +812,9 @@ export function mapGfmTableChange({
   const source = String(authored ?? '')
   const previous = String(previousCanonical ?? '')
   const next = String(nextCanonical ?? '')
+  if (!source.includes('|') && !previous.includes('|') && !next.includes('|')) {
+    return { status: 'not-table' }
+  }
   const models = parseModels(parseTables, [source, previous, next])
   if (!models) return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
   const [authoredModel, previousModel, nextModel] = models

@@ -26,9 +26,21 @@ export const mapTableSourceChange = (options) => mapGfmTableChange({
   parseTables: options?.parseTables || defaultParseTables
 })
 
-// Crepe's serializer spells its otherwise-empty table-cell paragraph as the
-// exact token `<br />`. Parser-owned cell ranges let us remove only that sole
-// placeholder. Authored `<br>`, `<br/>`, text beside a break, and escaped pipes
-// remain untouched because no line splitting or global table regex is used.
-export const normalizeEmptyTableCells = (markdown, parseTables = defaultParseTables) =>
-  normalizeGfmTableSerializerPlaceholders(String(markdown ?? ''), parseTables)
+// Authored Markdown has no intrinsic way to prove that a sole `<br />` is an
+// editor placeholder, so the generic API is deliberately a no-op. Only callers
+// holding serializer provenance may opt in to placeholder removal.
+export const normalizeEmptyTableCells = (
+  markdown,
+  parseTables = defaultParseTables,
+  options = {}
+) => {
+  const source = String(markdown ?? '')
+  return options.provenance === 'serializer'
+    ? normalizeGfmTableSerializerPlaceholders(source, parseTables)
+    : source
+}
+
+export const normalizeSerializerEmptyTableCells = (
+  markdown,
+  parseTables = defaultParseTables
+) => normalizeEmptyTableCells(markdown, parseTables, { provenance: 'serializer' })

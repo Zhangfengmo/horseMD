@@ -340,6 +340,87 @@ const cases = []
 }
 
 {
+  const markdown = [
+    '| Item | Note |',
+    '| --- | --- |',
+    '| **&amp; \\*** a \\| b<br>tail | stable |'
+  ].join('\n')
+  const pmDoc = doc(table(
+    row('Item', 'Note'),
+    schema.node('table_row', null, [
+      richCell([
+        text('& * a | b'),
+        schema.node('hard_break'),
+        text('tail')
+      ]),
+      cell('stable')
+    ])
+  ))
+  const cellStart = nthTextblockPos(pmDoc, '& * a | btail')
+  const entityRaw = markdown.indexOf('&amp;')
+  const entityPm = cellStart
+  assert.equal(markdownOffsetToPmPos(markdown, entityRaw, pmDoc, remark)?.pos, entityPm)
+  assert.equal(markdownOffsetToPmPos(markdown, entityRaw + 4, pmDoc, remark)?.pos, entityPm)
+  assert.equal(pmPosToMarkdownOffset(markdown, entityPm, pmDoc, remark), entityRaw)
+
+  const starRaw = markdown.indexOf('\\*')
+  const starPm = cellStart + '& '.length
+  assert.equal(markdownOffsetToPmPos(markdown, starRaw, pmDoc, remark)?.pos, starPm)
+  assert.equal(markdownOffsetToPmPos(markdown, starRaw + 1, pmDoc, remark)?.pos, starPm)
+  assert.equal(pmPosToMarkdownOffset(markdown, starPm, pmDoc, remark), starRaw)
+
+  const escapedPipeRaw = markdown.indexOf('\\|')
+  const pipePm = cellStart + '& * a '.length
+  assert.equal(markdownOffsetToPmPos(markdown, escapedPipeRaw + 1, pmDoc, remark)?.pos, pipePm)
+  assert.equal(pmPosToMarkdownOffset(markdown, pipePm, pmDoc, remark), escapedPipeRaw)
+
+  const breakRaw = markdown.indexOf('<br>')
+  const breakPm = cellStart + '& * a | b'.length
+  assert.equal(markdownOffsetToPmPos(markdown, breakRaw + 2, pmDoc, remark)?.pos, breakPm)
+  assert.equal(pmPosToMarkdownOffset(markdown, breakPm, pmDoc, remark), breakRaw)
+  assertTextRoundTrip({
+    label: 'formatted entity/escape text after parser-owned break',
+    markdown,
+    pmDoc,
+    token: 'tail',
+    local: 3,
+    pmText: '& * a | btail',
+    pmExtraBefore: 1
+  })
+  cases.push('table formatted entity and escape mapping units')
+}
+
+{
+  const markdown = [
+    '| Item | Note |',
+    '| --- | --- |',
+    '| <br> | y |'
+  ].join('\n')
+  const pmDoc = doc(table(
+    row('Item', 'Note'),
+    schema.node('table_row', null, [
+      richCell([schema.node('hard_break')]),
+      cell('y')
+    ])
+  ))
+  const cellStart = nthTextblockPos(pmDoc, '')
+  const breakRaw = markdown.indexOf('<br>')
+  assert.equal(
+    pmPosToMarkdownOffset(markdown, cellStart, pmDoc, remark),
+    breakRaw,
+    'sole hardbreak: PM atom start maps to the body-cell break start'
+  )
+  assert.equal(
+    pmPosToMarkdownOffset(markdown, cellStart + 1, pmDoc, remark),
+    breakRaw + '<br>'.length,
+    'sole hardbreak: PM atom end maps to the body-cell break end'
+  )
+  assert.equal(markdownOffsetToPmPos(markdown, breakRaw + 2, pmDoc, remark)?.pos, cellStart)
+  assert.equal(markdownOffsetToPmPos(markdown, breakRaw + '<br>'.length, pmDoc, remark)?.pos, cellStart + 1)
+  cases.push('sole table hardbreak cell atom boundaries')
+}
+
+{
   const markdown = 'Before\n\n```js\nconst answer = 42\nconsole.log(answer)\n```\n\nAfter\n'
   const code = 'const answer = 42\nconsole.log(answer)'
   const pmDoc = doc(paragraph('Before'), codeBlock(code), paragraph('After'))

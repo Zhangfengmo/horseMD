@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { preserveRichMarkdownSource } from '../src/renderer/src/markdown-source-preservation.js'
-import { normalizeEmptyTableCells } from '../src/renderer/src/lib/markdown-preservation/tables.js'
+import {
+  normalizeEmptyTableCells,
+  normalizeSerializerEmptyTableCells
+} from '../src/renderer/src/lib/markdown-preservation/tables.js'
 
 const nextWithNewTable = [
   '# Demo',
@@ -34,12 +37,17 @@ const mixedCells = [
 ].join('\n')
 assert.equal(
   normalizeEmptyTableCells(mixedCells),
+  mixedCells,
+  'generic authored normalization never treats an exact <br /> spelling as serializer provenance'
+)
+assert.equal(
+  normalizeSerializerEmptyTableCells(mixedCells),
   [
     '| A | B | C | D |',
     '| --- | --- | --- | --- |',
     '| <br> |  | text<br>text | a \\| b |'
   ].join('\n'),
-  'only the exact serializer placeholder is cleared; authored breaks and escaped pipes stay scoped to their parsed cells'
+  'explicit serializer provenance clears only its exact placeholder spelling'
 )
 
 const authoredBreak = [
@@ -57,6 +65,31 @@ assert.equal(
   editedBesideAuthoredBreak.markdown,
   authoredBreak.replace('a \\| b', 'a \\| bX'),
   'a user-authored sole <br> remains a semantic break during a neighboring cell edit'
+)
+
+const authoredSlashBreak = authoredBreak.replace('<br>', '<br />')
+const canonicalSlashBreak = authoredSlashBreak.replace('<br />', '<br>')
+const editedBesideAuthoredSlashBreak = preserveRichMarkdownSource(
+  authoredSlashBreak,
+  canonicalSlashBreak,
+  canonicalSlashBreak.replace('a \\| b', 'a \\| bX')
+)
+assert.equal(editedBesideAuthoredSlashBreak.reason, 'table-cell-text')
+assert.equal(
+  editedBesideAuthoredSlashBreak.markdown,
+  authoredSlashBreak.replace('a \\| b', 'a \\| bX'),
+  'a user-authored sole <br /> survives a neighboring serializer-origin cell edit'
+)
+
+const exactBaselineAuthoredBreak = preserveRichMarkdownSource(
+  `${authoredSlashBreak}\n\nold paragraph`,
+  `${authoredSlashBreak}\n\nold paragraph`,
+  `${authoredSlashBreak}\n\nnew paragraph`
+)
+assert.equal(
+  exactBaselineAuthoredBreak.markdown,
+  `${authoredSlashBreak}\n\nnew paragraph`,
+  'an exact-baseline non-table edit never globally clears an authored <br /> cell'
 )
 
 console.log('PASS table empty-cell normalization: new tables keep empty cells as GFM blanks')

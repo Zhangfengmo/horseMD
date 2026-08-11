@@ -12,6 +12,21 @@ import {
 const remark = unified().use(remarkParse).use(remarkGfm)
 const parseTables = createGfmTableSourceParser(remark)
 
+const mutableParsedModel = (markdown) => {
+  const parsed = parseTables(markdown)
+  const model = structuredClone({
+    view: {
+      raw: parsed.view.raw,
+      text: parsed.view.text,
+      ...(Array.isArray(parsed.view.toRaw) ? { toRaw: parsed.view.toRaw } : {})
+    },
+    tables: parsed.tables
+  })
+  model.view.rawOffset = parsed.view.rawOffset
+  model.view.rawRange = parsed.view.rawRange
+  return model
+}
+
 const replaceOnce = (value, from, to) => {
   const index = value.indexOf(from)
   assert.ok(index >= 0, `fixture is missing ${from}`)
@@ -191,6 +206,22 @@ for (const delimiter of ['| - | -- | - | -- | - |', '| -- | - | -- | - | -- |'])
 }
 
 {
+  const authored = '| A | B |\n| - | - |\n| **&amp; \\*** a \\| b<br>tail | stable |'
+  const cell = parseTables(authored).tables[0].rows[1].cells[0]
+  assert.equal(cell.patchable, false, 'formatted inline content remains opaque to source patching')
+  assert.equal(cell.units[0].kind, 'opaque', 'patch units keep the complete strong node fail-closed')
+  assert.equal(
+    cell.mappingUnits.map((unit) => unit.kind === 'break' ? '\n' : unit.value || '').join(''),
+    '& * a | b\ntail',
+    'mapping units recursively decode positioned text and breaks inside formatted content'
+  )
+  const entity = cell.mappingUnits.find((unit) => unit.value === '&')
+  const escapedStar = cell.mappingUnits.find((unit) => unit.value === '*')
+  assert.equal(authored.slice(entity.range.start, entity.range.end), '&amp;')
+  assert.equal(authored.slice(escapedStar.range.start, escapedStar.range.end), '\\*')
+}
+
+{
   const authored = [
     '| one | two | three |',
     '| --- | --- | --- |',
@@ -234,6 +265,23 @@ for (const fixture of [
   assert.equal(result.kind, 'materialized-cell', `${fixture.label}: missing cells are materialized deliberately`)
   assert.equal(result.markdown, fixture.expected, `${fixture.label}: the row's outer-pipe style is preserved`)
   assert.ok(result.sourceRange && result.sourceRange.start <= result.sourceRange.end)
+}
+
+{
+  const authored = 'one | two | three\n--- | --- | ---\nshort \\|'
+  const previousCanonical = 'one | two | three\n--- | --- | ---\nshort \\| |  | '
+  const nextCanonical = 'one | two | three\n--- | --- | ---\nshort \\| |  | typed'
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'patched', 'an escaped terminal pipe is cell content, not an outer delimiter')
+  assert.equal(result.kind, 'materialized-cell')
+  assert.equal(result.markdown, nextCanonical, 'virtual columns append after the complete escaped-pipe cell')
+  const reparsedRow = parseTables(result.markdown).tables[0].rows[1]
+  assert.equal(reparsedRow.cells[2].presence, 'present')
+  assert.equal(
+    reparsedRow.cells[2].units.map((unit) => unit.value || '').join(''),
+    'typed',
+    'the materialized value reparses at logical column 2'
+  )
 }
 
 {
@@ -509,6 +557,72 @@ for (const fixture of [
     parseTables
   })
   assert.deepEqual(result, { status: 'not-table' }, 'a prose-only edit is not claimed by a neighboring table')
+}
+
+{
+  const authored = '| a | b |\n| - | - |\n| value | stable |'
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical: `${authored}\n\nAfter`,
+    change: commonChange(authored, `${authored}\n\nAfter`),
+    parseTables
+  })
+  assert.deepEqual(result, { status: 'not-table' }, 'a zero-width append at table.end belongs outside the table')
+}
+
+{
+  let parseCalls = 0
+  const result = mapGfmTableChange({
+    authored: 'plain paragraph',
+    previousCanonical: 'plain paragraph',
+    nextCanonical: 'plain paragraph changed',
+    parseTables() {
+      parseCalls += 1
+      throw new Error('tableless edits must not invoke the table parser')
+    }
+  })
+  assert.deepEqual(result, { status: 'not-table' }, 'three no-pipe inputs take the safe generic fast path')
+  assert.equal(parseCalls, 0)
+}
+
+{
+  const authored = '| ab | cd |\n| - | - |\n| value | stable |'
+  const nextCanonical = authored.replace('value', 'typed')
+  const corruptions = [
+    ['non-monotonic toRaw', (model) => { model.view.toRaw[3] = model.view.toRaw[2] - 1 }],
+    ['overlapping rows', (model) => {
+      model.tables[0].rows[1].range.start = model.tables[0].rows[0].range.end - 1
+    }],
+    ['overlapping cells', (model) => {
+      model.tables[0].rows[0].cells[1].range.start = model.tables[0].rows[0].cells[0].range.end - 1
+    }],
+    ['unit outside content', (model) => {
+      const cell = model.tables[0].rows[0].cells[0]
+      cell.units[0].range.start = cell.contentRange.start - 1
+    }],
+    ['overlapping mapping units', (model) => {
+      const units = model.tables[0].rows[0].cells[0].mappingUnits
+      units[1].range.start = units[0].range.start
+    }],
+    ['wrong missingColumns', (model) => {
+      model.tables[0].rows[1].missingColumns = 1
+    }]
+  ]
+  for (const [label, corrupt] of corruptions) {
+    const result = mapGfmTableChange({
+      authored,
+      previousCanonical: authored,
+      nextCanonical,
+      parseTables(markdown) {
+        const model = mutableParsedModel(markdown)
+        corrupt(model)
+        return model
+      }
+    })
+    assert.equal(result.status, 'unowned', `${label}: invalid parser ownership fails closed`)
+    assert.match(result.reason, /invalid|ambiguous/, `${label}: failure identifies the parser model boundary`)
+  }
 }
 
 {

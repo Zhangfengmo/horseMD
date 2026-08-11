@@ -48,7 +48,7 @@ import {
 } from './lib/markdown-preservation/regions.js'
 import {
   mapTableSourceChange,
-  normalizeEmptyTableCells,
+  normalizeSerializerEmptyTableCells,
 } from './lib/markdown-preservation/tables.js'
 
 export {
@@ -74,7 +74,7 @@ export const generatedScratchMarkdown = (canonical) => {
   return canonicalFreshTextToSource(
     compactGeneratedListSpacing(
       withoutStandaloneEmptyBlockLines(
-        normalizeEmptyListItems(normalizeEmptyTableCells(canonical))
+        normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical))
       )
     )
   ).replace(/\r?\n+$/, '\n')
@@ -197,7 +197,7 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
         // An empty source has no pre-existing escape spelling to protect. This
         // is the same all-new authoring boundary as generatedScratchMarkdown.
         markdown: canonicalFreshTextToSource(
-          normalizeEmptyTableCells(
+          normalizeSerializerEmptyTableCells(
             compactGeneratedListSpacing(withoutStandaloneEmptyBlockLines(next)),
             parseTables
           )
@@ -611,12 +611,11 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
   if (sourceMarkdown === previous) {
     const translatedReplacement = canonicalFreshTextToSource(next.slice(start, nextEnd))
     return {
-      markdown: withoutStandaloneEmptyBlockLines(normalizeEmptyTableCells(
+      markdown: withoutStandaloneEmptyBlockLines(
         sourceMarkdown.slice(0, start) +
           translatedReplacement +
-          sourceMarkdown.slice(previousEnd),
-        parseTables
-      )),
+          sourceMarkdown.slice(previousEnd)
+      ),
       preserved: true,
       reason: 'exact-canonical-baseline'
     }
