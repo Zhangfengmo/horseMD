@@ -2,7 +2,7 @@
 
 Date: 2026-08-11
 
-Status: approved direction, implementation pending
+Status: implemented and independently reviewed on 2026-08-12
 
 Supersedes: `2026-08-11-rich-source-verified-commit-design.md`
 

@@ -6,13 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Known Issues
-- **0.13.48 仍待安装包长会话人工验收** — 自动化已覆盖用户同型非满列表格、8 种代码语言、列表完整 Backspace 序列、scratch 字面 Markdown、斜杠菜单代码块和 12 万字符以上文档；发布前仍需按真实长会话清单验证安装包。接手记录见 [`docs/rich-source-divergence-incident-0.13.47.md`](./docs/rich-source-divergence-incident-0.13.47.md)。
-
 ### Changed
-- **源码同步架构开始迁移** — 已加入统一 ProseMirror transaction 观察器、原子 raw-source patch 原型和真实逐字事务回归。当前发布构建仍只使用原有 fail-closed 保真链路，事务实验默认关闭；新路径只在开发/专项测试中运行，待每类结构通过完整家族门禁后再逐项放行，避免用未成熟架构修改用户文件或拖慢输入。
+- **源码同步采用耐久语义提交架构** — Markdown→ProseMirror 入口、表格结构归属、语义验收和 rich→source 发布已拆成独立层。所有持久化调用都以同一 immutable live-doc revision 为 authority，作者源码、canonical baseline、pending 与发布状态只会在验证成功后原子推进；默认关闭的 transaction-primary 实验也不能再维护第二套 baseline。
 
 ### Fixed
+- **非满列表格不再触发永久保存暂停** — 合法短行现在会在进入 ProseMirror 前做 editor-only 矩形化，避免首次表格事务由 `fixTables` 改写 live 结构后才与旧基线分叉。作者原始短行仍保存在源码中；编辑其他 cell、切源码、保存和冷重开只改目标字节。
+- **表格源码保真改为 parser-backed 所有权** — 表格 cell/row/range、escaped pipe、真实 `<br>`、缺失尾 cell、1/2 dash delimiter、BOM 与 CRLF 由同一 source model 跟踪，不再用会吞 hardbreak 的 visible-character stream 或近似正则猜结构。内部空 cell 占位只凭精确 provenance 忽略，作者 hardbreak 仍是耐久内容。
+- **保存、源码切换与富文本回调使用同一 revision** — 延迟的 `markdownUpdated`、立即保存、源码切换和恢复重建都必须验证各自捕获的 live document；旧 callback 不能提交或毒化新编辑，确定性失败不会在同一 revision 上无限重试。诊断只记录 revision/failure type，不记录文档正文。
 - **富文本 / 源码使用同一语义验收器** — 原文保真映射现在只负责提出候选源码；唯一 verified commit coordinator 使用 HorseMD 实际 Milkdown parser 将候选还原为 ProseMirror 文档并与当前 rich 文档比较，通过后才原子推进 source/canonical baselines、pending 状态和 App 快照。非满列 GFM 表不再因独立 GFM parser 与 Crepe 补列行为不同而误报保存暂停；列表松紧元数据、手动列宽、空 cell 内部占位，以及删除列表文字后留下的不可见 leading-space sentinel 也不会被误当成内容差异。保存、源码切换、导出和恢复副本不能绕过同一验收。
 - **新文档字面 Markdown 与大文档耐久边界** — 新建空文档不再无条件去掉 serializer 转义；`#`、反引号等字面字符若会改变 Markdown 语义，会保存为可安全重开的转义写法。移除 12 万字符以上热路径直接推进未验证 baseline 的例外，强制 flush 的 canonical-equality 快路径也必须证明 source 与 live ProseMirror 等价。
 - **列表退出操作与源码锁定回归** — 最后一个空列表项按 Backspace 退出为正文；若在该空正文再次按 Backspace，会按正常编辑语义重新并回上一个列表项，因此随后 Enter 会再次出现序号。完整“退出 → 并回 → 再建项 → 再退出 → 正文 → 保存 → 冷重开”已纳入真实按键回归。

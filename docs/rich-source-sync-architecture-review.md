@@ -403,10 +403,12 @@ coordinator、§5.6 的 visible-map 语法化重写（fail-closed 的**发生率
 ### 13.1 现场复现修正了原报告的触发归因
 
 对用户现场文件的只读副本验证表明，文件在编辑前就含有非满列 GFM 表格行：表头为
-5 列，部分正文行只有 1 个 cell。Crepe 的应用 parser 会在 ProseMirror 中补齐缺失
-cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一套归一化树。
-普通正文只增加一个字符后，原文保真 mapper 已给出正确 candidate，但独立 gate 仍
-误判不等价，于是源码切换和保存共同进入 recovery。
+5 列，部分正文行只有 1 个 cell。进一步做事务级追踪后，原报告中的“应用 parser
+在 mount 时补齐”并不准确：初始 Milkdown parse 仍保留短行，第一次表格事务才由
+`prosemirror-tables/fixTables` 把 live ProseMirror 表格修成矩形，而 source/canonical
+基线早已按短行建立。原文保真 mapper 保留作者短行，serializer 面对修复后的 live
+doc 则输出矩形行；独立 gate 因而把一次内容安全的编辑误判为不等价，使源码切换和
+保存共同进入 recovery，且同一 revision 上会稳定重现。
 
 同一 fixture 同时包含 Go、JavaScript、TypeScript、Python、Rust、Java、C 和 C++
 围栏；修复后 8 种语言全部通过。因此“Go 或某种代码高亮语言触发”
@@ -416,12 +418,12 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 
 | 问题 | 证据 | 修复 |
 |---|---|---|
-| 应用 parser 与独立 GFM gate 不一致，误拒绝现场文件 | 非满列表格 fixture 在旧 build 稳定弹 recovery；app parser 解析后与 live PM 等价 | preservation 仅提出 candidate；`parserCtx` + `areSourceDocumentsEquivalent` 成为生产语义 authority |
+| 表格合法短行在首个事务后才被 `fixTables` 改成矩形，基线与 live doc 生命周期错位 | 非满列表格 fixture 在旧 build 稳定弹 recovery；初始 parse 为短行，首个表格事务后 live PM 才补 cell | 在统一 remark parse 管线中、进入 ProseMirror 前确定性补齐 editor-only 尾部 cell；open、source replace、candidate verify 和 cold reopen 共用同一入口，作者源码字节不被改写 |
 | 新建 scratch 无条件去转义可改变语义 | 字面三反引号、`#` 等 candidate 在旧路径跳过 gate，保存重开可能变 code/heading | generated candidate 与安全 canonical fallback 依序验证，冷重开比较 rich 节点类型 |
 | `>120000` 热路径推进未验证双 baseline | 可构造 `preserved:true` 但语义不等价的长文档 candidate；forced flush 因 canonical 相等提前返回 | 删除大小豁免；所有提交和 canonical-equality durability 路径均验证 live PM |
 | 成功 forced rich read 后 App mirror 可停在旧内容 | `flushMarkdown` 只返回字符串，Pandoc 等调用者不一定同步 `tab.content` | App 使用统一 `commitRichSnapshotToTab` 同步 `tabsRef`/React state，不改 `savedContent` |
-| parser 重建的非语义 attrs 造成误拒绝 | 列表 `spread` 的 boolean/string 差异、表格 resize 的 `colwidth` 无 Markdown 表达 | 等价投影仅忽略这些 serializer/layout 元数据，列表文字、marker、alignment、span 仍严格比较 |
-| resize 后空表格 cell 的内部占位造成误拒绝 | live cell 是空 paragraph，serializer 写 `<br />` 后 parser 得到唯一 `isInline:false` hardbreak | 仅在 table cell/header 内把“唯一 block hardbreak”视为空；普通/行内/带文字 `<br>` 仍是语义内容 |
+| parser 重建的非语义 attrs 造成误拒绝 | 列表 `spread` 的 boolean/string 差异、表格 resize 的 `colwidth` 无 Markdown 表达 | 使用按 node type 声明的 durable semantic contract，仅局部忽略明确的 serializer/layout 元数据；未知 attrs 默认耐久，列表文字、marker、alignment、span 仍严格比较 |
+| 空表格 cell 的内部占位与作者 `<br>` 无法靠节点形状区分 | 两者在特定 parser 路径都可能表现为唯一 `isInline:false` hardbreak | parser-backed source model 为 candidate 绑定精确 table/row/column provenance；只在 expected/live 投影中消除已证明的内部占位，candidate 从不继承该豁免，作者 `<br>` 仍严格保留 |
 | 合并后的空列表项 sentinel 误拒绝 | 删除 `- ​    正文` 的可见文字后，live PM 保留纯空格 paragraph，作者源码重解析为仅含 U+200B 的 paragraph；完整 family matrix 的 `list-spaces` cell 被锁住 | 等价投影移除应用内部 leading-space sentinel，并且只在 `list_item` 内把纯未标记空白 paragraph 视为空；可见列表文字仍严格比较 |
 
 ### 13.3 当前生产架构风险（已收口，但不是本次用户触发的独立实证）
@@ -437,16 +439,14 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 
 ### 13.4 预防性问题与后续边界
 
-- transaction-primary 默认关闭，其直接 baseline publish 是实验路径的未来收敛项，
-  不是当前默认构建故障。本次不借机放行或扩大该路径。
-- 当前 coordinator 统一了“验证 → 双 baseline → pending → publish”的原子入口，但还
-  没有演进成持久化 revision/CST 日志；该方向属于阶段 B/C，不应作为本次问题的必要
-  补丁。
-- 全量应用 parser 验证可能影响超大文档输入延迟。`markdownUpdated` 在 >120K 路径
-  直接捕获 immutable live PM doc，避免为了 expected side 再做一次全量 canonical
-  parse；candidate 仍必须 parse + compare。当前 12 万字符 fixture 本机单次约 33ms，
-  功能回归与冷重开已通过，但仍应在图片密集真实长文档上保留性能门禁；优化不得
-  重新允许未验证源码越过 source/save/export 边界。
+- transaction-primary 默认关闭，它不是现场表格事故的触发路径；但其发布已收口到
+  同一个 revision-bound verified state，避免未来启用时再形成第二套 baseline。
+- 持久化 CST/operation log 仍属于更长期的编辑器演进，不是本次修复的必要条件。
+  当前 parser-backed table source model 已提供表格局部所有权与 provenance，但没有
+  把整篇 Markdown 改造成 CST 编辑器。
+- 全量应用 parser 验证可能影响超大文档输入延迟。当前调度可因文档大小调整，但
+  durable semantics 和 expected live-doc authority 不再有大小豁免；后续性能优化不得
+  允许未验证源码越过 source/save/export 边界。
 
 ### 13.5 列表反馈的最终解释
 
@@ -468,3 +468,61 @@ Backspace 退出。完整序列已经覆盖 source、save 和冷重开。
 - `npm run test:list-conversion-ui`
 - `npm run build`
 - `npm run build:mobile`
+
+## 14. 最终根因复核与 v0.13.49 架构结论
+
+### 14.1 与原报告一致的判断
+
+- 保存、切源码、导出共同报错不是三个 UI bug，而是同一个 rich→source durability
+  边界拒绝 candidate 后的表现。
+- live ProseMirror document 必须是用户可见内容 authority；只比较两份 Markdown
+  字符串或两次 serializer 结果不能证明没有丢内容。
+- 所有写出路径必须共用一个 fail-closed commit boundary，失败时不能推进作者源码
+  或 canonical baseline，也不能用整篇 canonical 静默覆盖原文写法。
+- 有序列表 Backspace/rejoin 是独立的编辑事务与 mapper 问题，应保留专项回归，但
+  不能拿它解释现场表格文件的稳定失败。
+
+### 14.2 原报告中被实证修正的判断
+
+- **补 cell 的时间点**：不是 initial parser mount，而是旧实现第一次表格事务后的
+  `fixTables`；修复必须前移到统一 parse contract，不能继续在 roundtrip comparator
+  中为短行加例外。
+- **独立 GFM gate**：让 gate 改用“更接近应用”的另一套 parser 仍会维护两种语义
+  authority。最终实现直接复用 HorseMD 配置后的 `parserCtx`，并在相同 remark 管线
+  中做 editor-only normalization。
+- **空 cell `<br>`**：它不是所有表格里都可忽略的全局等价规则。只有 source model
+  能证明坐标来自 serializer 内部占位时，expected/live 侧才可投影为空；真实作者
+  `<br>`、移动或丢失 hardbreak 都是耐久差异。
+- **大文档与 scratch**：它们暴露过旁路风险，但不是用户现场文件的触发根因；最终
+  架构删除语义验收的大小豁免，并仅让 scratch canonical 作为已验证候选，而不是
+  第二 authority。
+- **代码语言**：Go、JavaScript、TypeScript、Python、Rust、Java、C、C++ 的 fence
+  label 和 fence 内“像表格”的字符均不是根因；代码块仍纳入不变字节回归。
+
+### 14.3 原报告缺失、现已补齐的核心机制
+
+1. **统一 parse adapter**：initial content、source replace、paste/append、candidate
+   verify、rebuild 共用配置后的应用 parser；ragged table 在进入 PM 前确定性矩形化。
+2. **parser-backed table source model**：按 token/source range 记录 table/row/cell
+   所有权、escaped pipe、hardbreak、missing trailing cell、BOM/CRLF 和原始空白；
+   普通 cell edit 只改归属 range，结构操作只替换归属 table block。
+3. **node-local durable semantics**：每类 PM node 明确区分耐久内容、布局元数据和有
+   provenance 的内部占位；未知 attrs 默认参与比较，避免 schema 扩展被静默忽略。
+4. **revision-bound atomic state**：`source`、`canonical`、immutable `expectedDoc`、
+   `pending` 和 `status` 在同一对象中按 revision 一起推进。旧 callback 不能提交或
+   污染新 revision；同一 revision 的确定性失败不会靠重复 save 重试掩盖。
+5. **typed failure**：只有 `pending` 可有界等待；`unowned-source-change`、
+   `semantic-loss`、`parser-error` 都是最终失败并进入恢复出口。诊断只暴露 revision
+   与 failure type，不记录用户正文。
+
+### 14.4 现有功能问题与预防性问题的最终边界
+
+现场已证实并纳入修复的现有问题包括：非满列表格事务后补 cell、连续短行、表格
+hardbreak 被 visible stream 吞掉、1/2 dash delimiter 识别不一致、escaped pipe
+所有权错误、旧 callback/强制 flush 使用不同 expected authority，以及列表完整
+Backspace/rejoin 序列。
+
+未被现场证据支持、因此没有当作根因“顺手改行为”的项目包括：特定代码语言导致
+失败、代码 fence 内表格样文本参与表格解析、120K 阈值直接触发本例、scratch 文档
+直接触发本例，以及默认关闭的 transaction-primary 首次制造本例。它们只保留边界
+回归或被动收口，不扩大产品行为。
