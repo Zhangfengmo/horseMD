@@ -117,7 +117,7 @@ async function main() {
     })()`)
     assert.equal(caretPlaced, true, 'could not place caret in the first chunk')
     await evaluate('window.__hmGateTimingLog = []')
-    await send('Input.insertText', { text: 'X' })
+    await typeTextLikeUser(send, 'X')
     await sleep(500)
     const verificationTiming = await evaluate(`window.__hmGateTimingLog?.at(-1) || null`)
     assert.ok(verificationTiming?.length > 120000, 'large-document hot verification was not observed')

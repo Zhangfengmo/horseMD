@@ -123,7 +123,32 @@ async function runScenario({ name, initial = '', type, expected, scenarioPort })
 }
 
 async function typeBulletList(marker, send) {
-  await typeTextLikeUser(send, `${marker} `, { delayMs: 80 })
+  const delimiter = {
+    '-': { key: '-', code: 'Minus', keyCode: 189 },
+    '+': { key: '+', code: 'Equal', keyCode: 187 },
+    '*': { key: '*', code: 'Digit8', keyCode: 56 },
+    ' ': { key: ' ', code: 'Space', keyCode: 32 }
+  }
+  const typeRawDelimiter = async ({ key, code, keyCode }) => {
+    const common = {
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode: keyCode,
+      modifiers: ['+', '*'].includes(key) ? 8 : 0
+    }
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
+    await send('Input.dispatchKeyEvent', {
+      type: 'char',
+      ...common,
+      text: key,
+      unmodifiedText: key
+    })
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+    await sleep(80)
+  }
+  await typeRawDelimiter(delimiter[marker])
+  await typeRawDelimiter(delimiter[' '])
   await typeTextLikeUser(send, '第一项', { delayMs: 80 })
   await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 80 })
   await typeTextLikeUser(send, '第二项', { delayMs: 80 })
