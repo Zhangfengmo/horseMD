@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { Schema, Slice, Fragment } from '@milkdown/prose/model'
 import { EditorState, Plugin } from '@milkdown/prose/state'
 import { ReplaceStep } from '@milkdown/prose/transform'
+import { createMarkdownSourceView } from '../src/renderer/src/lib/markdown-source-view.js'
 import { mapPlainTextTransactionsToSource } from '../src/renderer/src/lib/source-transaction-sync.js'
 import { createSourceTransactionDispatch } from '../src/renderer/src/components/editor-source-transactions.js'
 
@@ -9,6 +10,29 @@ const mapTransactions = (options) => mapPlainTextTransactionsToSource({
   ...options,
   validateMarkdown: options.validateMarkdown || (() => true)
 })
+
+{
+  const lf = createMarkdownSourceView('A\nB')
+  assert.equal(lf.raw, 'A\nB')
+  assert.equal(lf.text, 'A\nB')
+  assert.deepEqual(lf.toRaw, [0, 1, 2, 3])
+  assert.equal(lf.rawOffset(2), 2)
+
+  const mixed = createMarkdownSourceView('\uFEFFA\r\nB\nC\rD')
+  assert.equal(mixed.raw, '\uFEFFA\r\nB\nC\rD')
+  assert.equal(mixed.text, 'A\nB\nC\nD')
+  assert.deepEqual(mixed.toRaw, [1, 2, 4, 5, 6, 7, 8, 9])
+  assert.equal(mixed.rawOffset(0), 1, 'BOM is outside normalized parser coordinates')
+  assert.equal(mixed.rawOffset(2), 4, 'offset after CRLF maps after both authored bytes')
+  assert.deepEqual(mixed.rawRange(1, 3), { start: 2, end: 5 })
+  assert.deepEqual(
+    mixed.rawRange({ start: { offset: 1 }, end: { offset: 3 } }),
+    { start: 2, end: 5 },
+    'mdast positions and numeric normalized ranges share one source-view mapper'
+  )
+  assert.equal(mixed.rawOffset(-1), null)
+  assert.equal(mixed.rawRange(3, 2), null)
+}
 
 const schema = new Schema({
   nodes: {

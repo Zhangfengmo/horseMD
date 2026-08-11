@@ -7,6 +7,11 @@
 // cannot be mapped byte-for-byte, the caller keeps the authored source intact
 // and lets the existing fail-closed preservation path handle the batch.
 
+import {
+  createMarkdownSourceView,
+  normalizedOffsetFromRaw
+} from './markdown-source-view.js'
+
 const unsafeInlineSyntax = /[`*_{}\[\]<>#|\\]/
 const unsafeAtBlockStart = /^(?:[-+>]|\d+[.)])/u
 const leadingSpaceSentinel = '\u200B'
@@ -78,48 +83,6 @@ const leadingLineEndingCount = (source, lineEnding) => {
   return count
 }
 
-// A mapping view keeps one byte-for-byte normalized copy (BOM stripped, every
-// line ending reduced to a single `\n`) plus the original authored bytes.
-// remark/Pm coordinates are only exact against the normalized copy; every raw
-// proof happens there. Edits are applied to both copies simultaneously so the
-// final source keeps the author's BOM/CRLF spelling byte-for-byte.
-const createMappingView = (original) => {
-  let text = ''
-  const toRaw = []
-  let index = 0
-  if (original.charCodeAt(0) === 0xFEFF) index = 1
-  while (index < original.length) {
-    const code = original.charCodeAt(index)
-    if (code === 13) {
-      toRaw.push(index)
-      text += '\n'
-      index += original.charCodeAt(index + 1) === 10 ? 2 : 1
-    } else {
-      toRaw.push(index)
-      text += original[index]
-      index += 1
-    }
-  }
-  toRaw.push(original.length)
-  return { text, toRaw, original }
-}
-
-// Original raw offset -> normalized position. toRaw is monotonically
-// increasing, so this is a binary search for the owning normalized slot.
-const normalizedFromRaw = (toRaw, rawOffset) => {
-  if (!Number.isFinite(rawOffset) || rawOffset < 0) return null
-  const max = toRaw[toRaw.length - 1]
-  if (rawOffset > max) return null
-  let low = 0
-  let high = toRaw.length - 1
-  while (low < high) {
-    const mid = (low + high + 1) >> 1
-    if (toRaw[mid] <= rawOffset) low = mid
-    else high = mid - 1
-  }
-  return low
-}
-
 // Apply a normalized-coordinate edit to both copies of the mapping view.
 // `lineEnding` converts authored separators only for structural splits;
 // plain text insertions never contain a newline.
@@ -133,7 +96,7 @@ const applyViewEdit = (view, from, to, text, lineEnding = null) => {
     ? text.replace(/\n/g, lineEnding)
     : text
   view.text = view.text.slice(0, from) + text + view.text.slice(to)
-  view.original = view.original.slice(0, origFrom) + origText + view.original.slice(origTo)
+  view.raw = view.raw.slice(0, origFrom) + origText + view.raw.slice(origTo)
   const delta = origText.length - (origTo - origFrom)
   const next = view.toRaw.slice(0, from)
   const insertedMapsOneToOne = origText.length === text.length
@@ -273,7 +236,7 @@ export function mapPlainTextTransactionsToSource({
     return { ok: false, markdown: original, reason: 'missing-position-mapper' }
   }
 
-  const view = createMappingView(original)
+  const view = createMarkdownSourceView(original)
   let markdown = view.text
   let doc = oldState?.doc
   let changed = false
@@ -330,7 +293,7 @@ export function mapPlainTextTransactionsToSource({
         const topBlockStart = $from.depth >= 1 ? $from.before(1) : null
         blockHint = hints.find((candidate) => candidate.pmBlockStart === topBlockStart) || null
         if (blockHint) {
-          const slotStart = normalizedFromRaw(view.toRaw, blockHint.rawStart)
+          const slotStart = normalizedOffsetFromRaw(view, blockHint.rawStart)
           if (slotStart == null) return fail('hint-raw-position-unmapped')
           rawFrom = slotStart + $from.parentOffset
           rawTo = slotStart + $to.parentOffset
@@ -398,10 +361,10 @@ export function mapPlainTextTransactionsToSource({
         if ($from.parentOffset === 0 && ($from.parent.content.size !== 0 || !blockHint)) {
           return fail('split-at-unowned-block-start')
         }
-        const lineEnding = documentLineEnding(view.original)
+        const lineEnding = documentLineEnding(view.raw)
         if (!lineEnding) return fail('mixed-line-ending-split')
         const origFrom = view.toRaw[rawFrom]
-        const rightBreaks = leadingLineEndingCount(view.original.slice(origFrom), lineEnding)
+        const rightBreaks = leadingLineEndingCount(view.raw.slice(origFrom), lineEnding)
         const splitAtBlockEnd = $from.parentOffset === $from.parent.content.size
         // If another authored block already follows, its existing `\n\n`
         // belongs to that boundary. The new empty PM paragraph needs its own
@@ -524,8 +487,8 @@ export function mapPlainTextTransactionsToSource({
 
   // The caller stores this snapshot as the authored source, so it must carry
   // the author's exact BOM/CRLF spelling. All proofs happened on the
-  // normalized copy; `view.original` was edited in lockstep.
-  const result = { ok: true, markdown: view.original, blockHints: hints, reason: 'plain-text-transactions' }
+  // normalized copy; `view.raw` was edited in lockstep.
+  const result = { ok: true, markdown: view.raw, blockHints: hints, reason: 'plain-text-transactions' }
   diagnostic({ ok: true, reason: result.reason })
   return result
 }
