@@ -2,7 +2,10 @@
 // Enter at the end of an ordered list creates an empty item; Backspace on it
 // must EXIT the list into a paragraph (editor-list-backspace.js), not merge
 // into the previous item as a marker-less continuation. The follow-up
-// paragraph must survive source mode and save, with no recovery dialog.
+// paragraph must survive source mode, save, and cold reopen with no recovery
+// dialog. The reported second Backspace intentionally rejoins the list; Enter
+// therefore creates another list item. A second empty-item Backspace exits it
+// again and is the sequence required to resume paragraph text.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -63,8 +66,38 @@ async function main() {
     await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
     await sleep(600)
 
-    // The document must now have a paragraph caret AFTER the list: typing
-    // must not re-enter the list or merge into `gamma`.
+    // This is the user's follow-up sequence: another Backspace at the start of
+    // the empty paragraph rejoins the preceding list item, so Enter correctly
+    // produces another ordered item. Backspace on that empty item exits again.
+    await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
+    await sleep(400)
+    const rejoinedState = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)
+      return {
+        items: [...editor.querySelectorAll('li')].map((li) => li.querySelector('p')?.textContent.trim() ?? ''),
+        topLevelEmpty: [...editor.querySelectorAll(':scope > p')].filter((p) => !p.textContent.trim()).length
+      }
+    })()`)
+    assert.deepEqual(rejoinedState.items, ['alpha', 'beta', 'gamma'])
+    assert.equal(rejoinedState.topLevelEmpty, 0, 'second Backspace must rejoin the preceding list')
+
+    await pressKey(app.send, { key: 'Enter', code: 'Enter', delayMs: 80 })
+    await sleep(400)
+    const relistedItems = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)
+      return [...editor.querySelectorAll('li')].map((li) => li.querySelector('p')?.textContent.trim() ?? '')
+    })()`)
+    assert.deepEqual(
+      relistedItems,
+      ['alpha', 'beta', 'gamma', ''],
+      'Enter after rejoining must create the list number observed in the report'
+    )
+
+    await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
+    await sleep(500)
+
+    // The document must now have a paragraph caret AFTER the list again:
+    // typing must not re-enter the list or merge into `gamma`.
     await typeTextLikeUser(app.send, '列表后的正文')
     await sleep(1100)
     const listState = await app.evaluate(`(() => {
@@ -121,7 +154,26 @@ async function main() {
     assert.ok(saved.includes('3. gamma\n\n列表后的正文'), 'the paragraph must persist on disk after the list')
     assert.equal(app.dialogs.length, 0, 'saving this flow must not require recovery')
 
-    console.log('PASS list backspace exit: empty-item Backspace exits the list into a paragraph; source and disk stay faithful')
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+    app = await launchBuiltElectron({ profileDir: join(root, 'p-reopen'), port, appArgs: [file] })
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
+      'editor did not cold reopen'
+    )
+    await sleep(900)
+    const reopened = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)
+      return {
+        items: [...editor.querySelectorAll('li')].map((li) => li.querySelector('p')?.textContent.trim() ?? ''),
+        paragraphs: [...editor.querySelectorAll(':scope > p')].map((p) => p.textContent.trim())
+      }
+    })()`)
+    assert.deepEqual(reopened.items, ['alpha', 'beta', 'gamma'])
+    assert.ok(reopened.paragraphs.includes('列表后的正文'), 'paragraph must survive a full cold reopen')
+    assert.equal(app.dialogs.length, 0, 'cold reopen must not surface source-sync recovery')
+
+    console.log('PASS list backspace sequence: exit, rejoin, re-list, exit again, save, and cold reopen stay faithful')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

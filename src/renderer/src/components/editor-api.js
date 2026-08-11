@@ -9,9 +9,6 @@ import {
   preserveGeneratedBulletMarkers,
   preserveRichMarkdownSource
 } from '../markdown-source-preservation.js'
-import { roundTripPreserved } from '../lib/markdown-preservation/roundtrip.js'
-import { withoutStandaloneEmptyBlockLines } from '../lib/markdown-preservation/paragraphs.js'
-import { normalizeEmptyListItems } from '../lib/markdown-preservation/lists.js'
 import { normalizeDisplayMath } from './editor-math.js'
 import { markdownOffsetToPmPos, pmPosToMarkdownOffset } from './editor-source-map.js'
 import { createPdfSourceFromEditor } from './editor-pdf-content.js'
@@ -25,6 +22,7 @@ import {
 import { strikethroughSchema } from '@milkdown/kit/preset/gfm'
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
 import { settleEditorMarkdown } from '../lib/editor-flush-settle.js'
+import { canonicalSourceFallback } from './editor-source-verification.js'
 
 export function createEditorApi({
   viewRef,
@@ -37,6 +35,7 @@ export function createEditorApi({
   clearPendingRichFlush,
   generatedScratchRef,
   getGeneratedScratchMarkdown,
+  sourceCommitter,
   canonicalForSource,
   setBlock,
   markUserEdit,
@@ -188,11 +187,34 @@ export function createEditorApi({
       // delayed markdownUpdated callback. Serialize the current ProseMirror
       // document instead of reading Crepe's potentially stale cached snapshot.
       const canonical = canonicalForSource(serializeCurrentDocument())
+      const scratch = generatedScratchRef?.current
+      // Fresh documents keep an empty title/body scaffold in the live PM doc,
+      // while canonicalForSource deliberately excludes it from persisted
+      // Markdown. Compare scratch candidates with the document reconstructed
+      // from that canonical source, not with internal editor-only nodes.
+      const expectedDoc = scratch
+        ? sourceCommitter.parse(canonical)
+        : viewRef.current?.state.doc
       if (canonical === canonicalMarkdownRef.current) {
-        clearPendingRichFlush?.()
-        return lastMarkdownRef.current
+        const committed = sourceCommitter.commit({
+          candidates: [lastMarkdownRef.current],
+          expectedDoc,
+          canonical,
+          shouldPublish: false
+        })
+        if (!committed.ok) {
+          if (Array.isArray(globalThis.__hmGateLog)) {
+            globalThis.__hmGateLog.push({
+              origin: 'flush-canonical-equality',
+              candidate: lastMarkdownRef.current,
+              canonical
+            })
+          }
+          return null
+        }
+        return committed.markdown
       }
-      const preserved = generatedScratchRef?.current
+      const preserved = scratch
         ? {
             markdown: getGeneratedScratchMarkdown?.(canonical) || preserveGeneratedBulletMarkers(
               lastMarkdownRef.current,
@@ -212,12 +234,17 @@ export function createEditorApi({
       // the cumulative delta. Returning null prevents source mode or save from
       // presenting the stale authored bytes as if the visible edit had synced.
       if (preserved.preserved === false) return null
-      // A mapper accepting the delta is not proof the mapped bytes mean what
-      // the editor shows. A wrong `preserved:true` poisons the authored source
-      // permanently, so every commit must pass the semantic round-trip gate.
-      // A fresh scratch document deliberately restores physical characters
-      // (unescaping can create real syntax), so only that path is exempt.
-      if (!generatedScratchRef?.current && !roundTripPreserved(preserved.markdown, canonical)) {
+      const committed = sourceCommitter.commit({
+        candidates: scratch
+          ? [preserved.markdown, canonicalSourceFallback(canonical)]
+          : [preserved.markdown],
+        expectedDoc,
+        canonical,
+        shouldPublish: false
+      })
+      // A mapper accepting the delta is not proof that its bytes reconstruct
+      // the live editor. Parser failures and semantic mismatches fail closed.
+      if (!committed.ok) {
         // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
         if (Array.isArray(globalThis.__hmGateLog)) {
           globalThis.__hmGateLog.push({
@@ -229,10 +256,7 @@ export function createEditorApi({
         }
         return null
       }
-      lastMarkdownRef.current = preserved.markdown
-      canonicalMarkdownRef.current = canonical
-      clearPendingRichFlush?.()
-      return preserved.markdown
+      return committed.markdown
     } catch (error) {
       // A silent null here is indistinguishable from a fail-closed mapping to
       // every caller; keep the error visible for diagnosis.
@@ -259,18 +283,21 @@ export function createEditorApi({
       // change semantics) but must still strip Crepe's internal empty-block
       // `<br />` placeholders — raw canonical bytes would write them into the
       // user's file, violating the source boundary invariant.
-      const markdown = roundTripPreserved(rebuilt, canonical)
-        ? rebuilt
-        : withoutStandaloneEmptyBlockLines(normalizeEmptyListItems(canonical))
-      lastMarkdownRef.current = markdown
-      canonicalMarkdownRef.current = canonical
-      clearPendingRichFlush?.()
+      const committed = sourceCommitter.commit({
+        candidates: [rebuilt, canonicalSourceFallback(canonical)],
+        expectedDoc: generatedScratchRef?.current
+          ? sourceCommitter.parse(canonical)
+          : viewRef.current?.state.doc,
+        canonical,
+        shouldPublish: false
+      })
+      if (!committed.ok) return null
       // A rebuild is a full baseline reset: every pending transaction intent
       // (paste snapshot, list conversion, input-rule markers) was captured
       // against the PREVIOUS baselines. Replaying one after the reset would
       // re-poison the fresh baselines, so the reset must be atomic.
       resetTransactionIntents?.()
-      return markdown
+      return committed.markdown
     } catch {
       return null
     }
@@ -287,7 +314,13 @@ export function createEditorApi({
       // Keeping it separate preserves both sides of the conflict: the original
       // source remains untouched and the user's visible edits are not trapped
       // solely in renderer memory.
-      return generatedScratchMarkdown(canonicalForSource(serializeCurrentDocument()))
+      const canonical = canonicalForSource(serializeCurrentDocument())
+      return sourceCommitter.select({
+        candidates: [generatedScratchMarkdown(canonical), canonicalSourceFallback(canonical)],
+        expectedDoc: generatedScratchRef?.current
+          ? sourceCommitter.parse(canonical)
+          : viewRef.current?.state.doc
+      })
     } catch {
       return null
     }

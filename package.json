@@ -1,6 +1,6 @@
 {
   "name": "horse",
-  "version": "0.13.47",
+  "version": "0.13.48",
   "description": "HorseMD Markdown Editor",
   "author": "mini_md",
   "license": "MIT",
@@ -28,6 +28,9 @@
     "test:codeblock-scroll-stability-ui": "node scripts/test-codeblock-scroll-stability-ui.mjs",
     "test:markdown-preservation": "node scripts/test-markdown-source-preservation.mjs",
     "test:roundtrip-acceptance": "node scripts/test-roundtrip-acceptance.mjs",
+    "test:editor-source-verification": "node scripts/test-editor-source-verification.mjs",
+    "test:rich-source-tab-state": "node scripts/test-rich-source-tab-state.mjs",
+    "test:rich-source-app-parser-ui": "node scripts/test-rich-source-app-parser-ui.mjs",
     "test:list-backspace-exit-ui": "node scripts/test-list-backspace-exit-ui.mjs",
     "test:sync-recovery-ui": "node scripts/test-sync-recovery-ui.mjs",
     "test:source-text-fidelity": "node scripts/test-source-text-fidelity.mjs",

@@ -134,8 +134,10 @@ async function main() {
       () => visibleSource(app.evaluate),
       'source mode did not open for literal triple-backtick text'
     )
-    assert.ok(source.includes('```你好```'), `source lost literal triple backticks: ${JSON.stringify(source)}`)
-    assert.ok(!source.includes('\\`'), `source leaked serializer backtick escapes: ${JSON.stringify(source)}`)
+    // Source spelling is subordinate to semantic round-trip. Literal Markdown
+    // delimiters must stay escaped; writing bare triple backticks would reopen
+    // as an inline-code node even though rich mode showed ordinary text.
+    assert.ok(source.includes('\\`'), `source did not protect literal backticks: ${JSON.stringify(source)}`)
 
     assert.equal(await app.evaluate(`(() => {
       const save = document.querySelector('.hm-save-fab')
@@ -147,6 +149,17 @@ async function main() {
     await stopBuiltElectron(app, { removeProfile: true })
     app = null
     app = await openApp('reopen', port + 1)
+    const reopenedRichState = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const block = [...(editor?.querySelectorAll('p, h1, h2, h3, h4, h5, h6') || [])]
+        .find((node) => node.textContent.includes('\`\`\`你好\`\`\`'))
+      return {
+        text: block?.textContent || '',
+        codeCount: block?.querySelectorAll('code').length ?? -1
+      }
+    })()`)
+    assert.equal(reopenedRichState.text, '```你好```', 'cold reopen changed literal backticks into Markdown structure')
+    assert.equal(reopenedRichState.codeCount, 0, 'cold reopen changed literal backticks into inline code')
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch reopened document to source mode')
     const reopened = await waitFor(
       () => visibleSource(app.evaluate),

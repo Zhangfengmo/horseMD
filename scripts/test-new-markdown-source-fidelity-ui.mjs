@@ -75,14 +75,21 @@ async function runScenario({ name, initial = '', type, expected, scenarioPort })
       () => evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`),
       `${name}: rich editor did not open`
     )
+    await evaluate('window.__hmGateLog = []')
     await focusBody(evaluate, send)
     await type({ send, evaluate })
     await sleep(800)
     await toggleSource(evaluate, send)
-    const actual = await waitFor(
-      () => visibleSource(evaluate),
-      `${name}: source mode did not open`
-    )
+    const opened = await waitFor(async () => {
+      const source = await visibleSource(evaluate)
+      if (source != null) return { source }
+      return app.dialogs.length ? { recovery: true } : null
+    }, `${name}: source mode did not open`)
+    if (opened.recovery) {
+      const gateLog = await evaluate('window.__hmGateLog')
+      throw new Error(`${name}: source verification entered recovery: ${JSON.stringify(gateLog)}`)
+    }
+    const actual = opened.source
     assert.equal(actual, expected, `${name}: newly typed Markdown source changed`)
 
     for (let cycle = 0; cycle < 2; cycle += 1) {
@@ -116,7 +123,32 @@ async function runScenario({ name, initial = '', type, expected, scenarioPort })
 }
 
 async function typeBulletList(marker, send) {
-  await typeTextLikeUser(send, `${marker} `, { delayMs: 80 })
+  const delimiter = {
+    '-': { key: '-', code: 'Minus', keyCode: 189 },
+    '+': { key: '+', code: 'Equal', keyCode: 187 },
+    '*': { key: '*', code: 'Digit8', keyCode: 56 },
+    ' ': { key: ' ', code: 'Space', keyCode: 32 }
+  }
+  const typeRawDelimiter = async ({ key, code, keyCode }) => {
+    const common = {
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode: keyCode,
+      modifiers: ['+', '*'].includes(key) ? 8 : 0
+    }
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
+    await send('Input.dispatchKeyEvent', {
+      type: 'char',
+      ...common,
+      text: key,
+      unmodifiedText: key
+    })
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+    await sleep(80)
+  }
+  await typeRawDelimiter(delimiter[marker])
+  await typeRawDelimiter(delimiter[' '])
   await typeTextLikeUser(send, '第一项', { delayMs: 80 })
   await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 80 })
   await typeTextLikeUser(send, '第二项', { delayMs: 80 })

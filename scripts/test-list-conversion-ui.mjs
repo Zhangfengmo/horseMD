@@ -225,6 +225,7 @@ async function main() {
       () => evaluate(`[...document.querySelectorAll('.ProseMirror')].some((node) => node.offsetParent)`),
       'list conversion fixture did not open in rich mode'
     )
+    await evaluate('window.__hmGateLog = []')
 
     assert.deepEqual(await listShape(evaluate), {
       parent: 'UL', child: 'UL', ordered: 'OL', orderedChild: 'OL', task: 'UL'
@@ -362,7 +363,16 @@ async function main() {
     )
 
     assert.equal(await toggleSource(evaluate), true, 'could not inspect converted Markdown in source mode')
-    const afterBulletConversion = await waitFor(() => sourceValue(evaluate), 'source mode did not open after list conversion')
+    const sourceOutcome = await waitFor(async () => {
+      const source = await sourceValue(evaluate)
+      if (source != null) return { source }
+      return app.dialogs.length ? { recovery: true } : null
+    }, 'source mode did not open after list conversion')
+    if (sourceOutcome.recovery) {
+      const gateLog = await evaluate('window.__hmGateLog')
+      throw new Error(`list conversion source verification entered recovery: ${JSON.stringify(gateLog)}`)
+    }
+    const afterBulletConversion = sourceOutcome.source
     assert.match(afterBulletConversion, /[-*] Parent\s+[-*] \[ \] Child A\s+[-*] \[ \] Child B\s+[-*] Sibling/)
     assert.match(afterBulletConversion, /[-*] First\s+[-*] First child\s+[-*] Second/)
     assert.ok(afterBulletConversion.includes('Keep this spelling: 0~9 and `inline code`.'), 'list conversion rewrote an untouched paragraph')

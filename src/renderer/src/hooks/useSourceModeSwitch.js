@@ -28,6 +28,7 @@ export function useSourceModeSwitch({
   editorHostRef,
   focusedTabRef,
   commitAllLive,
+  commitRichSnapshotToTab,
   findStateRef,
   richLoadingRef,
   tRef
@@ -115,22 +116,10 @@ export function useSourceModeSwitch({
       markdown = api.rebuildMarkdownFromRich?.()
     }
     if (typeof markdown !== 'string') return false
-    const current = tabsRef.current.find((tab) => tab.id === id)
-    if (!current) return false
-    if (current.content === markdown && !current.pendingRichEdit) return true
-    // The source textarea is uncontrolled. Update the synchronous mirror before
-    // mounting it, then queue the matching React state update in the same event;
-    // waiting for markdownUpdated would leave defaultValue stuck on stale text.
-    tabsRef.current = tabsRef.current.map((tab) =>
-      tab.id === id ? { ...tab, content: markdown, pendingRichEdit: false } : tab
-    )
-    setTabs((previous) => previous.map((tab) =>
-      tab.id === id && (tab.content !== markdown || tab.pendingRichEdit)
-        ? { ...tab, content: markdown, pendingRichEdit: false }
-        : tab
-    ))
-    return true
-  }, [editorApis, setTabs, tabsRef, tRef])
+    // The source textarea is uncontrolled. Commit the synchronous mirror before
+    // mounting it so defaultValue observes this exact verified snapshot.
+    return commitRichSnapshotToTab(id, markdown)
+  }, [commitRichSnapshotToTab, editorApis, tRef])
 
   const toggleSource = useCallback(async () => {
     const id = activeIdRef.current

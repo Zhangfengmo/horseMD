@@ -44,6 +44,19 @@ assert.equal(
   '前文\r\n\r\n```js\r\n\r\n```\r\n\r\n后文\r\n',
   'slash code conversion must atomically replace only its block and retain CRLF'
 )
+const slashMathSource = '前文\r\n\r\n/math\r\n\r\n后文\r\n'
+const slashMathIntent = captureSlashBlockSourceIntent({
+  source: slashMathSource,
+  queryText: '/math',
+  sourceOffset: slashMathSource.indexOf('/math') + 5,
+  id: 'math'
+})
+assert.ok(slashMathIntent, 'slash math intent must locate its exact authored block')
+assert.equal(
+  applySlashBlockSourceIntent({ intent: slashMathIntent, blockMarkdown: '```latex\nx^2\n```\n' }),
+  '前文\r\n\r\n```latex\r\nx^2\r\n```\r\n\r\n后文\r\n',
+  'slash math conversion must use the same atomic source replacement as code'
+)
 assert.equal(
   captureSlashBlockSourceIntent({
     source: '/code\n\n/code\n',

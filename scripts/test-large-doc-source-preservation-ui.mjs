@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
+import { typeTextLikeUser } from './lib/human-input.mjs'
 
 const dir = '/tmp/horsemd-large-doc-source-preservation'
 const file = join(dir, 'large-source-preservation.md')
@@ -55,7 +56,7 @@ async function main() {
   await mkdir(dir, { recursive: true })
   await writeFile(file, source, 'utf8')
 
-  const app = await launchBuiltElectron({
+  let app = await launchBuiltElectron({
     profileDir: join(dir, 'profile'),
     port,
     appArgs: [file]
@@ -115,8 +116,12 @@ async function main() {
       return false
     })()`)
     assert.equal(caretPlaced, true, 'could not place caret in the first chunk')
-    await send('Input.insertText', { text: 'X' })
+    await evaluate('window.__hmGateTimingLog = []')
+    await typeTextLikeUser(send, 'X')
     await sleep(500)
+    const verificationTiming = await evaluate(`window.__hmGateTimingLog?.at(-1) || null`)
+    assert.ok(verificationTiming?.length > 120000, 'large-document hot verification was not observed')
+    console.log(`large document verified commit: ${verificationTiming.durationMs.toFixed(1)}ms`)
 
     assert.equal(await toggleSource(evaluate), true, 'source toggle was unavailable')
     const actual = await waitFor(() => visibleSource(evaluate), 'source editor did not open')
@@ -127,19 +132,19 @@ async function main() {
       'the first rich edit after chunked loading was lost or normalized untouched source'
     )
 
-    const sourceEdited = await evaluate(`(() => {
+    const sourceCaretPlaced = await evaluate(`(() => {
       const textarea = [...document.querySelectorAll('textarea.source-editor')]
         .find((node) => node.offsetParent)
       if (!textarea) return false
       const index = textarea.value.indexOf('紧凑列表二')
       if (index < 0) return false
       const at = index + '紧凑列表二'.length
+      textarea.focus()
       textarea.setSelectionRange(at, at)
-      textarea.setRangeText('Y', at, at, 'end')
-      textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'Y' }))
       return true
     })()`)
-    assert.equal(sourceEdited, true, 'could not edit the CRLF document in source mode')
+    assert.equal(sourceCaretPlaced, true, 'could not place the source caret in the CRLF document')
+    await typeTextLikeUser(send, 'Y')
     await sleep(500)
 
     assert.equal(await toggleSource(evaluate), true, 'could not return to rich mode')
@@ -152,15 +157,43 @@ async function main() {
       () => evaluate(`!document.querySelector('.hm-save-fab')`),
       'large-document save did not finish'
     )
+    const expectedSaved = expectedAfterRich.replace('紧凑列表二', '紧凑列表二Y')
     assert.equal(
       await readFile(file, 'utf8'),
-      expectedAfterRich.replace('紧凑列表二', '紧凑列表二Y'),
+      expectedSaved,
       'saving rich/source edits changed bytes or line endings outside the edits'
     )
 
-    console.log('PASS large document source preservation: first rich edit stays local after chunked loading')
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await launchBuiltElectron({
+      profileDir: join(dir, 'reopen-profile'),
+      port: port + 1,
+      appArgs: [file]
+    })
+    await waitFor(
+      () => app.evaluate(`(() => {
+        const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        return !!editor && editor.textContent.includes('审计起点X') &&
+          editor.textContent.includes('紧凑列表二Y') &&
+          editor.textContent.includes('大文档审计终点')
+      })()`),
+      'cold reopen did not reconstruct both large-document edits in rich mode'
+    )
+    assert.equal(await toggleSource((expression) => app.evaluate(expression)), true, 'cold reopen source toggle was unavailable')
+    assert.equal(
+      await waitFor(
+        () => visibleSource((expression) => app.evaluate(expression)),
+        'cold reopen source editor did not open'
+      ),
+      expectedSaved.replace(/\r\n?/g, '\n'),
+      'cold reopen source did not preserve the verified large-document snapshot'
+    )
+    assert.equal(app.dialogs.length, 0, 'large-document cold reopen must not enter recovery')
+    assert.equal(await readFile(file, 'utf8'), expectedSaved, 'cold reopen changed the saved BOM/CRLF bytes')
+
+    console.log('PASS large document source preservation: committed rich/source edits survive save and cold reopen')
   } finally {
-    await stopBuiltElectron(app)
+    if (app) await stopBuiltElectron(app)
   }
 }
 
