@@ -24,15 +24,78 @@ const parseModels = (parseTables, values) => {
 }
 
 const unitKey = (unit) => `${unit.kind}:${unit.kind === 'break' ? '\n' : String(unit.value ?? '')}`
+
+const isSerializerPlaceholderCell = (cell, model) => Boolean(
+  cell?.presence === 'present' &&
+  cell.units?.length === 1 &&
+  cell.units[0].kind === 'break' &&
+  cell.contentRange &&
+  model.view.raw.slice(cell.contentRange.start, cell.contentRange.end) === '<br />'
+)
+
+const semanticUnitsForCell = (
+  cell,
+  model,
+  { serializerPlaceholder = false } = {}
+) => {
+  if (!cell || cell.presence === 'missing') return []
+  return serializerPlaceholder && isSerializerPlaceholderCell(cell, model)
+    ? []
+    : cell.units
+}
+
 // `canonical: true` is reserved for previousCanonical/nextCanonical supplied by
 // Milkdown's serializer, where an exact sole `<br />` denotes its empty-cell
 // placeholder. Authored source always uses `canonical: false`, so the same raw
 // spelling remains a semantic break and can never be folded by this comparison.
 const cellKey = (cell, model, canonical = false) => {
-  if (!cell || cell.presence === 'missing') return ''
-  if (canonical && isSerializerPlaceholderCell(cell, model)) return ''
-  return cell.units.map(unitKey).join('\u0000')
+  const units = semanticUnitsForCell(cell, model, { serializerPlaceholder: canonical })
+  return units.map(unitKey).join('\u0000')
 }
+
+const previousCanonicalCellUnits = (
+  authoredCell,
+  authoredModel,
+  previousCell,
+  previousModel
+) => semanticUnitsForCell(previousCell, previousModel, {
+  // The serializer spelling alone is ambiguous: a sole `<br />` can represent
+  // either an empty paragraph placeholder or a real hardbreak. The authored
+  // cell's parsed semantics provide provenance for the previous baseline.
+  serializerPlaceholder: semanticUnitsForCell(authoredCell, authoredModel).length === 0
+})
+
+const previousCanonicalCellKey = (...args) => (
+  previousCanonicalCellUnits(...args).map(unitKey).join('\u0000')
+)
+
+const nextCanonicalCellUnits = (
+  authoredCell,
+  authoredModel,
+  previousCell,
+  previousModel,
+  nextCell,
+  nextModel
+) => {
+  if (!isSerializerPlaceholderCell(nextCell, nextModel)) {
+    return semanticUnitsForCell(nextCell, nextModel)
+  }
+  const previousUnits = previousCanonicalCellUnits(
+    authoredCell,
+    authoredModel,
+    previousCell,
+    previousModel
+  )
+  // An unchanged ambiguous serializer spelling retains its established
+  // provenance. A newly emitted sole `<br />` remains an empty placeholder.
+  return isSerializerPlaceholderCell(previousCell, previousModel) && previousUnits.length
+    ? semanticUnitsForCell(nextCell, nextModel)
+    : []
+}
+
+const nextCanonicalCellKey = (...args) => (
+  nextCanonicalCellUnits(...args).map(unitKey).join('\u0000')
+)
 
 const rowActualCellCount = (row) => {
   let count = row.cells.length
@@ -73,7 +136,12 @@ const authoredMatchesPrevious = (authored, authoredModel, previous, previousMode
       const sourceCell = row.cells[column]
       const canonicalCell = previousRow.cells[column]
       const sourceKey = cellKey(sourceCell, authoredModel, false)
-      const canonicalKey = cellKey(canonicalCell, previousModel, true)
+      const canonicalKey = previousCanonicalCellKey(
+        sourceCell,
+        authoredModel,
+        canonicalCell,
+        previousModel
+      )
       if (sourceKey !== canonicalKey) return false
       if (
         sourceCell?.presence !== canonicalCell?.presence &&
@@ -84,14 +152,36 @@ const authoredMatchesPrevious = (authored, authoredModel, previous, previousMode
   })
 }
 
-const changedCellCoordinates = (previous, previousModel, next, nextModel) => {
+const changedCellCoordinates = (
+  authored,
+  authoredModel,
+  previous,
+  previousModel,
+  next,
+  nextModel
+) => {
   const changed = []
   for (let row = 0; row < previous.rows.length; row += 1) {
+    const source = authored.rows[row]
     const left = previous.rows[row]
     const right = next.rows[row]
     const columns = Math.max(left.cells.length, right.cells.length, previous.width)
     for (let column = 0; column < columns; column += 1) {
-      if (cellKey(left.cells[column], previousModel, true) !== cellKey(right.cells[column], nextModel, true)) {
+      const previousKey = previousCanonicalCellKey(
+        source?.cells[column],
+        authoredModel,
+        left.cells[column],
+        previousModel
+      )
+      const nextKey = nextCanonicalCellKey(
+        source?.cells[column],
+        authoredModel,
+        left.cells[column],
+        previousModel,
+        right.cells[column],
+        nextModel
+      )
+      if (previousKey !== nextKey) {
         changed.push({ row, column })
       }
     }
@@ -131,14 +221,6 @@ const unitsRaw = (model, units, start, end) => {
   if (!first || !last || first.start > last.end) return null
   return model.view.raw.slice(first.start, last.end)
 }
-
-const isSerializerPlaceholderCell = (cell, model) => Boolean(
-  cell?.presence === 'present' &&
-  cell.units?.length === 1 &&
-  cell.units[0].kind === 'break' &&
-  cell.contentRange &&
-  model.view.raw.slice(cell.contentRange.start, cell.contentRange.end) === '<br />'
-)
 
 export const normalizeGfmTableSerializerPlaceholders = (markdown, parseTables) => {
   const source = String(markdown ?? '')
@@ -403,13 +485,23 @@ export function mapGfmTableChange({
 
   const changedTables = []
   for (let index = 0; index < previousModel.tables.length; index += 1) {
+    const authoredTable = authoredModel.tables[index]
     const previousTable = previousModel.tables[index]
     const nextTable = nextModel.tables[index]
     const shapeEqual = tableShapeEqual(previousTable, nextTable)
-    if (
-      !shapeEqual ||
-      !tableDurableContentEqual(previousTable, previousModel, nextTable, nextModel)
-    ) changedTables.push({ index, shapeEqual })
+    const changedCells = shapeEqual && authoredTable
+      ? changedCellCoordinates(
+        authoredTable,
+        authoredModel,
+        previousTable,
+        previousModel,
+        nextTable,
+        nextModel
+      )
+      : []
+    if (!shapeEqual || !authoredTable || changedCells.length) {
+      changedTables.push({ index, shapeEqual, changedCells })
+    }
   }
 
   if (!changedTables.length) {
@@ -454,7 +546,7 @@ export function mapGfmTableChange({
   if (changedTables.length > 1) {
     return { status: 'unowned', reason: 'ambiguous-multiple-table-change' }
   }
-  const { index, shapeEqual } = changedTables[0]
+  const { index, shapeEqual, changedCells } = changedTables[0]
   const authoredTable = authoredModel.tables[index]
   const previousTable = previousModel.tables[index]
   const nextTable = nextModel.tables[index]
@@ -504,7 +596,6 @@ export function mapGfmTableChange({
     }
   }
 
-  const changedCells = changedCellCoordinates(previousTable, previousModel, nextTable, nextModel)
   if (changedCells.length !== 1) return { status: 'unowned', reason: 'ambiguous-table-cell-change' }
   const coordinate = changedCells[0]
   const authoredRow = authoredTable.rows[coordinate.row]
@@ -538,13 +629,32 @@ export function mapGfmTableChange({
   if (!authoredCell?.patchable || !previousCell.patchable || !nextCell.patchable) {
     return { status: 'unowned', reason: 'table-cell-unpatchable-token' }
   }
-  if (cellKey(authoredCell, authoredModel, false) !== cellKey(previousCell, previousModel, true)) {
+  if (cellKey(authoredCell, authoredModel, false) !== previousCanonicalCellKey(
+    authoredCell,
+    authoredModel,
+    previousCell,
+    previousModel
+  )) {
     return { status: 'unowned', reason: 'authored-previous-cell-token-mismatch' }
   }
-  const unitChange = commonUnitChange(previousCell.units, nextCell.units)
+  const previousUnits = previousCanonicalCellUnits(
+    authoredCell,
+    authoredModel,
+    previousCell,
+    previousModel
+  )
+  const nextUnits = nextCanonicalCellUnits(
+    authoredCell,
+    authoredModel,
+    previousCell,
+    previousModel,
+    nextCell,
+    nextModel
+  )
+  const unitChange = commonUnitChange(previousUnits, nextUnits)
   const rawStart = unitBoundary(authoredCell, unitChange.start, 'start')
   const rawEnd = unitBoundary(authoredCell, unitChange.previousEnd, 'end')
-  const rawReplacement = unitsRaw(nextModel, nextCell.units, unitChange.start, unitChange.nextEnd)
+  const rawReplacement = unitsRaw(nextModel, nextUnits, unitChange.start, unitChange.nextEnd)
   if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawStart > rawEnd || rawReplacement == null) {
     return { status: 'unowned', reason: 'unmappable-table-cell-unit-range' }
   }

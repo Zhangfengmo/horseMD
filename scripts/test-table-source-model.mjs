@@ -102,6 +102,36 @@ const mapFullRowEdit = (authored, previousCanonical, from, to) => {
   assert.ok(mapped.includes(shortRow), 'unrelated ragged row remains byte-identical')
 }
 
+{
+  const authored = '| A | B |\n| - | - |\n| <br> | stable |'
+  const previousCanonical = '| A | B |\n| - | - |\n| <br /> | stable |'
+  const nextCanonical = '| A | B |\n| - | - |\n|  | stable |'
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'patched', 'a canonical serializer spelling still owns an authored sole hardbreak')
+  assert.equal(result.kind, 'cell-text')
+  assert.equal(
+    result.markdown,
+    nextCanonical,
+    'deleting an authored sole hardbreak removes its source spelling instead of preserving stale bytes'
+  )
+}
+
+{
+  const authored = '| A | B |\n| - | - |\n|  | stable |'
+  const previousCanonical = '| A | B |\n| - | - |\n| <br /> | stable |'
+  const nextCanonical = '| A | B |\n| - | - |\n| <br> | stable |'
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'patched', 'an empty-cell placeholder can become a real sole hardbreak')
+  assert.equal(result.kind, 'cell-text')
+  assert.notEqual(result.markdown, authored, 'the hardbreak insertion must change the durable source')
+  const materialized = parseTables(result.markdown).tables[0].rows[1].cells[0]
+  assert.equal(
+    result.markdown.slice(materialized.contentRange.start, materialized.contentRange.end),
+    '<br>',
+    'inserting a sole hardbreak materializes its authored source spelling instead of leaving the cell empty'
+  )
+}
+
 for (const delimiter of ['| - | -- | - | -- | - |', '| -- | - | -- | - | -- |']) {
   const authored = [
     '| one | two | three | four | five |',
