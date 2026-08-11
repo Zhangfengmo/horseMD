@@ -47,10 +47,8 @@ import {
   preserveUniquelyAnchoredTextChange
 } from './lib/markdown-preservation/regions.js'
 import {
-  hasTableStructureChange,
+  mapTableSourceChange,
   normalizeEmptyTableCells,
-  preserveTableTextChange,
-  replaceChangedTableBlock
 } from './lib/markdown-preservation/tables.js'
 
 export {
@@ -87,9 +85,14 @@ export const generatedScratchMarkdown = (canonical) => {
 // localized delta. Structural edits are bounded to a list, table, or touched
 // lines; an ambiguous mapping keeps the authored source instead of normalizing
 // the complete document.
-export function preserveRichMarkdownSource(source, previousCanonical, nextCanonical) {
+export function preserveRichMarkdownSource(source, previousCanonical, nextCanonical, options = {}) {
   const sourceMarkdown = String(source || '')
-  const result = preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextCanonical)
+  const result = preserveRichMarkdownSourceCore(
+    sourceMarkdown,
+    previousCanonical,
+    nextCanonical,
+    options.parseTables
+  )
   // Hard boundary invariant: an internal empty-paragraph `<br />` placeholder
   // must NEVER reach authored source, no matter which heuristic path produced
   // the result. Enforce it here as a post-condition on every output, so a
@@ -180,7 +183,7 @@ const preserveAllDivergedListChanges = ({ source, previous, next }) => {
   }
 }
 
-function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextCanonical) {
+function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextCanonical, parseTables) {
   // Empty list items have a Crepe-only `<br />` placeholder. Normalize it on
   // both sides of the delta before source mapping so a normal rich-text flow
   // (paragraph → Enter → `- ` → text) never persists that implementation
@@ -194,7 +197,10 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
         // An empty source has no pre-existing escape spelling to protect. This
         // is the same all-new authoring boundary as generatedScratchMarkdown.
         markdown: canonicalFreshTextToSource(
-          normalizeEmptyTableCells(compactGeneratedListSpacing(withoutStandaloneEmptyBlockLines(next)))
+          normalizeEmptyTableCells(
+            compactGeneratedListSpacing(withoutStandaloneEmptyBlockLines(next)),
+            parseTables
+          )
         ),
         preserved: true,
         reason: 'new-document'
@@ -283,6 +289,30 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
   if (compactGeneratedListSpacing(previous) === compactGeneratedListSpacing(next)) {
     return { markdown: sourceMarkdown, preserved: true, reason: 'formatting-only-drift' }
   }
+  const tableChange = mapTableSourceChange({
+    authored: sourceMarkdown,
+    previousCanonical: previous,
+    nextCanonical: next,
+    change: { start, previousEnd, nextEnd },
+    parseTables
+  })
+  if (tableChange.status === 'patched') {
+    return {
+      markdown: tableChange.markdown,
+      preserved: true,
+      reason: tableChange.kind === 'table-structure'
+        ? 'table-structure'
+        : `table-${tableChange.kind}`
+    }
+  }
+  if (tableChange.status === 'unowned') {
+    return {
+      markdown: sourceMarkdown,
+      preserved: false,
+      blocked: true,
+      reason: tableChange.reason
+    }
+  }
   const trailingEmptyPreserved = preserveTrailingEmptyBlock({
     source: sourceMarkdown,
     previous,
@@ -359,15 +389,6 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     nextEnd
   })
   if (emptyListItemTextPreserved) return emptyListItemTextPreserved
-  const tableTextPreserved = preserveTableTextChange({
-    source: sourceMarkdown,
-    previous,
-    next,
-    start,
-    previousEnd,
-    nextEnd
-  })
-  if (tableTextPreserved) return tableTextPreserved
   if (sourceVisible.text !== previousVisible.text) {
     // remark parses `- 1. 甲乙` as a nested ordered list, so the canonical
     // visible stream drops the `1. ` item text while the authored source
@@ -503,37 +524,6 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     if (visibleDelete) return visibleDelete
     return { markdown: sourceMarkdown, preserved: false, reason: 'visible-stream-mismatch' }
   }
-  const tableStructureChanged = hasTableStructureChange({
-    previous,
-    next,
-    start,
-    previousEnd,
-    nextEnd
-  })
-  if (tableStructureChanged) {
-    const tablePreserved = replaceChangedTableBlock({
-      source: sourceMarkdown,
-      previous,
-      next,
-      start,
-      previousEnd,
-      nextEnd
-    })
-    if (tablePreserved) return tablePreserved
-    const linesPreserved = preserveChangedLineRegion({
-      source: sourceMarkdown,
-      previous,
-      next,
-      start,
-      previousEnd,
-      nextEnd,
-      reason: 'table-line-change',
-      transformReplacement: normalizeEmptyTableCells
-    })
-    if (linesPreserved) return linesPreserved
-    return { markdown: sourceMarkdown, preserved: false, reason: 'unmapped-table-change' }
-  }
-
   const listStructureChanged = hasListStructureChange({
     previous,
     next,
@@ -620,7 +610,8 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
       markdown: withoutStandaloneEmptyBlockLines(normalizeEmptyTableCells(
         sourceMarkdown.slice(0, start) +
           translatedReplacement +
-          sourceMarkdown.slice(previousEnd)
+          sourceMarkdown.slice(previousEnd),
+        parseTables
       )),
       preserved: true,
       reason: 'exact-canonical-baseline'

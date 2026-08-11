@@ -36,6 +36,7 @@ const paragraph = (value) => schema.node('paragraph', null, text(value))
 const heading = (value, level = 1) => schema.node('heading', { level }, text(value))
 const codeBlock = (value) => schema.node('code_block', null, text(value))
 const cell = (value) => schema.node('table_cell', null, paragraph(value))
+const richCell = (children) => schema.node('table_cell', null, schema.node('paragraph', null, children))
 const row = (...values) => schema.node('table_row', null, values.map(cell))
 const table = (...rows) => schema.node('table', null, rows)
 const listItem = (value) => schema.node('list_item', null, paragraph(value))
@@ -219,6 +220,58 @@ const cases = []
     pmOccurrence: 1
   })
   cases.push('table cells and inline code')
+}
+
+{
+  const markdown = [
+    '| Item | Note |',
+    '| --- | --- |',
+    '| a \\| b<br>tail | stable |'
+  ].join('\n')
+  const pmDoc = doc(table(
+    row('Item', 'Note'),
+    schema.node('table_row', null, [
+      richCell([
+        text('a | b'),
+        schema.node('hard_break'),
+        text('tail')
+      ]),
+      cell('stable')
+    ])
+  ))
+  const cellStart = nthTextblockPos(pmDoc, 'a | btail')
+  const escapedPipeRaw = markdown.indexOf('\\|')
+  const pipePm = cellStart + 'a '.length
+  assert.equal(
+    markdownOffsetToPmPos(markdown, escapedPipeRaw, pmDoc, remark)?.pos,
+    pipePm,
+    'escaped pipe: backslash offset maps to the one decoded PM character'
+  )
+  assert.equal(
+    markdownOffsetToPmPos(markdown, escapedPipeRaw + 1, pmDoc, remark)?.pos,
+    pipePm,
+    'escaped pipe: pipe offset maps to the same decoded PM character'
+  )
+  assert.equal(
+    pmPosToMarkdownOffset(markdown, pipePm, pmDoc, remark),
+    escapedPipeRaw,
+    'escaped pipe: PM position maps to the start of its two-byte authored unit'
+  )
+
+  const breakRaw = markdown.indexOf('<br>')
+  const breakPm = cellStart + 'a | b'.length
+  assert.equal(markdownOffsetToPmPos(markdown, breakRaw + 2, pmDoc, remark)?.pos, breakPm)
+  assert.equal(pmPosToMarkdownOffset(markdown, breakPm, pmDoc, remark), breakRaw)
+  assertTextRoundTrip({
+    label: 'table text after escaped pipe and HTML break',
+    markdown,
+    pmDoc,
+    token: 'tail',
+    local: 3,
+    pmText: 'a | btail',
+    pmExtraBefore: 1
+  })
+  cases.push('table escaped pipe and HTML break raw units')
 }
 
 {

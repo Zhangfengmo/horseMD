@@ -1,3 +1,5 @@
+import { createGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+
 const nodeStart = (node) => node?.position?.start?.offset
 const nodeEnd = (node) => node?.position?.end?.offset
 
@@ -103,8 +105,66 @@ const mdBlock = (markdown, node, kind = node.type) => {
   }
 }
 
-const collectMdBlocks = (markdown, tree) => {
+const tableParsers = new WeakMap()
+
+const tableParserFor = (remark) => {
+  if (!remark || (typeof remark !== 'object' && typeof remark !== 'function')) return null
+  let parser = tableParsers.get(remark)
+  if (!parser) {
+    parser = createGfmTableSourceParser(remark)
+    tableParsers.set(remark, parser)
+  }
+  return parser
+}
+
+const tableUnitItems = (cell) => {
+  const items = []
+  for (const unit of cell.units || []) {
+    if (unit.kind === 'break') {
+      items.push({ rawStart: unit.range.start, rawEnd: unit.range.end, atom: true })
+      continue
+    }
+    if (unit.kind !== 'char') continue
+    const length = Math.max(1, String(unit.value ?? '').length)
+    for (let index = 0; index < length; index += 1) {
+      items.push({ rawStart: unit.range.start, rawEnd: unit.range.end })
+    }
+  }
+  return items
+}
+
+const tableCellBlock = (markdown, cell, row, mdastCell) => {
+  if (cell?.presence === 'present' && cell.patchable && cell.range) {
+    const text = (cell.units || [])
+      .filter((unit) => unit.kind === 'char')
+      .map((unit) => unit.value || '')
+      .join('')
+    return {
+      kind: 'tableCell',
+      start: cell.range.start,
+      end: cell.range.end,
+      text,
+      matchText: text,
+      items: tableUnitItems(cell)
+    }
+  }
+  const fallback = mdBlock(markdown, mdastCell, 'tableCell')
+  if (fallback) return fallback
+  const offset = row?.range?.end
+  if (!Number.isFinite(offset)) return null
+  return {
+    kind: 'tableCell',
+    start: offset,
+    end: offset,
+    text: '',
+    matchText: '',
+    items: []
+  }
+}
+
+const collectMdBlocks = (markdown, tree, tableModel = null) => {
   const blocks = []
+  let tableIndex = 0
   const walk = (node) => {
     if (!node) return
     if (node.type === 'paragraph') {
@@ -129,6 +189,18 @@ const collectMdBlocks = (markdown, tree) => {
     if (node.type === 'thematicBreak') {
       const b = mdBlock(markdown, node, 'atom')
       if (b) blocks.push(b)
+      return
+    }
+    if (node.type === 'table' && tableModel?.tables?.[tableIndex]) {
+      const table = tableModel.tables[tableIndex++]
+      for (let rowIndex = 0; rowIndex < table.rows.length; rowIndex += 1) {
+        const row = table.rows[rowIndex]
+        const mdastRow = node.children?.[rowIndex]
+        for (let column = 0; column < row.cells.length; column += 1) {
+          const block = tableCellBlock(markdown, row.cells[column], row, mdastRow?.children?.[column])
+          if (block) blocks.push(block)
+        }
+      }
       return
     }
     if (node.type === 'tableCell') {
@@ -413,12 +485,14 @@ const pmPosFromItemIndex = (block, index) => {
 export function pmPosToMarkdownOffset(markdown, pmPos, doc, remark) {
   if (!markdown || !doc || !remark) return null
   let tree
+  let tableModel
   try {
+    tableModel = tableParserFor(remark)?.(markdown) || null
     tree = remark.runSync(remark.parse(markdown), markdown)
   } catch {
     return null
   }
-  const mdBlocks = collectMdBlocks(markdown, tree)
+  const mdBlocks = collectMdBlocks(markdown, tree, tableModel)
   const pmBlocks = collectPmBlocks(doc)
   const pmIndex = pmBlockIndexAtPos(pmBlocks, pmPos)
   if (pmIndex < 0) return null
@@ -434,12 +508,14 @@ export function pmPosToMarkdownOffset(markdown, pmPos, doc, remark) {
 export function markdownOffsetToPmPos(markdown, rawOffset, doc, remark) {
   if (!markdown || !doc || !remark) return null
   let tree
+  let tableModel
   try {
+    tableModel = tableParserFor(remark)?.(markdown) || null
     tree = remark.runSync(remark.parse(markdown), markdown)
   } catch {
     return null
   }
-  const mdBlocks = collectMdBlocks(markdown, tree)
+  const mdBlocks = collectMdBlocks(markdown, tree, tableModel)
   const pmBlocks = collectPmBlocks(doc)
   const mdIndex = nearestMdBlockIndex(mdBlocks, rawOffset)
   if (mdIndex < 0) return null

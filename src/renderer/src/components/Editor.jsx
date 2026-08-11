@@ -54,6 +54,7 @@ import {
   areSourceDocumentsEquivalent,
   mapPlainTextTransactionsToSource
 } from '../lib/source-transaction-sync.js'
+import { createGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
 
 // Every mounted rich editor registers itself here. A rich-text tab stays mounted
 // after its first activation, so several editors (and several Crepe selection
@@ -306,6 +307,13 @@ export default function Editor({
       pendingRichBlockKey = null
     }
     let crepe
+    let parseTables
+    const preserveSource = (source, previousCanonical, nextCanonical) => {
+      if (!parseTables) {
+        parseTables = createGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+      }
+      return preserveRichMarkdownSource(source, previousCanonical, nextCanonical, { parseTables })
+    }
     const parseAdapter = createEditorParseAdapter(() => {
       if (!crepe) return null
       return crepe.editor.ctx.get(parserCtx)
@@ -429,7 +437,7 @@ export default function Editor({
           : false
         if (!committed) {
           commitCanonicalResult(
-            preserveRichMarkdownSource(
+            preserveSource(
               lastMarkdownRef.current,
               canonicalMarkdownRef.current,
               canonical
@@ -455,7 +463,7 @@ export default function Editor({
         const canonical = canonicalForSource(markdown)
         if (canonical === canonicalMarkdownRef.current) return
         commitCanonicalResult(
-          preserveRichMarkdownSource(
+          preserveSource(
             lastMarkdownRef.current,
             canonicalMarkdownRef.current,
             canonical
@@ -478,7 +486,7 @@ export default function Editor({
           let source = lastMarkdownRef.current
           let previousCanonical = canonicalMarkdownRef.current
           if (canonical !== previousCanonical) {
-            const staged = preserveRichMarkdownSource(source, previousCanonical, canonical)
+            const staged = preserveSource(source, previousCanonical, canonical)
             if (staged.preserved === false) return null
             source = staged.markdown
             previousCanonical = canonical
@@ -819,7 +827,7 @@ export default function Editor({
             : false
           if (!committed) {
             commitCanonicalResult(
-              preserveRichMarkdownSource(
+              preserveSource(
                 sourceBeforeConversion,
                 canonicalBeforeConversion,
                 canonical
@@ -1044,7 +1052,7 @@ export default function Editor({
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical
               ? { markdown: pendingList.convertedSource }
-              : preserveRichMarkdownSource(
+              : preserveSource(
                   pendingList.convertedSource,
                   pendingList.convertedCanonical,
                   canonical
@@ -1070,20 +1078,20 @@ export default function Editor({
                 : null
               preserved = markdown
                 ? { markdown }
-                : preserveRichMarkdownSource(
+                : preserveSource(
                     pendingList.source,
                     pendingList.previous,
                     canonical
                   )
             } catch {
-              preserved = preserveRichMarkdownSource(
+              preserved = preserveSource(
                 pendingList.source,
                 pendingList.previous,
                 canonical
               )
             }
           } else {
-            preserved = preserveRichMarkdownSource(
+            preserved = preserveSource(
               lastMarkdownRef.current,
               canonicalMarkdownRef.current,
               canonical
@@ -1498,6 +1506,7 @@ export default function Editor({
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
           sourceCommitter,
+          preserveSource,
           prepareMarkdown: parseAdapter.prepare,
           canonicalForSource,
           setBlock,

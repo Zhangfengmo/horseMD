@@ -5,8 +5,7 @@ import { replaceAll } from '@milkdown/utils'
 import { applyReviewMarkupInView } from './editor-review.js'
 import {
   generatedScratchMarkdown,
-  preserveGeneratedBulletMarkers,
-  preserveRichMarkdownSource
+  preserveGeneratedBulletMarkers
 } from '../markdown-source-preservation.js'
 import { markdownOffsetToPmPos, pmPosToMarkdownOffset } from './editor-source-map.js'
 import { createPdfSourceFromEditor } from './editor-pdf-content.js'
@@ -34,6 +33,7 @@ export function createEditorApi({
   generatedScratchRef,
   getGeneratedScratchMarkdown,
   sourceCommitter,
+  preserveSource,
   prepareMarkdown,
   canonicalForSource,
   setBlock,
@@ -222,7 +222,7 @@ export function createEditorApi({
             preserved: true,
             reason: 'generated-scratch-flush'
           }
-        : preserveRichMarkdownSource(
+        : preserveSource(
             lastMarkdownRef.current,
             canonicalMarkdownRef.current,
             canonical

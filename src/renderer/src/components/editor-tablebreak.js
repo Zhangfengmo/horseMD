@@ -40,7 +40,12 @@ export function brToBreakRemarkPlugin() {
       if (!node || !Array.isArray(node.children)) return
       if (PHRASING_PARENTS.has(node.type)) {
         node.children = node.children.map((c) =>
-          c && c.type === 'html' && BR_RE.test((c.value || '').trim()) ? { type: 'break' } : c
+          c && c.type === 'html' && BR_RE.test((c.value || '').trim())
+            ? {
+                type: 'break',
+                ...(c.position ? { position: { ...c.position } } : {})
+              }
+            : c
         )
       }
       node.children.forEach(walk)

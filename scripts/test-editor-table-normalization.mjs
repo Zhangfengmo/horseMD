@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import { normalizeRaggedGfmTables } from '../src/renderer/src/components/editor-table-normalization.js'
+import { brToBreakRemarkPlugin } from '../src/renderer/src/components/editor-tablebreak.js'
 
 const remark = unified().use(remarkParse).use(remarkGfm)
 const markdown = [
@@ -64,6 +65,19 @@ assert.deepEqual(
 assert.ok(
   overwideRow.children.every((entry, index) => entry === overwideCells[index]),
   'normalization does not replace or move existing overwide cells'
+)
+
+const breakTree = remark.parse('| A | B |\n| - | - |\n| before<br>after | stable |')
+const breakCell = breakTree.children[0].children[1].children[0]
+const htmlBreak = breakCell.children.find((node) => node.type === 'html')
+assert.ok(htmlBreak?.position, 'the parser proves the authored <br> range before transforms run')
+const expectedBreakPosition = structuredClone(htmlBreak.position)
+brToBreakRemarkPlugin()(breakTree)
+const transformedBreak = breakCell.children.find((node) => node.type === 'break')
+assert.deepEqual(
+  transformedBreak?.position,
+  expectedBreakPosition,
+  'the HTML-break transform retains the exact parser-owned raw position'
 )
 
 console.log('PASS editor table normalization: ragged rows pad right and overwide rows remain intact')

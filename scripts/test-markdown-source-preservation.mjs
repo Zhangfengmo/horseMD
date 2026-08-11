@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import remarkGfm from 'remark-gfm'
+import remarkParse from 'remark-parse'
+import { unified } from 'unified'
 import {
   generatedScratchMarkdown,
   preserveGeneratedBulletMarkers,
@@ -10,6 +13,7 @@ import {
 } from '../src/renderer/src/markdown-source-preservation.js'
 import { sourceVisibleIndex } from '../src/renderer/src/mode-visible-map.js'
 import { commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
+import { createGfmTableSourceParser } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
 import {
   preserveLocallyAlignedTextChange,
   preserveUniquelyAnchoredTextChange
@@ -539,7 +543,7 @@ const tableCanonical = tableSource
 const tableNext = tableCanonical.replace('| old-a | old-b |', '| old-a | old-b |\n| new-a | new-b |')
 const tableChanged = preserveRichMarkdownSource(tableSource, tableCanonical, tableNext)
 assert.equal(tableChanged.preserved, true)
-assert.equal(tableChanged.reason, 'table-block-change')
+assert.equal(tableChanged.reason, 'table-structure')
 assert.equal(tableChanged.markdown, [
   '# 保持标题格式',
   '',
@@ -580,11 +584,43 @@ const tableRealignedTextEdit = preserveRichMarkdownSource(
   tableCanonicalRealigned,
   tableCanonicalRealignedNext
 )
-assert.equal(tableRealignedTextEdit.reason, 'table-text-change')
+assert.equal(tableRealignedTextEdit.reason, 'table-cell-text')
 assert.equal(
   tableRealignedTextEdit.markdown,
   'A | B\n:--- | ---:\nTABLE_CELLX | second<br>line',
   'serializer column padding changes must not reformat an authored table during a cell text edit'
+)
+
+const configuredTableParser = createGfmTableSourceParser(
+  unified().use(remarkParse).use(remarkGfm)
+)
+let configuredTableParseCalls = 0
+const injectedTableParser = (markdown) => {
+  configuredTableParseCalls += 1
+  return configuredTableParser(markdown)
+}
+const injectedTableEdit = preserveRichMarkdownSource(
+  '| A | B |\n| - | - |\n| source | stable |',
+  '| A | B |\n| - | - |\n| source | stable |',
+  '| A | B |\n| - | - |\n| sourceX | stable |',
+  { parseTables: injectedTableParser }
+)
+assert.equal(injectedTableEdit.reason, 'table-cell-text')
+assert.ok(configuredTableParseCalls >= 3, 'the four-argument API routes table ownership through the injected parser')
+
+const unownedTableEdit = preserveRichMarkdownSource(
+  '| A | B |\n| - | - |\n| authored | stable |',
+  '| A | B |\n| - | - |\n| different | stable |',
+  '| A | B |\n| - | - |\n| different | typed |',
+  { parseTables: injectedTableParser }
+)
+assert.equal(unownedTableEdit.preserved, false)
+assert.equal(unownedTableEdit.blocked, true)
+assert.equal(unownedTableEdit.reason, 'authored-previous-table-mismatch')
+assert.equal(
+  unownedTableEdit.markdown,
+  '| A | B |\n| - | - |\n| authored | stable |',
+  'an unowned table edit must not fall through to the visible or generic line mappers'
 )
 
 const listSource = [

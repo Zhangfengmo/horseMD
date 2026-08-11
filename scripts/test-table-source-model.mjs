@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import {
+  buildGfmTableSourceModel,
   createGfmTableSourceParser,
   mapGfmTableChange
 } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
@@ -120,4 +121,237 @@ for (const delimiter of ['| - | -- | - | -- | - |', '| -- | - | -- | - | -- |'])
   assert.ok(mapped.includes(shortRow), 'unrelated ragged row remains byte-identical')
 }
 
-console.log('PASS table source model: ragged authored rows survive neighboring GFM table edits')
+{
+  const authored = [
+    '\uFEFFbefore\r',
+    '\r',
+    '| one | two | three |\r',
+    '| :- | -- | -: |\r',
+    '| a \\| b<br>tail | second | third |\r',
+    '\r',
+    'after\r',
+    ''
+  ].join('\n')
+  const parsed = parseTables(authored)
+  assert.equal(parsed.view.raw, authored, 'the source view retains BOM + CRLF bytes exactly')
+  assert.equal(parsed.view.text, authored.slice(1).replaceAll('\r\n', '\n'), 'the parser view strips BOM and normalizes CRLF')
+  assert.equal(parsed.view.rawOffset(0), 1, 'normalized offset zero maps after the authored BOM')
+  assert.deepEqual(
+    parsed.view.rawRange({ start: { offset: 0 }, end: { offset: 6 } }),
+    { start: 1, end: 7 },
+    'mdast positions map back to authored raw offsets'
+  )
+
+  const table = parsed.tables[0]
+  assert.equal(authored.slice(table.range.start, table.range.end), [
+    '| one | two | three |',
+    '| :- | -- | -: |',
+    '| a \\| b<br>tail | second | third |'
+  ].join('\r\n'), 'table range maps through BOM + CRLF without consuming surrounding bytes')
+  assert.equal(
+    authored.slice(table.delimiterRange.start, table.delimiterRange.end),
+    '| :- | -- | -: |',
+    'delimiterRange is the exact authored delimiter line even though mdast has no delimiter row'
+  )
+  assert.deepEqual(table.align, ['left', null, 'right'], 'alignment comes from the parsed table node')
+
+  const target = table.rows[1].cells[0]
+  assert.equal(authored.slice(target.contentRange.start, target.contentRange.end), 'a \\| b<br>tail')
+  assert.equal(target.patchable, true, 'escaped pipes and HTML breaks have exact parser-proven units')
+  assert.equal(target.units.map((unit) => unit.kind === 'break' ? '\n' : unit.value).join(''), 'a | b\ntail')
+  const pipe = target.units.find((unit) => unit.kind === 'char' && unit.value === '|')
+  const hardBreak = target.units.find((unit) => unit.kind === 'break')
+  assert.equal(authored.slice(pipe.range.start, pipe.range.end), '\\|', 'escaped pipe is one unit owning both raw characters')
+  assert.equal(authored.slice(hardBreak.range.start, hardBreak.range.end), '<br>', 'break unit preserves the authored HTML spelling')
+
+  const nextCanonical = parsed.view.text.replace('tail', 'tailX')
+  const mapped = mapGfmTableChange({
+    authored,
+    previousCanonical: parsed.view.text,
+    nextCanonical,
+    parseTables
+  })
+  assert.equal(mapped.status, 'patched')
+  assert.equal(mapped.kind, 'cell-text')
+  assert.equal(mapped.markdown, authored.replace('tail', 'tailX'), 'cell patch preserves BOM, CRLF, escape and break bytes')
+}
+
+{
+  const authored = '| A | B |\n| - | - |\n| &amp; 😀 \\* | stable |'
+  const cell = parseTables(authored).tables[0].rows[1].cells[0]
+  assert.equal(cell.patchable, true, 'exact entity and backslash decoding remains patchable')
+  assert.equal(cell.units.map((unit) => unit.value).join(''), '& 😀 *')
+  const entity = cell.units.find((unit) => unit.value === '&')
+  const emoji = cell.units.find((unit) => unit.value === '😀')
+  const escaped = cell.units.find((unit) => unit.value === '*')
+  assert.equal(authored.slice(entity.range.start, entity.range.end), '&amp;')
+  assert.equal(authored.slice(emoji.range.start, emoji.range.end), '😀', 'one Unicode character owns its complete UTF-16 raw range')
+  assert.equal(authored.slice(escaped.range.start, escaped.range.end), '\\*')
+}
+
+{
+  const authored = [
+    '| one | two | three |',
+    '| --- | --- | --- |',
+    '| short |',
+    '| explicit empty |  |  |'
+  ].join('\n')
+  const parsed = parseTables(authored)
+  const short = parsed.tables[0].rows[1]
+  const explicit = parsed.tables[0].rows[2]
+  assert.deepEqual(short.cells.map((cell) => cell.presence), ['present', 'missing', 'missing'])
+  assert.equal(short.cells[1].range, null, 'virtual missing cells never invent a source range')
+  assert.equal(short.cells[1].contentRange, null, 'virtual missing cells never invent a content range')
+  assert.deepEqual(explicit.cells.map((cell) => cell.presence), ['present', 'present', 'present'])
+  assert.ok(explicit.cells[1].range && explicit.cells[1].contentRange, 'an explicit empty cell owns a real authored range')
+  assert.equal(explicit.cells[1].units.length, 0, 'explicit empty is semantically empty but distinct from missing metadata')
+}
+
+for (const fixture of [
+  {
+    label: 'outer pipes',
+    authored: '| one | two | three |\n| --- | --- | --- |\n| short |',
+    previous: '| one | two | three |\n| --- | --- | --- |\n| short |  |  |',
+    next: '| one | two | three |\n| --- | --- | --- |\n| short |  | typed |',
+    expected: '| one | two | three |\n| --- | --- | --- |\n| short |  | typed |'
+  },
+  {
+    label: 'no outer pipes',
+    authored: 'one | two | three\n--- | --- | ---\nshort',
+    previous: 'one | two | three\n--- | --- | ---\nshort |  | ',
+    next: 'one | two | three\n--- | --- | ---\nshort |  | typed',
+    expected: 'one | two | three\n--- | --- | ---\nshort |  | typed'
+  }
+]) {
+  const result = mapGfmTableChange({
+    authored: fixture.authored,
+    previousCanonical: fixture.previous,
+    nextCanonical: fixture.next,
+    parseTables
+  })
+  assert.equal(result.status, 'patched', `${fixture.label}: editing a virtual trailing cell is table-owned`)
+  assert.equal(result.kind, 'materialized-cell', `${fixture.label}: missing cells are materialized deliberately`)
+  assert.equal(result.markdown, fixture.expected, `${fixture.label}: the row's outer-pipe style is preserved`)
+  assert.ok(result.sourceRange && result.sourceRange.start <= result.sourceRange.end)
+}
+
+{
+  const authored = [
+    'before-sentinel',
+    '| one | two |',
+    '| :-- | --: |',
+    '| old | row |',
+    '',
+    'after-sentinel'
+  ].join('\n')
+  const previousCanonical = authored
+  const nextCanonical = [
+    'before-sentinel',
+    '| one | two |',
+    '| --- | ---: |',
+    '| old | row |',
+    '| new | <br /> |',
+    '',
+    'after-sentinel'
+  ].join('\n')
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'patched', 'row/alignment changes replace their owning parsed table')
+  assert.equal(result.kind, 'table-structure')
+  assert.equal(result.markdown, [
+    'before-sentinel',
+    '| one | two |',
+    '| --- | ---: |',
+    '| old | row |',
+    '| new |  |',
+    '',
+    'after-sentinel'
+  ].join('\n'), 'structural replacement is table-bounded and removes only the serializer empty-cell placeholder')
+  assert.equal(
+    authored.slice(result.sourceRange.start, result.sourceRange.end),
+    '| one | two |\n| :-- | --: |\n| old | row |',
+    'structural sourceRange owns only the old table block'
+  )
+}
+
+{
+  const authored = '| one | two |\n| --- | --- |\n| authored | stable |'
+  const previousCanonical = '| one | two |\n| --- | --- |\n| different | stable |'
+  const nextCanonical = '| one | two |\n| --- | --- |\n| different | typed |'
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'unowned', 'a pre-existing authored/canonical token mismatch is never guessed through')
+  assert.match(result.reason, /mismatch|ambiguous|unowned/)
+}
+
+{
+  const authored = [
+    '| a | b |',
+    '| - | - |',
+    '| first | stable |',
+    '',
+    '| c | d |',
+    '| - | - |',
+    '| second | stable |'
+  ].join('\n')
+  const nextCanonical = authored.replace('first', 'firstX').replace('second', 'secondX')
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical,
+    parseTables
+  })
+  assert.equal(result.status, 'unowned', 'one publication changing multiple parsed tables fails closed atomically')
+  assert.match(result.reason, /multiple|ambiguous/)
+}
+
+{
+  const authored = '| a | b |\n| - | - |\n| value | stable |'
+  const ambiguousParseTables = (markdown) => {
+    const parsed = parseTables(markdown)
+    return parsed.tables.length
+      ? { ...parsed, tables: [parsed.tables[0], { ...parsed.tables[0], index: 1 }] }
+      : parsed
+  }
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical: authored.replace('value', 'typed'),
+    parseTables: ambiguousParseTables
+  })
+  assert.equal(result.status, 'unowned', 'overlapping/duplicated parser ownership fails closed')
+  assert.match(result.reason, /ambiguous|parser|model/)
+}
+
+{
+  const authored = 'before\n\n| a | b |\n| - | - |\n| value | stable |\n'
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical: authored.replace('before', 'after'),
+    parseTables
+  })
+  assert.deepEqual(result, { status: 'not-table' }, 'a prose-only edit is not claimed by a neighboring table')
+}
+
+{
+  let parseCalls = 0
+  const parseOnlyRemark = {
+    parse(markdown) {
+      parseCalls += 1
+      return remark.parse(markdown)
+    },
+    runSync() {
+      throw new Error('table source ownership must never run transforms')
+    }
+  }
+  const cached = createGfmTableSourceParser(parseOnlyRemark)
+  const markdown = '| one | two |\n| - | - |\n| a | b |'
+  assert.equal(cached(markdown).tables.length, 1)
+  assert.equal(cached(markdown).tables.length, 1)
+  assert.equal(parseCalls, 1, 'the exact-string LRU reuses one parse result without invoking runSync')
+  cached(`${markdown}\n`)
+  assert.equal(parseCalls, 2, 'a byte-distinct source string gets its own parse result')
+  assert.equal(buildGfmTableSourceModel(markdown, parseOnlyRemark).tables.length, 1)
+  assert.equal(parseCalls, 3, 'the direct builder also calls remark.parse')
+}
+
+console.log('PASS table source model: AST-owned cells preserve authored bytes and fail closed on ambiguity')
