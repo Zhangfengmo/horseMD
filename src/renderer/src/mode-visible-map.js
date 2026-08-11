@@ -259,7 +259,11 @@ const sourceVisibleIndex = (md) => {
   let rawPos = 0
   let inFence = false
   let inTable = false
-  const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '')
+  // GFM allows a single dash per delimiter cell (`| - |`), and the serializer
+  // emits width-fitted runs (`| -- |`); requiring three dashes let canonical
+  // delimiter rows leak into the visible stream as text, permanently
+  // desyncing the two streams for every table document.
+  const isTableSeparator = (line) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line || '')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (line === '\n') {

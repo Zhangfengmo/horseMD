@@ -86,6 +86,18 @@ check('display math spellings pass', () => {
   assert.ok(roundTripPreserved('$$x^2$$\n', '$$\nx^2\n$$\n'))
 })
 
+check('non-rectangular table rows pass (GFM padding)', () => {
+  // GFM pads short rows with empty cells and ignores excess cells; the
+  // editor's table model is always rectangular, so its canonical spells out
+  // every cell while authored rows may omit trailing ones.
+  assert.ok(roundTripPreserved('| a | b |\n| - | - |\n| c |\n', '| a | b |\n| - | - |\n| c |  |\n'))
+  assert.ok(roundTripPreserved(
+    '| x | y | z |\n| - | - | - |\n| 1 |\n| 2 | 3 | 4 |\n',
+    '| x | y | z |\n| - | - | - |\n| 1 |  |  |\n| 2 | 3 | 4 |\n'
+  ))
+  assert.ok(roundTripPreserved('| a | b |\n| - | - |\n| c | d | e |\n', '| a | b |\n| - | - |\n| c | d |\n'))
+})
+
 check('empty table cell <br /> spelling passes', () => {
   // An authored `<br />`-only cell is HorseMD's spelling for an empty cell
   // (normalizeEmptyTableCells); the canonical serializes it as truly empty.

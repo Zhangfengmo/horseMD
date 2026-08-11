@@ -33,6 +33,7 @@
     "test:rich-source-app-parser-ui": "node scripts/test-rich-source-app-parser-ui.mjs",
     "test:list-backspace-exit-ui": "node scripts/test-list-backspace-exit-ui.mjs",
     "test:sync-recovery-ui": "node scripts/test-sync-recovery-ui.mjs",
+    "test:table-ragged-fill-ui": "node scripts/test-table-ragged-fill-ui.mjs",
     "test:source-text-fidelity": "node scripts/test-source-text-fidelity.mjs",
     "test:background-ui": "node scripts/test-background-cdp-ui.mjs",
     "test:source-fidelity-ui": "node scripts/test-source-fidelity-audit-ui.mjs",
