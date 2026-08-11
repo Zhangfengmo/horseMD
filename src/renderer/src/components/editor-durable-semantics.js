@@ -42,7 +42,9 @@ const nodeContracts = {
             !String(inline.text || '').trim()
           ))
         )
-        return invisibleParagraph ? { type: 'paragraph' } : child
+        if (!invisibleParagraph) return child
+        const { content: _invisibleContent, ...paragraph } = child
+        return paragraph
       })
     }
   },
@@ -130,17 +132,24 @@ const projectValue = (value, state, location = {}) => {
   return projected
 }
 
-export function projectDurableSemantics(node, durableContext = null) {
+const projectWithPlaceholderContext = (node, placeholderContext = null) => {
   const value = typeof node?.toJSON === 'function' ? node.toJSON() : node
-  const placeholderCells = new Set((durableContext?.emptyTableCells || []).map(
+  const placeholderCells = new Set((placeholderContext?.emptyTableCells || []).map(
     ({ table, row, column }) => `${table}:${row}:${column}`
   ))
   return projectValue(value, { nextTable: 0, placeholderCells })
 }
 
-export const areDurablyEquivalent = (left, right, durableContext = null) => {
-  const projectedLeft = projectDurableSemantics(left, durableContext)
-  const projectedRight = projectDurableSemantics(right, durableContext)
-  if (!projectedLeft || !projectedRight) return false
-  return JSON.stringify(projectedLeft) === JSON.stringify(projectedRight)
+export function projectDurableSemantics(node) {
+  return projectWithPlaceholderContext(node)
+}
+
+export const areDurablyEquivalent = (candidate, expected, expectedContext = null) => {
+  // Source-model provenance can prove that a live/expected hardbreak is an
+  // internal empty-cell placeholder. It never authorizes candidate Markdown:
+  // the mapper must already have removed serializer-only bytes there.
+  const projectedCandidate = projectDurableSemantics(candidate)
+  const projectedExpected = projectWithPlaceholderContext(expected, expectedContext)
+  if (!projectedCandidate || !projectedExpected) return false
+  return JSON.stringify(projectedCandidate) === JSON.stringify(projectedExpected)
 }

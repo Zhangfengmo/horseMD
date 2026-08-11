@@ -5,7 +5,7 @@ import { normalizeEmptyListItems } from '../lib/markdown-preservation/lists.js'
 export const canonicalSourceFallback = (canonical) =>
   withoutStandaloneEmptyBlockLines(normalizeEmptyListItems(String(canonical ?? '')))
 
-export const verifySourceDocument = ({ markdown, expectedDoc, parseMarkdown, durableContext = null }) => {
+export const verifySourceDocument = ({ markdown, expectedDoc, parseMarkdown, expectedContext = null }) => {
   if (typeof parseMarkdown !== 'function') {
     return {
       ok: false,
@@ -18,8 +18,8 @@ export const verifySourceDocument = ({ markdown, expectedDoc, parseMarkdown, dur
   }
   try {
     const parsed = parseMarkdown(String(markdown ?? ''))
-    if (areDurablyEquivalent(parsed, expectedDoc, durableContext)) {
-      return { ok: true, type: 'committed', parsed, durableContext }
+    if (areDurablyEquivalent(parsed, expectedDoc, expectedContext)) {
+      return { ok: true, type: 'committed', parsed, durableContext: expectedContext }
     }
     return { ok: false, type: 'semantic-loss', parsed }
   } catch (error) {
@@ -38,7 +38,7 @@ export const selectVerifiedSource = ({ candidates, expectedDoc, parseMarkdown })
       markdown: proposal.markdown,
       expectedDoc,
       parseMarkdown,
-      durableContext: proposal.durableContext || null
+      expectedContext: proposal.durableContext || null
     })
     if (result.ok) {
       return { ...result, markdown: proposal.markdown }

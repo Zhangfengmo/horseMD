@@ -72,6 +72,26 @@ run('durable node contracts ignore only declared derived attrs', () => {
   }])
   assert.equal(areDurablyEquivalent(list(true), list('false')), true)
   assert.equal(areDurablyEquivalent(list(true, { future: 1 }), list(false, { future: 2 })), false)
+
+  const listWithEmptyParagraph = (paragraphAttrs, text = null) => nodeDoc([{
+    type: 'bullet_list',
+    content: [{
+      type: 'list_item',
+      content: [{
+        type: 'paragraph',
+        attrs: paragraphAttrs,
+        ...(text == null ? {} : { content: [{ type: 'text', text }] })
+      }]
+    }]
+  }])
+  assert.equal(areDurablyEquivalent(
+    listWithEmptyParagraph({ future: 'same' }, '   '),
+    listWithEmptyParagraph({ future: 'same' })
+  ), true, 'only invisible paragraph content is normalized')
+  assert.equal(areDurablyEquivalent(
+    listWithEmptyParagraph({ future: 'left' }, '   '),
+    listWithEmptyParagraph({ future: 'right' })
+  ), false, 'empty-list normalization retains unknown paragraph attrs')
 })
 
 run('table contracts ignore colwidth but retain alignment spans and unknown attrs', () => {
@@ -151,10 +171,20 @@ run('a sole table hardbreak fails closed without explicit placeholder provenance
     cell(soleBlockBreak),
     cell(null),
     provenEmptyCell
-  ), true, 'parser-owned coordinates can prove an internal empty-cell placeholder')
+  ), false, 'expected-side provenance never authorizes a candidate hardbreak')
+  assert.equal(areDurablyEquivalent(
+    cell(null),
+    cell(soleBlockBreak),
+    provenEmptyCell
+  ), true, 'parser-owned coordinates can prove an expected live placeholder')
   assert.equal(areDurablyEquivalent(
     cell(soleBlockBreak),
+    cell(soleBlockBreak),
+    provenEmptyCell
+  ), false, 'a candidate hardbreak remains durable even when expected has placeholder provenance')
+  assert.equal(areDurablyEquivalent(
     cell(null),
+    cell(soleBlockBreak),
     { emptyTableCells: [{ table: 0, row: 0, column: 1 }] }
   ), false, 'placeholder provenance is bound to one exact cell')
 })
