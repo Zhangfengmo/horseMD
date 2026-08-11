@@ -317,6 +317,45 @@ for (const fixture of [
 }
 
 {
+  const authored = [
+    'A',
+    '',
+    '| one | two |',
+    '| --- | --- |',
+    '| old | stable |',
+    '',
+    'B',
+    '',
+    '',
+    'C'
+  ].join('\n')
+  const nextCanonical = [
+    'A',
+    '',
+    '',
+    '',
+    'B',
+    '| one | two |',
+    '| --- | --- |',
+    '| typed | stable |',
+    '',
+    'C'
+  ].join('\n')
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical,
+    change: commonChange(authored, nextCanonical),
+    parseTables
+  })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'mixed-table-and-outside-change' },
+    'moving and editing a table cannot hide behind equal concatenated outside text'
+  )
+}
+
+{
   const authored = '| one | two |\n| --- | --- |\n| old | stable |'
   const nextCanonical = authored.replace('old', 'typed')
   const result = mapGfmTableChange({

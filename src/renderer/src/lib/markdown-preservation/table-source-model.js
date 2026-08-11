@@ -527,17 +527,25 @@ const normalizedTableRange = (model, table) => {
     : null
 }
 
-const textOutsideTable = (model, table) => {
+const tableContext = (model, table) => {
   const range = normalizedTableRange(model, table)
-  return range
-    ? model.view.text.slice(0, range.start) + model.view.text.slice(range.end)
-    : null
+  if (!range || !table?.range) return null
+  return {
+    normalizedPrefix: model.view.text.slice(0, range.start),
+    normalizedSuffix: model.view.text.slice(range.end),
+    rawPrefix: model.view.raw.slice(0, table.range.start),
+    rawSuffix: model.view.raw.slice(table.range.end)
+  }
 }
 
 const tablesHaveIdenticalOutsideText = (previousModel, previousTable, nextModel, nextTable) => {
-  const previousOutside = textOutsideTable(previousModel, previousTable)
-  const nextOutside = textOutsideTable(nextModel, nextTable)
-  return previousOutside != null && previousOutside === nextOutside
+  const previousContext = tableContext(previousModel, previousTable)
+  const nextContext = tableContext(nextModel, nextTable)
+  return previousContext != null &&
+    previousContext.normalizedPrefix === nextContext.normalizedPrefix &&
+    previousContext.normalizedSuffix === nextContext.normalizedSuffix &&
+    previousContext.rawPrefix === nextContext.rawPrefix &&
+    previousContext.rawSuffix === nextContext.rawSuffix
 }
 
 const changeEquals = (left, right) => Boolean(
