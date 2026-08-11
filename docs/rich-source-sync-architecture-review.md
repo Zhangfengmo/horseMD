@@ -2,7 +2,11 @@
 
 > 日期：2026-08-11  
 > 版本：HorseMD v0.13.29（`ea4415b6459c`）  
-> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；只做诊断和架构评审，不修改产品代码。
+> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；§1–11 保留 v0.13.29 的历史诊断，§12–13 记录修复分支复核与实现结果。
+
+> 复核提示：v0.13.29 的原始列表 keymap 结论已被当前分支的“末尾空列表项
+> Backspace 退出”处理器取代；合并后仍可复现的现场问题不是代码语言或第一次
+> Backspace，而是非满列 GFM 表在应用 parser 与独立验收 parser 之间产生分歧。
 
 ## 1. 结论
 
@@ -390,3 +394,67 @@ coordinator、§5.6 的 visible-map 语法化重写（fail-closed 的**发生率
 归一化层近似,`\$x$` vs `$x$` 类 app 特有语义无法区分——已核验现有映射器不会
 产生这类翻转）、阶段 B/C 全部。
 - `docs/live-preview-migration-plan.md`
+
+## 13. 合并后重新定位与 verified commit 修复（v0.13.48 候选）
+
+### 13.1 现场复现修正了原报告的触发归因
+
+对用户现场文件的只读副本验证表明，文件在编辑前就含有非满列 GFM 表格行：表头为
+5 列，部分正文行只有 1 个 cell。Crepe 的应用 parser 会在 ProseMirror 中补齐缺失
+cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一套归一化树。
+普通正文只增加一个字符后，原文保真 mapper 已给出正确 candidate，但独立 gate 仍
+误判不等价，于是源码切换和保存共同进入 recovery。
+
+同一 fixture 分别放入 Go、JavaScript、TypeScript、Python、Rust、Java、C 和 C++
+围栏均得到相同结果；修复后 8 种语言全部通过。因此“Go 或某种代码高亮语言触发”
+是已排除假设，结构分歧来自表格 parser 行为。
+
+### 13.2 已证实并修复的当前功能问题
+
+| 问题 | 证据 | 修复 |
+|---|---|---|
+| 应用 parser 与独立 GFM gate 不一致，误拒绝现场文件 | 非满列表格 fixture 在旧 build 稳定弹 recovery；app parser 解析后与 live PM 等价 | preservation 仅提出 candidate；`parserCtx` + `areSourceDocumentsEquivalent` 成为生产语义 authority |
+| 新建 scratch 无条件去转义可改变语义 | 字面三反引号、`#` 等 candidate 在旧路径跳过 gate，保存重开可能变 code/heading | generated candidate 与安全 canonical fallback 依序验证，冷重开比较 rich 节点类型 |
+| `>120000` 热路径推进未验证双 baseline | 可构造 `preserved:true` 但语义不等价的长文档 candidate；forced flush 因 canonical 相等提前返回 | 删除大小豁免；所有提交和 canonical-equality durability 路径均验证 live PM |
+| 成功 forced rich read 后 App mirror 可停在旧内容 | `flushMarkdown` 只返回字符串，Pandoc 等调用者不一定同步 `tab.content` | App 使用统一 `commitRichSnapshotToTab` 同步 `tabsRef`/React state，不改 `savedContent` |
+
+### 13.3 当前生产架构风险（已收口，但不是本次用户触发的独立实证）
+
+- slash code/math 的 after 路径过去直接写双 baseline；它处于默认生产功能中，属于真实
+  旁路，但没有证据证明它就是本次非满列表格事故的首次分叉点。现已路由到同一
+  verified commit coordinator。
+- rebuild 与 recovery copy 的 canonical fallback 过去可能未重新验证；现同样通过应用
+  parser 后才返回或推进。
+- 通用独立 GFM gate 可构造 math/highlight/standalone `<br>` 等 false positive。未证明
+  现有 mapper 会生成每一种字符串翻转，因此不逐项增加 normalizer；该 gate 已退出
+  生产提交权限，只保留为纯 preservation 测试和诊断工具。
+
+### 13.4 预防性问题与后续边界
+
+- transaction-primary 默认关闭，其直接 baseline publish 是实验路径的未来收敛项，
+  不是当前默认构建故障。本次不借机放行或扩大该路径。
+- 当前 coordinator 统一了“验证 → 双 baseline → pending → publish”的原子入口，但还
+  没有演进成持久化 revision/CST 日志；该方向属于阶段 B/C，不应作为本次问题的必要
+  补丁。
+- 全量应用 parser 验证可能影响超大文档输入延迟。12 万字符以上真实 UI 回归已通过，
+  后续仍应在图片密集的真实长文档上保持性能门禁；性能优化不得重新允许未验证源码
+  越过 source/save/export 边界。
+
+### 13.5 列表反馈的最终解释
+
+当前分支中，最后一个空列表项按第一次 Backspace 会退出成顶层空段落。若用户此时
+尚未输入正文又按第二次 Backspace，该空段落按 ProseMirror 正常 join 语义重新并回
+上一列表项；所以下一次 Enter 再出现有序列表序号是预期行为，不是新的同步故障。
+正确操作是第一次退出后直接输入正文；若已重新并回，则 Enter 后在新空列表项再按
+Backspace 退出。完整序列已经覆盖 source、save 和冷重开。
+
+验证命令包括：
+
+- `npm run test:editor-source-verification`
+- `npm run test:rich-source-app-parser-ui`
+- `npm run test:list-backspace-exit-ui`
+- `npm run test:literal-triple-backtick-source-ui`
+- `npm run test:large-source-fidelity-ui`
+- `npm run test:tail-fence-ui`
+- `npm run build`
+- `npm run build:mobile`

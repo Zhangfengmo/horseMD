@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Known Issues
-- **富文本 / 源码长会话仍可能分叉（P0）** — 0.13.47 的 `/code` 原子同步修复通过了家族矩阵、多轮持久化和代码块专项，但安装包人工验收仍能在真实长文档中复现：建立代码块后继续多轮编辑，富文本新增内容可能没有完整进入源码或磁盘；保存既可能暂停，也可能执行成功但内容仍不一致。该问题尚未关闭，禁止把当前候选描述为稳定修复。接手记录见 [`docs/rich-source-divergence-incident-0.13.47.md`](./docs/rich-source-divergence-incident-0.13.47.md)。
+- **0.13.48 仍待安装包长会话人工验收** — 自动化已覆盖用户同型非满列表格、8 种代码语言、列表完整 Backspace 序列、scratch 字面 Markdown、斜杠菜单代码块和 12 万字符以上文档；发布前仍需按真实长会话清单验证安装包。接手记录见 [`docs/rich-source-divergence-incident-0.13.47.md`](./docs/rich-source-divergence-incident-0.13.47.md)。
 
 ### Changed
 - **源码同步架构开始迁移** — 已加入统一 ProseMirror transaction 观察器、原子 raw-source patch 原型和真实逐字事务回归。当前发布构建仍只使用原有 fail-closed 保真链路，事务实验默认关闭；新路径只在开发/专项测试中运行，待每类结构通过完整家族门禁后再逐项放行，避免用未成熟架构修改用户文件或拖慢输入。
 
 ### Fixed
+- **富文本 / 源码使用同一语义验收器** — 原文保真映射现在只负责提出候选源码；唯一 verified commit coordinator 使用 HorseMD 实际 Milkdown parser 将候选还原为 ProseMirror 文档并与当前 rich 文档比较，通过后才原子推进 source/canonical baselines、pending 状态和 App 快照。非满列 GFM 表不再因独立 GFM parser 与 Crepe 补列行为不同而误报保存暂停；保存、源码切换、导出和恢复副本也不能绕过同一验收。
+- **新文档字面 Markdown 与大文档耐久边界** — 新建空文档不再无条件去掉 serializer 转义；`#`、反引号等字面字符若会改变 Markdown 语义，会保存为可安全重开的转义写法。移除 12 万字符以上热路径直接推进未验证 baseline 的例外，强制 flush 的 canonical-equality 快路径也必须证明 source 与 live ProseMirror 等价。
+- **列表退出操作与源码锁定回归** — 最后一个空列表项按 Backspace 退出为正文；若在该空正文再次按 Backspace，会按正常编辑语义重新并回上一个列表项，因此随后 Enter 会再次出现序号。完整“退出 → 并回 → 再建项 → 再退出 → 正文 → 保存 → 冷重开”已纳入真实按键回归。
 - **斜杠菜单代码块连续编辑保真** — 修复在复杂文档末尾通过 `/code` 创建代码块后，立即继续编辑代码、代码块后的正文和前文列表时，源码缺少代码围栏、切换源码被锁定或保存后内容不一致的问题。`/code` 临时查询行到 `code_block` 的转换现在作为一次原子 source 事务提交，只替换精确命中的 authored 行并保留 CRLF；重复查询无法精确定位时仍安全拒绝，不会猜测覆盖用户源码。
 - **多轮保存后源码与富文本再次不一致** — 修复第一次保存重开正常、继续编辑已有列表后源码开始少空行、丢后续正文或只保存部分事务的问题。列表输入意图在 marker 恢复后立即消费，不再由下一次正文回调用旧槽重复重建；批量列表变更只有完整映射同一 callback 的列表与正文后才允许提交。
 - **重开后在文档中间新建列表丢失** — 修复再次重开后，在已有正文和后续代码块之间输入“正文 → 有序列表 → 正文”时，富文本显示完整但源码停在列表之前的问题。新列表只在前后锚和空段槽位均可证明时原子写回，随后立即消费列表输入意图。
