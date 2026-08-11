@@ -12,7 +12,6 @@
 // Never takes over when pasting INTO a code block (append code there).
 import { Slice, Fragment } from '@milkdown/prose/model'
 import { startsAsMermaid } from './editor-mermaid.js'
-import { normalizeDisplayMath } from './editor-math.js'
 import { hasStructuredWebHtml } from './editor-web-paste.js'
 
 function looksLikeMarkdown(text) {
@@ -193,7 +192,7 @@ export function attachMdPasteHandler(view, parse, prepareRawMarkdownPaste, markU
       })
       handled = insert(view, Fragment.from(node))
     } else if (shouldHandleRawMarkdown) {
-      const doc = parse(normalizeDisplayMath(text))
+      const doc = parse(text)
       if (doc && doc.content && doc.content.size > 0) {
         cancelRawPaste = prepareRawMarkdownPaste?.({
           markdown: text,

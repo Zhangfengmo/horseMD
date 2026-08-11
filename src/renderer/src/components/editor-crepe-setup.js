@@ -41,6 +41,7 @@ import { highlightFeatures, highlightStringifyHandler } from './editor-highlight
 import { createReviewDecorationPlugin } from './editor-review.js'
 import { normalizeWebPasteHtml } from './editor-web-paste.js'
 import { imageBlockMarkdownSchema } from './editor-image-markdown.js'
+import { remarkNormalizeRaggedGfmTables } from './editor-table-normalization.js'
 import { remarkStripLeadingSpaceSentinel } from '../lib/markdown-leading-space.js'
 import {
   createStrikeGuardPlugin,
@@ -236,6 +237,7 @@ export function createConfiguredCrepe({
 
     ctx.update(remarkPluginsCtx, (plugins) => [
       ...plugins,
+      { plugin: remarkNormalizeRaggedGfmTables, options: undefined },
       { plugin: remarkStripLeadingSpaceSentinel, options: undefined },
       { plugin: remarkNormalizeCodeOnlyLinkLabels, options: undefined },
       { plugin: remarkUnwrapNonAsciiAutolinks, options: undefined },

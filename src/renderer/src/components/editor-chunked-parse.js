@@ -11,8 +11,6 @@
 //
 // `appending` (the onChange-suppression flag) is NOT managed here — the caller
 // owns it, so it can be read by the editor's markdownUpdated handler.
-import { normalizeReviewMarkupMarkdown } from '../reviewMarkup.js'
-import { normalizeDisplayMath } from './editor-math.js'
 
 export const CHUNK_THRESHOLD = 120000 // above this, parse incrementally
 export const CHUNK_SIZE = 40000 // chars per chunk (first chunk renders in ~one frame)
@@ -55,12 +53,12 @@ export function splitMarkdown(md, target) {
 //
 //   rest              — the chunks after the first (already-rendered) one
 //   view              — the ProseMirror EditorView to dispatch into
-//   getParser         — () => parser fn (or null); parserCtx is caller-owned
+//   parseMarkdown     — configured Markdown-to-ProseMirror parse contract
 //   isDestroyed       — () => boolean; aborts the loop when the editor unmounts
 //   getEditable       — () => bool; keeps an external reading lock after loading
 //   onLoadingChange   — (bool) optional; outline shows a skeleton while streaming
 //   onStructureChange — () optional; host refreshes outline/scrollspy after load
-export async function appendChunks({ rest, view, getParser, isDestroyed, getEditable, onLoadingChange, onStructureChange }) {
+export async function appendChunks({ rest, view, parseMarkdown, isDestroyed, getEditable, onLoadingChange, onStructureChange }) {
   if (!rest || !rest.length) return
   onLoadingChange?.(true) // outline shows a skeleton while the doc streams in
   const setEditable = (on) => {
@@ -68,17 +66,14 @@ export async function appendChunks({ rest, view, getParser, isDestroyed, getEdit
     try { view.dom.contentEditable = on ? 'true' : 'false' } catch { /* */ }
   }
   setEditable(false)
-  const parser = getParser()
   try {
     for (const chunkText of rest) {
       if (isDestroyed()) break
       let parsed = null
-      // Normalize review markup + display math in each appended chunk too —
-      // defaultValue wraps firstContent with both, but these background-appended
-      // chunks are parsed directly, so wrap them. (Chunking splits only at blank
-      // lines; a normalized $$…$$ block has no internal blank line, so math never
-      // spans two chunks.)
-      try { parsed = parser ? parser(normalizeReviewMarkupMarkdown(normalizeDisplayMath(chunkText))) : null } catch { /* skip unparseable chunk */ }
+      // Chunking splits only at blank lines, so a prepared $$…$$ block never
+      // spans two chunks. The caller-owned adapter applies every configured
+      // preparation and remark transform before returning a ProseMirror doc.
+      try { parsed = parseMarkdown(chunkText) } catch { /* skip unparseable chunk */ }
       if (parsed && parsed.content && parsed.content.size > 0 && !isDestroyed()) {
         view.dispatch(view.state.tr.insert(view.state.doc.content.size, parsed.content))
       }

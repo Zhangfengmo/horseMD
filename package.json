@@ -65,6 +65,7 @@
     "test:issue-86-ui": "node scripts/test-issue-86-table-save-ui.mjs",
     "test:table-empty-cells": "node scripts/test-table-empty-cell-normalization.mjs",
     "test:editor-table-normalization": "node scripts/test-editor-table-normalization.mjs",
+    "test:editor-parse-adapter": "node scripts/test-editor-parse-adapter.mjs",
     "test:table-source-model": "node scripts/test-table-source-model.mjs",
     "test:ragged-table-save-ui": "cross-env RAGGED_CASE=cell CDP_PORT=10341 node scripts/test-ragged-table-save-ui.mjs && cross-env RAGGED_CASE=consecutive CDP_PORT=10342 node scripts/test-ragged-table-save-ui.mjs && cross-env RAGGED_CASE=hardbreak CDP_PORT=10343 node scripts/test-ragged-table-save-ui.mjs && cross-env RAGGED_CASE=dashes CDP_PORT=10344 node scripts/test-ragged-table-save-ui.mjs && cross-env RAGGED_CASE=escaped-pipe CDP_PORT=10345 node scripts/test-ragged-table-save-ui.mjs",
     "test:clipboard-ipc-ui": "node scripts/test-clipboard-ipc-ui.mjs",

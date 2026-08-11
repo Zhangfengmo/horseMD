@@ -3,13 +3,11 @@ import { commandsCtx, remarkCtx, serializerCtx } from '@milkdown/kit/core'
 import { toggleMark } from '@milkdown/prose/commands'
 import { replaceAll } from '@milkdown/utils'
 import { applyReviewMarkupInView } from './editor-review.js'
-import { normalizeReviewMarkupMarkdown } from '../reviewMarkup.js'
 import {
   generatedScratchMarkdown,
   preserveGeneratedBulletMarkers,
   preserveRichMarkdownSource
 } from '../markdown-source-preservation.js'
-import { normalizeDisplayMath } from './editor-math.js'
 import { markdownOffsetToPmPos, pmPosToMarkdownOffset } from './editor-source-map.js'
 import { createPdfSourceFromEditor } from './editor-pdf-content.js'
 import { applyHighlightInView, toggleHighlightCommand } from './editor-highlight.js'
@@ -36,6 +34,7 @@ export function createEditorApi({
   generatedScratchRef,
   getGeneratedScratchMarkdown,
   sourceCommitter,
+  prepareMarkdown,
   canonicalForSource,
   setBlock,
   markUserEdit,
@@ -152,7 +151,7 @@ export function createEditorApi({
       if (generatedScratchRef && source !== lastMarkdownRef.current) {
         generatedScratchRef.current = false
       }
-      const next = normalizeReviewMarkupMarkdown(normalizeDisplayMath(source))
+      const next = prepareMarkdown(source)
       lastMarkdownRef.current = source
       clearPendingRichFlush?.()
       if (programmaticReplaceRef) programmaticReplaceRef.current = programmaticReplace

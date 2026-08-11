@@ -1,4 +1,4 @@
-import { parserCtx, serializerCtx } from '@milkdown/kit/core'
+import { serializerCtx } from '@milkdown/kit/core'
 import { TextSelection } from '@milkdown/prose/state'
 import { copyToClipboard } from '../ui.js'
 import { dirOf, isRelativePath, resolveToFileUrl } from './editor-images.js'
@@ -18,6 +18,7 @@ export function mountEditorContentBindings({
   cleanups,
   markUserEdit,
   insertUploadedImage,
+  parseMarkdown,
   prepareRawMarkdownPaste,
   setZoom,
   getT,
@@ -209,7 +210,7 @@ export function mountEditorContentBindings({
   cleanups.push(
     attachMdPasteHandler(view, (markdown) => {
       try {
-        return crepe.editor.ctx.get(parserCtx)(markdown)
+        return parseMarkdown(markdown)
       } catch {
         return null
       }

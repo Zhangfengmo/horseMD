@@ -20,8 +20,8 @@ import { useI18n } from '../i18n.jsx'
 import { copyToClipboard, fireToast } from '../ui.js'
 import { Icon } from './icons.jsx'
 import { createImagePersister } from './editor-image-persistence.js'
-import { normalizeDisplayMath } from './editor-math.js'
 import { splitMarkdown, CHUNK_THRESHOLD, CHUNK_SIZE, appendChunks } from './editor-chunked-parse.js'
+import { createEditorParseAdapter } from './editor-parse-adapter.js'
 import { createBlockControls } from './editor-block-controls.js'
 import { convertSourceParagraphLineToList } from './editor-block-list-source.js'
 import {
@@ -305,11 +305,19 @@ export default function Editor({
       richFlushPending = false
       pendingRichBlockKey = null
     }
-    const parseSourceMarkdown = (markdown) => crepe.editor.ctx.get(parserCtx)(markdown)
+    let crepe
+    const parseAdapter = createEditorParseAdapter(() => {
+      if (!crepe) return null
+      try {
+        return crepe.editor.ctx.get(parserCtx)
+      } catch {
+        return null
+      }
+    })
     const sourceCommitter = createVerifiedSourceCommitter({
       sourceRef: lastMarkdownRef,
       canonicalRef: canonicalMarkdownRef,
-      parseMarkdown: parseSourceMarkdown,
+      parseMarkdown: parseAdapter.parse,
       clearPending: clearRichFlushPending,
       publish: (markdown) => onChange?.(markdown, false)
     })
@@ -464,7 +472,6 @@ export default function Editor({
       }
     }
 
-    let crepe
     const handleSlashCommand = ({ phase, id, view, token }) => {
       if (phase === 'before') {
         if (!(id === 'code' || id === 'math' || id?.startsWith('code:'))) return null
@@ -600,7 +607,6 @@ export default function Editor({
       }
       try {
         const remark = crepe.editor.ctx.get(remarkCtx)
-        const parser = crepe.editor.ctx.get(parserCtx)
         const mapped = mapPlainTextTransactionsToSource({
           source: lastMarkdownRef.current,
           transactions,
@@ -610,7 +616,7 @@ export default function Editor({
           mapPosition: (source, position, doc) =>
             pmPosToMarkdownOffset(source, position, doc, remark),
           validateMarkdown: (markdown, expectedDoc) => {
-            const parsed = parser(markdown)
+            const parsed = parseAdapter.parse(markdown)
             const equal = areSourceDocumentsEquivalent(parsed, expectedDoc)
             if (!equal && Array.isArray(globalThis.__hmSourceTransactionTrace)) {
               globalThis.__hmSourceTransactionSemantic = {
@@ -672,7 +678,7 @@ export default function Editor({
 
     crepe = createConfiguredCrepe({
       host,
-      defaultValue: normalizeReviewMarkupMarkdown(normalizeDisplayMath(firstContent)),
+      defaultValue: parseAdapter.prepare(firstContent),
       getT: (key) => tRef.current(key),
       persistImage,
       notify: fireToast,
@@ -985,9 +991,8 @@ export default function Editor({
           // can fix up the list on top of the current source snapshot.
           if (!pendingPaste && !pendingList && transactionSourcePendingPublish && !hasPendingListIntent) {
             try {
-              const parser = crepe.editor.ctx.get(parserCtx)
               const currentDoc = viewRef.current?.state.doc
-              const callbackDoc = parser(canonical)
+              const callbackDoc = parseAdapter.parse(canonical)
               if (
                 transactionSourcePendingDoc?.eq?.(currentDoc) === true &&
                 areSourceDocumentsEquivalent(callbackDoc, transactionSourcePendingDoc)
@@ -1033,7 +1038,7 @@ export default function Editor({
           // retries it. Forced boundaries always verify the latest live doc.
           const expectedCommitDoc = canonical.length > 120000
             ? viewRef.current?.state.doc
-            : parseSourceMarkdown(canonical)
+            : parseAdapter.parse(canonical)
           if (pendingPaste) {
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
@@ -1348,6 +1353,7 @@ export default function Editor({
             scheduleRichDirtyReconcile(delayMs)
           },
           insertUploadedImage,
+          parseMarkdown: parseAdapter.parse,
           prepareRawMarkdownPaste: ({ markdown, from, to }) => {
             const source = lastMarkdownRef.current || ''
             let next = markdown
@@ -1496,6 +1502,7 @@ export default function Editor({
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
           sourceCommitter,
+          prepareMarkdown: parseAdapter.prepare,
           canonicalForSource,
           setBlock,
           markUserEdit,
@@ -1575,8 +1582,7 @@ export default function Editor({
               const v = viewRef.current
               if (!v) return 'no-view'
               try {
-                const parser = crepe.editor.ctx.get(parserCtx)
-                const parsed = parser(md)
+                const parsed = parseAdapter.parse(md)
                 const endPos = v.state.doc.content.size
                 v.dispatch(v.state.tr.insert(endPos, parsed.content).scrollIntoView())
                 return true
@@ -1648,7 +1654,7 @@ export default function Editor({
           appendChunks({
             rest,
             view,
-            getParser: () => { try { return crepe.editor.ctx.get(parserCtx) } catch { return null } },
+            parseMarkdown: parseAdapter.parse,
             isDestroyed: () => destroyed,
             getEditable: () => !readOnlyRef.current,
             onLoadingChange,
