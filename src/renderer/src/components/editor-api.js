@@ -24,6 +24,7 @@ import {
 } from '@milkdown/kit/preset/commonmark'
 import { strikethroughSchema } from '@milkdown/kit/preset/gfm'
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
+import { settleEditorMarkdown } from '../lib/editor-flush-settle.js'
 
 export function createEditorApi({
   viewRef,
@@ -275,6 +276,23 @@ export function createEditorApi({
     }
   }
 
+  const flushMarkdownSettled = (options = {}) => settleEditorMarkdown(flushMarkdown, options)
+
+  const getRecoveryMarkdown = () => {
+    if (isDestroyed?.() || !crepeRef.current) return null
+    try {
+      // This is deliberately NOT written over the authored file. It is a
+      // normalized emergency copy of the live ProseMirror document, used only
+      // after bounded retries still cannot prove a byte-preserving mapping.
+      // Keeping it separate preserves both sides of the conflict: the original
+      // source remains untouched and the user's visible edits are not trapped
+      // solely in renderer memory.
+      return generatedScratchMarkdown(canonicalForSource(serializeCurrentDocument()))
+    } catch {
+      return null
+    }
+  }
+
   const restoreMarkdownOffset = (rawOffset, follow = false) => {
     const v = viewRef.current
     if (!v || !crepeRef.current) return false
@@ -370,7 +388,9 @@ export function createEditorApi({
     applyReviewMarkup,
     replaceMarkdown,
     flushMarkdown,
+    flushMarkdownSettled,
     rebuildMarkdownFromRich,
+    getRecoveryMarkdown,
     restoreMarkdownOffset,
     markdownOffsetFromSelection,
     markdownOffsetFromViewportTop

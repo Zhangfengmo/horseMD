@@ -250,8 +250,9 @@ export default function App() {
   }, [commitLive])
 
   const t = useCallback((key, vars) => translate(lang, key, vars), [lang])
-  // Always-current translator for stable callbacks (e.g. openPaths) that must
-  // not be recreated on every language change.
+  // Always-current translator for stable callbacks (for example the source/save
+  // fail-closed prompts and openPaths) that must not be recreated on every
+  // language change.
   const tRef = useRef(t)
   tRef.current = t
 
@@ -520,6 +521,30 @@ export default function App() {
     return await getPdfSourceForTab(id)
   }, [getPdfSourceForTab, waitForEditorApi])
 
+  // A mounted rich editor returning null means source preservation could not
+  // safely map the visible transaction. Never fall back to stale tab.content at
+  // a durability boundary; callers must abort rather than resurrect data. The
+  // fail-closed state must still be exit-able, so offer the explicit
+  // rebuild-from-rich recovery (normalizes authored spelling, keeps the
+  // document the user sees) before refusing the save/export. Declining leaves
+  // the authored file untouched and hands the caller its recovery-copy exit.
+  const rebuildMarkdownWithConsent = useCallback((id, editorApi) => {
+    if (!editorApi) return null
+    if (!window.confirm(tRef.current('sync.rebuildConfirm'))) return null
+    const rebuilt = editorApi.rebuildMarkdownFromRich?.()
+    if (typeof rebuilt !== 'string') return null
+    // The rebuild reset the editor-local baselines; the App-level truth must
+    // follow in the same operation or the two diverge again until the next
+    // markdownUpdated (export paths never write tab.content otherwise).
+    tabsRef.current = tabsRef.current.map((tab) =>
+      tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
+    )
+    setTabs((prev) => prev.map((tab) =>
+      tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
+    ))
+    return rebuilt
+  }, [setTabs, tabsRef, tRef])
+
   const getMarkdownForTab = useCallback((id) => {
     const sourceElement = sourceTextareas.current[id]
     if (sourceElement) return getTextareaSourceValue(sourceElement)
@@ -529,33 +554,29 @@ export default function App() {
     const editorApi = editorApis.current[id]
     const flushed = editorApi?.flushMarkdown?.({ force: true })
     if (typeof flushed === 'string') return flushed
-    // A mounted rich editor returning null means source preservation could not
-    // safely map the visible transaction. Never fall back to stale tab.content
-    // at a durability boundary; callers must abort rather than resurrect data.
-    // The fail-closed state must still be exit-able: offer the explicit
-    // rebuild-from-rich recovery (normalizes authored spelling, keeps the
-    // document the user sees) before refusing the save/export.
-    if (editorApi) {
-      if (window.confirm(tRef.current('sync.rebuildConfirm'))) {
-        const rebuilt = editorApi.rebuildMarkdownFromRich?.()
-        if (typeof rebuilt === 'string') {
-          // The rebuild reset the editor-local baselines; the App-level truth
-          // must follow in the same operation or the two diverge again until
-          // the next markdownUpdated (export paths never write tab.content
-          // otherwise).
-          tabsRef.current = tabsRef.current.map((tab) =>
-            tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
-          )
-          setTabs((prev) => prev.map((tab) =>
-            tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
-          ))
-          return rebuilt
-        }
-      }
-      return null
-    }
+    if (editorApi) return rebuildMarkdownWithConsent(id, editorApi)
     return tabsRef.current.find((tab) => tab.id === id)?.content || ''
-  }, [editorApis, setTabs, sourceTextareas, tabsRef, tRef])
+  }, [editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
+
+  const getSettledMarkdownForTab = useCallback(async (id) => {
+    const sourceElement = sourceTextareas.current[id]
+    if (sourceElement) return getTextareaSourceValue(sourceElement)
+    const editorApi = editorApis.current[id]
+    if (!editorApi) return tabsRef.current.find((tab) => tab.id === id)?.content || ''
+    // Wait for delayed callbacks to settle before judging the flush: only a
+    // settled null is a real mapping failure. Then run the same fail-closed
+    // rebuild consent as the synchronous path, so the save boundary keeps its
+    // in-place recovery and the caller's recovery copy stays the second exit.
+    const settled = typeof editorApi.flushMarkdownSettled === 'function'
+      ? await editorApi.flushMarkdownSettled({ force: true })
+      : editorApi.flushMarkdown?.({ force: true })
+    if (typeof settled === 'string') return settled
+    return rebuildMarkdownWithConsent(id, editorApi)
+  }, [editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
+
+  const getRecoveryMarkdownForTab = useCallback((id) => (
+    editorApis.current[id]?.getRecoveryMarkdown?.() ?? null
+  ), [editorApis])
 
   // Source/rich view state and anchor restoration live in useSourceModeSwitch.
 
@@ -603,6 +624,8 @@ export default function App() {
     liveTimersRef,
     getPdfSourceForTab,
     getMarkdownForTab,
+    getSettledMarkdownForTab,
+    getRecoveryMarkdownForTab,
     waitForPdfSourceForTab,
     isMobile,
     t,
@@ -694,7 +717,7 @@ export default function App() {
     setHome(false)
   }, [])
 
-  const toggleSourceRichSplit = useCallback(() => {
+  const toggleSourceRichSplit = useCallback(async () => {
     const tab = tabsRef.current.find((item) => item.id === activeIdRef.current)
     if (isMobile || !tab || tab.kind === 'settings') return
     if (split) {
@@ -714,11 +737,11 @@ export default function App() {
     // through the same guard (including the fail-closed recovery confirm).
     // Skipping it would expose a stale snapshot that a single keystroke in
     // the split would sync back over the user's unmapped rich edits.
-    if (!sourceMode && !flushRichSource(tab.id)) return
+    if (!sourceMode && !(await flushRichSource(tab.id))) return
     // Existing source mode owns a sensitive caret/viewport restoration path.
     // Close it through its public toggle before exposing both panes; the rich
     // editor stays mounted throughout, so this is not a re-parse.
-    if (sourceMode) toggleSource()
+    if (sourceMode && !await toggleSource()) return
     setSourceRichFocusedPane('source')
     setSourceRichSplitId(tab.id)
   }, [flushRichSource, isMobile, richForced, sourceMode, sourceRichSplitId, split, tRef, toggleSource])

@@ -11,7 +11,7 @@
 //   setActiveId/setHome/setSplitId/setRecents — tab/split/recents setters
 //   commitAllLive/liveContentRef/liveTimersRef — uncontrolled-textarea contract
 //   getPdfSourceForTab/waitForPdfSourceForTab — resolves structured PDF source
-//   getMarkdownForTab — flushes current Markdown for saves and Pandoc exports
+//   getMarkdownForTab/getSettledMarkdownForTab — sync exports + settled saves
 //   isMobile/t/tRef — i18n + mobile save-dialog branch
 //   setRenameState/setSaveNameState — rename / mobile-save modal triggers
 //   setSidebarOpen/initialFolderRoots — forwarded to useWorkspace
@@ -26,6 +26,7 @@ import {
 } from '../paths.js'
 import { fireToast } from '../ui.js'
 import { getSavedDocPosition } from '../lib/doc-positions.js'
+import { saveSourceSyncRecovery } from '../lib/source-sync-recovery.js'
 import { useWorkspace } from './useWorkspace.js'
 
 export function useFileOps({
@@ -41,6 +42,8 @@ export function useFileOps({
   liveTimersRef,
   getPdfSourceForTab,
   getMarkdownForTab,
+  getSettledMarkdownForTab,
+  getRecoveryMarkdownForTab,
   waitForPdfSourceForTab,
   isMobile,
   t,
@@ -185,6 +188,19 @@ export function useFileOps({
   }, [setTabs, tabsRef])
 
   const updateContent = useCallback((id, md, isInitial) => {
+    if (!isInitial) {
+      // `markdownUpdated` is also the source-mode handoff boundary. Mirror the
+      // committed source synchronously before React renders the textarea;
+      // otherwise a rapid structural input-rule callback can leave `tabsRef`
+      // one snapshot behind and source mode mounts that older Markdown even
+      // though Editor's byte-preserving mapper already produced the right
+      // result.
+      tabsRef.current = tabsRef.current.map((tab) =>
+        tab.id === id && (tab.content !== md || tab.pendingRichEdit)
+          ? { ...tab, content: md, pendingRichEdit: false }
+          : tab
+      )
+    }
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== id) return t
@@ -201,7 +217,7 @@ export function useFileOps({
         return { ...t, content: md, pendingRichEdit: false }
       })
     )
-  }, [setTabs])
+  }, [setTabs, tabsRef])
 
   // Milkdown batches `markdownUpdated` for 200ms. Rich text must nevertheless
   // show its unsaved indicator immediately after a real DOM input event. This
@@ -390,9 +406,27 @@ export function useFileOps({
       // markdownUpdated callback and React state are still one task behind.
       // Resolve the editor's current document before writing so an immediate
       // save cannot persist the previous tab.content snapshot.
-      const currentMarkdown = getMarkdownForTab(id)
+      let currentMarkdown = getSettledMarkdownForTab
+        ? await getSettledMarkdownForTab(id)
+        : getMarkdownForTab(id)
       if (currentMarkdown == null) {
-        fireToast(tRef.current('save.sourceSyncFailed'), { sticky: true })
+        const recoveryMarkdown = getRecoveryMarkdownForTab?.(id)
+        if (typeof recoveryMarkdown !== 'string') {
+          fireToast(tRef.current('save.sourceSyncFailed'), { sticky: true })
+          return
+        }
+        fireToast(tRef.current('save.sourceSyncRecoveryPrompt'), { sticky: true })
+        try {
+          const recovery = await saveSourceSyncRecovery({
+            api: window.api,
+            title: tab.title,
+            markdown: recoveryMarkdown
+          })
+          if (!recovery.ok) return
+          fireToast(tRef.current('save.sourceSyncRecoverySaved', { path: recovery.path }), { sticky: true })
+        } catch (error) {
+          fireToast(tRef.current('save.failed', { msg: error?.message || String(error) }), { sticky: true })
+        }
         return
       }
       if (typeof currentMarkdown === 'string' && currentMarkdown !== tab.content) {
@@ -417,7 +451,18 @@ export function useFileOps({
       }
       await writeTab(tab, target)
     },
-    [commitAllLive, getMarkdownForTab, writeTab, isMobile, setTabs, tabsRef, setSaveNameState]
+    [
+      commitAllLive,
+      getMarkdownForTab,
+      getRecoveryMarkdownForTab,
+      getSettledMarkdownForTab,
+      writeTab,
+      isMobile,
+      setTabs,
+      tabsRef,
+      setSaveNameState,
+      tRef
+    ]
   )
 
   // Commit a mobile "save as": let the platform layer place the named file in

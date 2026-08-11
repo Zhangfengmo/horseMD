@@ -6,6 +6,7 @@ import {
 import {
   adaptCanonicalRegionToSource,
   canonicalFreshTextToSource,
+  canonicalTextToSource,
   isTableLine,
   lineAt,
   lineEndingNear,
@@ -14,6 +15,7 @@ import {
 } from './core.js'
 import {
   preserveChangedLineRegion,
+  sameVisibleLines,
   visibleLineEntries
 } from './regions.js'
 
@@ -187,10 +189,30 @@ export const preserveEmptiedParagraph = ({
       const rowEnd = row.end < source.length && source[row.end] === '\n'
         ? row.end + 1
         : row.end
+      const removedTrailingRow = rowEnd === source.length
+      const kept = source.slice(0, row.start) + source.slice(rowEnd)
+      const sourceTrailingBreakCount = (
+        source.match(/(?:\r\n|\r|\n)*$/)?.[0]?.match(/\r\n|\r|\n/g) || []
+      ).length
+      const trailingNewlineGrowth = removedTrailingRow
+        ? sourceTrailingBreakCount === 0 ? 2 : 1
+        : 0
       return {
-        markdown: source.slice(0, row.start) + source.slice(rowEnd),
+        // Enter twice exits the list into a real trailing paragraph. Keep one
+        // raw blank-line slot for the next typed block; otherwise a later list
+        // input rule has nowhere to attach and its marker is glued to the
+        // previous list item. This is user-authored Enter state, not Crepe's
+        // serializer padding.
+        markdown: removedTrailingRow
+          ? kept + lineEndingNear(source, row.start)
+          : kept,
         preserved: true,
-        reason: 'empty-list-item-removed'
+        reason: 'empty-list-item-removed',
+        // A no-final-newline file needs two physical line endings after the
+        // final empty row is removed: one terminates the surviving row and one
+        // owns the blank block boundary. A source that already ended in EOL
+        // needs only one additional break.
+        trailingNewlineGrowth
       }
     }
   }
@@ -213,8 +235,13 @@ const appendBlockAtDocumentEnd = (source, canonicalBlock) => {
   const canonical = withoutStandaloneEmptyBlockLines(canonicalBlock)
     .replace(/^(?:(?:\r\n)|\n|\r)+/, '')
     .replace(/(?:(?:\r\n)|\n|\r)+$/, '')
+  // Dedicated-syntax rows (list markers, tables, headings, quotes, fences)
+  // must not be spell-checked by the fresh-punctuation restore (that would
+  // unescape an authored `\*`), but canonical entity spelling (`&#x20;` for a
+  // leading content space) still has to be translated back to authored text.
+  // canonicalTextToSource without the fresh flag does exactly that.
   const block = hasDedicatedBlockSyntax(canonical)
-    ? canonical
+    ? canonicalTextToSource(canonical)
     : canonicalFreshTextToSource(canonical)
   if (!block) return null
   const separator = eol.repeat(Math.max(0, 2 - sourceTrailingNewlines))
@@ -331,7 +358,7 @@ export const withoutStandaloneEmptyBlockLines = (markdown) => String(markdown ||
 // trailing run must never GROW beyond the source's. The source's authored
 // trailing blank lines may legitimately become mid-document separators when a
 // paragraph is appended, so the output is clamped rather than force-equalized.
-export const capOutputTrailingNewlines = (markdown, source) => {
+export const capOutputTrailingNewlines = (markdown, source, allowedGrowth = 0) => {
   const output = String(markdown || '')
   // A brand-new document generated from an empty source has no authored
   // terminal convention yet; its own serializer newline is the structure.
@@ -339,8 +366,12 @@ export const capOutputTrailingNewlines = (markdown, source) => {
   const outputTrail = output.match(/(?:\r\n|\r|\n)*$/)?.[0] || ''
   const sourceTrail = String(source || '').match(/(?:\r\n|\r|\n)*$/)?.[0] || ''
   const countBreaks = (run) => (run.match(/\r\n|\n|\r/g) || []).length
-  if (countBreaks(outputTrail) <= countBreaks(sourceTrail)) return output
-  return output.slice(0, output.length - outputTrail.length) + sourceTrail
+  const sourceCount = countBreaks(sourceTrail)
+  const outputCount = countBreaks(outputTrail)
+  const limit = sourceCount + Math.max(0, Number(allowedGrowth) || 0)
+  if (outputCount <= limit) return output
+  const eol = lineEndingNear(source, source.length)
+  return output.slice(0, output.length - outputTrail.length) + sourceTrail + eol.repeat(limit - sourceCount)
 }
 
 const rangeTouches = (range, start, end) =>
@@ -353,6 +384,30 @@ const hasDedicatedBlockSyntax = (markdown) => markdownLines(markdown).some(({ te
     isTableLine(text) ||
     /^(?:#{1,6}\s|>|```|~~~|(?:-{3,}|\*{3,}|_{3,})\s*$)/.test(trimmed)
 })
+
+// A list created by typing into an already-proven empty paragraph owns that
+// whole zero-width block slot. A deferred markdownUpdated may publish the list
+// rows and the paragraph typed after exiting the list together, so the changed
+// region can contain both list markers and ordinary continuation/prose rows.
+// Keep headings, quotes, tables, fences, and thematic breaks on their dedicated
+// mappers; accepting those here would bypass their source-specific contracts.
+const isMiddleListSlotFill = (markdown) => {
+  const lines = markdownLines(withoutStandaloneEmptyBlockLines(markdown))
+  let hasList = false
+  for (const { text } of lines) {
+    const trimmed = text.trim()
+    if (!trimmed) continue
+    if (listMarker(text)) {
+      hasList = true
+      continue
+    }
+    if (
+      isTableLine(text) ||
+      /^(?:#{1,6}\s|>|```|~~~|(?:-{3,}|\*{3,}|_{3,})\s*$)/.test(trimmed)
+    ) return false
+  }
+  return hasList
+}
 
 // Preserve an empty paragraph inserted between two existing blocks without
 // leaking Crepe's transient standalone `<br />` into authored Markdown.
@@ -397,7 +452,9 @@ export const preserveMiddleEmptyBlock = ({
     !previousChangedText &&
     !!nextChangedText
   if ((!previousChangedEmpty && !directBlockInsertion) || !nextChangedText) return null
-  if (hasDedicatedBlockSyntax(next.slice(start, nextEnd))) return null
+  const changedRegion = next.slice(start, nextEnd)
+  const middleListSlotFill = previousChangedEmpty && isMiddleListSlotFill(changedRegion)
+  if (hasDedicatedBlockSyntax(changedRegion) && !middleListSlotFill) return null
 
   const previousLines = visibleLineEntries(previous)
   const sourceLines = visibleLineEntries(source)
@@ -411,8 +468,49 @@ export const preserveMiddleEmptyBlock = ({
 
   const previousBefore = previousLines[beforeIndex]
   const previousAfter = previousLines[afterIndex]
-  const sourceBefore = sourceLines[beforeIndex]
-  const sourceAfter = sourceLines[afterIndex]
+  let sourceBefore
+  let sourceAfter
+  if (sameVisibleLines(sourceLines, previousLines)) {
+    sourceBefore = sourceLines[beforeIndex]
+    sourceAfter = sourceLines[afterIndex]
+  } else {
+    // A divergence near the document start (`- - text`, escaped punctuation,
+    // etc.) shifts every later visible-line index. Using beforeIndex directly
+    // then inserts a newly filled paragraph into an unrelated earlier quote —
+    // especially when many quote rows contain the same “测试” text. Identify
+    // the neighbouring visible-line pair by its own ordinal among equivalent
+    // pairs instead of borrowing the document-global index.
+    const lineKind = (line) => {
+      const text = line?.text || ''
+      if (/^\s*>/.test(text)) return 'quote'
+      if (/^\s*(?:[-+*]|\d{1,9}[.)])\s+/.test(text)) return 'list'
+      if (/^\s*#{1,6}\s+/.test(text)) return 'heading'
+      if (/^\s*\|/.test(text)) return 'table'
+      return 'plain'
+    }
+    const pairMatches = (lines, before, after) => {
+      const matches = []
+      for (let index = 0; index < lines.length - 1; index += 1) {
+        if (
+          lines[index].visible === before.visible &&
+          lines[index + 1].visible === after.visible &&
+          lineKind(lines[index]) === lineKind(before) &&
+          lineKind(lines[index + 1]) === lineKind(after)
+        ) matches.push(index)
+      }
+      return matches
+    }
+    const previousPairs = pairMatches(previousLines, previousBefore, previousAfter)
+    const pairOrdinal = previousPairs.indexOf(beforeIndex)
+    const sourcePairs = pairMatches(sourceLines, previousBefore, previousAfter)
+    if (
+      pairOrdinal < 0 ||
+      sourcePairs.length !== previousPairs.length ||
+      !Number.isInteger(sourcePairs[pairOrdinal])
+    ) return null
+    sourceBefore = sourceLines[sourcePairs[pairOrdinal]]
+    sourceAfter = sourceLines[sourcePairs[pairOrdinal] + 1]
+  }
   if (
     !sourceBefore ||
     !sourceAfter ||
@@ -431,7 +529,14 @@ export const preserveMiddleEmptyBlock = ({
     return null
   }
 
-  const sourceGap = source.slice(sourceBefore.end, sourceAfter.start)
+  // markdownLines() includes the `\r` byte in a CRLF row's text range. The
+  // middle-slot edit owns the complete line ending after the left anchor; a
+  // splice at sourceBefore.end would retain that `\r` and then emit a fresh
+  // `\r\n`, producing `\r\r\n`. Start before the complete CRLF pair.
+  const sourceBeforeContentEnd = sourceBefore.text.endsWith('\r')
+    ? sourceBefore.end - 1
+    : sourceBefore.end
+  const sourceGap = source.slice(sourceBeforeContentEnd, sourceAfter.start)
   if (standaloneEmptyBlockLines(sourceGap).length) return null
   const nextGap = next.slice(nextBefore.end, nextAfter.start)
   if (directBlockInsertion) {
@@ -442,21 +547,21 @@ export const preserveMiddleEmptyBlock = ({
     ))
     if (!insertedGap) return null
     return {
-      markdown: source.slice(0, sourceBefore.end) +
+      markdown: source.slice(0, sourceBeforeContentEnd) +
         adaptCanonicalRegionToSource(
           insertedGap,
           source,
-          { start: sourceBefore.end, end: sourceBefore.end }
+          { start: sourceBeforeContentEnd, end: sourceBeforeContentEnd }
         ) +
-        source.slice(sourceBefore.end),
+        source.slice(sourceBeforeContentEnd),
       preserved: true,
       reason: 'middle-block-inserted'
     }
   }
 
-  const sourceGapRegion = { start: sourceBefore.end, end: sourceAfter.start }
+  const sourceGapRegion = { start: sourceBeforeContentEnd, end: sourceAfter.start }
   return {
-    markdown: source.slice(0, sourceBefore.end) +
+    markdown: source.slice(0, sourceBeforeContentEnd) +
       adaptCanonicalRegionToSource(
         canonicalFreshTextToSource(withoutStandaloneEmptyBlockLines(nextGap)),
         source,
@@ -465,7 +570,9 @@ export const preserveMiddleEmptyBlock = ({
       source.slice(sourceAfter.start),
     preserved: true,
     reason: previousChangedEmpty
-      ? 'middle-empty-block-filled'
+      ? middleListSlotFill
+        ? 'middle-empty-block-list-filled'
+        : 'middle-empty-block-filled'
       : 'middle-block-inserted'
   }
 }
@@ -569,6 +676,46 @@ export const preserveTrailingEmptyBlock = ({
   const nextEmpty = trailingCanonicalEmptyBlock(next)
 
   if (!sourceEmpty && !previousEmpty && nextEmpty) {
+    // A leading-space segment (`&#x20;   文本`, U+200B-sentineled in source)
+    // deleted down to a blank canonical row makes `nextEmpty` true — this is
+    // a deletion, not a newly created empty block. When the canonical tail
+    // segment is a leading-space segment and the authored tail segment shows
+    // the same visible text, drop the authored segment instead of keeping it
+    // (which resurrected deleted content in source mode and after reopen).
+    const trailingVisibleLine = (value) => {
+      const body = String(value || '').replace(/\r?\n$/, '')
+      const lines = body.split('\n')
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        if (lines[index].trim()) {
+          let start = 0
+          for (let before = 0; before < index; before += 1) start += lines[before].length + 1
+          return { text: lines[index], start, end: start + lines[index].length }
+        }
+      }
+      return null
+    }
+    const sourceTailLine = trailingVisibleLine(source)
+    const previousTailLine = trailingVisibleLine(previous)
+    const stripSentinel = (line) => String(line || '')
+      .replace(/\u200B/g, '')
+      .replace(/&#x20;/g, ' ')
+      .replace(/^\s+/, '')
+    if (
+      sourceTailLine &&
+      previousTailLine &&
+      /^\s*(?:\u200B|&#x20;)/.test(previousTailLine.text) &&
+      stripSentinel(sourceTailLine.text) === stripSentinel(previousTailLine.text) &&
+      // Only a change that actually touches the segment is a deletion. Pressing
+      // Enter after the segment (canonical grows a `<br />` empty block, which
+      // makes `nextEmpty` true) must NOT drop the authored leading-space row.
+      start <= previousTailLine.end
+    ) {
+      return {
+        markdown: source.slice(0, sourceTailLine.start) + source.slice(sourceTailLine.end),
+        preserved: true,
+        reason: 'trailing-leading-space-deleted'
+      }
+    }
     return {
       markdown: source,
       preserved: true,
@@ -622,6 +769,11 @@ export const preserveAppendedParagraph = ({
   replacementVisible
 }) => {
   const replacement = next.slice(start, nextEnd)
+  // This shortcut owns only a new plain paragraph at the physical document
+  // end. Headings, lists, quotes, fences, tables, and other block syntax must
+  // continue through their structural handlers; otherwise moving this proof
+  // ahead of the diverged-visible branch could flatten a real structure.
+  if (hasDedicatedBlockSyntax(replacement)) return null
   const previousTrailingNewlines = previous.match(/\n*$/)?.[0].length || 0
   const replacementLeadingNewlines = replacement.match(/^\n*/)?.[0].length || 0
   if (
