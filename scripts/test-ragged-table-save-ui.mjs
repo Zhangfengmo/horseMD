@@ -3,7 +3,7 @@
 // preserve authored short-row bytes and must not enter recovery.
 import assert from 'node:assert/strict'
 import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
@@ -12,15 +12,18 @@ import { sleep } from './lib/cdp.mjs'
 import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const caseName = process.env.RAGGED_CASE || 'cell'
-const supportedCases = new Set(['cell', 'consecutive', 'hardbreak', 'dashes', 'escaped-pipe'])
+const supportedCases = new Set(['cell', 'consecutive', 'hardbreak', 'dashes', 'escaped-pipe', 'external-copy'])
 assert.ok(supportedCases.has(caseName), `RAGGED_CASE must be one of ${[...supportedCases].join(', ')}`)
 
 const root = `/tmp/horsemd-ragged-table-save-${process.pid}`
 const port = Number(process.env.CDP_PORT || 10230 + (process.pid % 300))
 const builtInFixture = new URL('./fixtures/table-save-user-repro.md', import.meta.url)
 const externalFixture = process.env.HORSEMD_REPRO_FILE
-const fixture = join(root, externalFixture ? basename(externalFixture) : 'table-save-user-repro.md')
+assert.equal(caseName === 'external-copy', Boolean(externalFixture), 'external-copy requires HORSEMD_REPRO_FILE and other cases forbid it')
+const fixture = join(root, externalFixture ? 'external-copy.md' : 'table-save-user-repro.md')
 const remark = unified().use(remarkParse).use(remarkGfm)
+let externalStage = 'setup'
+let externalDiagnostic = ''
 
 const waitFor = async (check, message, attempts = 100) => {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -111,9 +114,38 @@ const findRaggedTable = (source) => {
     const width = rows[0]?.children?.length || 0
     const body = rows.slice(1).map((row) => ({
       line: source.slice(row.position.start.offset, row.position.end.offset),
-      cells: row.children.length
+      cells: row.children.length,
+      node: row
     }))
     const shortRows = body.filter((row) => row.cells < width)
+    if (caseName === 'external-copy' && width > 1 && shortRows.length) {
+      const rowOrder = [
+        ...body.map((row, rowIndex) => ({ row, rowIndex })).filter(({ row }) => row.cells === width),
+        ...body.map((row, rowIndex) => ({ row, rowIndex })).filter(({ row }) => row.cells !== width)
+      ]
+      for (const { row, rowIndex } of rowOrder) {
+        for (const [cellIndex, cell] of row.node.children.entries()) {
+          const child = cell.children?.length === 1 && cell.children[0]?.type === 'text'
+            ? cell.children[0]
+            : null
+          if (!child?.value?.trim() || !Number.isInteger(child.position?.end?.offset)) continue
+          return {
+            tableIndex,
+            width,
+            body,
+            shortRows: shortRows.map((entry) => entry.line),
+            editableIndex: rowIndex,
+            targetIndex: rowIndex,
+            externalTarget: {
+              rowIndex,
+              cellIndex,
+              text: child.value,
+              insertionOffset: child.position.end.offset
+            }
+          }
+        }
+      }
+    }
     const editableIndex = body.findIndex((row) => row.cells === width && firstCellText(row.line) === 'editable full')
     const targetIndex = targetLine == null
       ? editableIndex
@@ -133,6 +165,17 @@ const findRaggedTable = (source) => {
 }
 
 const targetForCase = (table) => {
+  if (caseName === 'external-copy') {
+    assert.ok(table.externalTarget, 'external reproduction has no safe plain-text table cell target')
+    return {
+      bodyRowIndex: table.externalTarget.rowIndex,
+      cellIndex: table.externalTarget.cellIndex,
+      expectedCellText: table.externalTarget.text,
+      insertionOffset: table.externalTarget.insertionOffset,
+      token: 'hmExternalEditX',
+      rawEnter: false
+    }
+  }
   const targetLine = caseName === 'hardbreak'
     ? '| hardbreak target |'
     : caseName === 'escaped-pipe'
@@ -146,6 +189,7 @@ const targetForCase = (table) => {
   return {
     // Authored tables exclude the header here. `tbody tr` includes it at 0.
     bodyRowIndex,
+    cellIndex: 0,
     expectedCellText: firstCellText(table.body[bodyRowIndex].line),
     token: 'editedX',
     rawEnter: caseName === 'hardbreak'
@@ -179,13 +223,13 @@ const visibleTableRows = (app, tableIndex) => app.evaluate(`((tableIndex) => {
   )
 })(${tableIndex})`)
 
-const editPoint = (app, tableIndex, bodyRowIndex) => app.evaluate(`((tableIndex, bodyRowIndex) => {
+const editPoint = (app, tableIndex, bodyRowIndex, cellIndex) => app.evaluate(`((tableIndex, bodyRowIndex, cellIndex) => {
   const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent !== null)
   const tables = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].filter((node) => node.offsetParent !== null)
   const table = tables[tableIndex]
   // Milkdown emits the table header as tbody row 0, so authored body row n is
   // DOM row n + 1. Keep this conversion at the DOM boundary.
-  const cell = table?.querySelectorAll('tbody tr')[bodyRowIndex + 1]?.querySelector('td:first-child')
+  const cell = table?.querySelectorAll('tbody tr')[bodyRowIndex + 1]?.querySelectorAll('td')[cellIndex]
   const target = cell?.querySelector('p') || cell
   target?.scrollIntoView({ block: 'center' })
   const rect = target?.getBoundingClientRect()
@@ -193,7 +237,24 @@ const editPoint = (app, tableIndex, bodyRowIndex) => app.evaluate(`((tableIndex,
     text: cell.textContent || '',
     point: { x: Math.round(rect.left + Math.min(14, rect.width / 2)), y: Math.round((rect.top + rect.bottom) / 2) }
   } : null
-})(${tableIndex}, ${bodyRowIndex})`)
+})(${tableIndex}, ${bodyRowIndex}, ${cellIndex})`)
+
+const externalExpectedSource = (source, target) => (
+  source.slice(0, target.insertionOffset) + target.token + source.slice(target.insertionOffset)
+)
+
+const assertExternalLocalDiff = (original, source, target, checkpoint) => {
+  assert.equal(source, externalExpectedSource(original, target), `${checkpoint}: edit was not byte-local to the selected table cell`)
+  const prefixBytes = Buffer.byteLength(original.slice(0, target.insertionOffset))
+  return {
+    tableIndex: target.tableIndex,
+    rowIndex: target.bodyRowIndex,
+    columnIndex: target.cellIndex,
+    byteStart: prefixBytes,
+    byteEnd: prefixBytes + Buffer.byteLength(target.token),
+    insertedBytes: Buffer.byteLength(target.token)
+  }
+}
 
 const visibleSource = (app) => app.evaluate(`(
   [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)?.value ?? null
@@ -213,6 +274,20 @@ const enterSourceWithoutRecovery = async (app, checkpoint) => {
     const source = await visibleSource(app)
     return source == null ? null : { source }
   }, `${checkpoint}: source mode did not open`)
+  if (externalFixture && outcome.recovery) {
+    externalStage = 'source-recovery'
+    const diagnostic = await app.evaluate(`({
+      preserve: (window.__hmPreserveLog || []).slice(-4).map((entry) => ({
+        preserved: entry.preserved,
+        reason: entry.reason
+      })),
+      gate: (window.__hmGateLog || []).slice(-4).map((entry) => ({
+        origin: entry.origin,
+        reason: entry.reason
+      }))
+    })`)
+    externalDiagnostic = JSON.stringify(diagnostic)
+  }
   assert.equal(outcome.recovery, undefined, `${checkpoint}: valid ragged table entered recovery`)
   assert.equal(app.dialogs.length, 0, `${checkpoint}: no recovery dialog is allowed`)
   return outcome.source
@@ -242,6 +317,8 @@ const saveWithoutRecovery = async (app, checkpoint) => {
 
 async function main() {
   let app
+  let externalOriginalBytes
+  let externalResult
   try {
     await rm(root, { recursive: true, force: true })
     await mkdir(root, { recursive: true })
@@ -249,7 +326,7 @@ async function main() {
     // a new regular file under this run's temporary root instead of following
     // its type or metadata through fs.cp().
     const fixtureBytes = externalFixture
-      ? await readFile(externalFixture)
+      ? (externalOriginalBytes = await readFile(externalFixture))
       : caseName === 'cell' || caseName === 'consecutive'
         ? await readFile(builtInFixture)
         : Buffer.from(tableFixtureForCase(caseName), 'utf8')
@@ -259,15 +336,25 @@ async function main() {
     }
 
     const original = await readFile(fixture, 'utf8')
+    externalStage = 'parse-copy'
     const fixtureTable = findRaggedTable(original)
     const target = targetForCase(fixtureTable)
+    assert.equal(original.includes(target.token), false, 'edit token must be unique in the copied fixture')
+    target.tableIndex = fixtureTable.tableIndex
+    const authoredTargetLine = fixtureTable.body[target.bodyRowIndex].line
+    externalStage = 'open-copy'
     app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [fixture] })
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
     await waitFor(async () => (await visibleTableRows(app, fixtureTable.tableIndex)).length, 'ragged GFM table did not render')
     const rows = await visibleTableRows(app, fixtureTable.tableIndex)
     assert.equal(rows.length >= fixtureTable.editableIndex + 2, true, 'complete table row is missing from the DOM after its tbody header row')
-    const targetCell = await editPoint(app, fixtureTable.tableIndex, target.bodyRowIndex)
+    const targetCell = await editPoint(app, fixtureTable.tableIndex, target.bodyRowIndex, target.cellIndex)
     assert.ok(targetCell, 'target table cell was not available')
     assert.equal(targetCell.text, target.expectedCellText, 'target body-row coordinate did not resolve to the expected table cell before input')
+    externalStage = 'edit-copy'
 
     if (caseName === 'consecutive') {
       const shortDomRows = rows.filter((row) => fixtureTable.shortRows.some((raw) => row[0] === raw.replace(/^\|\s*|\s*\|$/g, '').replace(/\\\|/g, '|').replace(/<br\s*\/?>/gi, '')))
@@ -282,42 +369,63 @@ async function main() {
     await click(app, targetCell.point)
     await pressKey(app.send, { key: 'End', code: 'End' })
     if (target.rawEnter) await pressKey(app.send, { key: 'Enter', code: 'Enter' })
+    externalStage = 'type-copy'
     await typeTextLikeUser(app.send, target.token)
     await sleep(450)
 
+    externalStage = 'open-source'
     const sourceAfterEdit = await enterSourceWithoutRecovery(app, 'after real full-row cell edit')
-    assertCaseSource(sourceAfterEdit, target.token, 'source after edit')
+    externalStage = 'verify-source'
+    if (caseName === 'external-copy') {
+      externalResult = assertExternalLocalDiff(original, sourceAfterEdit, target, 'source after edit')
+    } else {
+      assertCaseSource(sourceAfterEdit, target.token, 'source after edit')
+    }
     for (const shortRow of fixtureTable.shortRows) {
-      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+      if (shortRow !== authoredTargetLine) {
         assert.equal(sourceAfterEdit.includes(shortRow), true, 'source mode rewrote an untouched short row')
       }
     }
     await returnToRich(app)
+    externalStage = 'save-copy'
     await saveWithoutRecovery(app, 'rich save')
     const saved = await readFile(fixture, 'utf8')
-    assertCaseSource(saved, target.token, 'saved disk')
+    assert.equal(saved, sourceAfterEdit, 'save did not persist the exact verified source')
+    if (caseName === 'external-copy') {
+      assertExternalLocalDiff(original, saved, target, 'saved disk')
+    } else {
+      assertCaseSource(saved, target.token, 'saved disk')
+    }
     for (const shortRow of fixtureTable.shortRows) {
-      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+      if (shortRow !== authoredTargetLine) {
         assert.equal(saved.includes(shortRow), true, 'save rewrote an untouched short row')
       }
     }
     const sourceAfterSave = await enterSourceWithoutRecovery(app, 'after rich save')
-    assertCaseSource(sourceAfterSave, target.token, 'source after save')
+    assert.equal(sourceAfterSave, saved, 'source after save diverged from verified disk bytes')
+    if (caseName !== 'external-copy') assertCaseSource(sourceAfterSave, target.token, 'source after save')
 
     await stopBuiltElectron(app, { removeProfile: true })
+    externalStage = 'cold-reopen'
     app = await launchBuiltElectron({ profileDir: join(root, 'reopen-profile'), port: port + 1, appArgs: [fixture] })
     await waitFor(async () => (await visibleTableRows(app, fixtureTable.tableIndex)).length, 'saved ragged table did not render after cold reopen')
     const coldRows = await visibleTableRows(app, fixtureTable.tableIndex)
     assert.equal(coldRows.flat().join('').includes(target.token), true, 'cold reopen target table is missing the edited input token')
     const reopened = await enterSourceWithoutRecovery(app, 'cold reopen')
-    assertCaseSource(reopened, target.token, 'cold reopen source')
+    assert.equal(reopened, saved, 'cold reopen source diverged from verified disk bytes')
+    if (caseName !== 'external-copy') assertCaseSource(reopened, target.token, 'cold reopen source')
     for (const shortRow of fixtureTable.shortRows) {
-      if (shortRow !== '| hardbreak target |' && shortRow !== '| a \\| b<br>tail |') {
+      if (shortRow !== authoredTargetLine) {
         assert.equal(reopened.includes(shortRow), true, 'cold reopen rewrote an untouched short row')
       }
     }
     assert.equal(app.dialogs.length, 0, 'cold reopen must not show recovery')
-    console.log(`PASS ragged table rich save: ${caseName}`)
+    if (externalFixture) {
+      assert.deepEqual(await readFile(externalFixture), externalOriginalBytes, 'external reproduction bytes changed')
+      console.log(`PASS external ragged-table copy: table=${externalResult.tableIndex} width=${fixtureTable.width} rows=${fixtureTable.body.length} shortRows=${fixtureTable.shortRows.length} targetRow=${externalResult.rowIndex} targetColumn=${externalResult.columnIndex} diffBytes=${externalResult.byteStart}-${externalResult.byteEnd} insertedBytes=${externalResult.insertedBytes}`)
+    } else {
+      console.log(`PASS ragged table rich save: ${caseName}`)
+    }
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })
@@ -327,7 +435,7 @@ async function main() {
 main().catch((error) => {
   const code = typeof error?.code === 'string' ? error.code : 'TEST_FAILURE'
   if (externalFixture) {
-    console.error(`FAIL ragged table save UI case=${caseName} code=${code}`)
+    console.error(`FAIL ragged table save UI case=${caseName} stage=${externalStage} code=${code} diagnostics=${externalDiagnostic || 'none'}`)
     process.exitCode = 1
     return
   }

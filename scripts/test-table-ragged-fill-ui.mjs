@@ -1,9 +1,8 @@
-// User-reported v0.13.x regression: typing into a cell of a NON-rectangular
-// (ragged) GFM table fail-closed every save. Root cause: the visible map's
-// table-delimiter detection required three dashes, while the canonical
-// serializer emits width-fitted runs (`| -- |`) — the canonical delimiter row
-// leaked into the visible stream as text and permanently desynced the two
-// streams for every table document (mode-visible-map.js isTableSeparator).
+// Legacy focused smoke test for the user-reported ragged-table save failure.
+// The root cause was not parser mount padding or a Go-specific code path: the
+// parser initially retained short rows, then fixTables rectangularized the live
+// ProseMirror document after the source baseline. The old global visible-stream
+// comparison treated those equivalent table shapes as a permanent mismatch.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'

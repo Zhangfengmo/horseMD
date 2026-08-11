@@ -1,73 +1,52 @@
-// A source-acceptance regression for documents whose authored Markdown and
-// Crepe's canonical serializer differ structurally. GFM permits short table
-// rows, while the app parser pads them to the table width in ProseMirror. That
-// normalization must not make an ordinary rich edit fail closed: acceptance
-// must compare through the app parser, not an independent Markdown parser.
+// End-to-end source ownership coverage for fenced languages next to legal
+// ragged GFM tables. Each language case edits a real table cell; table-looking
+// bytes inside its fence must remain completely untouched.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
-import { typeTextLikeUser } from './lib/human-input.mjs'
+import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const root = `/tmp/horsemd-rich-source-app-parser-${process.pid}`
 const port = Number(process.env.CDP_PORT || 10066)
 const tail = '结尾正文'
 const inserted = '新增段落'
-const raggedRow = '| only-one-cell |'
+const languages = ['go', 'js', 'ts', 'python', 'rust', 'java', 'c', 'cpp']
+const languageFixtures = languages.map((language) => ({
+  language,
+  target: `target-${language}`,
+  token: `X${language}`,
+  raggedRow: `| short-${language} |`,
+  fence: [
+    `\`\`\`${language}`,
+    `| code-${language} | table-looking | bytes |`,
+    '| --- | --- | --- |',
+    `literal-${language}`,
+    '\`\`\`'
+  ].join('\n')
+}))
 const initial = [
   '# App parser source acceptance',
   '',
-  'The code languages are deliberately unrelated to the table normalization.',
-  '',
-  '```go',
-  'package main',
-  'func main() { println("go") }',
-  '```',
-  '',
-  '```javascript',
-  'const language = "javascript"',
-  'console.log(language)',
-  '```',
-  '',
-  '```typescript',
-  'const language: string = "typescript"',
-  'console.log(language)',
-  '```',
-  '',
-  '```python',
-  'language = "python"',
-  'print(language)',
-  '```',
-  '',
-  '```rust',
-  'fn main() { println!("rust"); }',
-  '```',
-  '',
-  '```java',
-  'class Main { public static void main(String[] args) { System.out.println("java"); } }',
-  '```',
-  '',
-  '```c',
-  '#include <stdio.h>',
-  'int main(void) { puts("c"); return 0; }',
-  '```',
-  '',
-  '```cpp',
-  '#include <iostream>',
-  'int main() { std::cout << "cpp"; }',
-  '```',
-  '',
-  '| one | two | three | four | five |',
-  '| --- | --- | --- | --- | --- |',
-  '| a | b | c | d | e |',
-  raggedRow,
-  '| v | w | x | y | z |',
-  '',
+  ...languageFixtures.flatMap(({ language, target, raggedRow, fence }) => [
+    `## ${language}`,
+    '',
+    fence,
+    '',
+    '| language | target | guard |',
+    '| - | -- | --- |',
+    `| ${language} | ${target} | keep-${language} |`,
+    raggedRow,
+    '',
+  ]),
   tail,
   ''
 ].join('\n')
-const expected = initial.replace(`${tail}\n`, `${tail}${inserted}\n`)
+const expected = languageFixtures.reduce(
+  (source, { target, token }) => source.replace(target, `${target}${token}`),
+  initial
+)
 
 async function waitFor(check, message, attempts = 100) {
   for (let index = 0; index < attempts; index += 1) {
@@ -102,6 +81,10 @@ async function openApp(profile, file, appPort) {
     'rich fixture did not mount'
   )
   await sleep(500)
+  await app.evaluate(`(() => {
+    window.__hmPreserveLog = []
+    window.__hmGateLog = []
+  })()`)
   return app
 }
 
@@ -135,6 +118,57 @@ async function persistFirstTableColumnWidth(app) {
       .find((node) => node.offsetParent)
     return !!editor?.querySelector('.milkdown-table-block [data-colwidth]')
   })()`), true, 'table resize did not persist live colwidth metadata')
+}
+
+const click = async (app, point) => {
+  await app.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
+  await app.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await app.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+}
+
+async function appendToTableCell(app, target, token) {
+  const located = await app.evaluate(`((targetText) => {
+    const editor = [...document.querySelectorAll('.ProseMirror')]
+      .find((node) => node.offsetParent)
+    const matches = [...(editor?.querySelectorAll('.milkdown-table-block td') || [])]
+      .filter((cell) => cell.textContent === targetText)
+    if (matches.length !== 1) return { count: matches.length }
+    const cell = matches[0]
+    const paragraph = cell.querySelector('p') || cell
+    paragraph.scrollIntoView({ block: 'center' })
+    const rect = paragraph.getBoundingClientRect()
+    return {
+      count: 1,
+      point: {
+        x: Math.round(rect.left + Math.min(14, rect.width / 2)),
+        y: Math.round((rect.top + rect.bottom) / 2)
+      }
+    }
+  })(${JSON.stringify(target)})`)
+  assert.equal(located.count, 1, `table target ${target} was not unique`)
+  await click(app, located.point)
+  await pressKey(app.send, { key: 'End', code: 'End' })
+  await typeTextLikeUser(app.send, token)
+  await waitFor(
+    () => app.evaluate(`[...document.querySelectorAll('.ProseMirror td')]
+      .some((cell) => cell.textContent === ${JSON.stringify(target + token)})`),
+    `committed input did not land in table cell ${target}`
+  )
+}
+
+const assertFencedBytesUntouched = (source, checkpoint) => {
+  for (const { language, fence } of languageFixtures) {
+    assert.equal(source.includes(fence), true, `${checkpoint}: ${language} fenced table-looking bytes changed`)
+  }
+}
+
+async function returnToRich(app, checkpoint) {
+  assert.equal(await toggleSource(app), true, `${checkpoint}: source toggle missing`)
+  await waitFor(
+    () => app.evaluate(`Boolean([...document.querySelectorAll('.ProseMirror')]
+      .find((node) => node.offsetParent !== null))`),
+    `${checkpoint}: rich editor did not return`
+  )
 }
 
 async function placeCaretAtParagraphEnd(app, paragraphText) {
@@ -176,6 +210,18 @@ async function saveWithoutRecovery(app, checkpoint) {
   assert.equal(app.dialogs.length, 0, `${checkpoint}: save must not enter recovery`)
 }
 
+async function assertGateClean(app, checkpoint) {
+  assert.deepEqual(
+    await app.evaluate(`(window.__hmGateLog || []).map((entry) => ({
+      origin: entry.origin,
+      reason: entry.reason
+    }))`),
+    [],
+    `${checkpoint}: verified source gate recorded a rejection`
+  )
+  assert.equal(app.dialogs.length, 0, `${checkpoint}: recovery dialog appeared`)
+}
+
 async function inspectSourceWithoutRecovery(
   app,
   checkpoint,
@@ -199,8 +245,12 @@ async function inspectSourceWithoutRecovery(
   assert.equal(outcome.recovery, undefined, `${checkpoint}: source switch entered recovery`)
   assert.equal(outcome.source, expectedSource, `${checkpoint}: source did not match the verified disk form`)
   if (requireAuthoredRaggedRow) {
-    assert.ok(outcome.source.includes(raggedRow), `${checkpoint}: short table row was padded or removed`)
+    for (const { language, raggedRow } of languageFixtures) {
+      assert.ok(outcome.source.includes(raggedRow), `${checkpoint}: ${language} short table row was padded or removed`)
+    }
   }
+  assertFencedBytesUntouched(outcome.source, checkpoint)
+  return outcome.source
 }
 
 async function main() {
@@ -212,15 +262,12 @@ async function main() {
   let app
   try {
     app = await openApp('edit', file, port)
-    await app.evaluate(`(() => {
-      window.__hmPreserveLog = []
-      window.__hmGateLog = []
-    })()`)
-    await placeCaretAtParagraphEnd(app, tail)
-
-    // Committed input is sent one character at a time. This is not an IME
-    // composition test; it exercises the real incremental editor path.
-    await typeTextLikeUser(app.send, inserted)
+    // Every language performs committed per-character input in its own table
+    // target. The nearby fenced block deliberately contains table-looking
+    // lines so code bytes and table source ownership cannot be conflated.
+    for (const { target, token } of languageFixtures) {
+      await appendToTableCell(app, target, token)
+    }
     await waitFor(
       () => app.evaluate(`!!document.querySelector('.hm-save-fab')`),
       'rich edit did not become dirty'
@@ -228,12 +275,16 @@ async function main() {
     await sleep(500)
 
     await inspectSourceWithoutRecovery(app, 'after rich edit', expected)
-    await saveWithoutRecovery(app, 'authored-ragged source save')
+    await assertGateClean(app, 'after 8 table-cell source checks')
+    await returnToRich(app, 'after source inspection')
+    await saveWithoutRecovery(app, 'authored-ragged rich save')
+    await assertGateClean(app, 'after 8 table-cell rich save')
     assert.equal(await readFile(file, 'utf8'), expected, 'save changed untouched authored bytes')
 
     await stopBuiltElectron(app, { removeProfile: true })
     app = await openApp('reopen', file, port + 1)
     await inspectSourceWithoutRecovery(app, 'cold reopen', expected)
+    await assertGateClean(app, 'after 8 table-cell cold reopen')
     assert.equal(await readFile(file, 'utf8'), expected, 'cold reopen changed disk bytes')
 
     // A column resize is an explicit table operation and may canonicalize that
@@ -243,10 +294,6 @@ async function main() {
     const resizedFile = join(root, 'resized-ragged-table-code-matrix.md')
     await writeFile(resizedFile, initial)
     app = await openApp('resize-edit', resizedFile, port + 2)
-    await app.evaluate(`(() => {
-      window.__hmPreserveLog = []
-      window.__hmGateLog = []
-    })()`)
     await persistFirstTableColumnWidth(app)
     await placeCaretAtParagraphEnd(app, tail)
     await typeTextLikeUser(app.send, inserted)
@@ -257,22 +304,24 @@ async function main() {
     await saveWithoutRecovery(app, 'resized-table rich save')
     const resizedSource = await readFile(resizedFile, 'utf8')
     assert.ok(resizedSource.includes(`${tail}${inserted}`), 'resized-table edit was not saved')
-    assert.ok(resizedSource.includes('only-one-cell'), 'resized table lost its ragged-row content')
-    for (const language of ['go', 'javascript', 'typescript', 'python', 'rust', 'java', 'c', 'cpp']) {
-      assert.ok(resizedSource.includes(`\`\`\`${language}\n`), `resized save lost ${language} code`)
+    assert.ok(resizedSource.includes('short-go'), 'resized table lost its ragged-row content')
+    for (const { language, fence } of languageFixtures) {
+      assert.ok(resizedSource.includes(fence), `resized save changed ${language} fenced bytes`)
     }
     await inspectSourceWithoutRecovery(app, 'after resized-table save', resizedSource, {
       requireAuthoredRaggedRow: false
     })
+    await assertGateClean(app, 'after resized-table save')
 
     await stopBuiltElectron(app, { removeProfile: true })
     app = await openApp('resize-reopen', resizedFile, port + 3)
     await inspectSourceWithoutRecovery(app, 'resized-table cold reopen', resizedSource, {
       requireAuthoredRaggedRow: false
     })
+    await assertGateClean(app, 'after resized-table cold reopen')
     assert.equal(await readFile(resizedFile, 'utf8'), resizedSource, 'resized-table reopen changed disk bytes')
 
-    console.log('PASS app-parser source acceptance: exact ragged source and resized-table semantics survive 8 languages, save, source, and reopen')
+    console.log('PASS app-parser source acceptance: 8 real table-cell edits preserve adjacent fenced bytes through source, rich save, resize, and cold reopen')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })
