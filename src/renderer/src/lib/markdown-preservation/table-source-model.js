@@ -1,5 +1,8 @@
 import { decodeNamedCharacterReference } from 'decode-named-character-reference'
-import { createMarkdownSourceView } from '../markdown-source-view.js'
+import {
+  createMarkdownSourceView,
+  normalizedOffsetFromRaw
+} from '../markdown-source-view.js'
 import {
   adaptCanonicalRegionToSource,
   commonChange
@@ -356,9 +359,8 @@ const tableShapeEqual = (left, right) => {
   return left.rows.every((row, rowIndex) => row.kind === right.rows[rowIndex]?.kind)
 }
 
-const tableDurableEqual = (left, leftModel, right, rightModel) => {
-  if (!tableShapeEqual(left, right)) return false
-  return left.rows.every((row, rowIndex) => {
+const tableDurableContentEqual = (left, leftModel, right, rightModel) => (
+  left.rows.every((row, rowIndex) => {
     const other = right.rows[rowIndex]
     const columns = Math.max(row.cells.length, other.cells.length, left.width)
     for (let column = 0; column < columns; column += 1) {
@@ -368,7 +370,12 @@ const tableDurableEqual = (left, leftModel, right, rightModel) => {
     }
     return true
   })
-}
+)
+
+const tableDurableEqual = (left, leftModel, right, rightModel) => (
+  tableShapeEqual(left, right) &&
+  tableDurableContentEqual(left, leftModel, right, rightModel)
+)
 
 const authoredMatchesPrevious = (authored, authoredModel, previous, previousModel) => {
   if (!tableShapeEqual(authored, previous)) return false
@@ -511,19 +518,140 @@ const rangeTouchesChange = (range, changeRange) => {
   return changeRange.start < range.end && changeRange.end > range.start
 }
 
-const exactBaselineTableCountChange = ({ authoredModel, previousModel, nextModel }) => {
-  if (authoredModel.view.text !== previousModel.view.text) return null
-  const delta = Math.abs(previousModel.tables.length - nextModel.tables.length)
-  if (delta !== 1) return null
-  const normalizedNext = normalizeGfmTableSerializerPlaceholders(nextModel.view.raw, (value) => (
-    value === nextModel.view.raw ? nextModel : null
-  ))
-  const change = commonChange(previousModel.view.text, createMarkdownSourceView(normalizedNext).text)
-  const sourceRange = authoredModel.view.rawRange(change.start, change.previousEnd)
-  if (!sourceRange) return null
+const normalizedTableRange = (model, table) => {
+  if (!model?.view || !table?.range) return null
+  const start = normalizedOffsetFromRaw(model.view, table.range.start)
+  const end = normalizedOffsetFromRaw(model.view, table.range.end)
+  return Number.isInteger(start) && Number.isInteger(end) && start <= end
+    ? { start, end }
+    : null
+}
+
+const textOutsideTable = (model, table) => {
+  const range = normalizedTableRange(model, table)
+  return range
+    ? model.view.text.slice(0, range.start) + model.view.text.slice(range.end)
+    : null
+}
+
+const tablesHaveIdenticalOutsideText = (previousModel, previousTable, nextModel, nextTable) => {
+  const previousOutside = textOutsideTable(previousModel, previousTable)
+  const nextOutside = textOutsideTable(nextModel, nextTable)
+  return previousOutside != null && previousOutside === nextOutside
+}
+
+const changeEquals = (left, right) => Boolean(
+  left &&
+  Number.isInteger(left.start) &&
+  Number.isInteger(left.previousEnd) &&
+  Number.isInteger(left.nextEnd) &&
+  left.start === right.start &&
+  left.previousEnd === right.previousEnd &&
+  left.nextEnd === right.nextEnd
+)
+
+const changeTouchesOwningTable = (change, previousModel, previousTable, nextModel, nextTable) => {
+  const previousRaw = previousModel.view.rawRange(change.start, change.previousEnd)
+  const nextRaw = nextModel.view.rawRange(change.start, change.nextEnd)
+  return rangeTouchesChange(previousTable?.range, previousRaw) ||
+    rangeTouchesChange(nextTable?.range, nextRaw)
+}
+
+const unmatchedTableIndex = (shorterModel, longerModel) => {
+  if (longerModel.tables.length !== shorterModel.tables.length + 1) return null
+  const candidates = []
+  for (let skipped = 0; skipped < longerModel.tables.length; skipped += 1) {
+    const matches = shorterModel.tables.every((table, index) => {
+      const longerIndex = index < skipped ? index : index + 1
+      return tableDurableEqual(
+        table,
+        shorterModel,
+        longerModel.tables[longerIndex],
+        longerModel
+      )
+    })
+    if (matches) candidates.push(skipped)
+  }
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+const whitespaceOutsideOwnedTable = (text, changeStart, changeEnd, tableRange) => {
+  if (
+    !tableRange ||
+    changeStart > tableRange.start ||
+    changeEnd < tableRange.end
+  ) return false
+  return /^[\t \n]*$/.test(
+    text.slice(changeStart, tableRange.start) + text.slice(tableRange.end, changeEnd)
+  )
+}
+
+const exactBaselineTableCountChange = ({
+  authoredModel,
+  previousModel,
+  nextModel,
+  parseTables
+}) => {
+  if (authoredModel.view.text !== previousModel.view.text) {
+    return { status: 'unowned', reason: 'ambiguous-table-count-change' }
+  }
+  if (Math.abs(previousModel.tables.length - nextModel.tables.length) !== 1) {
+    return { status: 'unowned', reason: 'ambiguous-table-count-change' }
+  }
+
+  const normalizedNext = normalizeGfmTableSerializerPlaceholders(nextModel.view.raw, parseTables)
+  let normalizedNextModel = nextModel
+  if (normalizedNext !== nextModel.view.raw) {
+    try {
+      normalizedNextModel = parseTables(normalizedNext)
+    } catch {
+      return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
+    }
+    if (!isValidModel(normalizedNextModel, normalizedNext)) {
+      return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
+    }
+  }
+
+  const insertion = normalizedNextModel.tables.length === previousModel.tables.length + 1
+  const shorterModel = insertion ? previousModel : normalizedNextModel
+  const longerModel = insertion ? normalizedNextModel : previousModel
+  const owningIndex = unmatchedTableIndex(shorterModel, longerModel)
+  if (owningIndex == null) {
+    return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
+  }
+
+  const canonicalChange = commonChange(previousModel.view.text, normalizedNextModel.view.text)
+  const owningTable = longerModel.tables[owningIndex]
+  const owningRange = normalizedTableRange(longerModel, owningTable)
+  const shorterChangeIsEmpty = insertion
+    ? canonicalChange.previousEnd === canonicalChange.start
+    : canonicalChange.nextEnd === canonicalChange.start
+  const longerChangeEnd = insertion ? canonicalChange.nextEnd : canonicalChange.previousEnd
+  if (
+    !shorterChangeIsEmpty ||
+    !whitespaceOutsideOwnedTable(
+      longerModel.view.text,
+      canonicalChange.start,
+      longerChangeEnd,
+      owningRange
+    )
+  ) return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
+
+  const sourceRange = authoredModel.view.rawRange(
+    canonicalChange.start,
+    canonicalChange.previousEnd
+  )
+  const replacementRange = normalizedNextModel.view.rawRange(
+    canonicalChange.start,
+    canonicalChange.nextEnd
+  )
+  if (!sourceRange || !replacementRange) {
+    return { status: 'unowned', reason: 'unmappable-table-count-change' }
+  }
   return {
+    status: 'patched',
     sourceRange,
-    replacement: normalizedNext.slice(change.start, change.nextEnd)
+    replacement: normalizedNextModel.view.raw.slice(replacementRange.start, replacementRange.end)
   }
 }
 
@@ -531,7 +659,7 @@ export function mapGfmTableChange({
   authored,
   previousCanonical,
   nextCanonical,
-  change: _change,
+  change = null,
   parseTables
 }) {
   const source = String(authored ?? '')
@@ -540,10 +668,20 @@ export function mapGfmTableChange({
   const models = parseModels(parseTables, [source, previous, next])
   if (!models) return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
   const [authoredModel, previousModel, nextModel] = models
+  const rawCanonicalChange = commonChange(previous, next)
+  if (change != null && !changeEquals(change, rawCanonicalChange)) {
+    return { status: 'unowned', reason: 'invalid-table-change-range' }
+  }
+  const canonicalChange = commonChange(previousModel.view.text, nextModel.view.text)
 
   if (previousModel.tables.length !== nextModel.tables.length) {
-    const exact = exactBaselineTableCountChange({ authoredModel, previousModel, nextModel })
-    if (!exact) return { status: 'unowned', reason: 'ambiguous-table-count-change' }
+    const exact = exactBaselineTableCountChange({
+      authoredModel,
+      previousModel,
+      nextModel,
+      parseTables
+    })
+    if (exact.status !== 'patched') return exact
     const replacement = adaptCanonicalRegionToSource(exact.replacement, source, exact.sourceRange)
     return {
       status: 'patched',
@@ -555,12 +693,13 @@ export function mapGfmTableChange({
 
   const changedTables = []
   for (let index = 0; index < previousModel.tables.length; index += 1) {
-    if (!tableDurableEqual(
-      previousModel.tables[index],
-      previousModel,
-      nextModel.tables[index],
-      nextModel
-    )) changedTables.push(index)
+    const previousTable = previousModel.tables[index]
+    const nextTable = nextModel.tables[index]
+    const shapeEqual = tableShapeEqual(previousTable, nextTable)
+    if (
+      !shapeEqual ||
+      !tableDurableContentEqual(previousTable, previousModel, nextTable, nextModel)
+    ) changedTables.push({ index, shapeEqual })
   }
 
   if (!changedTables.length) {
@@ -574,6 +713,12 @@ export function mapGfmTableChange({
     if (!touched.length) return { status: 'not-table' }
     if (touched.length > 1) return { status: 'unowned', reason: 'ambiguous-multiple-table-format-change' }
     const index = touched[0].index
+    if (!tablesHaveIdenticalOutsideText(
+      previousModel,
+      previousModel.tables[index],
+      nextModel,
+      nextModel.tables[index]
+    )) return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
     if (!authoredMatchesPrevious(
       authoredModel.tables[index],
       authoredModel,
@@ -591,10 +736,20 @@ export function mapGfmTableChange({
   if (changedTables.length > 1) {
     return { status: 'unowned', reason: 'ambiguous-multiple-table-change' }
   }
-  const index = changedTables[0]
+  const { index, shapeEqual } = changedTables[0]
   const authoredTable = authoredModel.tables[index]
   const previousTable = previousModel.tables[index]
   const nextTable = nextModel.tables[index]
+  if (!tablesHaveIdenticalOutsideText(previousModel, previousTable, nextModel, nextTable)) {
+    return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
+  }
+  if (!changeTouchesOwningTable(
+    canonicalChange,
+    previousModel,
+    previousTable,
+    nextModel,
+    nextTable
+  )) return { status: 'unowned', reason: 'table-change-outside-owning-range' }
   if (!authoredTable || !authoredMatchesPrevious(
     authoredTable,
     authoredModel,
@@ -602,7 +757,7 @@ export function mapGfmTableChange({
     previousModel
   )) return { status: 'unowned', reason: 'authored-previous-table-mismatch' }
 
-  if (!tableShapeEqual(previousTable, nextTable)) {
+  if (!shapeEqual) {
     const nextBlock = nextModel.view.raw.slice(nextTable.range.start, nextTable.range.end)
     // Normalize against the already parsed whole document instead of trusting
     // a line-oriented table split. Ranges are table-local here.

@@ -29,10 +29,13 @@ const comparableTextOf = (node) => {
     case 'text':
     case 'inlineCode':
     case 'code':
-    case 'html':
     case 'yaml':
     case 'math':
       return node.value == null ? '' : String(node.value)
+    case 'html': {
+      const value = node.value == null ? '' : String(node.value)
+      return /^<br\s*\/?>$/i.test(value) ? '' : value
+    }
     default:
       return node.children ? node.children.map(comparableTextOf).join('') : ''
   }
@@ -117,11 +120,17 @@ const tableParserFor = (remark) => {
   return parser
 }
 
-const tableUnitItems = (cell) => {
+const tableUnitItems = (cell, fallbackItems = []) => {
   const items = []
   for (const unit of cell.units || []) {
     if (unit.kind === 'break') {
       items.push({ rawStart: unit.range.start, rawEnd: unit.range.end, atom: true })
+      continue
+    }
+    if (unit.kind === 'opaque') {
+      items.push(...fallbackItems.filter((item) => (
+        item.rawStart >= unit.range.start && item.rawEnd <= unit.range.end
+      )))
       continue
     }
     if (unit.kind !== 'char') continue
@@ -130,25 +139,26 @@ const tableUnitItems = (cell) => {
       items.push({ rawStart: unit.range.start, rawEnd: unit.range.end })
     }
   }
-  return items
+  return items.sort((left, right) => left.rawStart - right.rawStart || left.rawEnd - right.rawEnd)
 }
 
 const tableCellBlock = (markdown, cell, row, mdastCell) => {
-  if (cell?.presence === 'present' && cell.patchable && cell.range) {
-    const text = (cell.units || [])
+  const fallback = mdBlock(markdown, mdastCell, 'tableCell')
+  if (cell?.presence === 'present' && cell.range) {
+    const unitText = (cell.units || [])
       .filter((unit) => unit.kind === 'char')
       .map((unit) => unit.value || '')
       .join('')
+    const semanticText = mdastCell ? comparableTextOf(mdastCell) : unitText
     return {
       kind: 'tableCell',
       start: cell.range.start,
       end: cell.range.end,
-      text,
-      matchText: text,
-      items: tableUnitItems(cell)
+      text: semanticText,
+      matchText: semanticText,
+      items: tableUnitItems(cell, fallback?.items)
     }
   }
-  const fallback = mdBlock(markdown, mdastCell, 'tableCell')
   if (fallback) return fallback
   const offset = row?.range?.end
   if (!Number.isFinite(offset)) return null

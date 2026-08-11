@@ -220,7 +220,8 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
 
   const sourceVisible = sourceVisibleIndex(sourceMarkdown)
   const previousVisible = sourceVisibleIndex(previous)
-  let { start, previousEnd, nextEnd } = commonChange(previous, next)
+  const canonicalChange = commonChange(previous, next)
+  let { start, previousEnd, nextEnd } = canonicalChange
   // Two canonicals can share a PARTIAL leading marker (`# 旧标题` vs
   // `## 新标题` share `# `), leaving the delta boundary inside a marker
   // token. Mapping that split token as text glues the remainder onto the
@@ -293,7 +294,10 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     authored: sourceMarkdown,
     previousCanonical: previous,
     nextCanonical: next,
-    change: { start, previousEnd, nextEnd },
+    // The generic mapper may widen its local delta to keep Markdown marker
+    // tokens atomic. Table ownership validates against the canonical common
+    // change itself, not that downstream widened working range.
+    change: canonicalChange,
     parseTables
   })
   if (tableChange.status === 'patched') {

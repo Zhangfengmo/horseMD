@@ -275,6 +275,71 @@ const cases = []
 }
 
 {
+  const markdown = [
+    '| Item | Note |',
+    '| --- | --- |',
+    '| **bold** a \\| b<br>tail | stable |'
+  ].join('\n')
+  const pmDoc = doc(table(
+    row('Item', 'Note'),
+    schema.node('table_row', null, [
+      richCell([
+        text('bold a | b'),
+        schema.node('hard_break'),
+        text('tail')
+      ]),
+      cell('stable')
+    ])
+  ))
+  const cellStart = nthTextblockPos(pmDoc, 'bold a | btail')
+  const escapedPipeRaw = markdown.indexOf('\\|')
+  const pipePm = cellStart + 'bold a '.length
+  assert.equal(
+    markdownOffsetToPmPos(markdown, escapedPipeRaw, pmDoc, remark)?.pos,
+    pipePm,
+    'opaque prefix: escaped-pipe backslash still maps to its one decoded PM character'
+  )
+  assert.equal(
+    markdownOffsetToPmPos(markdown, escapedPipeRaw + 1, pmDoc, remark)?.pos,
+    pipePm,
+    'opaque prefix: escaped-pipe second raw byte maps to the same PM character'
+  )
+  assert.equal(
+    pmPosToMarkdownOffset(markdown, pipePm, pmDoc, remark),
+    escapedPipeRaw,
+    'opaque prefix: decoded pipe maps back to the two-byte unit start'
+  )
+
+  const afterPipeRaw = markdown.indexOf('b<br>')
+  const afterPipePm = cellStart + 'bold a | '.length
+  assert.equal(
+    markdownOffsetToPmPos(markdown, afterPipeRaw, pmDoc, remark)?.pos,
+    afterPipePm,
+    'opaque prefix: text after escaped pipe keeps its exact PM coordinate'
+  )
+  assert.equal(
+    pmPosToMarkdownOffset(markdown, afterPipePm, pmDoc, remark),
+    afterPipeRaw,
+    'opaque prefix: text after escaped pipe maps back to its exact raw offset'
+  )
+
+  const breakRaw = markdown.indexOf('<br>')
+  const breakPm = cellStart + 'bold a | b'.length
+  assert.equal(markdownOffsetToPmPos(markdown, breakRaw + 2, pmDoc, remark)?.pos, breakPm)
+  assert.equal(pmPosToMarkdownOffset(markdown, breakPm, pmDoc, remark), breakRaw)
+  assertTextRoundTrip({
+    label: 'opaque prefix text after parser-owned break',
+    markdown,
+    pmDoc,
+    token: 'tail',
+    local: 3,
+    pmText: 'bold a | btail',
+    pmExtraBefore: 1
+  })
+  cases.push('table opaque prefix with escaped pipe and break units')
+}
+
+{
   const markdown = 'Before\n\n```js\nconst answer = 42\nconsole.log(answer)\n```\n\nAfter\n'
   const code = 'const answer = 42\nconsole.log(answer)'
   const pmDoc = doc(paragraph('Before'), codeBlock(code), paragraph('After'))

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
+import { commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
 import {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
@@ -270,6 +271,145 @@ for (const fixture of [
     authored.slice(result.sourceRange.start, result.sourceRange.end),
     '| one | two |\n| :-- | --: |\n| old | row |',
     'structural sourceRange owns only the old table block'
+  )
+}
+
+{
+  const authored = [
+    '# Before',
+    '',
+    '| one | two |',
+    '| --- | --- |',
+    '| old | stable |',
+    '',
+    'tail'
+  ].join('\n')
+  const nextCanonical = authored
+    .replace('# Before', '# After')
+    .replace('| old | stable |', '| typed | stable |')
+  const result = mapGfmTableChange({ authored, previousCanonical: authored, nextCanonical, parseTables })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'mixed-table-and-outside-change' },
+    'one cell edit published with a heading edit fails closed atomically'
+  )
+}
+
+{
+  const authored = [
+    'before',
+    '',
+    '| one | two |',
+    '| --- | --- |',
+    '| old | stable |',
+    '',
+    'tail before'
+  ].join('\n')
+  const nextCanonical = authored
+    .replace('| old | stable |', '| old | stable |\n| new | row |')
+    .replace('tail before', 'tail after')
+  const result = mapGfmTableChange({ authored, previousCanonical: authored, nextCanonical, parseTables })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'mixed-table-and-outside-change' },
+    'one structural table edit published with a paragraph edit fails closed atomically'
+  )
+}
+
+{
+  const authored = '| one | two |\n| --- | --- |\n| old | stable |'
+  const nextCanonical = authored.replace('old', 'typed')
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical,
+    change: { start: 0, previousEnd: 0, nextEnd: 0 },
+    parseTables
+  })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'invalid-table-change-range' },
+    'a supplied transaction change must agree with the canonical common change'
+  )
+}
+
+{
+  const authored = '\uFEFFbefore\r\n\r\n| one | two |\r\n| --- | --- |\r\n| old | stable |\r\n'
+  const nextCanonical = authored.replace('old', 'typed')
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical: authored,
+    nextCanonical,
+    change: commonChange(authored, nextCanonical),
+    parseTables
+  })
+  assert.equal(result.status, 'patched', 'a raw canonical change remains valid across BOM + CRLF normalization')
+  assert.equal(result.markdown, authored.replace('old', 'typed'))
+}
+
+{
+  const before = '\uFEFF# Demo\r\n\r\nTail\r\n'
+  const insertedCanonical = [
+    '\uFEFF# Demo',
+    '',
+    '| Name | Notes |',
+    '| --- | --- |',
+    '| <br /> | kept |',
+    '',
+    'Tail',
+    ''
+  ].join('\r\n')
+  const expectedInserted = insertedCanonical.replace('<br />', '')
+  const inserted = mapGfmTableChange({
+    authored: before,
+    previousCanonical: before,
+    nextCanonical: insertedCanonical,
+    parseTables
+  })
+  assert.equal(inserted.status, 'patched', 'a pure table insertion is owned')
+  assert.equal(inserted.kind, 'table-structure')
+  assert.equal(inserted.sourceRange.start, inserted.sourceRange.end, 'table insertion owns one source insertion point')
+  assert.equal(inserted.sourceRange.start, before.indexOf('Tail'), 'the insertion point stays immediately before following text')
+  assert.equal(inserted.markdown, expectedInserted, 'table insertion preserves BOM, CRLF, following text, and clears only placeholders')
+
+  const deleted = mapGfmTableChange({
+    authored: expectedInserted,
+    previousCanonical: expectedInserted,
+    nextCanonical: before,
+    parseTables
+  })
+  assert.equal(deleted.status, 'patched', 'a pure table deletion is owned')
+  assert.equal(deleted.kind, 'table-structure')
+  assert.equal(
+    expectedInserted.slice(deleted.sourceRange.start, deleted.sourceRange.end),
+    ['| Name | Notes |', '| --- | --- |', '|  | kept |', '', ''].join('\r\n'),
+    'table deletion owns exactly the parsed table plus its necessary separator'
+  )
+  assert.equal(deleted.markdown, before, 'table deletion preserves BOM, CRLF, and does not glue following text')
+}
+
+for (const fixture of [
+  {
+    label: 'insert plus heading edit',
+    authored: '# Before\n\nTail\n',
+    next: '# After\n\n| A | B |\n| - | - |\n| x | y |\n\nTail\n'
+  },
+  {
+    label: 'delete plus trailing paragraph edit',
+    authored: '# Before\n\n| A | B |\n| - | - |\n| x | y |\n\nTail before\n',
+    next: '# Before\n\nTail after\n'
+  }
+]) {
+  const result = mapGfmTableChange({
+    authored: fixture.authored,
+    previousCanonical: fixture.authored,
+    nextCanonical: fixture.next,
+    parseTables
+  })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'mixed-table-and-outside-change' },
+    `${fixture.label} fails closed instead of replacing a whole-document common change`
   )
 }
 
