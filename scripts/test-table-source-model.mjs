@@ -377,6 +377,93 @@ for (const fixture of [
 
 {
   const authored = [
+    '| Break | Label |',
+    '| - | - |',
+    '| before | anchor-before |',
+    '|  | first |',
+    '| <br> | second |',
+    '| after | anchor-after |'
+  ].join('\n')
+  const previousCanonical = authored
+    .replace('|  | first |', '| <br /> | first |')
+    .replace('| <br> | second |', '| <br /> | second |')
+  const nextCanonical = previousCanonical.replace(
+    '| <br /> | first |',
+    '| <br /> | new |\n| <br /> | first |'
+  )
+  const inserted = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(inserted.status, 'patched', 'a uniquely anchored middle row insertion remains table-owned')
+  const insertedRows = parseTables(inserted.markdown).tables[0].rows
+  assert.equal(insertedRows[2].cells[0].units.length, 0, 'the inserted middle row placeholder becomes empty')
+  assert.equal(insertedRows[3].cells[0].units.length, 0, 'the old empty-cell provenance follows the first row')
+  assert.equal(insertedRows[4].cells[0].units[0]?.kind, 'break', 'the real hardbreak provenance follows the shifted second row')
+  assert.deepEqual(
+    insertedRows.slice(1).map((row) => row.cells[1].units.map((unit) => unit.value || '').join('')),
+    ['anchor-before', 'new', 'first', 'second', 'anchor-after'],
+    'middle insertion keeps both stable row anchors and logical row order'
+  )
+
+  const authoredWithMiddle = authored.replace(
+    '|  | first |',
+    '|  | remove |\n|  | first |'
+  )
+  const previousWithMiddle = previousCanonical.replace(
+    '| <br /> | first |',
+    '| <br /> | remove |\n| <br /> | first |'
+  )
+  const deleted = mapGfmTableChange({
+    authored: authoredWithMiddle,
+    previousCanonical: previousWithMiddle,
+    nextCanonical: previousCanonical,
+    parseTables
+  })
+  assert.equal(deleted.status, 'patched', 'a uniquely anchored middle row deletion remains table-owned')
+  const deletedRows = parseTables(deleted.markdown).tables[0].rows
+  assert.equal(deletedRows[2].cells[0].units.length, 0, 'the old empty-cell provenance follows first after deletion')
+  assert.equal(deletedRows[3].cells[0].units[0]?.kind, 'break', 'the real hardbreak provenance follows second after deletion')
+  assert.deepEqual(
+    deletedRows.slice(1).map((row) => row.cells[1].units.map((unit) => unit.value || '').join('')),
+    ['anchor-before', 'first', 'second', 'anchor-after'],
+    'middle deletion keeps both stable row anchors and logical row order'
+  )
+}
+
+for (const fixture of [
+  {
+    label: 'insert',
+    authoredRows: ['|  | same |', '| <br> | same |'],
+    previousRows: ['| <br /> | same |', '| <br /> | same |'],
+    nextRows: ['| <br /> | same |', '| <br /> | same |', '| <br /> | same |']
+  },
+  {
+    label: 'delete',
+    authoredRows: ['|  | same |', '| <br> | same |', '|  | same |'],
+    previousRows: ['| <br /> | same |', '| <br /> | same |', '| <br /> | same |'],
+    nextRows: ['| <br /> | same |', '| <br /> | same |']
+  }
+]) {
+  const table = (rows) => [
+    '| Break | Label |',
+    '| - | - |',
+    '| before | anchor-before |',
+    ...rows,
+    '| after | anchor-after |'
+  ].join('\n')
+  const result = mapGfmTableChange({
+    authored: table(fixture.authoredRows),
+    previousCanonical: table(fixture.previousRows),
+    nextCanonical: table(fixture.nextRows),
+    parseTables
+  })
+  assert.deepEqual(
+    result,
+    { status: 'unowned', reason: 'ambiguous-table-row-ownership' },
+    `a duplicate-row middle ${fixture.label} fails closed instead of guessing break provenance`
+  )
+}
+
+{
+  const authored = [
     '# Before',
     '',
     '| one | two |',

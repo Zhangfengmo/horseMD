@@ -246,6 +246,91 @@ export const normalizeGfmTableSerializerPlaceholders = (markdown, parseTables) =
   )
 }
 
+const rowsCanShareProvenance = ({
+  authoredRow,
+  authoredModel,
+  previousRow,
+  previousModel,
+  nextRow,
+  nextModel
+}) => {
+  if (!previousRow || !nextRow || previousRow.kind !== nextRow.kind) return false
+  const columns = Math.max(previousRow.cells.length, nextRow.cells.length)
+  for (let column = 0; column < columns; column += 1) {
+    const nextCell = nextRow.cells[column]
+    if (isSerializerPlaceholderCell(nextCell, nextModel)) continue
+    const previousKey = previousCanonicalCellKey(
+      authoredRow?.cells[column],
+      authoredModel,
+      previousRow.cells[column],
+      previousModel
+    )
+    if (previousKey !== cellKey(nextCell, nextModel, false)) return false
+  }
+  return true
+}
+
+const matchStructuralRowOwnership = ({
+  authoredTable,
+  authoredModel,
+  previousTable,
+  previousModel,
+  nextTable,
+  nextModel
+}) => {
+  if (!authoredTable || !previousTable || !nextTable) return null
+  if (previousTable.rows.length === nextTable.rows.length) {
+    return nextTable.rows.map((_, index) => index)
+  }
+  const previousToNext = Array(previousTable.rows.length).fill(null)
+  const nextToPrevious = Array(nextTable.rows.length).fill(null)
+  const assign = (previousIndex, nextIndex) => {
+    if (
+      previousToNext[previousIndex] != null &&
+      previousToNext[previousIndex] !== nextIndex
+    ) return false
+    if (
+      nextToPrevious[nextIndex] != null &&
+      nextToPrevious[nextIndex] !== previousIndex
+    ) return false
+    previousToNext[previousIndex] = nextIndex
+    nextToPrevious[nextIndex] = previousIndex
+    return true
+  }
+  const matches = (previousIndex, nextIndex) => rowsCanShareProvenance({
+    authoredRow: authoredTable.rows[previousIndex],
+    authoredModel,
+    previousRow: previousTable.rows[previousIndex],
+    previousModel,
+    nextRow: nextTable.rows[nextIndex],
+    nextModel
+  })
+
+  const limit = Math.min(previousTable.rows.length, nextTable.rows.length)
+  let prefix = 0
+  while (prefix < limit && matches(prefix, prefix)) {
+    if (!assign(prefix, prefix)) return null
+    prefix += 1
+  }
+  let suffix = 0
+  while (
+    suffix < limit &&
+    matches(previousTable.rows.length - suffix - 1, nextTable.rows.length - suffix - 1)
+  ) {
+    if (!assign(
+      previousTable.rows.length - suffix - 1,
+      nextTable.rows.length - suffix - 1
+    )) return null
+    suffix += 1
+  }
+  const required = Math.min(previousTable.rows.length, nextTable.rows.length)
+  const mappedPrevious = previousToNext.filter((index) => index != null).length
+  const mappedNext = nextToPrevious.filter((index) => index != null).length
+  return mappedPrevious === required && mappedNext === required
+    ? nextToPrevious
+    : null
+}
+
 const normalizeCanonicalWithTableProvenance = ({
   authoredModel,
   previousModel,
@@ -254,7 +339,7 @@ const normalizeCanonicalWithTableProvenance = ({
   parseTables
 }) => {
   const replacements = []
-  for (const { nextIndex, previousIndex } of tableOwnership) {
+  for (const { nextIndex, previousIndex, rowOwnership = null } of tableOwnership) {
     const nextTable = nextModel.tables[nextIndex]
     if (!nextTable) return null
     const authoredTable = previousIndex == null ? null : authoredModel.tables[previousIndex]
@@ -264,8 +349,15 @@ const normalizeCanonicalWithTableProvenance = ({
         if (!isSerializerPlaceholderCell(nextCell, nextModel)) continue
         let replacement = ''
         if (authoredTable && previousTable) {
-          const authoredCell = authoredTable.rows[nextRow.index]?.cells[nextCell.column]
-          const previousCell = previousTable.rows[nextRow.index]?.cells[nextCell.column]
+          const previousRowIndex = rowOwnership
+            ? rowOwnership[nextRow.index]
+            : nextRow.index
+          const authoredCell = previousRowIndex == null
+            ? null
+            : authoredTable.rows[previousRowIndex]?.cells[nextCell.column]
+          const previousCell = previousRowIndex == null
+            ? null
+            : previousTable.rows[previousRowIndex]?.cells[nextCell.column]
           const semanticUnits = nextCanonicalCellUnits(
             authoredCell,
             authoredModel,
@@ -649,11 +741,22 @@ export function mapGfmTableChange({
   )) return { status: 'unowned', reason: 'authored-previous-table-mismatch' }
 
   if (!shapeEqual) {
+    const rowOwnership = matchStructuralRowOwnership({
+      authoredTable,
+      authoredModel,
+      previousTable,
+      previousModel,
+      nextTable,
+      nextModel
+    })
+    if (!rowOwnership) {
+      return { status: 'unowned', reason: 'ambiguous-table-row-ownership' }
+    }
     const normalizedNext = normalizeCanonicalWithTableProvenance({
       authoredModel,
       previousModel,
       nextModel,
-      tableOwnership: [{ nextIndex: index, previousIndex: index }],
+      tableOwnership: [{ nextIndex: index, previousIndex: index, rowOwnership }],
       parseTables
     })
     const normalizedNextTable = normalizedNext?.model.tables[index]
