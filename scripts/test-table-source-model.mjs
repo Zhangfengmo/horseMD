@@ -6,6 +6,7 @@ import { commonChange } from '../src/renderer/src/lib/markdown-preservation/core
 import {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
+  getGfmTableSourceParser,
   mapGfmTableChange
 } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
 
@@ -645,6 +646,53 @@ for (const fixture of [
   assert.equal(parseCalls, 2, 'a byte-distinct source string gets its own parse result')
   assert.equal(buildGfmTableSourceModel(markdown, parseOnlyRemark).tables.length, 1)
   assert.equal(parseCalls, 3, 'the direct builder also calls remark.parse')
+}
+
+{
+  let parseCalls = 0
+  const instrumentedRemark = {
+    parse(markdown) {
+      parseCalls += 1
+      return remark.parse(markdown)
+    }
+  }
+  const parser = createGfmTableSourceParser(instrumentedRemark)
+  const tableless = 'plain text\n'.repeat(2000)
+  const compact = parser(tableless)
+  assert.equal(parseCalls, 0, 'a no-pipe document bypasses remark table parsing')
+  assert.deepEqual(compact.tables, [])
+  assert.equal(compact.view.raw, tableless)
+  assert.equal(compact.view.text, tableless)
+  assert.equal('toRaw' in compact.view, false, 'cached tableless models do not retain a full raw-offset array')
+  assert.equal(Object.isFrozen(compact), true)
+  assert.equal(Object.isFrozen(compact.view), true)
+  assert.equal(Object.isFrozen(compact.tables), true)
+  assert.throws(() => compact.tables.push('pollution'), TypeError, 'cached models cannot be mutated by a consumer')
+  assert.equal(parser(tableless), compact, 'an immutable exact-string cache hit may safely reuse model identity')
+
+  let retainedSource = ''
+  let retainedModel = null
+  for (let index = 0; index < 6; index += 1) {
+    retainedSource = `| A${index} | B |\n| - | - |\n| x | y |`
+    retainedModel = parser(retainedSource)
+  }
+  const bounded = parser.cacheInfo()
+  assert.equal(bounded.entries, 4, `cache must retain exactly its four-entry budget: ${JSON.stringify(bounded)}`)
+  assert.ok(bounded.characters <= 1_500_000, `cache character budget exceeded: ${JSON.stringify(bounded)}`)
+  assert.equal(parser(retainedSource), retainedModel, 'the most-recent entry remains retained by identity')
+  assert.equal(parseCalls, 6, 'a retained cache hit does not reparse')
+
+  const beforeHuge = parser.cacheInfo()
+  const hugeTableless = 'x'.repeat(1_500_001)
+  const hugeModel = parser(hugeTableless)
+  assert.equal(hugeModel.tables.length, 0)
+  assert.equal('toRaw' in hugeModel.view, false)
+  assert.deepEqual(parser.cacheInfo(), beforeHuge, 'an over-budget document is returned but never retained')
+  assert.equal(parseCalls, 6, 'tableless fast paths never call remark.parse, even when over budget')
+
+  const sharedA = getGfmTableSourceParser(instrumentedRemark)
+  const sharedB = getGfmTableSourceParser(instrumentedRemark)
+  assert.equal(sharedA, sharedB, 'one configured remark processor owns one shared parser/cache')
 }
 
 console.log('PASS table source model: AST-owned cells preserve authored bytes and fail closed on ambiguity')

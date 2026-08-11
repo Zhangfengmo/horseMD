@@ -8,9 +8,23 @@ import {
   commonChange
 } from './core.js'
 
-const CACHE_LIMIT = 12
+const CACHE_ENTRY_LIMIT = 4
+const CACHE_CHARACTER_LIMIT = 1_500_000
 const HTML_BREAK = /^<br\s*\/?>$/i
 const ESCAPABLE = /^[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]$/
+
+const deepFreeze = (value) => {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
+const compactSourceView = (source) => {
+  const raw = String(source ?? '')
+  let text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw
+  if (text.includes('\r')) text = text.replace(/\r\n?/g, '\n')
+  return { raw, text }
+}
 
 const positionOffsets = (position) => {
   const start = position?.start?.offset
@@ -193,7 +207,7 @@ const unitsForCell = (view, node) => {
   return { units, patchable }
 }
 
-const isUnescapedPipeAt = (text, index, lowerBound = 0) => {
+export const isUnescapedPipeAt = (text, index, lowerBound = 0) => {
   if (text[index] !== '|') return false
   let precedingBackslashes = 0
   for (let cursor = index - 1; cursor >= lowerBound && text[cursor] === '\\'; cursor -= 1) {
@@ -298,10 +312,17 @@ const buildTable = (view, node, index) => {
 }
 
 export function buildGfmTableSourceModel(markdown, remark) {
-  const view = createMarkdownSourceView(markdown)
   if (!remark || typeof remark.parse !== 'function') {
     throw new TypeError('A configured remark parser is required for GFM table source ownership')
   }
+  const raw = String(markdown ?? '')
+  if (!raw.includes('|')) {
+    return deepFreeze({
+      view: compactSourceView(raw),
+      tables: []
+    })
+  }
+  const view = createMarkdownSourceView(raw)
   const tree = remark.parse(view.text)
   const tableNodes = []
   const walk = (node) => {
@@ -314,15 +335,22 @@ export function buildGfmTableSourceModel(markdown, remark) {
     (left.position?.start?.offset ?? Number.MAX_SAFE_INTEGER) -
     (right.position?.start?.offset ?? Number.MAX_SAFE_INTEGER)
   ))
-  return {
+  if (!tableNodes.length) {
+    return deepFreeze({
+      view: compactSourceView(raw),
+      tables: []
+    })
+  }
+  return deepFreeze({
     view,
     tables: tableNodes.map((node, index) => buildTable(view, node, index))
-  }
+  })
 }
 
 export function createGfmTableSourceParser(remark) {
   const cache = new Map()
-  return (markdown) => {
+  let cachedCharacters = 0
+  const parse = (markdown) => {
     const key = String(markdown ?? '')
     if (cache.has(key)) {
       const value = cache.get(key)
@@ -331,10 +359,36 @@ export function createGfmTableSourceParser(remark) {
       return value
     }
     const value = buildGfmTableSourceModel(key, remark)
+    if (key.length > CACHE_CHARACTER_LIMIT) return value
     cache.set(key, value)
-    if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value)
+    cachedCharacters += key.length
+    while (
+      cache.size > CACHE_ENTRY_LIMIT ||
+      cachedCharacters > CACHE_CHARACTER_LIMIT
+    ) {
+      const oldest = cache.keys().next().value
+      cachedCharacters -= oldest.length
+      cache.delete(oldest)
+    }
     return value
   }
+  parse.cacheInfo = () => Object.freeze({
+    entries: cache.size,
+    characters: cachedCharacters
+  })
+  return parse
+}
+
+const sharedParsers = new WeakMap()
+
+export function getGfmTableSourceParser(remark) {
+  if (!remark || (typeof remark !== 'object' && typeof remark !== 'function')) return null
+  let parser = sharedParsers.get(remark)
+  if (!parser) {
+    parser = createGfmTableSourceParser(remark)
+    sharedParsers.set(remark, parser)
+  }
+  return parser
 }
 
 const isRange = (range, rawLength) => Boolean(
@@ -381,7 +435,7 @@ const hasOrderedOwnedRanges = (items, owner, kinds, rawLength) => {
   return true
 }
 
-const isValidModel = (model, markdown) => {
+export const isValidGfmTableSourceModel = (model, markdown) => {
   if (!model || model.view?.raw !== String(markdown ?? '') || !Array.isArray(model.tables)) return false
   if (model.tables.length && !hasValidOffsetMap(model.view)) return false
   let previousEnd = -1
@@ -469,7 +523,9 @@ const parseModels = (parseTables, values) => {
   if (typeof parseTables !== 'function') return null
   try {
     const models = values.map((value) => parseTables(value))
-    return models.every((model, index) => isValidModel(model, values[index])) ? models : null
+    return models.every((model, index) => (
+      isValidGfmTableSourceModel(model, values[index])
+    )) ? models : null
   } catch {
     return null
   }
@@ -600,7 +656,7 @@ export const normalizeGfmTableSerializerPlaceholders = (markdown, parseTables) =
   } catch {
     return source
   }
-  if (!isValidModel(model, source)) return source
+  if (!isValidGfmTableSourceModel(model, source)) return source
   const ranges = []
   for (const table of model.tables) {
     for (const row of table.rows) {
@@ -657,6 +713,13 @@ const rangeTouchesChange = (range, changeRange) => {
   return changeRange.start < range.end && changeRange.end > range.start
 }
 
+const modelRawRange = (model, start, end) => {
+  if (typeof model?.view?.rawRange === 'function') {
+    return model.view.rawRange(start, end)
+  }
+  return createMarkdownSourceView(model?.view?.raw ?? '').rawRange(start, end)
+}
+
 const normalizedTableRange = (model, table) => {
   if (!model?.view || !table?.range) return null
   const start = normalizedOffsetFromRaw(model.view, table.range.start)
@@ -698,8 +761,8 @@ const changeEquals = (left, right) => Boolean(
 )
 
 const changeTouchesOwningTable = (change, previousModel, previousTable, nextModel, nextTable) => {
-  const previousRaw = previousModel.view.rawRange(change.start, change.previousEnd)
-  const nextRaw = nextModel.view.rawRange(change.start, change.nextEnd)
+  const previousRaw = modelRawRange(previousModel, change.start, change.previousEnd)
+  const nextRaw = modelRawRange(nextModel, change.start, change.nextEnd)
   return rangeTouchesChange(previousTable?.range, previousRaw) ||
     rangeTouchesChange(nextTable?.range, nextRaw)
 }
@@ -754,7 +817,7 @@ const exactBaselineTableCountChange = ({
     } catch {
       return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
     }
-    if (!isValidModel(normalizedNextModel, normalizedNext)) {
+    if (!isValidGfmTableSourceModel(normalizedNextModel, normalizedNext)) {
       return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
     }
   }
@@ -784,11 +847,13 @@ const exactBaselineTableCountChange = ({
     )
   ) return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
 
-  const sourceRange = authoredModel.view.rawRange(
+  const sourceRange = modelRawRange(
+    authoredModel,
     canonicalChange.start,
     canonicalChange.previousEnd
   )
-  const replacementRange = normalizedNextModel.view.rawRange(
+  const replacementRange = modelRawRange(
+    normalizedNextModel,
     canonicalChange.start,
     canonicalChange.nextEnd
   )
@@ -818,6 +883,9 @@ export function mapGfmTableChange({
   const models = parseModels(parseTables, [source, previous, next])
   if (!models) return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
   const [authoredModel, previousModel, nextModel] = models
+  if (models.every((model) => model.tables.length === 0)) {
+    return { status: 'not-table' }
+  }
   const rawCanonicalChange = commonChange(previous, next)
   if (change != null && !changeEquals(change, rawCanonicalChange)) {
     return { status: 'unowned', reason: 'invalid-table-change-range' }
@@ -854,8 +922,16 @@ export function mapGfmTableChange({
 
   if (!changedTables.length) {
     const normalizedChange = commonChange(previousModel.view.text, nextModel.view.text)
-    const previousRawChange = previousModel.view.rawRange(normalizedChange.start, normalizedChange.previousEnd)
-    const nextRawChange = nextModel.view.rawRange(normalizedChange.start, normalizedChange.nextEnd)
+    const previousRawChange = modelRawRange(
+      previousModel,
+      normalizedChange.start,
+      normalizedChange.previousEnd
+    )
+    const nextRawChange = modelRawRange(
+      nextModel,
+      normalizedChange.start,
+      normalizedChange.nextEnd
+    )
     const touched = previousModel.tables.filter((table, index) => (
       rangeTouchesChange(table.range, previousRawChange) ||
       rangeTouchesChange(nextModel.tables[index]?.range, nextRawChange)

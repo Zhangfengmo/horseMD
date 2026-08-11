@@ -1,4 +1,4 @@
-import { createGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
 
 const nodeStart = (node) => node?.position?.start?.offset
 const nodeEnd = (node) => node?.position?.end?.offset
@@ -106,18 +106,6 @@ const mdBlock = (markdown, node, kind = node.type) => {
     matchText: comparableTextOf(node),
     items: collectInlineItems(markdown, node)
   }
-}
-
-const tableParsers = new WeakMap()
-
-const tableParserFor = (remark) => {
-  if (!remark || (typeof remark !== 'object' && typeof remark !== 'function')) return null
-  let parser = tableParsers.get(remark)
-  if (!parser) {
-    parser = createGfmTableSourceParser(remark)
-    tableParsers.set(remark, parser)
-  }
-  return parser
 }
 
 const tableUnitItems = (cell) => {
@@ -491,7 +479,7 @@ export function pmPosToMarkdownOffset(markdown, pmPos, doc, remark) {
   let tree
   let tableModel
   try {
-    tableModel = tableParserFor(remark)?.(markdown) || null
+    tableModel = getGfmTableSourceParser(remark)?.(markdown) || null
     tree = remark.runSync(remark.parse(markdown), markdown)
   } catch {
     return null
@@ -514,7 +502,7 @@ export function markdownOffsetToPmPos(markdown, rawOffset, doc, remark) {
   let tree
   let tableModel
   try {
-    tableModel = tableParserFor(remark)?.(markdown) || null
+    tableModel = getGfmTableSourceParser(remark)?.(markdown) || null
     tree = remark.runSync(remark.parse(markdown), markdown)
   } catch {
     return null

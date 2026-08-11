@@ -4,17 +4,19 @@ import { unified } from 'unified'
 import {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
+  getGfmTableSourceParser,
   mapGfmTableChange,
   normalizeGfmTableSerializerPlaceholders
 } from './table-source-model.js'
 
-const defaultParseTables = createGfmTableSourceParser(
+const defaultParseTables = getGfmTableSourceParser(
   unified().use(remarkParse).use(remarkGfm)
 )
 
 export {
   buildGfmTableSourceModel,
   createGfmTableSourceParser,
+  getGfmTableSourceParser,
   mapGfmTableChange
 }
 

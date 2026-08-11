@@ -54,7 +54,7 @@ import {
   areSourceDocumentsEquivalent,
   mapPlainTextTransactionsToSource
 } from '../lib/source-transaction-sync.js'
-import { createGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
 
 // Every mounted rich editor registers itself here. A rich-text tab stays mounted
 // after its first activation, so several editors (and several Crepe selection
@@ -310,7 +310,7 @@ export default function Editor({
     let parseTables
     const preserveSource = (source, previousCanonical, nextCanonical) => {
       if (!parseTables) {
-        parseTables = createGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+        parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
       }
       return preserveRichMarkdownSource(source, previousCanonical, nextCanonical, { parseTables })
     }
