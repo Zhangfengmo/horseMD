@@ -29,7 +29,6 @@ export function createEditorApi({
   canonicalMarkdownRef,
   programmaticReplaceRef,
   hasPendingRichFlush,
-  clearPendingRichFlush,
   generatedScratchRef,
   getGeneratedScratchMarkdown,
   sourceCommitter,
@@ -152,12 +151,14 @@ export function createEditorApi({
         generatedScratchRef.current = false
       }
       const next = prepareMarkdown(source)
-      lastMarkdownRef.current = source
-      clearPendingRichFlush?.()
       if (programmaticReplaceRef) programmaticReplaceRef.current = programmaticReplace
       crepe.editor.action(replaceAll(next))
       const canonical = canonicalForSource(serializeCurrentDocument())
-      canonicalMarkdownRef.current = canonical
+      sourceCommitter.reset({
+        source,
+        canonical,
+        expectedDoc: viewRef.current?.state.doc
+      })
       onStructureChange?.()
       return true
     } catch (err) {
@@ -181,25 +182,33 @@ export function createEditorApi({
       // Saves and exports pass `force` because data durability outranks that
       // optimization: a node view can have a visible transaction even if an
       // edit-intent event was missed or an asynchronous callback is delayed.
-      if (!force && !hasPendingRichFlush?.()) return lastMarkdownRef.current
+      if (
+        !force &&
+        !hasPendingRichFlush?.() &&
+        sourceCommitter.diagnostics().status !== 'pending'
+      ) return lastMarkdownRef.current
       // Saves and source-mode switches can occur before Milkdown publishes its
       // delayed markdownUpdated callback. Serialize the current ProseMirror
       // document instead of reading Crepe's potentially stale cached snapshot.
       const canonical = canonicalForSource(serializeCurrentDocument())
       const scratch = generatedScratchRef?.current
-      // Fresh documents keep an empty title/body scaffold in the live PM doc,
-      // while canonicalForSource deliberately excludes it from persisted
-      // Markdown. Compare scratch candidates with the document reconstructed
-      // from that canonical source, not with internal editor-only nodes.
-      const expectedDoc = scratch
-        ? sourceCommitter.parse(canonical)
-        : viewRef.current?.state.doc
+      // Scratch spelling changes candidate generation only. The immutable
+      // live document captured at dispatch remains the semantic authority for
+      // every document size and every durability caller.
+      const expectedDoc = viewRef.current?.state.doc
       if (canonical === canonicalMarkdownRef.current) {
-        const unchanged = preserveSource(
-          lastMarkdownRef.current,
-          canonicalMarkdownRef.current,
-          canonical
-        )
+        // The only unchanged-source verification context currently carries
+        // parser-owned table placeholder provenance. Avoid running the full
+        // preservation mapper for ordinary paragraphs/lists merely to produce
+        // an empty context; transaction-primary tests also rely on this path
+        // remaining a verification, not a canonical-diff fallback.
+        const unchanged = lastMarkdownRef.current.includes('|') || canonical.includes('|')
+          ? preserveSource(
+              lastMarkdownRef.current,
+              canonicalMarkdownRef.current,
+              canonical
+            )
+          : null
         const committed = sourceCommitter.commit({
           candidates: [{
             markdown: lastMarkdownRef.current,
@@ -211,11 +220,13 @@ export function createEditorApi({
         })
         if (!committed.ok) {
           if (Array.isArray(globalThis.__hmGateLog)) {
-            globalThis.__hmGateLog.push({
-              origin: 'flush-canonical-equality',
-              candidate: lastMarkdownRef.current,
-              canonical
-            })
+            if (committed.type !== 'pending') {
+              globalThis.__hmGateLog.push({
+                origin: 'flush-canonical-equality',
+                candidate: lastMarkdownRef.current,
+                canonical
+              })
+            }
           }
           return null
         }
@@ -237,10 +248,13 @@ export function createEditorApi({
           )
       // Ambiguous mapping is an explicit failed transaction, not a committed
       // snapshot. Keep both the authored source and canonical baseline intact,
-      // and leave the pending flag raised so a later callback/flush can retry
-      // the cumulative delta. Returning null prevents source mode or save from
-      // presenting the stale authored bytes as if the visible edit had synced.
-      if (preserved.preserved === false) return null
+      // and settle this revision as an unowned source change. Only a genuinely
+      // newer captured document may try again. Returning null prevents source
+      // mode or save from presenting stale bytes as if the edit had synced.
+      if (preserved.preserved === false) {
+        sourceCommitter.fail({ type: 'unowned-source-change', expectedDoc })
+        return null
+      }
       const committed = sourceCommitter.commit({
         candidates: scratch
           ? [preserved.markdown, canonicalSourceFallback(canonical)]
@@ -256,7 +270,7 @@ export function createEditorApi({
       // the live editor. Parser failures and semantic mismatches fail closed.
       if (!committed.ok) {
         // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
-        if (Array.isArray(globalThis.__hmGateLog)) {
+        if (committed.type !== 'pending' && Array.isArray(globalThis.__hmGateLog)) {
           globalThis.__hmGateLog.push({
             origin: 'flush',
             reason: preserved.reason || 'unknown',
@@ -293,27 +307,34 @@ export function createEditorApi({
       // change semantics) but must still strip Crepe's internal empty-block
       // `<br />` placeholders — raw canonical bytes would write them into the
       // user's file, violating the source boundary invariant.
-      const committed = sourceCommitter.commit({
+      const expectedDoc = viewRef.current?.state.doc
+      const selected = sourceCommitter.select({
         candidates: [rebuilt, canonicalSourceFallback(canonical)],
-        expectedDoc: generatedScratchRef?.current
-          ? sourceCommitter.parse(canonical)
-          : viewRef.current?.state.doc,
-        canonical,
-        shouldPublish: false
+        expectedDoc
       })
-      if (!committed.ok) return null
+      if (!selected.ok) return null
+      sourceCommitter.reset({
+        source: selected.markdown,
+        canonical,
+        expectedDoc
+      })
       // A rebuild is a full baseline reset: every pending transaction intent
       // (paste snapshot, list conversion, input-rule markers) was captured
       // against the PREVIOUS baselines. Replaying one after the reset would
       // re-poison the fresh baselines, so the reset must be atomic.
       resetTransactionIntents?.()
-      return committed.markdown
+      return selected.markdown
     } catch {
       return null
     }
   }
 
-  const flushMarkdownSettled = (options = {}) => settleEditorMarkdown(flushMarkdown, options)
+  const getVerifiedSyncStatus = () => sourceCommitter.diagnostics()
+
+  const flushMarkdownSettled = (options = {}) => settleEditorMarkdown(flushMarkdown, {
+    ...options,
+    shouldRetry: () => getVerifiedSyncStatus().status === 'pending'
+  })
 
   const getRecoveryMarkdown = () => {
     if (isDestroyed?.() || !crepeRef.current) return null
@@ -327,9 +348,7 @@ export function createEditorApi({
       const canonical = canonicalForSource(serializeCurrentDocument())
       const selected = sourceCommitter.select({
         candidates: [generatedScratchMarkdown(canonical), canonicalSourceFallback(canonical)],
-        expectedDoc: generatedScratchRef?.current
-          ? sourceCommitter.parse(canonical)
-          : viewRef.current?.state.doc
+        expectedDoc: viewRef.current?.state.doc
       })
       return selected.ok ? selected.markdown : null
     } catch {
@@ -433,6 +452,7 @@ export function createEditorApi({
     replaceMarkdown,
     flushMarkdown,
     flushMarkdownSettled,
+    getVerifiedSyncStatus,
     rebuildMarkdownFromRich,
     getRecoveryMarkdown,
     restoreMarkdownOffset,

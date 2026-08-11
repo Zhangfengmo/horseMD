@@ -51,35 +51,3 @@ export const selectVerifiedSource = ({ candidates, expectedDoc, parseMarkdown })
     markdown: null
   }
 }
-
-export const createVerifiedSourceCommitter = ({
-  sourceRef,
-  canonicalRef,
-  parseMarkdown,
-  clearPending,
-  publish
-}) => {
-  const parse = (markdown) => parseMarkdown(String(markdown ?? ''))
-  const select = ({ candidates, expectedDoc }) => selectVerifiedSource({
-    candidates,
-    expectedDoc,
-    parseMarkdown
-  })
-
-  const commit = ({
-    candidates,
-    canonical,
-    expectedDoc,
-    shouldPublish = true
-  }) => {
-    const selected = select({ candidates, expectedDoc })
-    if (!selected.ok) return selected
-    sourceRef.current = selected.markdown
-    canonicalRef.current = canonical
-    clearPending?.()
-    if (shouldPublish) publish?.(selected.markdown)
-    return selected
-  }
-
-  return { commit, parse, select }
-}

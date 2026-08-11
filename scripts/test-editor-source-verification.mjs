@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import {
-  createVerifiedSourceCommitter,
   selectVerifiedSource,
   verifySourceDocument
 } from '../src/renderer/src/components/editor-source-verification.js'
@@ -400,103 +399,6 @@ run('preserves an intentionally empty verified source', () => {
   assert.equal(selected.ok, true)
   assert.equal(selected.type, 'committed')
   assert.equal(selected.markdown, '')
-})
-
-run('verified commit advances both baselines and publication atomically', () => {
-  const sourceRef = { current: 'old source' }
-  const canonicalRef = { current: 'old canonical' }
-  const events = []
-  const committer = createVerifiedSourceCommitter({
-    sourceRef,
-    canonicalRef,
-    parseMarkdown: (markdown) => paragraphDoc(markdown.trim()),
-    clearPending: () => events.push('clear'),
-    publish: (markdown) => events.push(`publish:${markdown}`)
-  })
-  const result = committer.commit({
-    candidates: ['new source\n'],
-    canonical: 'canonical serializer bytes\n',
-    expectedDoc: paragraphDoc('new source')
-  })
-  assert.equal(result.ok, true)
-  assert.equal(result.type, 'committed')
-  assert.equal(result.markdown, 'new source\n')
-  assert.deepEqual(result.parsed.toJSON(), paragraphDoc('new source').toJSON())
-  assert.equal(sourceRef.current, 'new source\n')
-  assert.equal(canonicalRef.current, 'canonical serializer bytes\n')
-  assert.deepEqual(events, ['clear', 'publish:new source\n'])
-})
-
-run('failed commit leaves baselines pending state and publication untouched', () => {
-  const sourceRef = { current: 'trusted source' }
-  const canonicalRef = { current: 'trusted canonical' }
-  const events = []
-  const committer = createVerifiedSourceCommitter({
-    sourceRef,
-    canonicalRef,
-    parseMarkdown: () => headingDoc('wrong'),
-    clearPending: () => events.push('clear'),
-    publish: () => events.push('publish')
-  })
-  const result = committer.commit({
-    candidates: ['wrong'],
-    canonical: 'new canonical',
-    expectedDoc: paragraphDoc('expected')
-  })
-  assert.equal(result.ok, false)
-  assert.equal(result.type, 'semantic-loss')
-  assert.equal(result.markdown, null)
-  assert.equal(sourceRef.current, 'trusted source')
-  assert.equal(canonicalRef.current, 'trusted canonical')
-  assert.deepEqual(events, [])
-})
-
-run('large canonical-equality commits still reject an unverified source', () => {
-  const largeCandidate = 'x'.repeat(120001)
-  const sourceRef = { current: 'trusted source' }
-  const canonicalRef = { current: 'same canonical' }
-  let cleared = false
-  const committer = createVerifiedSourceCommitter({
-    sourceRef,
-    canonicalRef,
-    parseMarkdown: () => headingDoc('wrong'),
-    clearPending: () => { cleared = true }
-  })
-  const result = committer.commit({
-    candidates: [largeCandidate],
-    canonical: 'same canonical',
-    expectedDoc: paragraphDoc('expected'),
-    shouldPublish: false
-  })
-  assert.equal(result.ok, false)
-  assert.equal(result.type, 'semantic-loss')
-  assert.equal(result.markdown, null)
-  assert.equal(sourceRef.current, 'trusted source')
-  assert.equal(canonicalRef.current, 'same canonical')
-  assert.equal(cleared, false)
-})
-
-run('durability commit can advance verified baselines without publishing twice', () => {
-  const sourceRef = { current: 'old' }
-  const canonicalRef = { current: 'old' }
-  const events = []
-  const committer = createVerifiedSourceCommitter({
-    sourceRef,
-    canonicalRef,
-    parseMarkdown: (markdown) => paragraphDoc(markdown),
-    clearPending: () => events.push('clear'),
-    publish: () => events.push('publish')
-  })
-  const result = committer.commit({
-    candidates: ['current'],
-    canonical: 'current canonical',
-    expectedDoc: paragraphDoc('current'),
-    shouldPublish: false
-  })
-  assert.equal(result.ok, true)
-  assert.equal(result.type, 'committed')
-  assert.equal(result.markdown, 'current')
-  assert.deepEqual(events, ['clear'])
 })
 
 console.log('\neditor source verification: all cases passed')

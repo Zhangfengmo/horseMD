@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createVerifiedEditorState } from '../src/renderer/src/components/editor-verified-state.js'
+import { settleEditorMarkdown } from '../src/renderer/src/lib/editor-flush-settle.js'
 
 const doc = (name) => Object.freeze({ name })
 const doc0 = doc('doc-0')
@@ -219,6 +220,40 @@ run('stale proposals cannot verify or publish over a newer capture', () => {
   assert.deepEqual(published, ['latest:doc-2'])
 })
 
+run('a stale callback cannot poison the latest captured revision', () => {
+  let verifyCalls = 0
+  const state = createVerifiedEditorState({
+    source: 'old',
+    canonical: 'old-c',
+    expectedDoc: doc0,
+    ownsProposal: ({ captured, proposal }) => proposal.canonical === `${captured.expectedDoc.name}-c`,
+    verify: ({ candidates, canonical }) => {
+      verifyCalls += 1
+      return committed(candidates[0].markdown, canonical)
+    }
+  })
+  state.capture(doc1)
+  const latest = state.capture(doc2)
+
+  const staleCallback = state.propose(latest, {
+    candidates: [{ markdown: 'stale callback' }],
+    canonical: 'doc-1-c'
+  })
+  assert.deepEqual(staleCallback, { ok: false, type: 'pending' })
+  assert.deepEqual(state.commit(latest, staleCallback), { ok: false, type: 'pending' })
+  assert.equal(verifyCalls, 0)
+  assert.equal(state.snapshot().pending, latest)
+  assert.equal(state.snapshot().status, 'pending')
+
+  const latestCallback = state.propose(latest, {
+    candidates: [{ markdown: 'latest callback' }],
+    canonical: 'doc-2-c'
+  })
+  assert.equal(verifyCalls, 1)
+  assert.equal(state.commit(latest, latestCallback).ok, true)
+  assert.equal(state.snapshot().source, 'latest callback')
+})
+
 run('proposal candidates retain their own durable context', () => {
   const durableContext = Object.freeze({
     emptyTableCells: Object.freeze([{ table: 0, row: 1, column: 2 }])
@@ -281,5 +316,30 @@ run('publication failure never rolls back a committed revision', () => {
   assert.equal(state.snapshot().source, 'new')
   assert.equal(state.snapshot().status, 'committed')
 })
+
+{
+  let deterministicCalls = 0
+  const deterministic = await settleEditorMarkdown(() => {
+    deterministicCalls += 1
+    return null
+  }, {
+    delays: [0, 0, 0],
+    shouldRetry: () => false
+  })
+  assert.equal(deterministic, null)
+  assert.equal(deterministicCalls, 1, 'deterministic failures are never retried')
+
+  let pendingCalls = 0
+  const settled = await settleEditorMarkdown(() => {
+    pendingCalls += 1
+    return pendingCalls === 3 ? 'settled' : null
+  }, {
+    delays: [0, 0, 0],
+    shouldRetry: () => true
+  })
+  assert.equal(settled, 'settled')
+  assert.equal(pendingCalls, 3, 'pending revisions retry only within the bounded delays')
+  console.log('ok   settled flush retries pending but not deterministic failures')
+}
 
 console.log('\nverified editor state: all cases passed')

@@ -15,6 +15,7 @@ export function createVerifiedEditorState({
   canonical,
   expectedDoc,
   verify,
+  ownsProposal,
   publish
 }) {
   let nextRevision = 0
@@ -61,6 +62,13 @@ export function createVerifiedEditorState({
     if (settledFailure?.revision === captured.revision) {
       return { ok: false, type: settledFailure.type }
     }
+    try {
+      if (typeof ownsProposal === 'function' && !ownsProposal({ captured, proposal })) {
+        return { ok: false, type: 'pending' }
+      }
+    } catch {
+      return { ok: false, type: 'pending' }
+    }
     if (typeof verify !== 'function') {
       return { ok: false, type: 'parser-error' }
     }
@@ -88,6 +96,9 @@ export function createVerifiedEditorState({
     }
     if (settledFailure?.revision === captured.revision) {
       return { ok: false, type: settledFailure.type }
+    }
+    if (result?.type === 'pending') {
+      return { ok: false, type: 'pending' }
     }
     if (!result?.ok || typeof result.markdown !== 'string') {
       const type = failureType(result)

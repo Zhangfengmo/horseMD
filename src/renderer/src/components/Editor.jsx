@@ -48,8 +48,9 @@ import {
 import { pmPosToMarkdownOffset } from './editor-source-map.js'
 import {
   canonicalSourceFallback,
-  createVerifiedSourceCommitter
+  selectVerifiedSource
 } from './editor-source-verification.js'
+import { createVerifiedEditorState } from './editor-verified-state.js'
 import {
   areSourceDocumentsEquivalent,
   mapPlainTextTransactionsToSource
@@ -242,8 +243,6 @@ export default function Editor({
     let richFlushPending = false
     let pendingRichBlockKey = null
     let richDirtyReconcileTimer = 0
-    let transactionSourcePendingPublish = false
-    let transactionSourcePendingDoc = null
     let transactionSourceBlockHints = []
     let transactionSourceQuarantined = false
     const currentRichBlockKey = () => {
@@ -318,34 +317,98 @@ export default function Editor({
       if (!crepe) return null
       return crepe.editor.ctx.get(parserCtx)
     })
-    const sourceCommitter = createVerifiedSourceCommitter({
-      sourceRef: lastMarkdownRef,
-      canonicalRef: canonicalMarkdownRef,
-      parseMarkdown: parseAdapter.parse,
-      clearPending: clearRichFlushPending,
-      publish: (markdown) => onChange?.(markdown, false)
+    let latestVerifiedCapture = null
+    let verifiedState = null
+    const mirrorVerifiedState = () => {
+      const snapshot = verifiedState.snapshot()
+      lastMarkdownRef.current = snapshot.source
+      canonicalMarkdownRef.current = snapshot.canonical
+      clearRichFlushPending()
+      return snapshot
+    }
+    verifiedState = createVerifiedEditorState({
+      source: lastMarkdownRef.current,
+      canonical: canonicalMarkdownRef.current,
+      expectedDoc: null,
+      verify: ({ candidates, expectedDoc }) => selectVerifiedSource({
+        candidates,
+        expectedDoc,
+        parseMarkdown: parseAdapter.parse
+      }),
+      ownsProposal: ({ captured, proposal }) => {
+        const serializer = crepe.editor.ctx.get(serializerCtx)
+        const capturedCanonical = canonicalForSource(serializer(captured.expectedDoc))
+        return capturedCanonical === String(proposal.canonical ?? '')
+      },
+      publish: (markdown) => {
+        mirrorVerifiedState()
+        onChange?.(markdown, false)
+      }
     })
+    const resetVerifiedState = ({ source, canonical, expectedDoc }) => {
+      const snapshot = verifiedState.reset({ source, canonical, expectedDoc })
+      latestVerifiedCapture = Object.freeze({
+        revision: snapshot.revision,
+        expectedDoc: snapshot.expectedDoc
+      })
+      mirrorVerifiedState()
+      return snapshot
+    }
+    const captureVerifiedDocument = (expectedDoc) => {
+      if (!expectedDoc) return null
+      if (latestVerifiedCapture?.expectedDoc === expectedDoc) return latestVerifiedCapture
+      latestVerifiedCapture = verifiedState.capture(expectedDoc)
+      return latestVerifiedCapture
+    }
+    const sourceCommitter = {
+      select: ({ candidates, expectedDoc }) => selectVerifiedSource({
+        candidates,
+        expectedDoc,
+        parseMarkdown: parseAdapter.parse
+      }),
+      commit: ({
+        candidates,
+        canonical,
+        expectedDoc,
+        capture = null,
+        shouldPublish = true
+      }) => {
+        const captured = capture || captureVerifiedDocument(expectedDoc)
+        if (!captured) return { ok: false, type: 'semantic-loss', markdown: null }
+        const proposed = verifiedState.propose(captured, { candidates, canonical })
+        const committed = verifiedState.commit(captured, proposed, { shouldPublish })
+        if (committed.ok && !shouldPublish) mirrorVerifiedState()
+        return { ...proposed, ...committed }
+      },
+      fail: ({ type, expectedDoc, capture = null }) => {
+        const captured = capture || captureVerifiedDocument(expectedDoc)
+        if (!captured) return { ok: false, type }
+        return verifiedState.commit(captured, { ok: false, type })
+      },
+      reset: resetVerifiedState,
+      diagnostics: () => verifiedState.diagnostics()
+    }
     // The single commit point for every enabled rich→source transaction in
     // this editor: markdownUpdated, frontmatter, inline code, generated
     // scratch, slash blocks, and both list conversions all publish through
     // here. Source preservation proposes authored bytes; HorseMD's configured
     // parser is the only semantic authority allowed to commit them.
-    // A false return leaves both baselines and every pending flag untouched;
-    // a later callback or forced flush retries the cumulative delta.
+    // A false return leaves both baselines untouched. Pending means a newer
+    // callback may still settle; typed deterministic failures remain final
+    // until another document-changing transaction captures a new revision.
     const commitCanonicalResult = (
       preserved,
       canonical,
-      { fallbackCandidates = [], expectedDoc: requestedExpectedDoc = null } = {}
+      { capture: requestedCapture = null, fallbackCandidates = [] } = {}
     ) => {
       let markdown = null
-      let expectedDoc = null
+      let commitType = null
       if (preserved && preserved.preserved !== false) {
         try {
-          // ProseMirror documents are immutable. Capturing the current one at
-          // the commit boundary proves the candidate against the exact editor
-          // state that produced it; canonical remains only the next diff
-          // baseline and is never promoted into a second semantic authority.
-          expectedDoc = requestedExpectedDoc || viewRef.current?.state.doc
+          // The dispatch boundary owns the immutable document revision. A
+          // delayed markdownUpdated callback may propose bytes, but it cannot
+          // replace that expected document with a reparsed callback snapshot.
+          const expectedDoc = requestedCapture?.expectedDoc || viewRef.current?.state.doc
           const verificationStartedAt = performance.now()
           const result = sourceCommitter.commit({
             candidates: [
@@ -354,10 +417,20 @@ export default function Editor({
                 durableContext: preserved.durableContext || null
               },
               ...fallbackCandidates
+                .filter((candidate) => candidate && candidate.preserved !== false)
+                .map((candidate) => ({
+                  markdown: candidate.markdown,
+                  durableContext: candidate.durableContext || null
+                })),
+              ...(generatedScratchRef.current
+                ? [canonicalSourceFallback(canonical)]
+                : [])
             ],
             expectedDoc,
-            canonical
+            canonical,
+            capture: requestedCapture
           })
+          commitType = result.type
           if (Array.isArray(globalThis.__hmGateTimingLog)) {
             globalThis.__hmGateTimingLog.push({
               length: String(canonical || '').length,
@@ -369,10 +442,21 @@ export default function Editor({
         } catch {
           markdown = null
         }
+      } else if (preserved?.preserved === false) {
+        commitType = sourceCommitter.fail({
+          type: 'unowned-source-change',
+          expectedDoc: requestedCapture?.expectedDoc || viewRef.current?.state.doc,
+          capture: requestedCapture
+        }).type
       }
       if (markdown === null) {
         // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
-        if (Array.isArray(globalThis.__hmGateLog) && preserved && preserved.preserved !== false) {
+        if (
+          commitType !== 'pending' &&
+          Array.isArray(globalThis.__hmGateLog) &&
+          preserved &&
+          preserved.preserved !== false
+        ) {
           globalThis.__hmGateLog.push({
             origin: 'commit',
             reason: preserved.reason || 'unknown',
@@ -438,19 +522,18 @@ export default function Editor({
         // The exact frontmatter block patch is the primary candidate; when it
         // is unavailable or rejected by the acceptance gate, the generic
         // preservation mapping still owns the fallback.
-        const committed = markdown
-          ? commitCanonicalResult({ markdown, preserved: true, reason: 'frontmatter-block' }, canonical)
-          : false
-        if (!committed) {
-          commitCanonicalResult(
-            preserveSource(
-              lastMarkdownRef.current,
-              canonicalMarkdownRef.current,
-              canonical
-            ),
-            canonical
-          )
-        }
+        const generic = preserveSource(
+          lastMarkdownRef.current,
+          canonicalMarkdownRef.current,
+          canonical
+        )
+        commitCanonicalResult(
+          markdown
+            ? { markdown, preserved: true, reason: 'frontmatter-block' }
+            : generic,
+          canonical,
+          { fallbackCandidates: markdown ? [generic] : [] }
+        )
       } catch {
         // The live editor remains correct; the normal markdownUpdated callback
         // still owns fallback serialization if a mapper/plugin is unavailable.
@@ -541,8 +624,6 @@ export default function Editor({
           canonical
         )
         if (!committed) return null
-        transactionSourcePendingPublish = false
-        transactionSourcePendingDoc = null
         transactionSourceBlockHints = []
         transactionSourceQuarantined = false
         if (Array.isArray(globalThis.__hmPreserveLog)) {
@@ -582,6 +663,14 @@ export default function Editor({
           intent.pmPos = transaction.mapping.map(intent.pmPos, 1)
         }
       }
+      // Capture every immutable document revision at dispatch time, before a
+      // debounced serializer callback can be overtaken by a later transaction.
+      // Programmatic initialization/replacement establishes its own baseline
+      // with reset after dispatch and therefore never becomes a user commit.
+      const dispatchedCapture = newState?.doc &&
+        transactions?.some((transaction) => transaction?.docChanged)
+        ? captureVerifiedDocument(newState.doc)
+        : null
       // Phase 1 of the transaction-first source model: take ownership only of
       // plain text ReplaceStep batches whose raw range is byte-for-byte proven.
       // Every structural/input-rule/marked edit remains on the established
@@ -610,8 +699,6 @@ export default function Editor({
         transactionSourceQuarantined ||
         !hasRecentUserEdit()
       ) {
-        transactionSourcePendingPublish = false
-        transactionSourcePendingDoc = null
         transactionSourceBlockHints = []
         return
       }
@@ -639,8 +726,6 @@ export default function Editor({
         })
         if (!mapped.ok) {
           if (!transactionPrimaryEnabled) return
-          transactionSourcePendingPublish = false
-          transactionSourcePendingDoc = null
           const retainOwnedSyntaxSlot =
             transactionSourceBlockHints.length > 0 &&
             (mapped.reason === 'block-prefix-sensitive-insert' ||
@@ -655,19 +740,28 @@ export default function Editor({
         // bypass canonical diff without silently widening production scope.
         if (!transactionPrimaryEnabled) return
 
-        // The source bytes come only from the transaction mapper. Serialization
-        // is retained temporarily as a baseline fingerprint so delayed
-        // markdownUpdated callbacks and unsupported follow-up transactions can
-        // continue from the exact matching PM document without replaying the
-        // already-consumed text edit.
+        // The source bytes come only from the transaction mapper. Publish them
+        // through the same revision-bound state as markdownUpdated and forced
+        // durability boundaries; the experimental primary path must not own a
+        // second pair of mutable baselines.
         const serializer = crepe.editor.ctx.get(serializerCtx)
         const canonical = canonicalForSource(serializer(newState.doc))
-        lastMarkdownRef.current = mapped.markdown
-        canonicalMarkdownRef.current = canonical
+        const committed = sourceCommitter.commit({
+          candidates: [{
+            markdown: mapped.markdown,
+            durableContext: mapped.durableContext || null
+          }],
+          canonical,
+          expectedDoc: newState.doc,
+          capture: dispatchedCapture
+        })
+        if (!committed.ok) {
+          transactionSourceBlockHints = []
+          transactionSourceQuarantined = committed.type !== 'pending'
+          return
+        }
         transactionSourceBlockHints = mapped.blockHints || []
         transactionSourceQuarantined = false
-        transactionSourcePendingPublish = true
-        transactionSourcePendingDoc = newState.doc
       } catch (error) {
         // No partial state is committed by the mapper. Preserve a structural
         // diagnostic without retaining document content, then quarantine the
@@ -679,8 +773,6 @@ export default function Editor({
             error: error?.name || 'Error'
           })
         }
-        transactionSourcePendingPublish = false
-        transactionSourcePendingDoc = null
         transactionSourceBlockHints = []
         if (transactionPrimaryEnabled) transactionSourceQuarantined = true
       }
@@ -825,22 +917,18 @@ export default function Editor({
           // The exact-line patch is the primary candidate; when it is
           // unavailable or rejected by the acceptance gate, the generic
           // preservation mapping still owns the fallback.
-          const committed = exactLineFallback
-            ? commitCanonicalResult(
-                { markdown: exactLineFallback, preserved: true, reason: 'exact-line-conversion' },
-                canonical
-              )
-            : false
-          if (!committed) {
-            commitCanonicalResult(
-              preserveSource(
-                sourceBeforeConversion,
-                canonicalBeforeConversion,
-                canonical
-              ),
-              canonical
-            )
-          }
+          const generic = preserveSource(
+            sourceBeforeConversion,
+            canonicalBeforeConversion,
+            canonical
+          )
+          commitCanonicalResult(
+            exactLineFallback
+              ? { markdown: exactLineFallback, preserved: true, reason: 'exact-line-conversion' }
+              : generic,
+            canonical,
+            { fallbackCandidates: exactLineFallback ? [generic] : [] }
+          )
         } catch {
           // markdownUpdated remains the authoritative fallback if a serializer
           // plugin is temporarily unavailable during editor teardown.
@@ -976,7 +1064,6 @@ export default function Editor({
           // replaceAll can publish more than one Markdown transaction. Keep all
           // of them outside the user-edit path until the next explicit input
           // calls markUserEdit; consuming only the first callback is racy.
-          canonicalMarkdownRef.current = canonical
           return
         }
         // IME composition (pinyin / cangjie / kana …) pushes the in-flight
@@ -994,32 +1081,6 @@ export default function Editor({
             (pendingMarkdownInputIntent.type === 'bullet-list' ||
               pendingMarkdownInputIntent.type === 'ordered-list') &&
             Date.now() - pendingMarkdownInputIntent.at < 30000
-          // A pending list intent still needs its marker/slot reconstruction
-          // even when the mapper already owned a later transaction (for
-          // example typing in another block before the deferred list callback
-          // landed). Skip the fast confirm path so the intent branch below
-          // can fix up the list on top of the current source snapshot.
-          if (!pendingPaste && !pendingList && transactionSourcePendingPublish && !hasPendingListIntent) {
-            try {
-              const currentDoc = viewRef.current?.state.doc
-              const callbackDoc = parseAdapter.parse(canonical)
-              if (
-                transactionSourcePendingDoc?.eq?.(currentDoc) === true &&
-                areSourceDocumentsEquivalent(callbackDoc, transactionSourcePendingDoc)
-              ) {
-                canonicalMarkdownRef.current = canonical
-                clearRichFlushPending()
-                transactionSourcePendingPublish = false
-                transactionSourcePendingDoc = null
-                transactionSourceQuarantined = false
-                onChange?.(lastMarkdownRef.current, false)
-                return
-              }
-            } catch {
-              // The callback was not proven to represent the owned PM state;
-              // continue into the established fail-closed preservation path.
-            }
-          }
           if (
             !pendingPaste &&
             !pendingList &&
@@ -1031,30 +1092,14 @@ export default function Editor({
             // does not reserialize the same large document.
             clearRichFlushPending()
             transactionSourceQuarantined = false
-            if (transactionSourcePendingPublish) {
-              transactionSourcePendingPublish = false
-              transactionSourcePendingDoc = null
-              onChange?.(lastMarkdownRef.current, false)
-            }
             return
           }
           let preserved
-          let fallbackCandidates = []
-          // markdownUpdated may be delivered after a newer PM transaction is
-          // already visible. Normal documents verify against the immutable
-          // canonical snapshot owned by this callback. Large documents avoid
-          // a second full parse by capturing the immutable live PM doc; a stale
-          // callback then fails closed and the later callback/settled boundary
-          // retries it. Forced boundaries always verify the latest live doc.
-          const expectedCommitDoc = canonical.length > 120000
-            ? viewRef.current?.state.doc
-            : parseAdapter.parse(canonical)
           if (pendingPaste) {
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
             const markdown = generatedScratchMarkdownForCanonical(canonical)
             preserved = { markdown, reason: 'generated-scratch-canonical' }
-            fallbackCandidates = [canonicalSourceFallback(canonical)]
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical
               ? { markdown: pendingList.convertedSource }
@@ -1261,18 +1306,13 @@ export default function Editor({
           // frozen byte capture, so replaying it against a newer canonical
           // either locks permanently or publishes source missing later input —
           // the cumulative preservation path owns the retry instead.
-          if (!commitCanonicalResult(preserved, canonical, {
-            fallbackCandidates,
-            expectedDoc: expectedCommitDoc
-          })) {
+          if (!commitCanonicalResult(preserved, canonical)) {
             pendingRawMarkdownPasteRef.current = null
             return
           }
           // commitCanonicalResult already advanced both baselines, cleared the
           // flush flag, and published onChange; only the per-path transaction
           // state resets remain here.
-          transactionSourcePendingPublish = false
-          transactionSourcePendingDoc = null
           transactionSourceBlockHints = []
           transactionSourceQuarantined = false
           pendingRawMarkdownPasteRef.current = null
@@ -1508,7 +1548,6 @@ export default function Editor({
           canonicalMarkdownRef,
           programmaticReplaceRef,
           hasPendingRichFlush: () => richFlushPending,
-          clearPendingRichFlush: clearRichFlushPending,
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
           sourceCommitter,
@@ -1540,6 +1579,7 @@ export default function Editor({
           flushMarkdown,
           rebuildMarkdownFromRich,
           flushMarkdownSettled,
+          getVerifiedSyncStatus,
           getRecoveryMarkdown,
           restoreMarkdownOffset,
           markdownOffsetFromSelection,
@@ -1555,6 +1595,7 @@ export default function Editor({
           window.__horsemd = Object.assign(window.__horsemd || {}, {
             getView: () => viewRef.current,
             getMarkdown,
+            getVerifiedSyncStatus,
             applyReviewMarkup,
             focus: () => {
               viewRef.current && viewRef.current.focus()
@@ -1614,6 +1655,7 @@ export default function Editor({
           flushMarkdown,
           rebuildMarkdownFromRich,
           flushMarkdownSettled,
+          getVerifiedSyncStatus,
           getRecoveryMarkdown,
           restoreMarkdownOffset,
           markdownOffsetFromSelection,
@@ -1630,6 +1672,7 @@ export default function Editor({
         // or list-marker changes before the user edits anything.
         const finishInitial = (recordCanonical) => {
           if (destroyed) return
+          let canonical = canonicalMarkdownRef.current
           if (recordCanonical) {
             try {
               // Source-mode switches and saves serialize `view.state.doc`
@@ -1638,13 +1681,18 @@ export default function Editor({
               // getMarkdown() can differ in trailing list newlines, making a
               // no-op source switch look like an edit and rewrite source bytes.
               const serializer = crepe.editor.ctx.get(serializerCtx)
-              canonicalMarkdownRef.current = canonicalForSource(serializer(view.state.doc))
+              canonical = canonicalForSource(serializer(view.state.doc))
             } catch {
               try {
-                canonicalMarkdownRef.current = canonicalForSource(crepe.getMarkdown())
+                canonical = canonicalForSource(crepe.getMarkdown())
               } catch { /* editor teardown */ }
             }
           }
+          resetVerifiedState({
+            source: initialContent || '',
+            canonical,
+            expectedDoc: view.state.doc
+          })
           ready = true
           interactionReadyRef.current = true
           try { view.setProps({ editable: () => !readOnlyRef.current }) } catch { /* editor teardown */ }
