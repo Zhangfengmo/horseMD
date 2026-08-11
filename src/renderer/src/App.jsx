@@ -37,6 +37,7 @@ import {
   setTextareaSourceValue
 } from './source-text-fidelity.js'
 import { isTabDirty } from './lib/tab-state.js'
+import { applyVerifiedRichSnapshot } from './lib/rich-source-tab-state.js'
 import { applyCustomTheme, applyUserCss } from './customThemes.js'
 import { fireToast } from './ui.js'
 import { useFindReplace } from './hooks/useFindReplace.js'
@@ -248,6 +249,19 @@ export default function App() {
   const commitAllLive = useCallback(() => {
     for (const id of [...liveContentRef.current.keys()]) commitLive(id)
   }, [commitLive])
+  // A verified rich snapshot has one App-level commit path. It updates the
+  // synchronous mirror before scheduling React state, clears only the pending
+  // rich edit flag, and deliberately leaves savedContent untouched.
+  const commitRichSnapshotToTab = useCallback((id, content) => {
+    if (typeof content !== 'string') return false
+    const next = applyVerifiedRichSnapshot(tabsRef.current, id, content)
+    if (next === tabsRef.current) {
+      return tabsRef.current.some((tab) => tab.id === id)
+    }
+    tabsRef.current = next
+    setTabs((previous) => applyVerifiedRichSnapshot(previous, id, content))
+    return true
+  }, [])
 
   const t = useCallback((key, vars) => translate(lang, key, vars), [lang])
   // Always-current translator for stable callbacks (for example the source/save
@@ -273,6 +287,7 @@ export default function App() {
     editorHostRef,
     focusedTabRef,
     commitAllLive,
+    commitRichSnapshotToTab,
     findStateRef,
     richLoadingRef,
     tRef
@@ -533,17 +548,9 @@ export default function App() {
     if (!window.confirm(tRef.current('sync.rebuildConfirm'))) return null
     const rebuilt = editorApi.rebuildMarkdownFromRich?.()
     if (typeof rebuilt !== 'string') return null
-    // The rebuild reset the editor-local baselines; the App-level truth must
-    // follow in the same operation or the two diverge again until the next
-    // markdownUpdated (export paths never write tab.content otherwise).
-    tabsRef.current = tabsRef.current.map((tab) =>
-      tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
-    )
-    setTabs((prev) => prev.map((tab) =>
-      tab.id === id ? { ...tab, content: rebuilt, pendingRichEdit: false } : tab
-    ))
+    commitRichSnapshotToTab(id, rebuilt)
     return rebuilt
-  }, [setTabs, tabsRef, tRef])
+  }, [commitRichSnapshotToTab, tRef])
 
   const getMarkdownForTab = useCallback((id) => {
     const sourceElement = sourceTextareas.current[id]
@@ -553,10 +560,13 @@ export default function App() {
     // node view has not yet delivered its edit-intent callback.
     const editorApi = editorApis.current[id]
     const flushed = editorApi?.flushMarkdown?.({ force: true })
-    if (typeof flushed === 'string') return flushed
+    if (typeof flushed === 'string') {
+      commitRichSnapshotToTab(id, flushed)
+      return flushed
+    }
     if (editorApi) return rebuildMarkdownWithConsent(id, editorApi)
     return tabsRef.current.find((tab) => tab.id === id)?.content || ''
-  }, [editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
+  }, [commitRichSnapshotToTab, editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
 
   const getSettledMarkdownForTab = useCallback(async (id) => {
     const sourceElement = sourceTextareas.current[id]
@@ -570,9 +580,12 @@ export default function App() {
     const settled = typeof editorApi.flushMarkdownSettled === 'function'
       ? await editorApi.flushMarkdownSettled({ force: true })
       : editorApi.flushMarkdown?.({ force: true })
-    if (typeof settled === 'string') return settled
+    if (typeof settled === 'string') {
+      commitRichSnapshotToTab(id, settled)
+      return settled
+    }
     return rebuildMarkdownWithConsent(id, editorApi)
-  }, [editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
+  }, [commitRichSnapshotToTab, editorApis, rebuildMarkdownWithConsent, sourceTextareas, tabsRef])
 
   const getRecoveryMarkdownForTab = useCallback((id) => (
     editorApis.current[id]?.getRecoveryMarkdown?.() ?? null
