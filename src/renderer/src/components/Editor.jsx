@@ -308,11 +308,7 @@ export default function Editor({
     let crepe
     const parseAdapter = createEditorParseAdapter(() => {
       if (!crepe) return null
-      try {
-        return crepe.editor.ctx.get(parserCtx)
-      } catch {
-        return null
-      }
+      return crepe.editor.ctx.get(parserCtx)
     })
     const sourceCommitter = createVerifiedSourceCommitter({
       sourceRef: lastMarkdownRef,

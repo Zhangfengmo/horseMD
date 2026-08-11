@@ -17,6 +17,8 @@ assert.equal(
   prepared,
   'prepare keeps the established display-math then review-markup normalization order'
 )
+assert.equal(prepareEditorMarkdown(null), '', 'null prepares like empty Markdown')
+assert.equal(prepareEditorMarkdown(undefined), '', 'undefined prepares like empty Markdown')
 
 let getterCalls = 0
 let parsedMarkdown = null
@@ -36,6 +38,14 @@ assert.equal(adapter.parse(authored), parsedDocument, 'parse returns the configu
 assert.equal(getterCalls, 1, 'parse resolves the parser lazily')
 assert.equal(parsedMarkdown, prepared, 'parse always prepares Markdown before parsing')
 
+const scalarInputs = []
+const scalarAdapter = createEditorParseAdapter(() => (markdown) => {
+  scalarInputs.push(markdown)
+  return markdown
+})
+assert.equal(scalarAdapter.parse(42), '42', 'non-string Markdown is stringified before parsing')
+assert.deepEqual(scalarInputs, ['42'], 'the configured parser only receives prepared strings')
+
 const unavailable = createEditorParseAdapter(() => null)
 assert.throws(
   () => unavailable.parse('# not ready'),
@@ -43,4 +53,14 @@ assert.throws(
   'parse reports a clear parser-not-ready error'
 )
 
-console.log('PASS editor parse adapter: ordered preparation, lazy parser lookup, and readiness error')
+const sentinel = new Error('sentinel parser context failure')
+const throwing = createEditorParseAdapter(() => {
+  throw sentinel
+})
+assert.throws(
+  () => throwing.parse('# propagate'),
+  (error) => error === sentinel,
+  'parser getter runtime failures propagate without being rewritten as not-ready errors'
+)
+
+console.log('PASS editor parse adapter: ordered preparation, string boundaries, lazy lookup, and exact errors')

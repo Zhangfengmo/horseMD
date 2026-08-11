@@ -38,4 +38,32 @@ const once = structuredClone(tree)
 normalizeRaggedGfmTables(tree)
 assert.deepEqual(tree, once, 'normalization is idempotent')
 
-console.log('PASS editor table normalization: continuous ragged GFM body rows pad only trailing cells')
+const cell = (value) => ({
+  type: 'tableCell',
+  children: [{ type: 'text', value }]
+})
+const overwideCells = ['left', 'middle', 'right'].map(cell)
+const overwideTree = {
+  type: 'root',
+  children: [{
+    type: 'table',
+    children: [
+      { type: 'tableRow', children: [cell('h1'), cell('h2')] },
+      { type: 'tableRow', children: overwideCells }
+    ]
+  }]
+}
+normalizeRaggedGfmTables(overwideTree)
+const overwideRow = overwideTree.children[0].children[1]
+assert.equal(overwideRow.children.length, 3, 'a body row wider than its header is never truncated')
+assert.deepEqual(
+  overwideRow.children.map((entry) => entry.children[0]?.value),
+  ['left', 'middle', 'right'],
+  'overwide body-cell content keeps its authored order'
+)
+assert.ok(
+  overwideRow.children.every((entry, index) => entry === overwideCells[index]),
+  'normalization does not replace or move existing overwide cells'
+)
+
+console.log('PASS editor table normalization: ragged rows pad right and overwide rows remain intact')

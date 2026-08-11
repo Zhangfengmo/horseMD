@@ -2,7 +2,8 @@ import { normalizeReviewMarkupMarkdown } from '../reviewMarkup.js'
 import { normalizeDisplayMath } from './editor-math.js'
 
 export function prepareEditorMarkdown(markdown) {
-  return normalizeReviewMarkupMarkdown(normalizeDisplayMath(markdown))
+  const source = String(markdown ?? '')
+  return normalizeReviewMarkupMarkdown(normalizeDisplayMath(source))
 }
 
 export function createEditorParseAdapter(getParser) {
