@@ -28,6 +28,7 @@
     "test:codeblock-scroll-stability-ui": "node scripts/test-codeblock-scroll-stability-ui.mjs",
     "test:markdown-preservation": "node scripts/test-markdown-source-preservation.mjs",
     "test:roundtrip-acceptance": "node scripts/test-roundtrip-acceptance.mjs",
+    "test:editor-source-verification": "node scripts/test-editor-source-verification.mjs",
     "test:list-backspace-exit-ui": "node scripts/test-list-backspace-exit-ui.mjs",
     "test:sync-recovery-ui": "node scripts/test-sync-recovery-ui.mjs",
     "test:source-text-fidelity": "node scripts/test-source-text-fidelity.mjs",
