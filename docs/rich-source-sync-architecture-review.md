@@ -553,3 +553,22 @@ cell、普通 paragraph 与 heading 全部委托 Milkdown 原实现。现场副�
 `<br>`，邻 cell 编辑仍可能安全 fail-closed。它不是本次无 mark 的 3 个现场 cell 根因，
 当前修复也没有使其退化；若后续有真实反馈，应把 formatted inline token 纳入 source
 grammar，而不是为 comparator 增加例外。
+
+### 14.6 合并前独立审查发现的大文档实证问题
+
+最终只读审查没有再发现现场 `test.md` 路径的语义缺口，但对本次新 source model 找到
+两个可执行复现，因此它们属于必须在发布前修复的现有实现问题，而不是产品现场根因：
+
+- 单个合法 table cell 达到约 12.5 万字符时，`units.push(...decoded)` 会越过 JavaScript
+  的 variadic argument 上限并抛 `RangeError`，随后被映射层转换成确定性的
+  `unowned-source-change`。现在所有 unit 以线性迭代追加，并用 15 万字符 cell 回归覆盖。
+- table mapper 把 authored、previous canonical、next canonical 当作三个独立 LRU 项；
+  三份约 50 万字符源码刚好超过旧 150 万字符预算时会循环互相驱逐，同一个 revision
+  每次检查都重新全量解析。现在 parser 明确拥有一个当前 revision working set，三份
+  immutable model 原子替换并跨保存、源码定位和耐久上下文复用；通用 LRU 仍保持原有
+  条目/字符上限，下一 revision 只保留其自身三元组。instrumented 回归证明重复检查的
+  parser 调用由 6 次降为 3 次，且没有放宽任何语义验收规则。
+
+这两项说明“超大文档性能”不能一概归为预设问题：它们不是用户 2 KB 现场文件的触发
+原因，但已能由当前支持的合法 Markdown 确定触发。相对地，formatted terminal break
+仍只有理论残余、没有现场或现有回归证据，继续列为预防性边界。

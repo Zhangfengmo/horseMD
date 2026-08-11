@@ -14,7 +14,9 @@ import {
 const parseModels = (parseTables, values) => {
   if (typeof parseTables !== 'function') return null
   try {
-    const models = values.map((value) => parseTables(value))
+    const models = typeof parseTables.revisionSet === 'function'
+      ? parseTables.revisionSet(values)
+      : values.map((value) => parseTables(value))
     return models.every((model, index) => (
       isValidGfmTableSourceModel(model, values[index])
     )) ? models : null

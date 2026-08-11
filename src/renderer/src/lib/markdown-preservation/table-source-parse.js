@@ -168,6 +168,10 @@ const opaqueUnit = (view, node) => {
     : []
 }
 
+const appendUnits = (target, source) => {
+  for (const unit of source) target.push(unit)
+}
+
 const unitsForCell = (view, node) => {
   const units = []
   let patchable = true
@@ -176,9 +180,9 @@ const unitsForCell = (view, node) => {
       const decoded = textUnits(view, child)
       if (!decoded) {
         patchable = false
-        units.push(...opaqueUnit(view, child))
+        appendUnits(units, opaqueUnit(view, child))
       } else {
-        units.push(...decoded)
+        appendUnits(units, decoded)
       }
       continue
     }
@@ -189,12 +193,12 @@ const unitsForCell = (view, node) => {
         units.push({ kind: 'break', range })
       } else {
         patchable = false
-        units.push(...opaqueUnit(view, child))
+        appendUnits(units, opaqueUnit(view, child))
       }
       continue
     }
     patchable = false
-    units.push(...opaqueUnit(view, child))
+    appendUnits(units, opaqueUnit(view, child))
   }
   if ((node.children || []).some((child) => !rawRangeFor(view, child.position))) patchable = false
   return { units, patchable }
@@ -343,16 +347,19 @@ export function buildGfmTableSourceModel(markdown, remark) {
 export function createGfmTableSourceParser(remark) {
   const cache = new Map()
   let cachedCharacters = 0
-  const parse = (markdown) => {
-    const key = String(markdown ?? '')
+  let revisionModels = new Map()
+  const cachedModel = (key) => {
+    if (revisionModels.has(key)) return revisionModels.get(key)
     if (cache.has(key)) {
       const value = cache.get(key)
       cache.delete(key)
       cache.set(key, value)
       return value
     }
-    const value = buildGfmTableSourceModel(key, remark)
-    if (key.length > CACHE_CHARACTER_LIMIT) return value
+    return null
+  }
+  const remember = (key, value) => {
+    if (key.length > CACHE_CHARACTER_LIMIT) return
     cache.set(key, value)
     cachedCharacters += key.length
     while (
@@ -363,7 +370,36 @@ export function createGfmTableSourceParser(remark) {
       cachedCharacters -= oldest.length
       cache.delete(oldest)
     }
+  }
+  const parse = (markdown) => {
+    const key = String(markdown ?? '')
+    const cached = cachedModel(key)
+    if (cached) return cached
+    const value = buildGfmTableSourceModel(key, remark)
+    remember(key, value)
     return value
+  }
+  // Source preservation verifies authored, previous-canonical, and
+  // next-canonical as one immutable editor revision. Keep exactly that
+  // revision's models together instead of letting the generic character LRU
+  // evict one member while the same transaction is still being checked. The
+  // next revision replaces this working set atomically, so memory is bounded
+  // by the current triple and overlapping baselines are reused.
+  parse.revisionSet = (markdownValues) => {
+    const nextRevisionModels = new Map()
+    const models = []
+    for (const markdown of markdownValues || []) {
+      const key = String(markdown ?? '')
+      let value = nextRevisionModels.get(key) || cachedModel(key)
+      if (!value) {
+        value = buildGfmTableSourceModel(key, remark)
+        remember(key, value)
+      }
+      nextRevisionModels.set(key, value)
+      models.push(value)
+    }
+    revisionModels = nextRevisionModels
+    return models
   }
   parse.cacheInfo = () => Object.freeze({
     entries: cache.size,
@@ -511,4 +547,3 @@ export const isValidGfmTableSourceModel = (model, markdown) => {
   }
   return true
 }
-

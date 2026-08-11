@@ -1054,4 +1054,41 @@ for (const fixture of [
   assert.equal(sharedA, sharedB, 'one configured remark processor owns one shared parser/cache')
 }
 
+{
+  // A legal table cell can be larger than JavaScript's variadic argument
+  // limit. Source ownership must scale with document size instead of routing a
+  // normal edit into the fail-closed recovery path through RangeError.
+  const longCell = 'x'.repeat(150_000)
+  const markdown = `| a | b |\n| - | - |\n| ${longCell} | y |`
+  const model = buildGfmTableSourceModel(markdown, remark)
+  const cell = model.tables[0].rows[1].cells[0]
+  assert.equal(cell.patchable, true)
+  assert.equal(cell.units.length, longCell.length)
+}
+
+{
+  // Table preservation consumes one authored/canonical/next triple as a
+  // revision. Its models must remain one bounded working set even when their
+  // source strings narrowly exceed the generic LRU character budget.
+  let parseCalls = 0
+  const instrumentedRemark = {
+    parse(markdown) {
+      parseCalls += 1
+      return remark.parse(markdown)
+    }
+  }
+  const parser = createGfmTableSourceParser(instrumentedRemark)
+  const prefix = 'ordinary paragraph\n\n'.repeat(25_000)
+  const authored = `${prefix}| a | b | c |\n| - | - | - |\n| short |\n| x | y | z |`
+  const previousCanonical = authored.replace('| short |', '| short |  |  |')
+  const nextCanonical = previousCanonical.replace('| x | y | z |', '| x1 | y | z |')
+  const first = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables: parser })
+  const second = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables: parser })
+  assert.equal(first.status, 'patched')
+  assert.equal(second.status, 'patched')
+  assert.equal(parseCalls, 3, 'the current revision triple is parsed once and reused as one working set')
+  assert.equal(parser(nextCanonical).tables.length, 1)
+  assert.equal(parseCalls, 3, 'source mapping reuses the model owned by the verified revision')
+}
+
 console.log('PASS table source model: AST-owned cells preserve authored bytes and fail closed on ambiguity')
