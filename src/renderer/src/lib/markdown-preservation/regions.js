@@ -1085,8 +1085,15 @@ export const preserveDivergedTailBlockAppend = ({
     const tailBreaks = source.slice(sourceAnchor.start + sourceLine.length)
     // Deleting a leading-space paragraph down to its bare whitespace leaves a
     // blank canonical row (` `); the authored row must shrink to that blank
-    // rather than keep the deleted content.
-    const blankTail = nextTailLine.trim() === '' ? nextTailLine : ''
+    // rather than keep the deleted content. A LIST row deleted down to its
+    // marker still keeps an (empty) item in the canonical, so the authored
+    // row must keep its own marker too — dropping the whole row would erase a
+    // bullet the editor still shows (the round-trip gate rejects that).
+    const nextKeepsMarkerOnlyRow = /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(nextTailLine)
+    const authoredMarkerPrefix = nextKeepsMarkerOnlyRow
+      ? (sourceLine.match(/^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]?/)?.[0] || '')
+      : ''
+    const blankTail = nextTailLine.trim() === '' ? nextTailLine : authoredMarkerPrefix
     return {
       markdown: source.slice(0, sourceAnchor.start) + blankTail + tailBreaks,
       preserved: true,

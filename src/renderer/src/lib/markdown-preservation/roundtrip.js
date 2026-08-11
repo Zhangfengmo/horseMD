@@ -73,6 +73,19 @@ const normalizeNode = (node, definitions) => {
           BR_RE.test(String(child.children[0].value || '').trim()))
       )
       if (brOnly) continue
+      // An empty paragraph in a flow container (empty list item body after a
+      // delete) is structurally invisible; one spelling parses to a bare item
+      // and the other to an item with an empty paragraph node.
+      if (
+        flowParent &&
+        child?.type === 'paragraph' &&
+        (!child.children ||
+          !child.children.some((inline) =>
+            inline?.type !== 'text' || String(inline.value || '').replace(/\u200B/g, '').trim()
+          ))
+      ) {
+        continue
+      }
       let resolved = child
       if (resolved?.type === 'definition') continue
       if (resolved?.type === 'linkReference' || resolved?.type === 'imageReference') {
@@ -96,6 +109,13 @@ const normalizeNode = (node, definitions) => {
         continue
       }
       children.push(normalized)
+    }
+    // Invisible whitespace is not content: a paragraph (or list item body)
+    // whose only text is whitespace renders identically to an empty one, and
+    // the two spellings flip between `&#x20;`-protected spaces and bare
+    // trailing spaces (which re-parse away) without a user edit.
+    if (children.length === 1 && children[0].type === 'text' && !children[0].value.trim()) {
+      children.length = 0
     }
     // An authored table cell holding only `<br />` is HorseMD's spelling for
     // an EMPTY cell (normalizeEmptyTableCells); the canonical serializes it as

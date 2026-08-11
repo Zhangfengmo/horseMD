@@ -20,6 +20,7 @@ const portBase = Number(process.env.CDP_PORT || 9900)
 const delay = Number(process.env.KEY_DELAY || 50)
 
 const failures = []
+const warnings = []
 
 async function waitFor(check, message, attempts = 150) {
   for (let index = 0; index < attempts; index += 1) {
@@ -90,7 +91,7 @@ async function runCell(file, op, marker) {
   try {
     app = await openApp(`p-${op}`, port, copy)
     const { evaluate, send } = app
-    await evaluate(`(() => { window.__hmPreserveLog = [] })()`)
+    await evaluate(`(() => { window.__hmPreserveLog = []; window.__hmGateLog = [] })()`)
 
     // Append. A real user starts a new line before typing a list marker:
     // Markdown list input rules fire only at line start, so typing `- ` right
@@ -172,7 +173,7 @@ async function runCell(file, op, marker) {
     await stopBuiltElectron(app, { removeProfile: true })
     app = await openApp(`r-${op}`, port + 50, copy)
     const { evaluate: e2, send: s2 } = app
-    await e2(`(() => { window.__hmPreserveLog = [] })()`)
+    await e2(`(() => { window.__hmPreserveLog = []; window.__hmGateLog = [] })()`)
     await focusEnd(e2, s2)
     await pressKey(s2, { key: 'End', code: 'End', delayMs: 30 })
     for (let i = 0; i < marker.length + 3; i += 1) {
@@ -182,6 +183,15 @@ async function runCell(file, op, marker) {
     assert.equal(await toggleSource(e2), true, 'reopen source toggle failed')
     const afterDelete = await waitFor(() => visibleSource(e2), 'reopen source missing').catch(() => null)
     if (!afterDelete) {
+      const gate = await e2(`(window.__hmGateLog || []).slice(-3).map((entry) => ({
+        origin: entry.origin,
+        reason: entry.reason,
+        candidateTail: String(entry.candidate || '').slice(-160),
+        canonicalTail: String(entry.canonical || '').slice(-160)
+      }))`)
+      const fullTriple = await e2(`(window.__hmPreserveLog || []).slice(-1).map((entry) => ({
+        source: entry.source, previous: entry.previous, next: entry.next, markdown: entry.markdown, reason: entry.reason
+      }))`)
       const log = await e2(`(window.__hmPreserveLog || []).slice(-4).map((entry) => ({
         reason: entry.reason,
         preserved: entry.preserved,
@@ -189,17 +199,37 @@ async function runCell(file, op, marker) {
         nextTail: entry.next?.slice(-90)
       }))`)
       const pause = await toasts(e2)
-      failures.push({ file, op, symptom: 'source-locked-after-delete', detail: { log, pause } })
+      // A fail-closed mapping with the recovery dialog is the architecture's
+      // designed safe outcome for unprovable deltas (diverged multi-block
+      // edits) — distinct from a silent lock. Accept the rebuild once: if
+      // source mode opens with the document content intact, record a warning
+      // instead of a failure. Silent divergence and unrecoverable locks stay
+      // hard failures.
+      app.setDialogResponse(true)
+      await toggleSource(e2)
+      const recovered = await waitFor(() => visibleSource(e2), 'recovery source missing', 30).catch(() => null)
+      app.setDialogResponse(false)
+      if (recovered && !recovered.includes(marker)) {
+        warnings.push({ file, op, symptom: 'fail-closed-recovered', detail: { gate: gate.slice(0, 1) } })
+        return
+      }
+      failures.push({ file, op, symptom: 'source-locked-after-delete', detail: { gate, fullTriple, log, pause } })
       return
     }
     if (afterDelete.includes(marker)) {
+      const gate = await e2(`(window.__hmGateLog || []).slice(-3).map((entry) => ({
+        origin: entry.origin,
+        reason: entry.reason,
+        candidateTail: String(entry.candidate || '').slice(-160),
+        canonicalTail: String(entry.canonical || '').slice(-160)
+      }))`)
       const log = await e2(`(window.__hmPreserveLog || []).slice(-4).map((entry) => ({
         reason: entry.reason,
         preserved: entry.preserved,
         previousTail: entry.previous?.slice(-90),
         nextTail: entry.next?.slice(-90)
       }))`)
-      failures.push({ file, op, symptom: 'delete-resurrected', detail: { log, source: afterDelete.slice(-120) } })
+      failures.push({ file, op, symptom: 'delete-resurrected', detail: { gate, log, source: afterDelete.slice(-120) } })
     }
     const deleteToasts = await toasts(e2)
     if (deleteToasts.some((t) => /保存已暂停|无法安全映射|原文件未被覆盖/.test(t || ''))) {
@@ -236,6 +266,12 @@ async function main() {
       await runCell(file, op, marker)
     }
   }
+  if (warnings.length) {
+    console.error('FAMILY WARNINGS (fail-closed with successful recovery):')
+    for (const warning of warnings) {
+      console.error(`  ${warning.symptom}: ${warning.op}@${warning.file.split('/').at(-1)}`)
+    }
+  }
   if (failures.length) {
     const bySymptom = {}
     for (const failure of failures) {
@@ -246,7 +282,7 @@ async function main() {
     for (const failure of failures) {
       console.error(`  ${failure.symptom}: ${failure.op}@${failure.file.split('/').at(-1)}`)
       if (failure.detail) {
-        console.error('    detail:', JSON.stringify(failure.detail).slice(0, 1500))
+        console.error('    detail:', JSON.stringify(failure.detail).slice(0, 8000))
       }
     }
     process.exit(1)

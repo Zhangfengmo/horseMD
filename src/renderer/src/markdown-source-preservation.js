@@ -222,12 +222,18 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
   // corruption). A block-marker token is atomic: whenever the boundary falls
   // inside one, widen the delta to the start of its line on both canonicals
   // (the bytes before `start` are identical, so the line start coincides).
-  // This widening MUST run before any position-derived value below.
+  // This widening MUST run before any position-derived value below, and it
+  // must fire ONLY when the boundary character itself is a structural marker
+  // character (`#`, `>`, a list digit/punctuation): plain padding spaces after
+  // a complete marker are not part of the token, and widening across them
+  // parks the anchor inside an invisible-byte gap where affinity resolution
+  // can leak a neighbouring block into the mapped range.
   const changeLineStart = previous.lastIndexOf('\n', Math.max(0, start - 1)) + 1
   if (start > changeLineStart) {
-    const markerRunLength = (markdown) =>
-      markdown.slice(changeLineStart).match(/^(?:(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])[ \t]+)+/)?.[0]?.length || 0
-    if (Math.max(markerRunLength(previous), markerRunLength(next)) > start - changeLineStart) {
+    const markerRun = /^(?:(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])[ \t]+)*(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])?$/
+    const prefixIsMarkerRun = markerRun.test(previous.slice(changeLineStart, start))
+    const boundaryContinuesToken = /[#>\d.)]/.test(previous[start] || '') || /[#>\d.)]/.test(next[start] || '')
+    if (prefixIsMarkerRun && boundaryContinuesToken) {
       start = changeLineStart
     }
   }
