@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict'
+import remarkGfm from 'remark-gfm'
+import remarkParse from 'remark-parse'
+import { unified } from 'unified'
+import { normalizeRaggedGfmTables } from '../src/renderer/src/components/editor-table-normalization.js'
+
+const remark = unified().use(remarkParse).use(remarkGfm)
+const markdown = [
+  '| one | two | three | four | five |',
+  '| - | -- | --- | :---: | ---: |',
+  '| first short |',
+  '| second short |',
+  '| complete | b | c | d | e |'
+].join('\n')
+
+const tree = remark.parse(markdown)
+const table = tree.children.find((node) => node.type === 'table')
+assert.ok(table, 'fixture must parse as a GFM table')
+assert.deepEqual(table.children.map((row) => row.children.length), [5, 1, 1, 5], 'fixture must start ragged')
+
+const normalized = normalizeRaggedGfmTables(tree)
+assert.equal(normalized, tree, 'normalization mutates and returns the same mdast tree')
+
+const rows = table.children
+assert.deepEqual(rows.map((row) => row.children.length), [5, 5, 5, 5], 'continuous short body rows are padded to the header width')
+for (const [index, value] of ['first short', 'second short'].entries()) {
+  const row = rows[index + 1]
+  assert.equal(row.children[0].children[0]?.value, value, `short row ${index + 1} keeps authored content in column one`)
+  assert.deepEqual(
+    row.children.slice(1).map((cell) => cell.children),
+    [[], [], [], []],
+    `short row ${index + 1} receives only empty cells on the right`
+  )
+}
+assert.equal(rows[3].children[4].children[0]?.value, 'e', 'complete rows remain unchanged')
+
+const once = structuredClone(tree)
+normalizeRaggedGfmTables(tree)
+assert.deepEqual(tree, once, 'normalization is idempotent')
+
+console.log('PASS editor table normalization: continuous ragged GFM body rows pad only trailing cells')
