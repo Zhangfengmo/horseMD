@@ -2,8 +2,11 @@
 // cells. The editor renders each row rectangularly, but rich cell edits must
 // preserve authored short-row bytes and must not enter recovery.
 import assert from 'node:assert/strict'
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import remarkGfm from 'remark-gfm'
+import remarkParse from 'remark-parse'
+import { unified } from 'unified'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
 import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
@@ -17,6 +20,7 @@ const port = Number(process.env.CDP_PORT || 10230 + (process.pid % 300))
 const builtInFixture = new URL('./fixtures/table-save-user-repro.md', import.meta.url)
 const externalFixture = process.env.HORSEMD_REPRO_FILE
 const fixture = join(root, externalFixture ? basename(externalFixture) : 'table-save-user-repro.md')
+const remark = unified().use(remarkParse).use(remarkGfm)
 
 const waitFor = async (check, message, attempts = 100) => {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -31,26 +35,6 @@ const click = async (app, point) => {
   await app.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
   await app.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
   await app.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
-}
-
-const lineCellCount = (line) => {
-  let cells = 1
-  let escaped = false
-  for (const character of line.trim().replace(/^\||\|$/g, '')) {
-    if (escaped) {
-      escaped = false
-    } else if (character === '\\') {
-      escaped = true
-    } else if (character === '|') {
-      cells += 1
-    }
-  }
-  return cells
-}
-
-const isDelimiter = (line) => {
-  const cells = line.trim().replace(/^\||\|$/g, '').split('|')
-  return cells.length > 1 && cells.every((cell) => /^:?-{1,}:?$/.test(cell.trim()))
 }
 
 const tableFixtureForCase = (name) => {
@@ -83,35 +67,8 @@ const tableFixtureForCase = (name) => {
   ].join('\n')
 }
 
-const findRaggedTable = (source) => {
-  const lines = source.split('\n')
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    if (!lines[index].includes('|') || !isDelimiter(lines[index + 1])) continue
-    const width = lineCellCount(lines[index])
-    const body = []
-    for (let row = index + 2; row < lines.length && lines[row].includes('|'); row += 1) {
-      body.push({ line: lines[row], cells: lineCellCount(lines[row]) })
-    }
-    const shortRows = body.filter((row) => row.cells < width)
-    const editableIndex = body.findIndex((row) => row.cells === width)
-    if (width === 5 && shortRows.length && editableIndex >= 0) {
-      return { width, body, shortRows: shortRows.map((row) => row.line), editableIndex }
-    }
-  }
-  throw new Error('fixture needs a five-column GFM table with a short body row and a complete body row')
-}
-
-const targetForCase = (table) => {
-  const targetLine = caseName === 'hardbreak'
-    ? '| hardbreak target |'
-    : caseName === 'escaped-pipe'
-      ? '| a \\| b<br>tail |'
-      : null
-  const bodyRowIndex = targetLine == null
-    ? table.editableIndex
-    : table.body.findIndex((row) => row.line === targetLine)
-  assert.ok(bodyRowIndex >= 0, 'case target cell is missing from the authored fixture')
-  const raw = table.body[bodyRowIndex].line.trim().replace(/^\||\|$/g, '')
+const firstCellText = (line) => {
+  const raw = line.trim().replace(/^\||\|$/g, '')
   let firstCell = ''
   let escaped = false
   for (const character of raw) {
@@ -126,10 +83,70 @@ const targetForCase = (table) => {
       firstCell += character
     }
   }
+  return firstCell.trim().replace(/<br\s*\/?>/gi, '')
+}
+
+const targetLineForCase = () => {
+  if (caseName === 'hardbreak') return '| hardbreak target |'
+  if (caseName === 'escaped-pipe') return '| a \\| b<br>tail |'
+  return null
+}
+
+const tableNodes = (tree) => {
+  const tables = []
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'table') tables.push(node)
+    for (const child of node.children || []) visit(child)
+  }
+  visit(tree)
+  return tables
+}
+
+const findRaggedTable = (source) => {
+  const targetLine = targetLineForCase()
+  const candidates = tableNodes(remark.parse(source))
+  for (const [tableIndex, node] of candidates.entries()) {
+    const rows = node.children || []
+    const width = rows[0]?.children?.length || 0
+    const body = rows.slice(1).map((row) => ({
+      line: source.slice(row.position.start.offset, row.position.end.offset),
+      cells: row.children.length
+    }))
+    const shortRows = body.filter((row) => row.cells < width)
+    const editableIndex = body.findIndex((row) => row.cells === width && firstCellText(row.line) === 'editable full')
+    const targetIndex = targetLine == null
+      ? editableIndex
+      : body.findIndex((row) => row.line === targetLine)
+    if (width === 5 && shortRows.length && targetIndex >= 0) {
+      return {
+        tableIndex,
+        width,
+        body,
+        shortRows: shortRows.map((row) => row.line),
+        editableIndex,
+        targetIndex
+      }
+    }
+  }
+  throw new Error('fixture needs a target-bearing five-column GFM table with a short body row')
+}
+
+const targetForCase = (table) => {
+  const targetLine = caseName === 'hardbreak'
+    ? '| hardbreak target |'
+    : caseName === 'escaped-pipe'
+      ? '| a \\| b<br>tail |'
+      : null
+  const bodyRowIndex = table.targetIndex
+  assert.ok(bodyRowIndex >= 0, 'case target cell is missing from the authored fixture')
+  if (targetLine != null) {
+    assert.equal(table.body[bodyRowIndex].line, targetLine, 'case target resolves within the selected source table')
+  }
   return {
     // Authored tables exclude the header here. `tbody tr` includes it at 0.
     bodyRowIndex,
-    expectedCellText: firstCell.trim().replace(/<br\s*\/?>/gi, ''),
+    expectedCellText: firstCellText(table.body[bodyRowIndex].line),
     token: 'editedX',
     rawEnter: caseName === 'hardbreak'
   }
@@ -153,27 +170,30 @@ const assertCaseSource = (source, token, checkpoint) => {
   }
 }
 
-const visibleTableRows = (app) => app.evaluate(`(() => {
+const visibleTableRows = (app, tableIndex) => app.evaluate(`((tableIndex) => {
   const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent !== null)
-  const table = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].find((node) => node.offsetParent !== null)
+  const tables = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].filter((node) => node.offsetParent !== null)
+  const table = tables[tableIndex]
   return [...(table?.querySelectorAll('tbody tr') || [])].map((row) =>
     [...row.children].map((cell) => cell.textContent || '')
   )
-})()`)
+})(${tableIndex})`)
 
-const editPoint = (app, bodyRowIndex) => app.evaluate(`((bodyRowIndex) => {
+const editPoint = (app, tableIndex, bodyRowIndex) => app.evaluate(`((tableIndex, bodyRowIndex) => {
   const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent !== null)
-  const table = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].find((node) => node.offsetParent !== null)
+  const tables = [...(editor?.querySelectorAll('.milkdown-table-block') || [])].filter((node) => node.offsetParent !== null)
+  const table = tables[tableIndex]
   // Milkdown emits the table header as tbody row 0, so authored body row n is
   // DOM row n + 1. Keep this conversion at the DOM boundary.
   const cell = table?.querySelectorAll('tbody tr')[bodyRowIndex + 1]?.querySelector('td:first-child')
   const target = cell?.querySelector('p') || cell
+  target?.scrollIntoView({ block: 'center' })
   const rect = target?.getBoundingClientRect()
   return rect ? {
     text: cell.textContent || '',
     point: { x: Math.round(rect.left + Math.min(14, rect.width / 2)), y: Math.round((rect.top + rect.bottom) / 2) }
   } : null
-})(${bodyRowIndex})`)
+})(${tableIndex}, ${bodyRowIndex})`)
 
 const visibleSource = (app) => app.evaluate(`(
   [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)?.value ?? null
@@ -221,28 +241,31 @@ const saveWithoutRecovery = async (app, checkpoint) => {
 }
 
 async function main() {
-  await rm(root, { recursive: true, force: true })
-  await mkdir(root, { recursive: true })
-  if (externalFixture) {
-    // Never open the supplied file in place; this reproduction owns only its
-    // temporary copy and deliberately keeps diagnostics content-free.
-    await cp(externalFixture, fixture)
-  } else if (caseName === 'cell' || caseName === 'consecutive') {
-    await cp(builtInFixture, fixture)
-  } else {
-    await writeFile(fixture, tableFixtureForCase(caseName), 'utf8')
-  }
-
-  const original = await readFile(fixture, 'utf8')
-  const fixtureTable = findRaggedTable(original)
-  const target = targetForCase(fixtureTable)
   let app
   try {
+    await rm(root, { recursive: true, force: true })
+    await mkdir(root, { recursive: true })
+    // Never open an external reproduction in place. Read its bytes and create
+    // a new regular file under this run's temporary root instead of following
+    // its type or metadata through fs.cp().
+    const fixtureBytes = externalFixture
+      ? await readFile(externalFixture)
+      : caseName === 'cell' || caseName === 'consecutive'
+        ? await readFile(builtInFixture)
+        : Buffer.from(tableFixtureForCase(caseName), 'utf8')
+    await writeFile(fixture, fixtureBytes, { flag: 'wx' })
+    if (externalFixture) {
+      assert.equal((await lstat(fixture)).isSymbolicLink(), false, 'temporary external reproduction must not be a symlink')
+    }
+
+    const original = await readFile(fixture, 'utf8')
+    const fixtureTable = findRaggedTable(original)
+    const target = targetForCase(fixtureTable)
     app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [fixture] })
-    await waitFor(async () => (await visibleTableRows(app)).length, 'ragged GFM table did not render')
-    const rows = await visibleTableRows(app)
+    await waitFor(async () => (await visibleTableRows(app, fixtureTable.tableIndex)).length, 'ragged GFM table did not render')
+    const rows = await visibleTableRows(app, fixtureTable.tableIndex)
     assert.equal(rows.length >= fixtureTable.editableIndex + 2, true, 'complete table row is missing from the DOM after its tbody header row')
-    const targetCell = await editPoint(app, target.bodyRowIndex)
+    const targetCell = await editPoint(app, fixtureTable.tableIndex, target.bodyRowIndex)
     assert.ok(targetCell, 'target table cell was not available')
     assert.equal(targetCell.text, target.expectedCellText, 'target body-row coordinate did not resolve to the expected table cell before input')
 
@@ -283,11 +306,9 @@ async function main() {
 
     await stopBuiltElectron(app, { removeProfile: true })
     app = await launchBuiltElectron({ profileDir: join(root, 'reopen-profile'), port: port + 1, appArgs: [fixture] })
-    await waitFor(async () => (await visibleTableRows(app)).length, 'saved ragged table did not render after cold reopen')
-    const coldRichText = await app.evaluate(`(
-      [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)?.textContent ?? ''
-    )`)
-    assert.equal(coldRichText.includes(target.token), true, 'cold reopen rich editor is missing the edited input token')
+    await waitFor(async () => (await visibleTableRows(app, fixtureTable.tableIndex)).length, 'saved ragged table did not render after cold reopen')
+    const coldRows = await visibleTableRows(app, fixtureTable.tableIndex)
+    assert.equal(coldRows.flat().join('').includes(target.token), true, 'cold reopen target table is missing the edited input token')
     const reopened = await enterSourceWithoutRecovery(app, 'cold reopen')
     assertCaseSource(reopened, target.token, 'cold reopen source')
     for (const shortRow of fixtureTable.shortRows) {
@@ -304,6 +325,11 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error)
+  const code = typeof error?.code === 'string' ? ` ${error.code}` : ''
+  const message = String(error?.message || 'unknown failure')
+    .replace(/file:\/\/[^\s)]+|\/?(?:Users|tmp)\/[^\s)]+/g, '[path]')
+    .replace(/HORSEMD_REPRO_FILE/gi, '[external fixture]')
+    .slice(0, 500)
+  console.error(`ragged-table-save-ui ${caseName}${code}: ${message}`)
   process.exitCode = 1
 })
