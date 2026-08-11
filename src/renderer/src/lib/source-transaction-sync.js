@@ -161,6 +161,12 @@ const semanticJson = (node) => {
   const visit = (value) => {
     if (!value || typeof value !== 'object') return value
     const next = { ...value }
+    if (next.type === 'text' && typeof next.text === 'string') {
+      // HorseMD inserts U+200B only to keep authored leading spaces from being
+      // reinterpreted as Markdown indentation. It is an internal source
+      // sentinel, not visible ProseMirror content.
+      next.text = next.text.replaceAll(leadingSpaceSentinel, '')
+    }
     if (next.type === 'heading' && next.attrs) {
       next.attrs = { ...next.attrs }
       // Heading ids are derived by the live editor and regenerated after parse;
@@ -188,7 +194,26 @@ const semanticJson = (node) => {
       delete next.attrs.colwidth
       if (!Object.keys(next.attrs).length) delete next.attrs
     }
-    if (Array.isArray(next.content)) next.content = next.content.map(visit)
+    if (Array.isArray(next.content)) {
+      next.content = next.content
+        .map(visit)
+        .filter((child) => !(child?.type === 'text' && !child.text))
+      if (!next.content.length) delete next.content
+    }
+    if (next.type === 'list_item' && Array.isArray(next.content)) {
+      next.content = next.content.map((child) => {
+        const invisibleParagraph = child?.type === 'paragraph' && (
+          !child.content?.length || child.content.every((inline) => (
+            inline?.type === 'text' &&
+            !inline.marks?.length &&
+            !String(inline.text || '').trim()
+          ))
+        )
+        if (!invisibleParagraph) return child
+        const { content: _content, ...emptyParagraph } = child
+        return emptyParagraph
+      })
+    }
     if (next.type === 'table_cell' || next.type === 'table_header') {
       // Milkdown spells an otherwise empty table-cell paragraph as a single
       // block hardbreak when it reparses the serializer's internal `<br />`

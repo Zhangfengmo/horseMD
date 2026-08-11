@@ -79,6 +79,42 @@ run('ignores live list spread metadata that source reparsing normalizes', () => 
   }), true)
 })
 
+run('normalizes the internal leading-space sentinel without hiding list content', () => {
+  assert.equal(verifySourceDocument({
+    markdown: '\u200B  indented\n',
+    expectedDoc: paragraphDoc('  indented'),
+    parseMarkdown: () => paragraphDoc('\u200B  indented')
+  }), true, 'the app-owned leading-space sentinel is not document content')
+
+  const listDoc = (text) => ({
+    toJSON: () => ({
+      type: 'doc',
+      content: [{
+        type: 'bullet_list',
+        attrs: { spread: 'false' },
+        content: [{
+          type: 'list_item',
+          attrs: { label: '•', listType: 'bullet', spread: 'false', checked: null },
+          content: [{
+            type: 'paragraph',
+            ...(text == null ? {} : { content: [{ type: 'text', text }] })
+          }]
+        }]
+      }]
+    })
+  })
+  assert.equal(verifySourceDocument({
+    markdown: '- \u200B  \n',
+    expectedDoc: listDoc('  '),
+    parseMarkdown: () => listDoc('\u200B')
+  }), true, 'an empty list item must not fail because its internal whitespace spelling changed')
+  assert.equal(verifySourceDocument({
+    markdown: '- \u200Bwrong\n',
+    expectedDoc: listDoc('expected'),
+    parseMarkdown: () => listDoc('\u200Bwrong')
+  }), false, 'visible list-item text must still be compared')
+})
+
 run('ignores table column-width layout metadata that Markdown cannot encode', () => {
   const tableDoc = (colwidth) => ({
     toJSON: () => ({

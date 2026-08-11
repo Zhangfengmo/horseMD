@@ -422,6 +422,7 @@ cell；原独立 `mdast-util-from-markdown + GFM` 验收器却直接比较另一
 | 成功 forced rich read 后 App mirror 可停在旧内容 | `flushMarkdown` 只返回字符串，Pandoc 等调用者不一定同步 `tab.content` | App 使用统一 `commitRichSnapshotToTab` 同步 `tabsRef`/React state，不改 `savedContent` |
 | parser 重建的非语义 attrs 造成误拒绝 | 列表 `spread` 的 boolean/string 差异、表格 resize 的 `colwidth` 无 Markdown 表达 | 等价投影仅忽略这些 serializer/layout 元数据，列表文字、marker、alignment、span 仍严格比较 |
 | resize 后空表格 cell 的内部占位造成误拒绝 | live cell 是空 paragraph，serializer 写 `<br />` 后 parser 得到唯一 `isInline:false` hardbreak | 仅在 table cell/header 内把“唯一 block hardbreak”视为空；普通/行内/带文字 `<br>` 仍是语义内容 |
+| 合并后的空列表项 sentinel 误拒绝 | 删除 `- ​    正文` 的可见文字后，live PM 保留纯空格 paragraph，作者源码重解析为仅含 U+200B 的 paragraph；完整 family matrix 的 `list-spaces` cell 被锁住 | 等价投影移除应用内部 leading-space sentinel，并且只在 `list_item` 内把纯未标记空白 paragraph 视为空；可见列表文字仍严格比较 |
 
 ### 13.3 当前生产架构风险（已收口，但不是本次用户触发的独立实证）
 
