@@ -246,6 +246,63 @@ export const normalizeGfmTableSerializerPlaceholders = (markdown, parseTables) =
   )
 }
 
+const normalizeCanonicalWithTableProvenance = ({
+  authoredModel,
+  previousModel,
+  nextModel,
+  tableOwnership,
+  parseTables
+}) => {
+  const replacements = []
+  for (const { nextIndex, previousIndex } of tableOwnership) {
+    const nextTable = nextModel.tables[nextIndex]
+    if (!nextTable) return null
+    const authoredTable = previousIndex == null ? null : authoredModel.tables[previousIndex]
+    const previousTable = previousIndex == null ? null : previousModel.tables[previousIndex]
+    for (const nextRow of nextTable.rows) {
+      for (const nextCell of nextRow.cells) {
+        if (!isSerializerPlaceholderCell(nextCell, nextModel)) continue
+        let replacement = ''
+        if (authoredTable && previousTable) {
+          const authoredCell = authoredTable.rows[nextRow.index]?.cells[nextCell.column]
+          const previousCell = previousTable.rows[nextRow.index]?.cells[nextCell.column]
+          const semanticUnits = nextCanonicalCellUnits(
+            authoredCell,
+            authoredModel,
+            previousCell,
+            previousModel,
+            nextCell,
+            nextModel
+          )
+          if (semanticUnits.length) {
+            if (!authoredCell?.contentRange) continue
+            replacement = authoredModel.view.raw.slice(
+              authoredCell.contentRange.start,
+              authoredCell.contentRange.end
+            )
+          }
+        }
+        replacements.push({ range: nextCell.contentRange, replacement })
+      }
+    }
+  }
+  if (!replacements.length) return { raw: nextModel.view.raw, model: nextModel }
+  replacements.sort((left, right) => right.range.start - left.range.start)
+  const raw = replacements.reduce(
+    (value, { range, replacement }) => (
+      value.slice(0, range.start) + replacement + value.slice(range.end)
+    ),
+    nextModel.view.raw
+  )
+  let model
+  try {
+    model = parseTables(raw)
+  } catch {
+    return null
+  }
+  return isValidGfmTableSourceModel(model, raw) ? { raw, model } : null
+}
+
 const materializeMissingCell = ({ authoredModel, table, row, column, nextCell, nextModel }) => {
   const actual = rowActualCellCount(row)
   if (column < actual || !nextCell || nextCell.presence !== 'present' || !nextCell.patchable) return null
@@ -376,35 +433,59 @@ const exactBaselineTableCountChange = ({
   nextModel,
   parseTables
 }) => {
-  if (authoredModel.view.text !== previousModel.view.text) {
-    return { status: 'unowned', reason: 'ambiguous-table-count-change' }
-  }
   if (Math.abs(previousModel.tables.length - nextModel.tables.length) !== 1) {
     return { status: 'unowned', reason: 'ambiguous-table-count-change' }
   }
 
-  const normalizedNext = normalizeGfmTableSerializerPlaceholders(nextModel.view.raw, parseTables)
-  let normalizedNextModel = nextModel
-  if (normalizedNext !== nextModel.view.raw) {
-    try {
-      normalizedNextModel = parseTables(normalizedNext)
-    } catch {
-      return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
-    }
-    if (!isValidGfmTableSourceModel(normalizedNextModel, normalizedNext)) {
-      return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
-    }
-  }
-
-  const insertion = normalizedNextModel.tables.length === previousModel.tables.length + 1
-  const shorterModel = insertion ? previousModel : normalizedNextModel
-  const longerModel = insertion ? normalizedNextModel : previousModel
-  const owningIndex = unmatchedTableIndex(shorterModel, longerModel)
+  const insertion = nextModel.tables.length === previousModel.tables.length + 1
+  const originalShorter = insertion ? previousModel : nextModel
+  const originalLonger = insertion ? nextModel : previousModel
+  const owningIndex = unmatchedTableIndex(originalShorter, originalLonger)
   if (owningIndex == null) {
     return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
   }
 
-  const canonicalChange = commonChange(previousModel.view.text, normalizedNextModel.view.text)
+  const normalizedPrevious = normalizeCanonicalWithTableProvenance({
+    authoredModel,
+    previousModel,
+    nextModel: previousModel,
+    tableOwnership: previousModel.tables.map((_, index) => ({
+      nextIndex: index,
+      previousIndex: index
+    })),
+    parseTables
+  })
+  if (
+    !normalizedPrevious ||
+    normalizedPrevious.model.view.text !== authoredModel.view.text
+  ) return { status: 'unowned', reason: 'ambiguous-table-count-change' }
+
+  const nextOwnership = nextModel.tables.map((_, nextIndex) => ({
+    nextIndex,
+    previousIndex: insertion
+      ? (nextIndex === owningIndex ? null : nextIndex < owningIndex ? nextIndex : nextIndex - 1)
+      : (nextIndex < owningIndex ? nextIndex : nextIndex + 1)
+  }))
+  const normalizedNext = normalizeCanonicalWithTableProvenance({
+    authoredModel,
+    previousModel,
+    nextModel,
+    tableOwnership: nextOwnership,
+    parseTables
+  })
+  if (!normalizedNext) {
+    return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
+  }
+
+  const previousForChange = normalizedPrevious.model
+  const nextForChange = normalizedNext.model
+  const shorterModel = insertion ? previousForChange : nextForChange
+  const longerModel = insertion ? nextForChange : previousForChange
+  if (unmatchedTableIndex(shorterModel, longerModel) !== owningIndex) {
+    return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
+  }
+
+  const canonicalChange = commonChange(previousForChange.view.text, nextForChange.view.text)
   const owningTable = longerModel.tables[owningIndex]
   const owningRange = normalizedTableRange(longerModel, owningTable)
   const shorterChangeIsEmpty = insertion
@@ -427,7 +508,7 @@ const exactBaselineTableCountChange = ({
     canonicalChange.previousEnd
   )
   const replacementRange = modelRawRange(
-    normalizedNextModel,
+    nextForChange,
     canonicalChange.start,
     canonicalChange.nextEnd
   )
@@ -437,7 +518,7 @@ const exactBaselineTableCountChange = ({
   return {
     status: 'patched',
     sourceRange,
-    replacement: normalizedNextModel.view.raw.slice(replacementRange.start, replacementRange.end)
+    replacement: nextForChange.view.raw.slice(replacementRange.start, replacementRange.end)
   }
 }
 
@@ -568,24 +649,20 @@ export function mapGfmTableChange({
   )) return { status: 'unowned', reason: 'authored-previous-table-mismatch' }
 
   if (!shapeEqual) {
-    const nextBlock = nextModel.view.raw.slice(nextTable.range.start, nextTable.range.end)
-    // Normalize against the already parsed whole document instead of trusting
-    // a line-oriented table split. Ranges are table-local here.
-    const placeholderRanges = []
-    for (const row of nextTable.rows) {
-      for (const cell of row.cells) {
-        if (isSerializerPlaceholderCell(cell, nextModel)) {
-          placeholderRanges.push({
-            start: cell.contentRange.start - nextTable.range.start,
-            end: cell.contentRange.end - nextTable.range.start
-          })
-        }
-      }
+    const normalizedNext = normalizeCanonicalWithTableProvenance({
+      authoredModel,
+      previousModel,
+      nextModel,
+      tableOwnership: [{ nextIndex: index, previousIndex: index }],
+      parseTables
+    })
+    const normalizedNextTable = normalizedNext?.model.tables[index]
+    if (!normalizedNextTable) {
+      return { status: 'unowned', reason: 'invalid-or-ambiguous-table-model' }
     }
-    placeholderRanges.sort((left, right) => right.start - left.start)
-    const replacementBlock = placeholderRanges.reduce(
-      (value, range) => value.slice(0, range.start) + value.slice(range.end),
-      nextBlock
+    const replacementBlock = normalizedNext.raw.slice(
+      normalizedNextTable.range.start,
+      normalizedNextTable.range.end
     )
     const replacement = adaptCanonicalRegionToSource(replacementBlock, source, authoredTable.range)
     return {

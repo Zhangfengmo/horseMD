@@ -355,6 +355,28 @@ for (const fixture of [
 
 {
   const authored = [
+    '| A | B | C |',
+    '| - | - | - |',
+    '| <br> |  | keep |'
+  ].join('\n')
+  const previousCanonical = [
+    '| A | B | C |',
+    '| - | - | - |',
+    '| <br /> | <br /> | keep |'
+  ].join('\n')
+  const nextCanonical = `${previousCanonical}\n| new | <br /> | row |`
+  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  assert.equal(result.status, 'patched', 'adding a row remains owned when an existing cell has a sole hardbreak')
+  assert.equal(result.kind, 'table-structure')
+  const table = parseTables(result.markdown).tables[0]
+  assert.equal(table.rows[1].cells[0].units[0]?.kind, 'break', 'row add preserves the proven real hardbreak')
+  assert.equal(table.rows[1].cells[1].units.length, 0, 'row add clears the proven existing empty-cell placeholder')
+  assert.equal(table.rows[1].cells[2].units.map((unit) => unit.value || '').join(''), 'keep', 'row add preserves neighboring text')
+  assert.equal(table.rows[2].cells[1].units.length, 0, 'row add clears a placeholder in the newly created row')
+}
+
+{
+  const authored = [
     '# Before',
     '',
     '| one | two |',
@@ -504,6 +526,56 @@ for (const fixture of [
     'table deletion owns exactly the parsed table plus its necessary separator'
   )
   assert.equal(deleted.markdown, before, 'table deletion preserves BOM, CRLF, and does not glue following text')
+}
+
+{
+  const authoredFirst = [
+    '| A | B | C |',
+    '| - | - | - |',
+    '| <br> |  | keep |'
+  ].join('\n')
+  const canonicalFirst = [
+    '| A | B | C |',
+    '| - | - | - |',
+    '| <br /> | <br /> | keep |'
+  ].join('\n')
+  const insertedCanonicalTable = [
+    '| X | Y |',
+    '| - | - |',
+    '| new | <br /> |'
+  ].join('\n')
+  const insertedSourceTable = insertedCanonicalTable.replace('<br />', '')
+  const authoredBeforeInsert = `${authoredFirst}\n\nTail`
+  const previousBeforeInsert = `${canonicalFirst}\n\nTail`
+  const nextAfterInsert = `${canonicalFirst}\n\n${insertedCanonicalTable}\n\nTail`
+  const inserted = mapGfmTableChange({
+    authored: authoredBeforeInsert,
+    previousCanonical: previousBeforeInsert,
+    nextCanonical: nextAfterInsert,
+    parseTables
+  })
+  assert.equal(inserted.status, 'patched', 'table insertion is owned across proven hardbreak/placeholder spellings')
+  assert.equal(
+    inserted.markdown,
+    `${authoredFirst}\n\n${insertedSourceTable}\n\nTail`,
+    'table insertion preserves the existing real break, empty cell, and text while clearing only the new placeholder'
+  )
+
+  const authoredBeforeDelete = `${authoredFirst}\n\n${insertedSourceTable}\n\nTail`
+  const previousBeforeDelete = `${canonicalFirst}\n\n${insertedSourceTable}\n\nTail`
+  const nextAfterDelete = `${canonicalFirst}\n\nTail`
+  const deleted = mapGfmTableChange({
+    authored: authoredBeforeDelete,
+    previousCanonical: previousBeforeDelete,
+    nextCanonical: nextAfterDelete,
+    parseTables
+  })
+  assert.equal(deleted.status, 'patched', 'table deletion is owned across proven hardbreak/placeholder spellings')
+  assert.equal(
+    deleted.markdown,
+    `${authoredFirst}\n\nTail`,
+    'table deletion preserves the unchanged real break, empty cell, and neighboring text'
+  )
 }
 
 for (const fixture of [
