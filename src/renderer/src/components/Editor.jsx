@@ -45,8 +45,11 @@ import {
   replaceMarkdownListBlock,
   restoreTypedBulletMarker
 } from '../markdown-source-preservation.js'
-import { roundTripPreserved } from '../lib/markdown-preservation/roundtrip.js'
 import { pmPosToMarkdownOffset } from './editor-source-map.js'
+import {
+  canonicalSourceFallback,
+  createVerifiedSourceCommitter
+} from './editor-source-verification.js'
 import {
   areSourceDocumentsEquivalent,
   mapPlainTextTransactionsToSource
@@ -302,25 +305,41 @@ export default function Editor({
       richFlushPending = false
       pendingRichBlockKey = null
     }
-    // The single commit point for every rich→source transaction in this
-    // editor: markdownUpdated, frontmatter, inline code, and both list
-    // conversions all publish through here. The fail-closed check and the
-    // round-trip acceptance gate therefore cannot be skipped by any individual
-    // path — that omission is what used to poison the baselines permanently.
+    const parseSourceMarkdown = (markdown) => crepe.editor.ctx.get(parserCtx)(markdown)
+    const sourceCommitter = createVerifiedSourceCommitter({
+      sourceRef: lastMarkdownRef,
+      canonicalRef: canonicalMarkdownRef,
+      parseMarkdown: parseSourceMarkdown,
+      clearPending: clearRichFlushPending,
+      publish: (markdown) => onChange?.(markdown, false)
+    })
+    // The single commit point for every enabled rich→source transaction in
+    // this editor: markdownUpdated, frontmatter, inline code, generated
+    // scratch, slash blocks, and both list conversions all publish through
+    // here. Source preservation proposes authored bytes; HorseMD's configured
+    // parser is the only semantic authority allowed to commit them.
     // A false return leaves both baselines and every pending flag untouched;
     // a later callback or forced flush retries the cumulative delta.
-    const commitCanonicalResult = (preserved, canonical, { skipRoundTrip = false } = {}) => {
-      // The gate double-parses the full document; on very large documents that
-      // is a per-keystroke-batch main-thread cost, so the hot path defers to
-      // the durability boundaries (flushMarkdown gates every save, source
-      // switch, and export unconditionally — corrupted bytes still cannot
-      // reach disk or the source view).
-      const gateSkipped = skipRoundTrip || String(canonical || '').length > 120000
-      if (
-        !preserved ||
-        preserved.preserved === false ||
-        (!gateSkipped && !roundTripPreserved(preserved.markdown, canonical))
-      ) {
+    const commitCanonicalResult = (preserved, canonical, { fallbackCandidates = [] } = {}) => {
+      let markdown = null
+      if (preserved && preserved.preserved !== false) {
+        try {
+          // ProseMirror documents are immutable. Capturing the current one at
+          // the commit boundary proves the candidate against the exact editor
+          // state that produced it; canonical remains only the next diff
+          // baseline and is never promoted into a second semantic authority.
+          const expectedDoc = viewRef.current?.state.doc
+          const result = sourceCommitter.commit({
+            candidates: [preserved.markdown, ...fallbackCandidates],
+            expectedDoc,
+            canonical
+          })
+          markdown = result.markdown
+        } catch {
+          markdown = null
+        }
+      }
+      if (markdown === null) {
         // Test-only opt-in diagnostics (same pattern as __hmPreserveLog).
         if (Array.isArray(globalThis.__hmGateLog) && preserved && preserved.preserved !== false) {
           globalThis.__hmGateLog.push({
@@ -333,10 +352,6 @@ export default function Editor({
         userEditUntil = Date.now() + 1000
         return false
       }
-      lastMarkdownRef.current = preserved.markdown
-      canonicalMarkdownRef.current = canonical
-      clearRichFlushPending()
-      onChange?.(preserved.markdown, false)
       return true
     }
     const pendingRawMarkdownPasteRef = { current: null }
@@ -491,14 +506,15 @@ export default function Editor({
         const blockMarkdown = canonicalForSource(serializer(singleBlockDoc))
         const markdown = applySlashBlockSourceIntent({ intent: token, blockMarkdown })
         if (typeof markdown !== 'string') return null
-        lastMarkdownRef.current = markdown
-        canonicalMarkdownRef.current = canonical
+        const committed = commitCanonicalResult(
+          { markdown, preserved: true, reason: 'slash-code-block-atomic' },
+          canonical
+        )
+        if (!committed) return null
         transactionSourcePendingPublish = false
         transactionSourcePendingDoc = null
         transactionSourceBlockHints = []
         transactionSourceQuarantined = false
-        clearRichFlushPending()
-        onChange?.(markdown, false)
         if (Array.isArray(globalThis.__hmPreserveLog)) {
           globalThis.__hmPreserveLog.push({
             source: token.source,
@@ -995,16 +1011,13 @@ export default function Editor({
             return
           }
           let preserved
-          // A fresh scratch document deliberately restores physical characters
-          // (unescaping can create real syntax), so it is the only commit that
-          // may skip the round-trip acceptance gate.
-          let scratchCommit = false
+          let fallbackCandidates = []
           if (pendingPaste) {
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
             const markdown = generatedScratchMarkdownForCanonical(canonical)
             preserved = { markdown, reason: 'generated-scratch-canonical' }
-            scratchCommit = true
+            fallbackCandidates = [canonicalSourceFallback(canonical)]
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical
               ? { markdown: pendingList.convertedSource }
@@ -1211,7 +1224,7 @@ export default function Editor({
           // frozen byte capture, so replaying it against a newer canonical
           // either locks permanently or publishes source missing later input —
           // the cumulative preservation path owns the retry instead.
-          if (!commitCanonicalResult(preserved, canonical, { skipRoundTrip: scratchCommit })) {
+          if (!commitCanonicalResult(preserved, canonical, { fallbackCandidates })) {
             pendingRawMarkdownPasteRef.current = null
             return
           }
@@ -1457,6 +1470,7 @@ export default function Editor({
           clearPendingRichFlush: clearRichFlushPending,
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
+          sourceCommitter,
           canonicalForSource,
           setBlock,
           markUserEdit,
@@ -1467,6 +1481,7 @@ export default function Editor({
             pendingListConversion = null
             pendingMarkdownInputIntent = null
             pendingMarkdownInputIntents = []
+            pendingSlashBlockIntent = null
           },
           getT: (key) => tRef.current(key),
           notify: fireToast
