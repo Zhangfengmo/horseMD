@@ -325,11 +325,16 @@ async function main() {
 }
 
 main().catch((error) => {
-  const code = typeof error?.code === 'string' ? ` ${error.code}` : ''
+  const code = typeof error?.code === 'string' ? error.code : 'TEST_FAILURE'
+  if (externalFixture) {
+    console.error(`FAIL ragged table save UI case=${caseName} code=${code}`)
+    process.exitCode = 1
+    return
+  }
   const message = String(error?.message || 'unknown failure')
     .replace(/file:\/\/[^\s)]+|\/?(?:Users|tmp)\/[^\s)]+/g, '[path]')
     .replace(/HORSEMD_REPRO_FILE/gi, '[external fixture]')
     .slice(0, 500)
-  console.error(`ragged-table-save-ui ${caseName}${code}: ${message}`)
+  console.error(`ragged-table-save-ui ${caseName} ${code}: ${message}`)
   process.exitCode = 1
 })
