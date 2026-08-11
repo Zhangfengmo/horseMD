@@ -6,10 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.49] - 2026-08-12
+
 ### Changed
 - **源码同步采用耐久语义提交架构** — Markdown→ProseMirror 入口、表格结构归属、语义验收和 rich→source 发布已拆成独立层。所有持久化调用都以同一 immutable live-doc revision 为 authority，作者源码、canonical baseline、pending 与发布状态只会在验证成功后原子推进；默认关闭的 transaction-primary 实验也不能再维护第二套 baseline。
 
 ### Fixed
+- **表格末尾换行不再使源码锁死** — Milkdown 过去会在 HorseMD 的 `<br>` handler 运行前删除 table cell/header paragraph 最后一个 hardbreak；现场文件中的 3 个单独 `<br />` 因而仍存在于 live 富文本，却从 canonical Markdown 消失，正确的语义验收随后只能暂停保存。现在仅 GFM body/header cell 的 serializer 保留 `isInline:false` 的末尾 hardbreak；直接位于 cell 中的单独、文字末尾和连续 `<br>` 均可通过源码切换、保存与冷重开，普通段落、空 cell 和其他节点继续使用上游行为。
 - **非满列表格不再触发永久保存暂停** — 合法短行现在会在进入 ProseMirror 前做 editor-only 矩形化，避免首次表格事务由 `fixTables` 改写 live 结构后才与旧基线分叉。作者原始短行仍保存在源码中；编辑其他 cell、切源码、保存和冷重开只改目标字节。
 - **表格源码保真改为 parser-backed 所有权** — 表格 cell/row/range、escaped pipe、真实 `<br>`、缺失尾 cell、1/2 dash delimiter、BOM 与 CRLF 由同一 source model 跟踪，不再用会吞 hardbreak 的 visible-character stream 或近似正则猜结构。内部空 cell 占位只凭精确 provenance 忽略，作者 hardbreak 仍是耐久内容。
 - **保存、源码切换与富文本回调使用同一 revision** — 延迟的 `markdownUpdated`、立即保存、源码切换和恢复重建都必须验证各自捕获的 live document；旧 callback 不能提交或毒化新编辑，确定性失败不会在同一 revision 上无限重试。诊断只记录 revision/failure type，不记录文档正文。

@@ -58,6 +58,10 @@ mismatch, producing the persistent lock-up.
 6. Normal callbacks and forced/large-document boundaries do not always use the
    same expected-document authority. Verification semantics must not vary with
    document size or caller.
+7. Milkdown's commonmark paragraph serializer removes a terminal hardbreak
+   before HorseMD's table `<br>` handler runs. In a table body/header cell this
+   loses a sole or trailing authored break from canonical Markdown even though
+   the live ProseMirror node still contains `hardbreak { isInline: false }`.
 
 The original ordered-list Backspace report remains a real mapper/state issue,
 but code-language labels, the fenced table-looking text in the user's C block,

@@ -518,7 +518,8 @@ Backspace 退出。完整序列已经覆盖 source、save 和冷重开。
 ### 14.4 现有功能问题与预防性问题的最终边界
 
 现场已证实并纳入修复的现有问题包括：非满列表格事务后补 cell、连续短行、表格
-hardbreak 被 visible stream 吞掉、1/2 dash delimiter 识别不一致、escaped pipe
+hardbreak 被 visible stream 吞掉、Milkdown 在 table body/header 的 paragraph serializer
+中提前删除 sole/terminal hardbreak、1/2 dash delimiter 识别不一致、escaped pipe
 所有权错误、旧 callback/强制 flush 使用不同 expected authority，以及列表完整
 Backspace/rejoin 序列。
 
@@ -526,3 +527,29 @@ Backspace/rejoin 序列。
 失败、代码 fence 内表格样文本参与表格解析、120K 阈值直接触发本例、scratch 文档
 直接触发本例，以及默认关闭的 transaction-primary 首次制造本例。它们只保留边界
 回归或被动收口，不扩大产品行为。
+
+### 14.5 真实文件最终门禁发现：terminal table hardbreak
+
+在前述五类合成表格与八语言矩阵全部通过后，严格的用户文件临时副本仍返回
+`authored-previous-table-mismatch`。脱敏结构比较排除了多表 ordinal、row shape、
+alignment、代码语言和 short-row 坐标：唯一差异是同一张表的 3 个 cell，作者源码
+均为单独 `<br />`，而 previous canonical 对应 cell 为空。
+
+进一步直接检查 live ProseMirror document 证明这 3 个 cell 并不为空，均保留
+`hardbreak { isInline: false }`。真正的数据丢失发生在 Milkdown commonmark 的
+`serializeText`：它会在进入 hardbreak schema 和 HorseMD `tableCellBreakHandler`
+之前删除 textblock 的最后一个 hardbreak。中间的 `text<br>text` 因 lastChild 是 text
+而不受影响，这也解释了旧回归为何漏过现场文件。
+
+最终修复没有在 comparator 或 source model 中放行 `break ≡ empty`，而是只扩展 GFM
+`table_cell` 与 `table_header` 的 Markdown serializer。当 cell 只有一个 paragraph，
+且其最后节点为 `hardbreak { isInline: false }` 时，serializer 遍历完整 paragraph
+content，再由既有 table break handler 输出 `<br>`；空 cell、`isInline:true`、多 block
+cell、普通 paragraph 与 heading 全部委托 Milkdown 原实现。现场副本随后通过逐字符
+编辑、源码切换、保存和冷重开，且原文件哈希与大小前后完全不变。
+
+仍有一个未由现场触发的预防性残余：strong/emphasis/link 包裹的 terminal `<br />`
+目前在 table source model 中属于 opaque inline node，若 serializer 同时把拼写规范为
+`<br>`，邻 cell 编辑仍可能安全 fail-closed。它不是本次无 mark 的 3 个现场 cell 根因，
+当前修复也没有使其退化；若后续有真实反馈，应把 formatted inline token 纳入 source
+grammar，而不是为 comparator 增加例外。
