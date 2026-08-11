@@ -29,6 +29,7 @@
     "test:markdown-preservation": "node scripts/test-markdown-source-preservation.mjs",
     "test:roundtrip-acceptance": "node scripts/test-roundtrip-acceptance.mjs",
     "test:editor-source-verification": "node scripts/test-editor-source-verification.mjs",
+    "test:verified-editor-state": "node scripts/test-verified-editor-state.mjs",
     "test:rich-source-tab-state": "node scripts/test-rich-source-tab-state.mjs",
     "test:rich-source-app-parser-ui": "node scripts/test-rich-source-app-parser-ui.mjs",
     "test:list-backspace-exit-ui": "node scripts/test-list-backspace-exit-ui.mjs",
