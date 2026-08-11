@@ -1,16 +1,19 @@
 // In-cell line breaks for tables (issue #7), with a clean <br> round-trip.
 //
 // GFM table cells must be a single line; the only valid in-cell break is <br>.
-// Three surgical pieces, none of which touch Milkdown's node definitions:
+// Four focused pieces, including a table-cell-only Markdown schema extension:
 //   1. keymap     — Enter / Shift+Enter inside a cell inserts a hardbreak node
 //                   (renders as <br> in the editor).
 //   2. serialize  — a custom remark `break` handler emits <br> *only* inside a
 //                   tableCell; everywhere else it defers to the default (so normal
 //                   paragraph line breaks are unchanged).
-//   3. parse      — a remark transform turns inline `<br>` html nodes into break
+//   3. serialize  — the GFM body/header cell schemas retain terminal hardbreaks
+//                   that Milkdown's generic paragraph serializer would drop.
+//   4. parse      — a remark transform turns inline `<br>` html nodes into break
 //                   nodes, so <br> in a cell renders as a line break (and the
 //                   previously-dropped <br> now shows up).
 import { keymap } from '@milkdown/prose/keymap'
+import { tableCellSchema, tableHeaderSchema } from '@milkdown/kit/preset/gfm'
 import { defaultHandlers } from 'mdast-util-to-markdown'
 
 const BR_RE = /^<br\s*\/?>$/i
@@ -53,6 +56,49 @@ export function brToBreakRemarkPlugin() {
     walk(tree)
   }
 }
+
+// Milkdown's commonmark paragraph serializer intentionally removes a trailing
+// hardbreak before walking inline content. That is appropriate for ordinary
+// Markdown paragraphs, where a break with no following line has no durable
+// rendering, but it is lossy inside a GFM table cell: `<br>` is the cell's
+// only line-break representation and a sole/trailing break is authored data.
+//
+// Extend only the GFM body/header cell serializers. All other paragraphs,
+// empty-cell placeholders, multi-block cells, and inline-only breaks keep the
+// upstream behavior. The existing mdast break handler below remains the sole
+// place that chooses the table-cell `<br>` spelling.
+const preserveTerminalTableHardbreak = (feature) => feature.extendSchema((prev) => (ctx) => {
+  const schema = prev(ctx)
+  const baseRunner = schema.toMarkdown.runner
+  return {
+    ...schema,
+    toMarkdown: {
+      ...schema.toMarkdown,
+      runner: (state, node) => {
+        const paragraph = node.childCount === 1 && node.firstChild?.type.name === 'paragraph'
+          ? node.firstChild
+          : null
+        const terminal = paragraph?.lastChild
+        const hasDurableTerminalHardbreak = (
+          terminal?.type.name === 'hardbreak' &&
+          terminal.attrs?.isInline === false
+        )
+        if (!paragraph || !hasDurableTerminalHardbreak) {
+          baseRunner(state, node)
+          return
+        }
+        state.openNode('tableCell')
+        state.openNode('paragraph')
+        state.next(paragraph.content)
+        state.closeNode()
+        state.closeNode()
+      }
+    }
+  }
+})
+
+export const tableCellBreakMarkdownSchema = preserveTerminalTableHardbreak(tableCellSchema)
+export const tableHeaderBreakMarkdownSchema = preserveTerminalTableHardbreak(tableHeaderSchema)
 
 // --- 1. keymap: insert a break inside a table cell ---
 function inTableCell($from) {

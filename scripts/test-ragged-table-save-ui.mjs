@@ -12,7 +12,7 @@ import { sleep } from './lib/cdp.mjs'
 import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const caseName = process.env.RAGGED_CASE || 'cell'
-const supportedCases = new Set(['cell', 'consecutive', 'hardbreak', 'dashes', 'escaped-pipe', 'external-copy'])
+const supportedCases = new Set(['cell', 'consecutive', 'hardbreak', 'terminal-hardbreak', 'dashes', 'escaped-pipe', 'external-copy'])
 assert.ok(supportedCases.has(caseName), `RAGGED_CASE must be one of ${[...supportedCases].join(', ')}`)
 
 const root = `/tmp/horsemd-ragged-table-save-${process.pid}`
@@ -46,6 +46,8 @@ const tableFixtureForCase = (name) => {
     : '| - | -- | --- | :---: | ---: |'
   const shortRows = name === 'hardbreak'
     ? ['| hardbreak target |', '| second short |']
+    : name === 'terminal-hardbreak'
+      ? ['| <br /> |', '| second short |']
     : name === 'escaped-pipe'
       ? ['| a \\| b<br>tail |', '| second short |']
       : ['| authored short |', '| second short |']
@@ -59,9 +61,14 @@ const tableFixtureForCase = (name) => {
     'int main(void) { return 0; }',
     '```',
     '',
-    '| one | two | three | four | five |',
+    name === 'terminal-hardbreak'
+      ? '| one | two | three | four | five<br /> |'
+      : '| one | two | three | four | five |',
     delimiter,
     ...shortRows,
+    ...(name === 'terminal-hardbreak'
+      ? ['| terminal<br /> | b | c | d | e |', '| double<br /><br /> | b | c | d | e |']
+      : []),
     '| editable full | b | c | d | e |',
     '| complete | w | x | y | z |',
     '',
@@ -200,6 +207,12 @@ const assertCaseSource = (source, token, checkpoint) => {
   assert.equal(source.includes(token), true, `${checkpoint}: edited input token is missing from source`)
   if (caseName === 'hardbreak') {
     assert.match(source, /hardbreak target<br\s*\/?>editedX/, `${checkpoint}: raw Enter did not round-trip as a table-cell <br>`)
+  }
+  if (caseName === 'terminal-hardbreak') {
+    assert.equal(source.includes('| one | two | three | four | five<br /> |'), true, `${checkpoint}: terminal table-header hardbreak changed`)
+    assert.equal(source.includes('| <br /> |'), true, `${checkpoint}: sole authored table-cell hardbreak changed`)
+    assert.equal(source.includes('| terminal<br /> | b | c | d | e |'), true, `${checkpoint}: terminal authored table-cell hardbreak changed`)
+    assert.equal(source.includes('| double<br /><br /> | b | c | d | e |'), true, `${checkpoint}: consecutive terminal table-cell hardbreaks changed`)
   }
   if (caseName === 'escaped-pipe') {
     assert.equal(source.includes('a \\| b<br>taileditedX'), true, `${checkpoint}: escaped pipe and existing <br> did not retain their authored spelling`)

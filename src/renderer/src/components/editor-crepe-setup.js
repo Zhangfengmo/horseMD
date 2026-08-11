@@ -20,6 +20,8 @@ import { createMermaidPreviewRenderer, createMermaidSplitPlugin } from './editor
 import {
   tableBreakKeymap,
   tableCellBreakHandler,
+  tableCellBreakMarkdownSchema,
+  tableHeaderBreakMarkdownSchema,
   brToBreakRemarkPlugin
 } from './editor-tablebreak.js'
 import { listBackspaceKeymap } from './editor-list-backspace.js'
@@ -251,6 +253,8 @@ export function createConfiguredCrepe({
   crepe.editor.use(
     inlineCodeSchema.extendSchema((prev) => (ctx) => ({ ...prev(ctx), inclusive: false }))
   )
+  crepe.editor.use(tableCellBreakMarkdownSchema)
+  crepe.editor.use(tableHeaderBreakMarkdownSchema)
   crepe.editor.use(imageBlockMarkdownSchema)
   crepe.editor.use(highlightFeatures)
   crepe.editor.use(frontmatterSchema)
