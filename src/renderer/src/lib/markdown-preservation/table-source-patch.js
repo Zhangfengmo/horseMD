@@ -252,13 +252,33 @@ const rowsCanShareProvenance = ({
   previousRow,
   previousModel,
   nextRow,
-  nextModel
+  nextModel,
+  allowAmbiguousEmptyRowProvenance = false
 }) => {
   if (!previousRow || !nextRow || previousRow.kind !== nextRow.kind) return false
   const columns = Math.max(previousRow.cells.length, nextRow.cells.length)
+  // A whole serializer-placeholder row has no stable content anchor. It may
+  // inherit only proven empty provenance; an anchored row can still carry a
+  // proven real break in one of its placeholder-shaped cells.
+  const hasStableNextContent = nextRow.cells.some((cell) => (
+    semanticUnitsForCell(cell, nextModel, { serializerPlaceholder: true }).length > 0
+  ))
   for (let column = 0; column < columns; column += 1) {
     const nextCell = nextRow.cells[column]
-    if (isSerializerPlaceholderCell(nextCell, nextModel)) continue
+    if (isSerializerPlaceholderCell(nextCell, nextModel)) {
+      if (hasStableNextContent || allowAmbiguousEmptyRowProvenance) {
+        if (!isSerializerPlaceholderCell(previousRow.cells[column], previousModel)) return false
+        continue
+      }
+      const previousUnits = previousCanonicalCellUnits(
+        authoredRow?.cells[column],
+        authoredModel,
+        previousRow.cells[column],
+        previousModel
+      )
+      if (previousUnits.length) return false
+      continue
+    }
     const previousKey = previousCanonicalCellKey(
       authoredRow?.cells[column],
       authoredModel,
@@ -282,53 +302,70 @@ const matchStructuralRowOwnership = ({
   if (previousTable.rows.length === nextTable.rows.length) {
     return nextTable.rows.map((_, index) => index)
   }
-  const previousToNext = Array(previousTable.rows.length).fill(null)
-  const nextToPrevious = Array(nextTable.rows.length).fill(null)
-  const assign = (previousIndex, nextIndex) => {
-    if (
-      previousToNext[previousIndex] != null &&
-      previousToNext[previousIndex] !== nextIndex
-    ) return false
-    if (
-      nextToPrevious[nextIndex] != null &&
-      nextToPrevious[nextIndex] !== previousIndex
-    ) return false
-    previousToNext[previousIndex] = nextIndex
-    nextToPrevious[nextIndex] = previousIndex
-    return true
-  }
-  const matches = (previousIndex, nextIndex) => rowsCanShareProvenance({
-    authoredRow: authoredTable.rows[previousIndex],
-    authoredModel,
-    previousRow: previousTable.rows[previousIndex],
-    previousModel,
-    nextRow: nextTable.rows[nextIndex],
-    nextModel
-  })
+  const matchRows = (allowAmbiguousEmptyRowProvenance) => {
+    const previousToNext = Array(previousTable.rows.length).fill(null)
+    const nextToPrevious = Array(nextTable.rows.length).fill(null)
+    const assign = (previousIndex, nextIndex) => {
+      if (
+        previousToNext[previousIndex] != null &&
+        previousToNext[previousIndex] !== nextIndex
+      ) return false
+      if (
+        nextToPrevious[nextIndex] != null &&
+        nextToPrevious[nextIndex] !== previousIndex
+      ) return false
+      previousToNext[previousIndex] = nextIndex
+      nextToPrevious[nextIndex] = previousIndex
+      return true
+    }
+    const matches = (previousIndex, nextIndex) => rowsCanShareProvenance({
+      authoredRow: authoredTable.rows[previousIndex],
+      authoredModel,
+      previousRow: previousTable.rows[previousIndex],
+      previousModel,
+      nextRow: nextTable.rows[nextIndex],
+      nextModel,
+      allowAmbiguousEmptyRowProvenance
+    })
 
-  const limit = Math.min(previousTable.rows.length, nextTable.rows.length)
-  let prefix = 0
-  while (prefix < limit && matches(prefix, prefix)) {
-    if (!assign(prefix, prefix)) return null
-    prefix += 1
+    const limit = Math.min(previousTable.rows.length, nextTable.rows.length)
+    let prefix = 0
+    while (prefix < limit && matches(prefix, prefix)) {
+      if (!assign(prefix, prefix)) return null
+      prefix += 1
+    }
+    let suffix = 0
+    while (
+      suffix < limit &&
+      matches(previousTable.rows.length - suffix - 1, nextTable.rows.length - suffix - 1)
+    ) {
+      if (!assign(
+        previousTable.rows.length - suffix - 1,
+        nextTable.rows.length - suffix - 1
+      )) return null
+      suffix += 1
+    }
+    const required = Math.min(previousTable.rows.length, nextTable.rows.length)
+    const mappedPrevious = previousToNext.filter((index) => index != null).length
+    const mappedNext = nextToPrevious.filter((index) => index != null).length
+    return mappedPrevious === required && mappedNext === required
+      ? nextToPrevious
+      : null
   }
-  let suffix = 0
-  while (
-    suffix < limit &&
-    matches(previousTable.rows.length - suffix - 1, nextTable.rows.length - suffix - 1)
-  ) {
-    if (!assign(
-      previousTable.rows.length - suffix - 1,
-      nextTable.rows.length - suffix - 1
-    )) return null
-    suffix += 1
-  }
-  const required = Math.min(previousTable.rows.length, nextTable.rows.length)
-  const mappedPrevious = previousToNext.filter((index) => index != null).length
-  const mappedNext = nextToPrevious.filter((index) => index != null).length
-  return mappedPrevious === required && mappedNext === required
-    ? nextToPrevious
-    : null
+
+  const rowOwnership = matchRows(false)
+  if (!rowOwnership) return null
+  // The safe pass treats an unanchored placeholder row as empty. Re-run with
+  // raw canonical compatibility so a surviving real-break row cannot also be
+  // a plausible owner that the safe pass silently discarded.
+  const permissiveOwnership = matchRows(true)
+  if (
+    !permissiveOwnership ||
+    permissiveOwnership.some((previousIndex, nextIndex) => (
+      previousIndex !== rowOwnership[nextIndex]
+    ))
+  ) return null
+  return rowOwnership
 }
 
 const normalizeCanonicalWithTableProvenance = ({

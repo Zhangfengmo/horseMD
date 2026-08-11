@@ -376,6 +376,38 @@ for (const fixture of [
 }
 
 {
+  const table = (rows) => [
+    '| Break | Label |',
+    '| - | - |',
+    ...rows
+  ].join('\n')
+  const before = '| before | one |'
+  const emptySource = '|  |  |'
+  const emptyCanonical = '| <br /> | <br /> |'
+  const after = '| after | two |'
+
+  const inserted = mapGfmTableChange({
+    authored: table([before, after]),
+    previousCanonical: table([before, after]),
+    nextCanonical: table([before, emptyCanonical, after]),
+    parseTables
+  })
+  assert.equal(inserted.status, 'patched', 'an all-placeholder middle row insertion remains table-owned')
+  const insertedRows = parseTables(inserted.markdown).tables[0].rows
+  assert.equal(insertedRows[2].cells[0].units.length, 0, 'the inserted all-placeholder row clears its first cell')
+  assert.equal(insertedRows[2].cells[1].units.length, 0, 'the inserted all-placeholder row clears its second cell')
+
+  const deleted = mapGfmTableChange({
+    authored: table([before, emptySource, after]),
+    previousCanonical: table([before, emptyCanonical, after]),
+    nextCanonical: table([before, after]),
+    parseTables
+  })
+  assert.equal(deleted.status, 'patched', 'an all-placeholder middle row deletion remains table-owned')
+  assert.equal(deleted.markdown, table([before, after]), 'deleting an empty row preserves its stable neighbors')
+}
+
+{
   const authored = [
     '| Break | Label |',
     '| - | - |',
@@ -459,6 +491,128 @@ for (const fixture of [
     result,
     { status: 'unowned', reason: 'ambiguous-table-row-ownership' },
     `a duplicate-row middle ${fixture.label} fails closed instead of guessing break provenance`
+  )
+}
+
+{
+  const table = (rows) => [
+    '| Left | Right |',
+    '| - | - |',
+    ...rows
+  ].join('\n')
+  const positions = [
+    { label: 'beginning', index: 0 },
+    { label: 'middle', index: 1 },
+    { label: 'end', index: 2 }
+  ]
+  const insertAt = (rows, index, row) => [
+    ...rows.slice(0, index),
+    row,
+    ...rows.slice(index)
+  ]
+  const emptySource = '|  |  |'
+  const emptyCanonical = '| <br /> | <br /> |'
+  const rowKeys = (rows) => rows.map((row) => row.cells.map((cell) => (
+    cell.units.map((unit) => `${unit.kind}:${String(unit.value ?? '')}`).join('\0')
+  )))
+  let matrixCaseCount = 0
+
+  for (const operation of ['insert', 'delete']) {
+    for (const position of positions) {
+      for (const changedKind of ['empty', 'nonempty']) {
+        for (const anchorKind of ['distinct', 'duplicate']) {
+          matrixCaseCount += 1
+          const anchors = anchorKind === 'distinct'
+            ? ['| left | one |', '| right | two |']
+            : ['| same | anchor |', '| same | anchor |']
+          const changedSource = changedKind === 'empty'
+            ? emptySource
+            : anchorKind === 'duplicate'
+              ? '| same | anchor |'
+              : `| changed-${operation}-${position.label} | row |`
+          const changedCanonical = changedKind === 'empty'
+            ? emptyCanonical
+            : changedSource
+          const authoredRows = operation === 'insert'
+            ? anchors
+            : insertAt(anchors, position.index, changedSource)
+          const previousRows = operation === 'insert'
+            ? anchors
+            : insertAt(anchors, position.index, changedCanonical)
+          const nextRows = operation === 'insert'
+            ? insertAt(anchors, position.index, changedCanonical)
+            : anchors
+          const result = mapGfmTableChange({
+            authored: table(authoredRows),
+            previousCanonical: table(previousRows),
+            nextCanonical: table(nextRows),
+            parseTables
+          })
+          const label = `${operation} ${changedKind} row at ${position.label} with ${anchorKind} anchors`
+          if (changedKind === 'nonempty' && anchorKind === 'duplicate') {
+            assert.deepEqual(
+              result,
+              { status: 'unowned', reason: 'ambiguous-table-row-ownership' },
+              `${label} fails closed because identical nonempty rows have multiple owners`
+            )
+            continue
+          }
+          assert.equal(result.status, 'patched', `${label} remains table-owned`)
+          const resultRows = parseTables(result.markdown).tables[0].rows.slice(1)
+          const expectedSourceRows = operation === 'insert'
+            ? insertAt(anchors, position.index, changedSource)
+            : anchors
+          const expectedRows = parseTables(table(expectedSourceRows)).tables[0].rows.slice(1)
+          assert.equal(resultRows.length, nextRows.length, `${label} keeps the expected row count`)
+          assert.deepEqual(rowKeys(resultRows), rowKeys(expectedRows), `${label} keeps expected row semantics`)
+          if (operation === 'insert' && changedKind === 'empty') {
+            assert.ok(
+              resultRows[position.index].cells.every((cell) => cell.units.length === 0),
+              `${label} clears every serializer placeholder in the new row`
+            )
+          }
+        }
+      }
+    }
+  }
+  assert.equal(matrixCaseCount, 24, 'row ownership matrix covers all 24 requested combinations')
+}
+
+{
+  const table = (rows) => [
+    '| Break | Empty |',
+    '| - | - |',
+    ...rows
+  ].join('\n')
+  const before = '| before | one |'
+  const emptySource = '|  |  |'
+  const emptyCanonical = '| <br /> | <br /> |'
+  const realBreakSource = '| <br> |  |'
+  const realBreakCanonical = '| <br /> | <br /> |'
+  const after = '| after | two |'
+
+  const insertedBesideBreak = mapGfmTableChange({
+    authored: table([before, realBreakSource, after]),
+    previousCanonical: table([before, realBreakCanonical, after]),
+    nextCanonical: table([before, emptyCanonical, realBreakCanonical, after]),
+    parseTables
+  })
+  assert.deepEqual(
+    insertedBesideBreak,
+    { status: 'unowned', reason: 'ambiguous-table-row-ownership' },
+    'an all-placeholder insertion beside a sole real-break row cannot consume its provenance'
+  )
+
+  const deletedBesideBreak = mapGfmTableChange({
+    authored: table([before, emptySource, realBreakSource, after]),
+    previousCanonical: table([before, emptyCanonical, realBreakCanonical, after]),
+    nextCanonical: table([before, realBreakCanonical, after]),
+    parseTables
+  })
+  assert.deepEqual(
+    deletedBesideBreak,
+    { status: 'unowned', reason: 'ambiguous-table-row-ownership' },
+    'deleting an empty row beside a sole real-break row cannot steal the surviving break owner'
   )
 }
 
