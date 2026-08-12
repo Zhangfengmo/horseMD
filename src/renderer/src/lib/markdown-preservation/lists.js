@@ -353,8 +353,21 @@ export const preserveGeneratedBulletMarkers = (source, markdown) => {
 // empty list item while the caret is there.  Do not touch `text<br>text`, which
 // is a real hard break authored inside a list item.
 export const normalizeEmptyListItems = (markdown) => String(markdown || '')
+  // An empty TASK item cannot be spelled with an empty body: GFM requires
+  // content after the checkbox, so `- [ ] ` re-parses as a plain bullet whose
+  // text is the literal `[ ]` — the checkbox the user sees would be gone on
+  // reopen. Keep the item valid with the entity spelling this codebase
+  // already uses for a space that must survive; the durable semantics treat a
+  // whitespace-only item body as empty, so it still compares equal to the
+  // editor's empty task item.
   .replace(
-    /^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)[ \t]*<br\s*\/?>[ \t]*$/gim,
+    /^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+\[[ xX]\][ \t]+)[ \t]*<br\s*\/?>[ \t]*$/gim,
+    '$1&#x20;'
+  )
+  // A plain empty list item has no such constraint: an empty body is valid,
+  // so the placeholder is dropped outright.
+  .replace(
+    /^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+)[ \t]*<br\s*\/?>[ \t]*$/gim,
     '$1'
   )
   // A deleted list row leaves a standalone `<br />` placeholder in canonical
