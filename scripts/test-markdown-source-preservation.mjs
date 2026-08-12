@@ -11,6 +11,7 @@ import {
   replaceMarkdownListBlock,
   restoreTypedBulletMarker
 } from '../src/renderer/src/markdown-source-preservation.js'
+import { normalizeEmptyListItems } from '../src/renderer/src/lib/markdown-preservation/lists.js'
 import { sourceVisibleIndex } from '../src/renderer/src/mode-visible-map.js'
 import { commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
 import { createGfmTableSourceParser } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
@@ -2818,6 +2819,37 @@ assert.equal(
   assert.ok(
     insideEdit.markdown.includes('1甲'),
     'a table cell edit must reach authored source'
+  )
+}
+
+// GFM has no spelling for an EMPTY task item: a checkbox must be followed by
+// content, so `- [ ] ` re-parses as a plain bullet whose literal text is
+// `[ ]`. That is a state the rich model can hold and the format cannot carry.
+// The contract is NOT to invent a byte convention for it: the checkbox is
+// declared non-durable on an empty item (see editor-durable-semantics.js) and
+// the row persists as a plain empty item, so the authored bytes stay standard
+// Markdown. Locking the normalization here keeps the two halves in step.
+{
+  const emptyTaskItem = normalizeEmptyListItems('* [ ] 待办\n\n* [ ] <br />\n')
+  assert.equal(
+    emptyTaskItem,
+    '* [ ] 待办\n\n* \n',
+    'an emptied task item must normalize to a plain empty item, never to an invented spelling'
+  )
+  assert.ok(
+    !/&#x20;|\u200B/.test(emptyTaskItem),
+    'an emptied task item must not carry an entity or sentinel spelling'
+  )
+  assert.equal(
+    normalizeEmptyListItems('* 普通\n\n* <br />\n'),
+    '* 普通\n\n* \n',
+    'a plain empty item keeps its (legal) empty body'
+  )
+  // A task item WITH content keeps its checkbox untouched.
+  assert.equal(
+    normalizeEmptyListItems('* [x] 已完成\n'),
+    '* [x] 已完成\n',
+    'a task item with content must not lose its checkbox'
   )
 }
 

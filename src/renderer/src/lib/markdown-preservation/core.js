@@ -137,11 +137,6 @@ const translateInlineCanonicalEscapes = (line, restoreFreshPunctuation = false) 
       const previous = prefix
       prefix = prefix.replace(/^>[ \t]*/, '')
       prefix = prefix.replace(/^(?:#{1,6}|[-+*]|\d{1,9}[.)])[ \t]+/, '')
-      // A task checkbox is list syntax, not the item's text. Counting it as
-      // visible text made an empty task item's protected space degrade to a
-      // plain trailing space, and GFM then re-parses `- [ ] ` as a bullet
-      // whose literal text is `[ ]` — the checkbox disappears on reopen.
-      prefix = prefix.replace(/^\[[ xX]\][ \t]+/, '')
       prefix = prefix.replace(/^[ \t]*/, '')
       if (prefix === previous) break
     }

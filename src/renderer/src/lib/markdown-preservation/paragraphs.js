@@ -734,26 +734,6 @@ export const preserveTrailingEmptyBlock = ({
         reason: 'trailing-leading-space-deleted'
       }
     }
-    // Pressing Enter on a trailing EMPTY list item lifts it out of the list:
-    // the canonical loses that item and gains a standalone placeholder. The
-    // authored row must go with it — keeping it leaves the source with an item
-    // the document no longer has (the verified commit then refuses the whole
-    // transaction). The newly created empty paragraph itself is still not
-    // persisted, exactly like the plain Enter-at-end case below.
-    const emptyListRow = /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?[\s\u200B]*(?:&#x20;)?[\s\u200B]*$/
-    if (
-      sourceTailLine &&
-      previousTailLine &&
-      emptyListRow.test(previousTailLine.text) &&
-      emptyListRow.test(sourceTailLine.text) &&
-      !/^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]/.test(next.slice(nextEmpty.start, nextEmpty.end))
-    ) {
-      return {
-        markdown: source.slice(0, sourceTailLine.start) + source.slice(sourceTailLine.end),
-        preserved: true,
-        reason: 'trailing-empty-list-item-lifted'
-      }
-    }
     return {
       markdown: source,
       preserved: true,

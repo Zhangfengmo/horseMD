@@ -43,8 +43,23 @@ const nodeContracts = {
     }
   },
   list_item: {
-    attrs(attrs) {
+    attrs(attrs, node) {
       const { spread: _serializerSpacing, ...durable } = attrs || {}
+      // A checkbox needs content to exist in GFM (`- [ ] ` re-parses as a
+      // bullet whose literal text is `[ ]`), so an EMPTY task item is a state
+      // the rich model can hold and the format cannot carry. Declare the
+      // checkbox non-durable exactly there instead of inventing a byte
+      // spelling for it: the row still persists as a plain empty item, and an
+      // authored `- ` therefore compares equal to the editor's empty task
+      // item. As soon as the item has content, `checked` is durable again.
+      const hasVisibleContent = (node?.content || []).some((child) => (
+        child?.type !== 'paragraph' ||
+        (child.content || []).some((inline) => (
+          inline?.type !== 'text' ||
+          String(inline.text || '').replaceAll(leadingSpaceSentinel, '').trim()
+        ))
+      ))
+      if (!hasVisibleContent) delete durable.checked
       return sortedAttrs(durable)
     },
     content(content) {
@@ -208,7 +223,7 @@ const projectValue = (value, state, location = {}) => {
   }
 
   const contract = nodeContracts[value.type]
-  const attrs = (contract?.attrs || durableAttrs)(value.attrs || {})
+  const attrs = (contract?.attrs || durableAttrs)(value.attrs || {}, value)
   if (Object.keys(attrs).length) projected.attrs = attrs
 
   if (Array.isArray(value.marks) && value.marks.length) {
