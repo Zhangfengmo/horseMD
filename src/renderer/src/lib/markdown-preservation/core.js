@@ -377,11 +377,15 @@ const adjacentAuthoredBullet = (source, region) => {
 }
 
 export const adoptAdjacentBulletMarker = (adapted, source, region) => {
-  if (!BULLET_ROW.test(adapted) && !/\n[ \t]*(?:>[ \t]?)*[-+*][ \t]/.test(adapted)) return adapted
+  // Exactly ONE bullet row: a single sibling joining the neighbouring list.
+  // A larger insertion spans list boundaries, and rewriting its markers
+  // uniformly would merge lists the author deliberately kept distinct.
+  const rows = adapted.match(/^[ \t]*(?:>[ \t]?)*[-+*][ \t]/gm) || []
+  if (rows.length !== 1) return adapted
   const authored = adjacentAuthoredBullet(source, region)
   if (!authored) return adapted
   return adapted.replace(
-    /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/gm,
+    /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/m,
     (whole, prefix, marker, space) => (
       marker === authored ? whole : `${prefix}${authored}${space}`
     )

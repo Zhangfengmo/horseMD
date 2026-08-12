@@ -2936,4 +2936,21 @@ assert.equal(
   )
 }
 
+// `-`, `+` and `*` are three DIFFERENT lists in CommonMark, and the serializer
+// alternates markers precisely to keep adjacent lists apart. A mapper that
+// reformats the edited list must respect that boundary, or it rewrites the
+// neighbours' markers too and the candidate describes one merged list.
+{
+  const neighbours = preserveRichMarkdownSource(
+    '- a\n- b\n\n+ c\n+ d\n\n* e\n* \n',
+    '* a\n\n* b\n\n- c\n\n- d\n\n* e\n\n* <br />\n',
+    '* a\n\n* b\n\n- c\n\n- d\n\n* e\n\n* f\n'
+  )
+  assert.equal(
+    neighbours.markdown,
+    '- a\n- b\n\n+ c\n+ d\n\n* e\n* f\n',
+    'filling an empty item must not rewrite the neighbouring lists own markers'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

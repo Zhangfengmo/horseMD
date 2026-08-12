@@ -82,11 +82,15 @@ export const listBlockAt = (markdown, offset, { splitBulletMarkers = false } = {
 }
 
 const listBlockNear = (markdown, ...offsets) => {
+  const options = offsets.length && !Number.isFinite(offsets[offsets.length - 1]) &&
+    typeof offsets[offsets.length - 1] === 'object'
+    ? offsets.pop()
+    : undefined
   for (const offset of offsets) {
     if (!Number.isFinite(offset)) continue
     for (const candidate of [offset, offset - 1, offset - 2]) {
       if (candidate < 0) continue
-      const block = listBlockAt(markdown, candidate)
+      const block = listBlockAt(markdown, candidate, options)
       if (block) return block
     }
   }
@@ -193,11 +197,11 @@ const sourceListItemRows = (blockText) => {
   return rows
 }
 
-const listBlocksInSourceOrder = (markdown) => {
+const listBlocksInSourceOrder = (markdown, options) => {
   const blocks = new Map()
   markdownLines(markdown).forEach((line) => {
     if (!listMarker(line.text)) return
-    const block = listBlockAt(markdown, line.start)
+    const block = listBlockAt(markdown, line.start, options)
     if (block) blocks.set(`${block.start}:${block.end}`, block)
   })
   return [...blocks.values()].sort((left, right) => left.start - right.start || left.end - right.end)
@@ -1629,13 +1633,19 @@ export const preserveEmptyListItemTextChange = ({
   previousEnd,
   nextEnd
 }) => {
-  const previousList = listBlockNear(previous, start, previousEnd)
-  const nextList = listBlockNear(next, start, nextEnd)
+  // `-`, `+` and `*` are three DIFFERENT lists in CommonMark, and the
+  // serializer alternates markers precisely to keep adjacent lists apart.
+  // Without that boundary the scanner merged neighbouring bullet lists into
+  // one block, so reformatting the edited list rewrote its neighbours' markers
+  // too — the candidate then described one merged list and was refused.
+  const BOUNDARY = { splitBulletMarkers: true }
+  const previousList = listBlockNear(previous, start, previousEnd, BOUNDARY)
+  const nextList = listBlockNear(next, start, nextEnd, BOUNDARY)
   if (!previousList || !nextList) return null
   if (!hasEmptyListItem(previous, previousList) || hasEmptyListItem(next, nextList)) return null
 
-  const previousBlocks = listBlocksInSourceOrder(previous)
-  const sourceBlocks = listBlocksInSourceOrder(source)
+  const previousBlocks = listBlocksInSourceOrder(previous, BOUNDARY)
+  const sourceBlocks = listBlocksInSourceOrder(source, BOUNDARY)
   const previousIndex = previousBlocks.findIndex((block) =>
     block.start === previousList.start && block.end === previousList.end
   )
