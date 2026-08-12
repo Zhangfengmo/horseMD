@@ -2727,4 +2727,98 @@ assert.equal(
   'generic visible-text fallback must never own a multiline structural insertion'
 )
 
+// Canonical serialization adds a TERMINAL newline without a user edit when a
+// document ends with a table (verified against the real app: trailing run
+// 1 -> 2). That drift breaks the common suffix, so the delta grew from "one
+// character in a paragraph" to "everything through the table to end of file";
+// the table router then claimed a delta it does not own and failed closed on
+// the text outside the table, making EVERY edit before a terminal table
+// unsavable. These shapes lock the delta on the real edit and the authored
+// table spelling (`| --- |`, never the canonical `| - |`) byte for byte.
+{
+  const TABLE_AUTHORED = '| a | b |\n| --- | --- |\n| 1 | 2 |\n'
+  const TABLE_CANONICAL = '| a | b |\n| - | - |\n| 1 | 2 |\n'
+  const outsideEdits = [
+    {
+      name: 'paragraph before a terminal table',
+      source: `编辑区段落\n\n${TABLE_AUTHORED}`,
+      previous: `编辑区段落\n\n${TABLE_CANONICAL}`,
+      next: `编辑区段落甲\n\n${TABLE_CANONICAL}\n`,
+      expected: `编辑区段落甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'heading before a terminal table',
+      source: `## 标题\n\n${TABLE_AUTHORED}`,
+      previous: `## 标题\n\n${TABLE_CANONICAL}`,
+      next: `## 标题甲\n\n${TABLE_CANONICAL}\n`,
+      expected: `## 标题甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'list item before a terminal table',
+      source: `- 条目\n\n${TABLE_AUTHORED}`,
+      previous: `* 条目\n\n${TABLE_CANONICAL}`,
+      next: `* 条目甲\n\n${TABLE_CANONICAL}\n`,
+      expected: `- 条目甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'paragraph between two tables',
+      source: `${TABLE_AUTHORED}\n中间段落\n\n${TABLE_AUTHORED}`,
+      previous: `${TABLE_CANONICAL}\n中间段落\n\n${TABLE_CANONICAL}`,
+      next: `${TABLE_CANONICAL}\n中间段落甲\n\n${TABLE_CANONICAL}\n`,
+      expected: `${TABLE_AUTHORED}\n中间段落甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'reverse drift (previous carries the extra newline)',
+      source: `编辑区段落\n\n${TABLE_AUTHORED}`,
+      previous: `编辑区段落\n\n${TABLE_CANONICAL}\n`,
+      next: `编辑区段落甲\n\n${TABLE_CANONICAL}`,
+      expected: `编辑区段落甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'no drift at all (must stay on the same mapping)',
+      source: `编辑区段落\n\n${TABLE_AUTHORED}`,
+      previous: `编辑区段落\n\n${TABLE_CANONICAL}`,
+      next: `编辑区段落甲\n\n${TABLE_CANONICAL}`,
+      expected: `编辑区段落甲\n\n${TABLE_AUTHORED}`
+    },
+    {
+      name: 'paragraph after the table (was already passing)',
+      source: `${TABLE_AUTHORED}\n尾段\n`,
+      previous: `${TABLE_CANONICAL}\n尾段\n`,
+      next: `${TABLE_CANONICAL}\n尾段甲\n`,
+      expected: `${TABLE_AUTHORED}\n尾段甲\n`
+    }
+  ]
+  for (const shape of outsideEdits) {
+    const mapped = preserveRichMarkdownSource(shape.source, shape.previous, shape.next)
+    assert.notEqual(
+      mapped.preserved,
+      false,
+      `editing outside a table must stay mappable (${shape.name}): ${mapped.reason}`
+    )
+    assert.equal(
+      mapped.markdown,
+      shape.expected,
+      `editing outside a table must patch only that edit (${shape.name})`
+    )
+  }
+  // The edit INSIDE a table keeps its dedicated owner while the same drift is
+  // present, so the equalization must not divert cell edits to generic text
+  // mapping.
+  const insideEdit = preserveRichMarkdownSource(
+    `前段\n\n${TABLE_AUTHORED}`,
+    `前段\n\n${TABLE_CANONICAL}`,
+    `前段\n\n| a | b |\n| - | - |\n| 1甲 | 2 |\n\n`
+  )
+  assert.notEqual(insideEdit.preserved, false, `a table cell edit must stay mappable: ${insideEdit.reason}`)
+  assert.ok(
+    insideEdit.markdown.includes('| --- | --- |'),
+    'a table cell edit must keep the authored delimiter spelling'
+  )
+  assert.ok(
+    insideEdit.markdown.includes('1甲'),
+    'a table cell edit must reach authored source'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

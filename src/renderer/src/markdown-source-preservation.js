@@ -243,7 +243,32 @@ function preserveRichMarkdownSourceCore(
 
   const sourceVisible = sourceVisibleIndex(sourceMarkdown)
   const previousVisible = sourceVisibleIndex(previous)
-  const canonicalChange = commonChange(previous, next)
+  // Canonical serialization adds or drops TERMINAL newlines without a user
+  // edit (a document ending with a table reliably gains one). That run is
+  // serializer padding, never content — but it breaks the common SUFFIX, so
+  // the delta grows from "one character in a paragraph" to "everything from
+  // that character to end of file", spanning every block in between. The
+  // table router then claimed a delta it does not own and failed closed on
+  // the text outside the table, which made any edit before a terminal table
+  // unsavable. Derive the delta from a terminal-equalized pair so it stays
+  // anchored on the real edit; the pair itself stays intact for the handlers,
+  // and the authored source's own trailing run remains owned by
+  // `capOutputTrailingNewlines` at the façade boundary.
+  const withoutTrailingLineEndings = (value) => value.replace(/(?:\r\n|\r|\n)+$/, '')
+  const withEqualizedTerminal = (value) => `${withoutTrailingLineEndings(value)}\n`
+  const equalizedPrevious = withEqualizedTerminal(previous)
+  const equalizedNext = withEqualizedTerminal(next)
+  const rawChange = commonChange(previous, next)
+  const equalizedChange = commonChange(equalizedPrevious, equalizedNext)
+  const changeSpan = (change) =>
+    (change.previousEnd - change.start) + (change.nextEnd - change.start)
+  // The delta must be the most localized description of the difference. When
+  // the terminal run itself grew, equalizing recovers the real common suffix;
+  // when content was genuinely appended at the tail, the raw pair already
+  // describes it more tightly and the terminal run carries the authored block
+  // separator. Take whichever is smaller instead of always equalizing.
+  const useEqualized = changeSpan(equalizedChange) < changeSpan(rawChange)
+  const canonicalChange = useEqualized ? equalizedChange : rawChange
   let { start, previousEnd, nextEnd } = canonicalChange
   // Two canonicals can share a PARTIAL leading marker (`# 旧标题` vs
   // `## 新标题` share `# `), leaving the delta boundary inside a marker
@@ -302,7 +327,6 @@ function preserveRichMarkdownSourceCore(
   // about *only* the number of terminal newlines. That is not a user edit.
   // In particular, treating it as a structural deletion on a list rewrites a
   // no-op rich→source switch and drops the author's final blank line.
-  const withoutTrailingLineEndings = (value) => value.replace(/(?:\r\n|\r|\n)+$/, '')
   if (withoutTrailingLineEndings(previous) === withoutTrailingLineEndings(next)) {
     return { markdown: sourceMarkdown, preserved: true, reason: 'canonical-trailing-newline-drift' }
   }
@@ -315,8 +339,10 @@ function preserveRichMarkdownSourceCore(
   }
   const tableChange = mapTableSourceChange({
     authored: sourceMarkdown,
-    previousCanonical: previous,
-    nextCanonical: next,
+    // The router recomputes the common change from this pair and refuses a
+    // mismatch, so it must see the same pair `canonicalChange` came from.
+    previousCanonical: useEqualized ? equalizedPrevious : previous,
+    nextCanonical: useEqualized ? equalizedNext : next,
     // The generic mapper may widen its local delta to keep Markdown marker
     // tokens atomic. Table ownership validates against the canonical common
     // change itself, not that downstream widened working range.

@@ -423,7 +423,16 @@ export function useFileOps({
             originalPath: tab.path,
             markdown: recoveryMarkdown
           })
-          if (!recovery.ok) return
+          // Choosing the original file is refused on purpose (it would
+          // overwrite the very bytes this exit protects), but silence there
+          // reads exactly like a broken button — say why. A cancelled dialog
+          // is a deliberate no-op and stays quiet.
+          if (!recovery.ok) {
+            if (recovery.reason === 'original-path') {
+              fireToast(tRef.current('save.sourceSyncRecoveryOriginalPath'), { sticky: true })
+            }
+            return
+          }
           fireToast(tRef.current('save.sourceSyncRecoverySaved', { path: recovery.path }), { sticky: true })
         } catch (error) {
           fireToast(tRef.current('save.failed', { msg: error?.message || String(error) }), { sticky: true })
