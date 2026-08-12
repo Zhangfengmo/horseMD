@@ -12,7 +12,7 @@ const api = {
   openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
   openAttachments: () => ipcRenderer.invoke('dialog:openAttachments'),
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
-  saveAs: (defaultName) => ipcRenderer.invoke('dialog:saveAs', defaultName),
+  saveAs: (defaultName, options) => ipcRenderer.invoke('dialog:saveAs', defaultName, options),
   previewPDF: (source, defaultName, options, sourcePath) =>
     ipcRenderer.invoke('pdf:preview', { source, defaultName, options, sourcePath }),
   savePDFPreview: (token, defaultName) =>

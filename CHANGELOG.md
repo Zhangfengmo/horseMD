@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.50] - 2026-08-12
+
+### Fixed
+- **恢复副本不再与源码重建一起死锁** — 富文本重建仍必须通过应用 parser 与 live ProseMirror 的耐久语义验收，失败时不会推进 baseline 或覆盖原文件；重建表格继续携带同一应用 parser 产生的 empty-cell source provenance，空 cell 不泄漏内部 `<br>`，作者真实 `<br>` 仍保留，ownership 不明则拒绝重建。单独的 `.horsemd-recovered.md` 恢复副本改为直接导出 live 文档的 best-effort canonical Markdown，不再重复同一个必然失败的提交谓词。另存边界同时在 renderer 与主进程拒绝原路径，主进程按路径和文件身份拦截大小写别名、符号链接与硬链接，防止未验证恢复内容绕路覆盖原件。
+- **列表 Backspace 与分歧列表重新通过源码/保存验收** — Crepe 在删除内层列表 marker 后留下的无属性空段落被明确归类为 `list_item` 内部占位，不再误当作作者内容；未知 paragraph attrs 仍严格比较。`- 1. 内容` 拆分出的新有序项现在写为缩进的 `  2. ...`，保持原有外层列表结构，并覆盖源码切换、保存和冷重开。
+- **分歧段落删除保留可重解析的尾随空格** — mapper 只沿用未修改边界的作者标点写法，对本次 canonical delta 保留 parser 必需的 `&#x20;`，避免把可见尾随空格写成重开即消失的普通空格。
+- **列表项内的字面 marker 不再保存成嵌套列表** — 在列表正文开头输入 `2. `、`2) `、`- `、`+ `、`* ` 时，只保留阻止 Markdown 重解析为嵌套列表所必需的标准反斜杠转义；外层 marker、紧凑/松散空行和未编辑行仍按作者源码保留。
+- **复杂分歧文档的尾删与前导空格不再误入恢复流程** — 跨块纯删除改用最长可用的唯一局部后缀锚点，并继续逐字校验实际删除内容；固定 24 字符窗口不再因窗口内存在无关列表表示差异而拒绝合法尾删。只删除前导空格的一部分时保留剩余空格段落及内部 sentinel，不再把整行误删。
+
+### Changed
+- **源码同步测试进入标准门禁** — durable semantics、revision state、应用 parse adapter、表格 source model、恢复副本与核心 preservation 测试加入 `test:core`；参差表格六种真实 UI 场景、真实 `test.md` 的条件式隔离副本、分歧删除、字面列表 marker 和嵌套有序列表加入 UI regression 清单。恢复 UI 同时覆盖 strict rebuild 成功及返回 `null` 后另存副本、原文件与 dirty 状态不变。
+
 ## [0.13.49] - 2026-08-12
 
 ### Changed

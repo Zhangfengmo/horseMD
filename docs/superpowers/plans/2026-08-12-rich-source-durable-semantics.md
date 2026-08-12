@@ -1,5 +1,12 @@
 # Rich/Source Durable Semantics Implementation Plan
 
+> **Implementation status (2026-08-12):** the modules and production wiring
+> described below are present on `fix/rich-source-sync-architecture` at and
+> after `ca11a73`. The unchecked boxes are the original execution record, not a
+> list of architecture that still lives only on another local branch. Current
+> verification and second-review conclusions are tracked in
+> `docs/rich-source-sync-architecture-review.md` §14–15.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make rich edits, source switching, saving, export, and cold reopen share one durable Markdown-semantic contract, beginning with the reproduced ragged-table failure and covering real table hard breaks, short delimiter cells, and escaped pipes.
@@ -146,7 +153,7 @@ console.log('PASS parser-backed table source model')
 
 - [ ] **Step 3: Add the sanitized real fixture and UI RED flow**
 
-Create `scripts/fixtures/table-save-user-repro.md` with a fenced non-Go code block, prose sentinels, and the reproduced 5-column ragged table. Create `scripts/test-ragged-table-save-ui.mjs` by using `launchBuiltElectron()` in its default background mode and `typeTextLikeUser()` for committed characters. For each `RAGGED_CASE=cell|consecutive|hardbreak|dashes|escaped-pipe`, assert:
+Create `scripts/fixtures/table-save-user-repro.md` with a fenced non-Go code block, prose sentinels, and the reproduced 5-column ragged table. Create `scripts/test-ragged-table-save-ui.mjs` by using `launchBuiltElectron()` in its default background mode and `typeTextLikeUser()` for committed characters. For each `RAGGED_CASE=cell|consecutive|hardbreak|terminal-hardbreak|dashes|escaped-pipe`, assert:
 
 ```js
 assert.equal(before.gateLog.length, 0)
@@ -168,7 +175,7 @@ Add:
 ```json
 "test:editor-table-normalization": "node scripts/test-editor-table-normalization.mjs",
 "test:table-source-model": "node scripts/test-table-source-model.mjs",
-"test:ragged-table-save-ui": "RAGGED_CASE=cell node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=consecutive CDP_PORT=10221 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=hardbreak CDP_PORT=10222 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=dashes CDP_PORT=10223 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=escaped-pipe CDP_PORT=10224 node scripts/test-ragged-table-save-ui.mjs"
+"test:ragged-table-save-ui": "RAGGED_CASE=cell node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=consecutive CDP_PORT=10221 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=hardbreak CDP_PORT=10222 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=terminal-hardbreak CDP_PORT=10223 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=dashes CDP_PORT=10224 node scripts/test-ragged-table-save-ui.mjs && RAGGED_CASE=escaped-pipe CDP_PORT=10225 node scripts/test-ragged-table-save-ui.mjs"
 ```
 
 Run:
@@ -786,7 +793,7 @@ npm run build
 npm run test:ragged-table-save-ui
 ```
 
-Expected for all five cases: no recovery banner; source toggle succeeds; save succeeds; disk and cold reopen reconstruct the live rich document; only the target cell bytes change for non-structural edits.
+Expected for all six built-in cases: no recovery banner; source toggle succeeds; save succeeds; disk and cold reopen reconstruct the live rich document; only the target cell bytes change for non-structural edits.
 
 - [ ] **Step 2: Strengthen the existing multi-language matrix**
 

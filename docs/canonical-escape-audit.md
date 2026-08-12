@@ -121,13 +121,16 @@ diverged-block）全部失败并 fail-closed 回退旧源码——删除静默�
 `document-emptied`）和「单块删除」（diverged-block）之间的**中间地带**。
 
 **修复**（`preserveDivergedVisibleDelete`，`regions.js`，diverged 分支最后、
-fail-closed 之前）：canonical 删除区间**前 24 个可见字符**在 source 可见流中
-**唯一锚定**（要求唯一出现），删除起点 = 锚点后；删除终点 = 区间后锚点或文档
-可见流末尾。**删除内容校验**：被删 raw 文本逐行去列表标记（`- `、`N. `）后的
+fail-closed 之前）：canonical 删除区间前至多 24 个可见字符按长度从长到短寻找 source
+可见流中的**唯一局部后缀锚点**。这样固定窗口内若恰好跨过无关的列表表示分歧
+（例如作者 `- - 字面`、canonical 为嵌套列表），仍可使用更短但唯一的同一后缀；找不到
+唯一锚点继续拒绝。删除起点 = 锚点后；删除终点 = 区间后锚点或文档可见流末尾。
+**删除内容校验**：被删 raw 文本逐行去列表标记（`- `、`N. `）后的
 可见文本必须与 canonical 删除区间可见文本一致，不一致 fail-closed。纯删除
 限定（replacement 无可见文本）——替换/插入场景不适用，保持既有行为。
 
-回归：纯函数 1 例（真实 canonical：删「复核。」项 + 尾部 `- ce` 项）+ UI
+回归：纯函数覆盖真实 canonical 删除「复核。」项 + 尾部 `- ce` 项，以及
+`- - 嵌套字面` 后追加正文再跨段尾删；UI
 `npm run test:diverged-partial-delete-ui`（反馈.md 形态：从「复核」删到文档
 末尾 → 切源码 → 保存 → 重开，删除不复活）。真实反馈.md 文件实测通过。
 

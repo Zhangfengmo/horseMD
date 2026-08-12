@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
 import {
+  canonicalSourceFallback,
+  rebuildSourceCandidates,
   selectVerifiedSource,
   verifySourceDocument
 } from '../src/renderer/src/components/editor-source-verification.js'
+import { generatedScratchMarkdown } from '../src/renderer/src/markdown-source-preservation.js'
+import { tableDurableContext } from '../src/renderer/src/lib/markdown-preservation/tables.js'
 import {
   areDurablyEquivalent,
   projectDurableSemantics
@@ -91,6 +95,53 @@ run('durable node contracts ignore only declared derived attrs', () => {
     listWithEmptyParagraph({ future: 'left' }, '   '),
     listWithEmptyParagraph({ future: 'right' })
   ), false, 'empty-list normalization retains unknown paragraph attrs')
+  for (const whitespace of ['\u00A0', '\u3000']) {
+    assert.equal(areDurablyEquivalent(
+      listWithEmptyParagraph({}, whitespace),
+      listWithEmptyParagraph({})
+    ), false, 'Unicode whitespace in a list item is authored content, not an internal ASCII placeholder')
+  }
+
+  const liftedNestedItem = (withPlaceholder) => nodeDoc([{
+    type: 'bullet_list',
+    content: [{
+      type: 'list_item',
+      content: [
+        ...(withPlaceholder ? [{ type: 'paragraph' }] : []),
+        { type: 'paragraph', content: [{ type: 'text', text: 'lifted text' }] }
+      ]
+    }]
+  }])
+  assert.equal(areDurablyEquivalent(
+    liftedNestedItem(true),
+    liftedNestedItem(false)
+  ), true, 'an attrs-free Crepe list placeholder is not durable document content')
+
+  const topLevelWhitespace = (text, attrs = {}) => nodeDoc([{
+    type: 'paragraph',
+    attrs,
+    ...(text == null ? {} : { content: [{ type: 'text', text }] })
+  }])
+  for (const whitespace of [' ', '\t', '\u00A0', '\u3000']) {
+    assert.equal(areDurablyEquivalent(
+      topLevelWhitespace(whitespace),
+      topLevelWhitespace(null)
+    ), false, 'top-level whitespace is authored paragraph content, not a global empty-node exception')
+  }
+  assert.equal(areDurablyEquivalent(
+    topLevelWhitespace(' ', { future: 'left' }),
+    topLevelWhitespace(null, { future: 'right' })
+  ), false, 'whitespace normalization must retain unknown top-level paragraph attrs')
+  assert.equal(areDurablyEquivalent(
+    topLevelWhitespace(null),
+    topLevelWhitespace(' '),
+    { trailingLeadingSpaceEmptyParagraph: true }
+  ), true, 'the exact trailing leading-space mapper may declare its terminal ASCII placeholder')
+  assert.equal(areDurablyEquivalent(
+    topLevelWhitespace(null),
+    topLevelWhitespace('\u00A0'),
+    { trailingLeadingSpaceEmptyParagraph: true }
+  ), false, 'mapper provenance never authorizes dropping Unicode whitespace')
 })
 
 run('table contracts ignore colwidth but retain alignment spans and unknown attrs', () => {
@@ -186,6 +237,97 @@ run('a sole table hardbreak fails closed without explicit placeholder provenance
     cell(soleBlockBreak),
     { emptyTableCells: [{ table: 0, row: 0, column: 1 }] }
   ), false, 'placeholder provenance is bound to one exact cell')
+})
+
+run('durable provenance composes table placeholders with a trailing leading-space paragraph', () => {
+  const combined = ({ hardbreak = false, trailingSpace = false }) => nodeDoc([
+    {
+      type: 'table',
+      content: [{
+        type: 'table_row',
+        content: [{
+          type: 'table_cell',
+          attrs: { alignment: null, colspan: 1, rowspan: 1, colwidth: null },
+          content: [{
+            type: 'paragraph',
+            ...(hardbreak ? { content: [{ type: 'hardbreak', attrs: { isInline: false } }] } : {})
+          }]
+        }]
+      }]
+    },
+    ...(trailingSpace
+      ? [{ type: 'paragraph', content: [{ type: 'text', text: ' ' }] }]
+      : [])
+  ])
+  assert.equal(areDurablyEquivalent(
+    combined({}),
+    combined({ hardbreak: true, trailingSpace: true }),
+    {
+      emptyTableCells: [{ table: 0, row: 0, column: 0 }],
+      trailingLeadingSpaceEmptyParagraph: true
+    }
+  ), true, 'independent source owners must combine their expected-document provenance')
+})
+
+run('strict rebuild distinguishes an empty table placeholder from an authored table break', () => {
+  const canonical = '| <br /> |\n| --- |\n'
+  const emptySource = '|  |\n| --- |\n'
+  const tableDoc = (hardbreak) => nodeDoc([{
+    type: 'table',
+    content: [{
+      type: 'table_row',
+      content: [{
+        type: 'table_header',
+        attrs: { alignment: null, colspan: 1, rowspan: 1, colwidth: null },
+        content: [{
+          type: 'paragraph',
+          ...(hardbreak ? { content: [{ type: 'hardbreak', attrs: { isInline: false } }] } : {})
+        }]
+      }]
+    }]
+  }])
+  const parseMarkdown = (markdown) => tableDoc(markdown.includes('<br'))
+
+  const placeholderSelection = selectVerifiedSource({
+    candidates: rebuildSourceCandidates({
+      canonical,
+      rebuilt: generatedScratchMarkdown(canonical),
+      durableContext: tableDurableContext({
+        authored: emptySource,
+        previousCanonical: canonical,
+        nextCanonical: canonical
+      })
+    }),
+    expectedDoc: tableDoc(true),
+    parseMarkdown
+  })
+  assert.equal(placeholderSelection.ok, true)
+  assert.equal(placeholderSelection.markdown, emptySource, 'an editor-owned empty-cell break must not leak into rebuilt source')
+
+  const authoredBreakSelection = selectVerifiedSource({
+    candidates: rebuildSourceCandidates({
+      canonical,
+      rebuilt: generatedScratchMarkdown(canonical),
+      durableContext: tableDurableContext({
+        authored: canonical,
+        previousCanonical: canonical,
+        nextCanonical: canonical
+      })
+    }),
+    expectedDoc: tableDoc(true),
+    parseMarkdown
+  })
+  assert.equal(authoredBreakSelection.ok, true)
+  assert.equal(
+    authoredBreakSelection.markdown,
+    canonicalSourceFallback(canonical),
+    'a user-authored sole table break must survive strict rebuild'
+  )
+  assert.deepEqual(rebuildSourceCandidates({
+    canonical,
+    rebuilt: emptySource,
+    durableContext: null
+  }), [], 'ambiguous table ownership must keep strict rebuild fail-closed')
 })
 
 run('accepts the configured parser document when semantics match', () => {

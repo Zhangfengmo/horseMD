@@ -2,8 +2,15 @@ import { dialog } from 'electron'
 import { createPdfExportService } from './pdf-export.js'
 import { createPandocExportService } from './pandoc-export.js'
 import { createHtmlExportService } from './html-export.js'
+import { isSameRecoveryFile } from './recovery-path.js'
 
-export function registerDocumentIpc(ipcMain, { getMainWindow, getUserDataPath, markdownExtensions, isTrustedSender }) {
+export function registerDocumentIpc(ipcMain, {
+  getMainWindow,
+  getUserDataPath,
+  markdownExtensions,
+  isTrustedSender,
+  testSaveAsPath = null
+}) {
   const pdfExport = createPdfExportService({ getMainWindow })
   const htmlExport = createHtmlExportService({ getMainWindow })
   const pandocExport = createPandocExportService({ getMainWindow, getUserDataPath })
@@ -32,12 +39,18 @@ export function registerDocumentIpc(ipcMain, { getMainWindow, getUserDataPath, m
     return res.canceled ? null : res.filePaths[0]
   })
 
-  ipcMain.handle('dialog:saveAs', async (_event, defaultName) => {
-    const res = await dialog.showSaveDialog(getMainWindow(), {
-      defaultPath: defaultName || 'Untitled.md',
-      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }]
-    })
-    return res.canceled ? null : res.filePath
+  ipcMain.handle('dialog:saveAs', async (_event, defaultName, options = {}) => {
+    let filePath = testSaveAsPath
+    if (!filePath) {
+      const res = await dialog.showSaveDialog(getMainWindow(), {
+        defaultPath: defaultName || 'Untitled.md',
+        filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }]
+      })
+      if (res.canceled || !res.filePath) return null
+      filePath = res.filePath
+    }
+    if (await isSameRecoveryFile(filePath, options?.excludedPath)) return null
+    return filePath
   })
 
   ipcMain.handle('pdf:preview', (event, payload) => trusted(event)

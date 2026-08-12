@@ -90,6 +90,10 @@ async function main() {
   let app
   try {
     app = await openApp('edit', port)
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
     assert.equal(
       await selectRichRange(app.evaluate, '输入设备', '内容'),
       '输入设备： 内容',
@@ -99,7 +103,26 @@ async function main() {
     await sleepMs(700)
 
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode')
-    const raw = await waitFor(() => visibleSource(app.evaluate), 'source textarea did not appear')
+    await waitFor(
+      async () => app.dialogs.length > 0 || typeof await visibleSource(app.evaluate) === 'string',
+      'source mode produced neither a textarea nor a recovery dialog'
+    )
+    if (app.dialogs.length) {
+      const diagnostics = await app.evaluate(`({
+        gate: (window.__hmGateLog || []).slice(-4).map((entry) => ({
+          origin: entry.origin,
+          reason: entry.reason,
+          candidate: entry.candidate,
+          canonical: entry.canonical
+        })),
+        preserve: (window.__hmPreserveLog || []).slice(-4)
+      })`)
+      throw new Error(`source switch was rejected: ${JSON.stringify({
+        ...diagnostics,
+        dialog: app.dialogs.at(-1)?.message
+      })}`)
+    }
+    const raw = await visibleSource(app.evaluate)
     assert.equal(
       raw.includes('输入设备'),
       false,
@@ -107,8 +130,8 @@ async function main() {
     )
     assert.equal(
       raw,
-      '# 测试\n\n前段。* \n\n第二段保留。\n',
-      'the authored literal `*` spelling must survive the diverged deletion'
+      '# 测试\n\n前段。*&#x20;\n\n第二段保留。\n',
+      'literal punctuation and the visible trailing space must survive the diverged deletion'
     )
 
     // Back to rich, save, and verify the deletion is durable on disk.
@@ -120,7 +143,7 @@ async function main() {
     const saved = await readFile(file, 'utf8')
     assert.equal(
       saved,
-      '# 测试\n\n前段。* \n\n第二段保留。\n',
+      '# 测试\n\n前段。*&#x20;\n\n第二段保留。\n',
       'saving must persist the rich-text deletion instead of resurrecting it'
     )
 
@@ -136,7 +159,7 @@ async function main() {
     const reopened = await waitFor(() => visibleSource(app.evaluate), 'source textarea did not appear after reopen')
     assert.equal(
       reopened,
-      '# 测试\n\n前段。* \n\n第二段保留。\n',
+      '# 测试\n\n前段。*&#x20;\n\n第二段保留。\n',
       'full reopen must not normalize or resurrect the diverged paragraph'
     )
 

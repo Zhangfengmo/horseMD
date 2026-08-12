@@ -12,7 +12,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
-import { typeTextLikeUser } from './lib/human-input.mjs'
+import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const root = `/tmp/horsemd-sync-recovery-${process.pid}`
 const port = Number(process.env.CDP_PORT || 10016)
@@ -123,7 +123,72 @@ async function main() {
     const saved = await readFile(file, 'utf8')
     assert.equal(saved, rebuilt, 'disk must contain exactly the rebuilt source shown in source mode')
 
-    console.log('PASS sync recovery: fail-closed shows the rebuild dialog; declining keeps rich mode, accepting rebuilds source and unblocks save')
+    // 4. Exercise the branch the original P0 lacked: strict rebuild itself is
+    // rejected, yet a separate best-effort recovery copy remains writable.
+    // A terminal hardbreak in an ordinary paragraph has no durable Markdown
+    // representation in the current schema, so canonical reparse cannot equal
+    // the live document and rebuildMarkdownFromRich returns null.
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+    const terminalFile = join(root, 'terminal-hardbreak.md')
+    const terminalOriginal = '# Terminal recovery\n\nabc\n'
+    const recoveryFile = join(root, 'terminal-hardbreak.horsemd-recovered.md')
+    await writeFile(terminalFile, terminalOriginal)
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'terminal-profile'),
+      port: port + 1,
+      appArgs: [terminalFile],
+      env: { ...process.env, HORSEMD_TEST_SAVE_AS_PATH: recoveryFile }
+    })
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
+      'terminal-break editor did not open'
+    )
+    await sleep(900)
+    assert.equal(await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)
+      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        if (node.nodeValue !== 'abc') continue
+        const range = document.createRange()
+        range.setStart(node, node.nodeValue.length)
+        range.collapse(true)
+        const selection = getSelection()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        editor.focus()
+        document.dispatchEvent(new Event('selectionchange'))
+        return true
+      }
+      return false
+    })()`), true, 'could not place caret for terminal hardbreak')
+    await typeTextLikeUser(app.send, 'X')
+    await pressKey(app.send, { key: 'Enter', code: 'Enter', modifiers: 8 })
+    await sleep(700)
+    assert.ok(
+      await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
+      'the live text edit must be dirty before recovery'
+    )
+    app.setDialogResponse(true)
+    const dialogCount = app.dialogs.length
+    assert.equal(await toggleSource(app), true, 'could not request source after terminal hardbreak')
+    await waitFor(async () => {
+      try {
+        return (await readFile(recoveryFile, 'utf8')).includes('abcX')
+      } catch {
+        return false
+      }
+    }, 'rebuild-null branch did not write a separate recovery copy')
+    assert.equal(app.dialogs.length, dialogCount + 1, 'strict rebuild confirmation must be exercised')
+    assert.equal(await sourceVisible(app), false, 'a rejected strict rebuild must not enter source mode')
+    assert.equal(await readFile(terminalFile, 'utf8'), terminalOriginal, 'recovery must leave the original bytes untouched')
+    assert.ok(
+      await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
+      'recovery export must not clear the original tab dirty state'
+    )
+
+    console.log('PASS sync recovery: strict rebuild success and rebuild-null separate-copy exits both remain available')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

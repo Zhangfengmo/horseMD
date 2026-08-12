@@ -298,7 +298,13 @@ registerDocumentIpc(ipcMain, {
   getMainWindow: () => mainWindow,
   getUserDataPath: () => app.getPath('userData'),
   markdownExtensions: MD_EXTS,
-  isTrustedSender: (event) => !!mainWindow && event.sender.id === mainWindow.webContents.id
+  isTrustedSender: (event) => !!mainWindow && event.sender.id === mainWindow.webContents.id,
+  // Native save panels cannot be driven in background CDP mode. Keep the
+  // deterministic path injectable only for an explicitly backgrounded test
+  // process so production launches always use the real dialog.
+  testSaveAsPath: !app.isPackaged && backgroundTestMode
+    ? process.env.HORSEMD_TEST_SAVE_AS_PATH
+    : null
 })
 
 registerFileSystemIpc(ipcMain, { shell, markdownPattern: MD_RE })

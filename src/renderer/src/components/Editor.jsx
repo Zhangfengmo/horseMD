@@ -56,6 +56,7 @@ import {
   mapPlainTextTransactionsToSource
 } from '../lib/source-transaction-sync.js'
 import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+import { tableDurableContext } from '../lib/markdown-preservation/tables.js'
 
 // Every mounted rich editor registers itself here. A rich-text tab stays mounted
 // after its first activation, so several editors (and several Crepe selection
@@ -312,6 +313,12 @@ export default function Editor({
         parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
       }
       return preserveRichMarkdownSource(source, previousCanonical, nextCanonical, { parseTables })
+    }
+    const getTableDurableContext = (options) => {
+      if (!parseTables) {
+        parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+      }
+      return tableDurableContext({ ...options, parseTables })
     }
     const parseAdapter = createEditorParseAdapter(() => {
       if (!crepe) return null
@@ -801,7 +808,10 @@ export default function Editor({
     // Milkdown has delivered the input-rule callback, so it must still consume
     // the physical `-` / `*` / `+` intent captured by the DOM binding.
     const generatedScratchMarkdownForCanonical = (canonical, consumeInputIntent = false) => {
-      let markdown = generatedScratchMarkdown(canonical)
+      if (!parseTables) {
+        parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+      }
+      let markdown = generatedScratchMarkdown(canonical, parseTables)
       const generatedInputIntents = pendingMarkdownInputIntents.length
         ? pendingMarkdownInputIntents
         : pendingMarkdownInputIntent ? [pendingMarkdownInputIntent] : []
@@ -1551,6 +1561,7 @@ export default function Editor({
           hasPendingRichFlush: () => richFlushPending,
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
+          getTableDurableContext,
           sourceCommitter,
           preserveSource,
           prepareMarkdown: parseAdapter.prepare,

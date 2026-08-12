@@ -2,19 +2,19 @@
 
 > 日期：2026-08-11  
 > 版本：HorseMD v0.13.29（`ea4415b6459c`）  
-> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；§1–11 保留 v0.13.29 的历史诊断，§12–13 记录修复分支复核与实现结果。
+> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；§1–11 保留 v0.13.29 的历史诊断，§12–15 记录修复分支各阶段复核与最终实现结果。
 
-> 复核提示：v0.13.29 的原始列表 keymap 结论已被当前分支的“末尾空列表项
-> Backspace 退出”处理器取代；合并后仍可复现的现场问题不是代码语言或第一次
-> Backspace，而是非满列 GFM 表在应用 parser 与独立验收 parser 之间产生分歧。
+> 复核提示：§13 是 v0.13.48 的中间候选，§14 是 v0.13.49 的 durable table
+> 架构结论，§15 是 v0.13.50 二次审查。现场表格主因不是代码语言；列表
+> Backspace 和 `- 1.` 分歧列表则是独立、可执行的同步回归，不能因表格根因成立而略过。
 
 ## 1. 结论
 
 这次反馈由两类问题串联而成，不能合并成一个“Backspace 小 bug”：
 
-1. **列表交互问题**：当前 Milkdown/ProseMirror 的列表 keymap 中，空列表项按
+1. **列表交互问题（v0.13.29 当时行为）**：当时 Milkdown/ProseMirror 的列表 keymap 中，空列表项按
    Backspace 走 `joinBackward`，不是“退出列表”。它会先产生列表项内的第二个空段落，
-   视觉上就是用户看到的“没有变正文，反而缩进了”。当前要退出列表，应在空列表项
+   视觉上就是用户看到的“没有变正文，反而缩进了”。v0.13.29 当时要退出列表，应在空列表项
    再按一次 Enter。
 2. **同步架构问题**：HorseMD 同时维护作者源码、上一次 canonical Markdown、当前
    ProseMirror 文档和 `tab.content`。富文本事务依靠启发式 diff 映射回作者源码；列表
@@ -431,8 +431,9 @@ doc 则输出矩形行；独立 gate 因而把一次内容安全的编辑误判�
 - slash code/math 的 after 路径过去直接写双 baseline；它处于默认生产功能中，属于真实
   旁路，但没有证据证明它就是本次非满列表格事故的首次分叉点。现已路由到同一
   verified commit coordinator。
-- rebuild 与 recovery copy 的 canonical fallback 过去可能未重新验证；现同样通过应用
-  parser 后才返回或推进。
+- rebuild 的 canonical fallback 过去可能未重新验证，现仍必须通过应用 parser 后才可
+  重置 baseline；recovery copy 是另一类操作，只写用户另选路径，§15 已将它从 source
+  commit 谓词中解耦，避免严格 rebuild 失败后恢复副本必然重复失败。
 - 通用独立 GFM gate 可构造 math/highlight/standalone `<br>` 等 false positive。未证明
   现有 mapper 会生成每一种字符串翻转，因此不逐项增加 normalizer；该 gate 已退出
   生产提交权限，只保留为纯 preservation 测试和诊断工具。
@@ -572,3 +573,82 @@ grammar，而不是为 comparator 增加例外。
 这两项说明“超大文档性能”不能一概归为预设问题：它们不是用户 2 KB 现场文件的触发
 原因，但已能由当前支持的合法 Markdown 确定触发。相对地，formatted terminal break
 仍只有理论残余、没有现场或现有回归证据，继续列为预防性边界。
+
+## 15. v0.13.50 二次审查与列表/恢复出口修正
+
+### 15.1 外部审查结论逐项复核
+
+| 审查项 | 当前判定 | 证据与处理 |
+|---|---|---|
+| “结构实现只在另一分支，fix 分支只有正则补丁” | 已过时 | `fix/rich-source-sync-architecture` 与 `codex/rich-source-durable` 已共同指向 `ca11a73`；parse adapter、table source model/parse/patch、durable semantics 与 revision state 均在当前调用链中。 |
+| rebuild 与 recovery 使用同一候选和同一验收谓词 | 来审时 P0，现已修复 | 逻辑复核成立：同一 live revision 上 rebuild 失败后，recovery 必然再次失败。严格 rebuild 保持不变；恢复副本改为无条件导出 best-effort canonical，只能写用户另选路径，不推进 baseline、不清 dirty、不覆盖原文件。 |
+| 参差表格缺矩形化、普通编辑无 fallback | 已由 §14 结构实现覆盖 | 当前 parser 在进入 PM 前做 editor-only 矩形化，普通 cell edit 由 parser-backed source ownership 产出候选；六类表格 UI、terminal hardbreak、issue-86 与应用 parser 回归均通过。没有向 `semanticJson` 增加表格例外。 |
+| `- 1.` 家族被 verified acceptance 误拒 | 当前回归，已修 | 一次 Backspace 后 live PM 含 `list_item[内部空段落, 正文]`，candidate 重解析为 `list_item[正文]`。durable node contract 现在只删除无 attrs 的内部空段落；带未知 attrs 的空段落仍严格比较。 |
+| `- 1.` Enter 后保存为新的 `- 2.` 行 | 旧 mapper 产出错误，gate 拒绝正确 | `- 2.` 会在冷重开时变成另一个外层 bullet item。mapper 现在输出缩进的 `  2.`，保留原外层列表；测试新增完整冷重开，不再只断言磁盘字符串。 |
+| 测试被重塑后削弱外部行为 | 部分成立 | 旧的字面 marker 与尾随空格断言只检查源码外观，却允许冷重开改变结构。现以应用 parser/live PM 为合同：尾随可见空格保留 `&#x20;`；列表项开头的字面 marker 保留防止意外嵌套所必需的标准转义。 |
+
+### 15.2 恢复出口与 source commit 是两个安全域
+
+`rebuildMarkdownFromRich()` 仍是 source commit：候选必须重解析成当前 live 文档，成功后
+才原子重置 source/canonical/expectedDoc 与 pending intents。`getRecoveryMarkdown()`
+则是灾备导出：它返回 live serializer 的保守 canonical，并只移除 HorseMD 内部的
+standalone `<br />` 占位。调用者只能经 `saveSourceSyncRecovery()` 打开另存对话框，
+不能接收原文件路径，也不能把未验证恢复 Markdown 冒充成 committed source。
+
+因此“未验证”在这里表示恢复文件可能规范化作者写法，不表示允许覆盖原件。两侧资产
+被同时保留：原 Markdown 字节不动，用户眼前的富文本至少有独立 Markdown 副本可导出。
+另存保护不是依赖默认文件名：renderer 会拒绝规范化后等于原路径的返回值，主进程还会
+比较现存文件的 `dev + ino` 与 realpath，因此大小写别名、符号链接和硬链接也不能绕过
+原文件边界。UI 回归用普通段落末尾 hardbreak 构造可重复的 strict rebuild `null`，验证
+恢复副本仍写出、原件逐字节不变且标签保持 dirty。
+
+### 15.3 实际问题与预防性问题边界
+
+本轮有执行证据并已修复的现有问题：恢复双谓词死锁、列表内部空占位误拒、分歧嵌套
+列表新增项写成错误外层结构、分歧段落删除后的尾随空格丢失、列表正文歧义 marker 被
+去转义后冷重开成嵌套列表、前导空格部分删除被误判为整段删除，以及固定 24 字符锚点
+跨过无关 `- -` 表示分歧后把合法跨段尾删拒绝为 `visible-stream-mismatch`。最后一项由
+完整 family matrix 的 `plain@literal-shapes.md` 首次抓到：修正后 4 个 fixture × 5 种
+逐字操作的追加、源码切换、保存、删除和冷重开全部直接通过，未进入 recovery warning。
+
+二次独立复审还否决了两个会重新污染验收器的实现：其一，全局把任意 paragraph 的
+whitespace-only text 视为空会吞掉 NBSP 与全角空格；现已撤销，只允许精确的前导空格
+尾删 mapper 以 provenance 声明“最后一个顶层 ASCII 空白 paragraph”是同一个空占位，
+`list_item` 内也只识别 ASCII editor placeholder，Unicode 空白保持耐久。其二，可见尾删
+raw span 可能夹着 PM 看不见的 unused reference definition；visible fallback 现在遇到
+非空、零可见的 source-only 行必须拒绝，由有 source ownership 的处理器接管，不能靠
+最终 PM 验收（它同样看不见该资产）放行。
+
+严格 rebuild 同样不能绕过 table ownership：空 cell canonical 与作者真实单独 `<br>`
+形状相同，重建候选必须携带 Editor 当前 `remarkCtx` 派生的 table durable context。已知
+空 cell 选择去占位候选，作者 `<br>` 选择保留候选；若 source model 无法证明 provenance，
+strict rebuild 返回失败并转入独立 recovery，而不是换用默认 GFM parser 或猜测 fallback。
+重建规范化本身也复用同一 parser，避免把 display math 内形似表格的 `| <br /> |` 当成
+GFM 空 cell；纯函数已锁定“表格形公式 + 配置 parser”不改字节。
+
+仍存在但不属于本次“保存暂停”根因的现有 P2：全新文档通过输入规则键入 `1. ` 时，
+保存后可能规范化为 `1)`。该行为在 `ca11a73` 基线即可复现，语义仍是有序列表但没有
+保留作者 marker 拼写；应进入独立的 input-intent 保真修复，不能通过放宽 durable
+semantics 或往表格比较器加例外处理。
+
+未作为现场根因扩大的预防性项目：带复杂行内格式的 terminal table break opaque token、
+默认关闭的 transaction-primary、任意未来 schema attrs、以及为 durable remark 管线
+增加“切回旧 verifier”的运行时开关。最后一项会重新启用已证实不安全的第二 authority，
+不能作为安全回滚。发布回滚必须以提交/版本为单位；若未来必须紧急隔离 durable rich
+路径，应降级到现有 source textarea，而不是恢复旧的独立 GFM gate。灾备 canonical
+当前会剥离 standalone `<br>`；“用户恰好在别处失败，同时该行是有意独立 HTML `<br>`”
+尚无现场复现，属于恢复文件保真风险而非原文件安全问题，后续应以节点 provenance
+区分，不能为这个预防性场景重新接回严格提交谓词。
+
+### 15.4 门禁
+
+- `npm run test:rich-source-verified-core` 已加入 `npm run test:core`；
+- `test:nested-number-list-source-ui`、`test:diverged-delete-source-ui` 与六种
+  `test-ragged-table-save-ui` 场景已加入 UI regression；
+- `test:diverged-list-structure-ui` 覆盖一次 marker 删除、继续输入、三次 lift、保存；
+- `test:list-item-literal-marker-source-ui` 覆盖必要转义、保存与冷重开；
+- `test:sync-recovery-ui` 覆盖 strict rebuild 成功和 `null` 后独立恢复副本两条出口；
+- 若本机存在 `/Users/fengmo/Documents/test.md`，UI runner 只读取原件并在临时普通文件
+  副本上执行 `external-copy`，最后再验证原件字节未变；
+- 多语言代码围栏由 round-trip multi-language matrix 与真实表格 fixture 继续覆盖，
+  Go、JavaScript、TypeScript、Python、Rust、Java、C、C++ 均不是触发条件。

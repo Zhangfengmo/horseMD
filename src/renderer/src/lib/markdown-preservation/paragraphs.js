@@ -710,6 +710,24 @@ export const preserveTrailingEmptyBlock = ({
       // makes `nextEmpty` true) must NOT drop the authored leading-space row.
       start <= previousTailLine.end
     ) {
+      const nextBlankText = next.slice(nextEmpty.start, nextEmpty.end)
+        .replace(/(?:\r\n|\r|\n)+$/, '')
+      const sentinelPrefix = sourceTailLine.text.match(/^([ \t]*)\u200B/)
+      if (sentinelPrefix && /^[ \t]+$/.test(nextBlankText)) {
+        // The user removed the visible text and only part of its leading
+        // spaces. A whitespace-only canonical paragraph is still present in
+        // the live document, so deleting the complete authored row would make
+        // the verified candidate reconstruct one fewer paragraph. Keep the
+        // Markdown-safe sentinel and exactly the remaining whitespace.
+        return {
+          markdown: source.slice(0, sourceTailLine.start) +
+            sentinelPrefix[1] + '\u200B' + nextBlankText +
+            source.slice(sourceTailLine.end),
+          preserved: true,
+          reason: 'trailing-leading-space-partially-deleted',
+          durableContext: { trailingLeadingSpaceEmptyParagraph: true }
+        }
+      }
       return {
         markdown: source.slice(0, sourceTailLine.start) + source.slice(sourceTailLine.end),
         preserved: true,

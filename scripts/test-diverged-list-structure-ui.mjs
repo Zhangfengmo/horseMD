@@ -51,6 +51,12 @@ const placeCaret = (evaluate, needle, offset = 0) => evaluate(`(() => {
   return false
 })()`)
 
+const visibleEditorSnapshot = (evaluate) => evaluate(`(
+  [...document.querySelectorAll('.ProseMirror')]
+    .filter((node) => node.offsetParent)
+    .map((node) => node.textContent)
+)`)
+
 async function openApp(profile, appPort, file) {
   const app = await launchBuiltElectron({
     profileDir: join(root, profile),
@@ -74,9 +80,26 @@ async function save(app) {
 async function sourceAfter(app) {
   assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode')
   await waitFor(
-    () => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)`),
-    'source textarea did not appear'
+    async () => app.dialogs.length > 0 || await app.evaluate(
+      `!![...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)`
+    ),
+    'source mode produced neither a textarea nor a recovery dialog'
   )
+  if (app.dialogs.length) {
+    const diagnostics = await app.evaluate(`({
+      gate: (window.__hmGateLog || []).slice(-4).map((entry) => ({
+        origin: entry.origin,
+        reason: entry.reason,
+        candidate: entry.candidate,
+        canonical: entry.canonical
+      })),
+      preserve: (window.__hmPreserveLog || []).slice(-4)
+    })`)
+    throw new Error(`source switch was rejected: ${JSON.stringify({
+      ...diagnostics,
+      dialog: app.dialogs.at(-1)?.message
+    })}`)
+  }
   return visibleSource(app.evaluate)
 }
 
@@ -103,12 +126,20 @@ async function main() {
   let app
   try {
     app = await openApp('remove-inner-marker', port, file)
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
 
     // `- 2. 综合行政部` is parsed as an empty outer bullet item containing an
     // ordered-list item. Backspace at the start of its text removes the inner
     // ordered-list marker in the rich editor. The authored source must drop
     // only the literal `2. ` while retaining the outer `- ` marker.
-    assert.equal(await placeCaret(app.evaluate, '综合行政部'), true, 'could not place caret at item start')
+    assert.equal(
+      await placeCaret(app.evaluate, '综合行政部'),
+      true,
+      `could not place caret at item start; visible editors: ${JSON.stringify(await visibleEditorSnapshot(app.evaluate))}`
+    )
     await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
     await sleep(900)
 
@@ -167,13 +198,23 @@ async function main() {
     await stopBuiltElectron(app, { removeProfile: true })
     app = null
 
+    app = await openApp('reopen-add', port + 1, file)
+    const reopenedAfterAdd = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      return editor?.textContent || ''
+    })()`)
+    assert.ok(reopenedAfterAdd.includes('综合行政部') && reopenedAfterAdd.includes('新增部门'), 'cold reopen lost the edited list rows')
+    assert.ok(reopenedAfterAdd.includes('ISO 9001:2015'), 'cold reopen lost the formatted sibling row')
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+
     // Three consecutive Backspaces model the actual ProseMirror lift sequence
     // without an intervening source-mode reparse: remove `2.`, merge the lifted
     // paragraph into the outer list item, then remove the remaining `-`.
     // The paragraph text must survive while both authored markers disappear.
     const liftFile = join(root, 'lift.md')
     await writeFile(liftFile, authored)
-    app = await openApp('lift-both-markers', port + 1, liftFile)
+    app = await openApp('lift-both-markers', port + 2, liftFile)
     assert.equal(await placeCaret(app.evaluate, '综合行政部'), true, 'could not place caret for two-level lift')
     await pressKey(app.send, { key: 'Backspace', code: 'Backspace', delayMs: 80 })
     await sleep(700)
@@ -201,7 +242,16 @@ async function main() {
       'the two-level marker removal must persist on disk'
     )
 
-    console.log('PASS diverged list structure sync: marker deletion, full lift, and subsequent insertion survive source mode and save')
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await openApp('reopen-lift', port + 3, liftFile)
+    const reopenedLiftText = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      return editor?.textContent || ''
+    })()`)
+    assert.ok(reopenedLiftText.includes('综合行政部'), 'cold reopen lost the fully lifted paragraph text')
+    assert.equal(await sourceAfter(app), authored.replace('- 2. 综合行政部', '\n  综合行政部'), 'cold reopen changed the lifted source structure')
+
+    console.log('PASS diverged list structure sync: marker deletion, full lift, and subsequent insertion survive source mode, save, and cold reopen')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

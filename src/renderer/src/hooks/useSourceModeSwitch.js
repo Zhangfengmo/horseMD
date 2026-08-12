@@ -136,6 +136,7 @@ export function useSourceModeSwitch({
           const recovery = await saveSourceSyncRecovery({
             api: window.api,
             title: tab.title,
+            originalPath: tab.path,
             markdown: recoveryMarkdown
           })
           if (recovery.ok) {

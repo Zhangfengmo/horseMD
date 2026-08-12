@@ -1,18 +1,18 @@
 # HorseMD AI 接手手册
 
-> 面向全新的 AI / 开发者。先读这篇，再按链接深入。更新时间：2026-08-11。
+> 面向全新的 AI / 开发者。先读这篇，再按链接深入。更新时间：2026-08-12。
 
 ## 0. 当前状态快照
 
-- 当前主分支：`main`
-- 当前源码候选：`0.13.47`；正式路径 `/Applications/HorseMD.app` 已替换为 0.13.47，
-  但**人工验收失败，禁止按稳定版发布**。真实 `123321.md` 长会话在文章末尾通过
-  `/code` 建立代码块、继续编辑并保存后，源码与富文本仍会再次分叉；保存暂停和
-  “保存成功但磁盘内容不等于富文本”都属于同一 P0。RS-40 只修复了 slash 命令创建
-  fence 的一个子路径，新增 RS-41 继续跟踪未知的首次分叉 transaction。完整现场、
-  救援过程、排查字段和完成标准见 `rich-source-divergence-incident-0.13.47.md`。方案一
-  （保留 ProseMirror，迁移 transaction→source）生产仍未默认接管；0.13.34 的
-  settle/recovery 只是数据保护安全网，不是根治。`v0.13.29` 是最近正式发布版。
+- 当前架构修复分支：`fix/rich-source-sync-architecture`；源码候选：`0.13.50`。
+  `0.13.47` 的真实长会话人工验收曾失败，因此仍不得仅凭专项自动化宣布稳定发布；
+  事故现场和 RS-41 完成标准见 `rich-source-divergence-incident-0.13.47.md`。
+  0.13.50 已把普通保存、强制 flush、源码切换统一到单一 verified-commit 边界，并落地
+  共享 parser、表格源码结构模型、durable semantic projection 与 revision-bound state。
+  对短行/参差 GFM 表格的修复不是 `semanticJson` 例外：短行在 editor parse adapter
+  中确定性补齐，作者源码仍由 table source model 按 cell range 局部持有。严格重建失败
+  时原文件保持不变；恢复副本必须独立、无条件返回当前 live doc 的 best-effort canonical，
+  不能再用同一提交验收谓词把恢复出口锁死。`v0.13.29` 仍是最近正式发布版。
 - **0.13.x 系列主线（自 0.12.69 之后）**：
   - **原文保真与空段落硬不变式**：空段落 `<br />` 占位绝不允许进入作者源码（`withoutStandaloneEmptyBlockLines` 在 `preserveRichMarkdownSource` 出口强制剥离）；空段落映射不得要求全文可见流相等、不得被无关空段落否决；连续空段落映射不递归。系列提交 `bb5b9f4` → `cfae66a`。
   - **可见流分叉单块回退**：源码与 canonical 可见流分叉（如行中 `* ` 使 remark 拆成列表项）时，局部对齐与行区域映射都会失败并 fail-closed。`preserveDivergedBlockTextChange()`（`lib/markdown-preservation/regions.js`）只处理单 canonical 块：先反转义 canonical 拼写（`\*`→`*`、`&#x20;`→空格），0.13.30 起优先用 source/canonical 等数量非空块的 ordinal 定位；候选数量不等才退回全文唯一子串，仍歧义则拒绝写回。初始提交 `abb6d09`，最新复盘见 `diverged-ordinary-save-regression.md`。
@@ -21,9 +21,9 @@
   - **序列化转义反转义（0.13.15–0.13.16）**：remark-stringify 把行首第一个空格序列化为 `&#x20;` 实体、波浪线转义为 `\~`。所有 canonical → 源码翻译点（`adaptCanonicalRegionToSource`、scratch/new-document、列表 direct-join）统一经 `canonicalTextToSource` 还原为作者字面拼写（`&#x20;`→空格、`\~`→`~`）。**全量转义形态清单见 `canonical-escape-audit.md`——新增转义处理前必须先读它**；`\\` 因行尾硬换行语义刻意不动。
   - **缩进上下文的空格实体回归（0.13.21）**：旧版 `canonicalTextToSource` 把任何四空格或 Tab 开头的 canonical 行都当作 indented code，导致普通顶格测试通过、但列表续行/嵌套块中的 `&#x20;` 仍直接进入源码。现在只依靠 fenced code、inline code、HTML 和 source-aware literal region 判定字面区，结构缩进不再短路反转义；纯函数覆盖四空格、Tab、列表续行，UI 覆盖已有文档、清空重写、真正空文件、保存和完整重开。
   - **连续空格与模式切换共同根因（0.13.22）**：真实 CGEvent 证明第 3 个 whitespace-only canonical callback 会误走 `structural-line-change`，删除段落边界并污染后续增量。现在纯空格阶段只推进 baseline，首个可见文字才一次提交；不能直接写四个以上 ASCII 空格（会变代码块），故按本机 Typora 实测采用不可见 `U+200B` 哨兵。解析插件剥离、visible map 忽略、caret map 同步处理，保存/重开仍恢复。详见 `leading-space-mode-switch-regression.md`。
-  - **数字点列表与多列表同步（0.13.17–0.13.18）**：`- 1. 甲乙` 被 remark 解析为嵌套有序列表，canonical 与 source 可见流永久分歧，列表内编辑曾 fail-closed 丢失。`preserveDivergedNestedListChange` 现在以 canonical/source 的**顶层列表块**做 ordinal 对齐，再以 `token + text + indent` 项序列执行结构级 diff；覆盖删除数字 marker、Backspace 多级提升、后续含内联加粗列表以及 Enter 拆分。延迟 `markdownUpdated` 同时包含多个 `- / + / *` 列表操作时，`preserveBatchedListBlockChanges(requireMultiple: true)` 会先做多块原子对账，避免单列表处理器提前返回、marker 被统一或编辑丢失。完整根因、事故记录和回归矩阵见 `nested-list-sync-bug-handoff.md`。
-  - **跨块删除兜底（0.13.18）**：分歧文档里**跨多个 canonical 块的纯删除**（拖选删尾部、一次删多个列表树）此前 fail-closed 回退，删除静默消失、保存后重开复活。新增 `preserveDivergedVisibleDelete`（`regions.js`，diverged 分支最后）：删除区间前 24 可见字符唯一锚定 + 删除内容逐行去标记校验。详见 `canonical-escape-audit.md`。
-  - **字面列表标记与反引号强制边界（0.13.25–0.13.26）**：稳定列表行用去转义语义视图 + raw boundary map 回写 `1.` / `1)` / `-` / `+` / `*` 字面正文；反引号部分删除改为读取完整 next canonical line，重复行按 ordinal，独立 `<br />` 空段落两侧按同行映射。行内代码事务从 live `view.state.doc` 序列化，失败不推进双快照。详见 `list-item-literal-marker-escape-regression.md` 与 `backtick-source-sync-lock-regression.md`。
+  - **数字点列表与多列表同步（0.13.17–0.13.18，0.13.50 验收修正）**：`- 1. 甲乙` 被 remark 解析为嵌套有序列表，canonical 与 source 可见流永久分歧，列表内编辑曾 fail-closed 丢失。`preserveDivergedNestedListChange` 现在以 canonical/source 的**顶层列表块**做 ordinal 对齐，再以 `token + text + indent` 项序列执行结构级 diff；覆盖删除数字 marker、Backspace 多级提升、后续含内联加粗列表以及 Enter 拆分。Enter 拆分产生的下一项必须写成缩进的 `  2.`，不能生成另一个外层 `- 2.`。验收投影只忽略没有 attrs 的空 list-item paragraph 占位；带未知 attrs 的空节点仍是 durable，禁止扩成全局忽略规则。延迟 `markdownUpdated` 同时包含多个 `- / + / *` 列表操作时，`preserveBatchedListBlockChanges(requireMultiple: true)` 会先做多块原子对账，避免单列表处理器提前返回、marker 被统一或编辑丢失。完整根因、事故记录和回归矩阵见 `nested-list-sync-bug-handoff.md`。
+  - **跨块删除兜底（0.13.18，0.13.50 锚点修正）**：分歧文档里**跨多个 canonical 块的纯删除**（拖选删尾部、一次删多个列表树）此前 fail-closed 回退，删除静默消失、保存后重开复活。`preserveDivergedVisibleDelete`（`regions.js`，diverged 分支最后）从删除边界前至多 24 个字符开始，选择**最长且唯一**的局部后缀；若无关列表表示差异落在固定窗口内，会有界缩短而不是误拒。实际 raw 删除内容仍须逐行去标记后与 canonical 删除逐字相等，否则 fail closed。详见 `canonical-escape-audit.md`。
+  - **字面列表标记与反引号强制边界（0.13.25–0.13.26，0.13.50 验收修正）**：稳定列表行用去转义语义视图 + raw boundary map 定位 `1.` / `1)` / `-` / `+` / `*` 字面正文；输出必须保留 canonical 中阻止字面文本被重新解析成嵌套列表所必需的 `\`，不能以“源码零转义”为目标。反引号部分删除改为读取完整 next canonical line，重复行按 ordinal，独立 `<br />` 空段落两侧按同行映射。行内代码事务从 live `view.state.doc` 序列化，失败不推进双快照。详见 `list-item-literal-marker-escape-regression.md` 与 `backtick-source-sync-lock-regression.md`。
   - **列表转换与行内代码闭合交互（0.13.27）**：列表 marker 转换的正文比较先统一 `U+200B + spaces` 与 `&#x20; + spaces` 的 canonical/source 语义，但只输出 marker 变化；行内代码不再在首个中文字符时提前激活，只在最终闭合反引号输入后创建 mark，并支持首尾方向键退出。``` + Space 恢复代码块输入规则，空代码块 Backspace 后立即对账 live doc。真实 IME、逐键 fence 删除、保存和新进程重开均有专项回归。
   - **新文档三反引号原文保真（0.13.28）**：generated scratch 与空文件首次编辑全部属于本次用户输入，改由 `canonicalFreshTextToSource` 还原 Markdown 正文 serializer punctuation；真正的 fenced/inline code 与 HTML literal 仍保持字节不动。新增 `test:literal-triple-backtick-source-ui`，逐键输入 delimiter、真实中文 IME、切源码、保存和完整进程重开。
   - **桌面外部拖入打开（0.13.29）**：Finder / 文件资源管理器拖入一个或多个文件时复用标签打开链路，拖入目录时加入多根工作区；图片落在富文本正文仍由编辑器插图链路处理。Renderer 只通过 preload 的 `webUtils.getPathForFile()` 取得路径，目录判定留在主进程，移动端 capability 明确关闭。详见 `desktop-drop-open.md`。
@@ -31,7 +31,7 @@
   - **复杂分叉列表普通保存（0.13.31）**：0.13.30 的 fixture 虽含 `- -`，但只编辑了独立正文。source 第二个 `- ` / `+ ` / `* ` / ordered marker 会被 canonical 消费为嵌套语法；`preserveDivergedNestedListChange` 现在在比较和 raw offset 中跳过恰好一层该前缀，输出仍保留作者 marker。专项必须同时编辑独立段落、嵌套项和后续兄弟项。
   - **重复引用后的 raw 位置错写（0.13.32）**：前部结构分叉后，`preserveMiddleEmptyBlock` 不得复用 canonical 的全文 visible-line index；重复“测试”引用会让错误位置伪装成有效邻接。完全对齐才可直取索引，分叉改用相邻 pair + block kind + equal-count ordinal，失败继续 fail closed。专项还必须从第三个重复引用按两次 Enter 退出并逐字输入唯一末段，直接保存后比较源码、磁盘和冷重开。禁止引入整篇 parse/stringify 语义循环，它会破坏字面列表 marker 与反引号。
   - **引用后空白直接起笔（0.13.33）**：Crepe 在末尾引用后提供的空 `<p>` 可能只序列化为 canonical terminal padding。直接点击该空白起笔是 `previous.length` 处的纯正文追加，不等同于从引用内按两次 Enter；若先走 locally-aligned 零宽 visible offset，会被前面的重复空引用误导。plain append 现提前写入物理文档末尾，结构语法明确拒绝；UI 必须真实点击空段落、逐字输入、直接保存并冷重开。
-  - **保存事务 settle 与恢复副本（0.13.34）**：可见 ProseMirror transaction 可能早于 Milkdown 的 `markdownUpdated` / pending input intent 对账。保存和富文本→源码先调用同一 fail-closed flush 并有界让出事件循环重试，不用 canonical 覆盖作者源码；持续歧义时原文件不写，用户可把 live rich doc 另存为 `.horsemd-recovered.md`。专项：`test:editor-flush-settle`、`test:source-sync-recovery`，文档 `source-sync-save-recovery.md`。
+  - **保存事务 settle 与恢复副本（0.13.34，0.13.50 恢复出口修正）**：可见 ProseMirror transaction 可能早于 Milkdown 的 `markdownUpdated` / pending input intent 对账。保存和富文本→源码先调用同一 fail-closed flush 并有界让出事件循环重试，不用 canonical 覆盖作者源码；持续歧义时原文件不写。严格 rebuild 仍必须通过 verified-commit，但 `.horsemd-recovered.md` 是独立安全域：直接取得 live doc 的 best-effort canonical，剥离内部 standalone `<br>` 后供用户另存，不写原文件、不推进 verified baseline，因此绝不能再次走导致 strict rebuild 失败的同一验收谓词。专项：`test:editor-flush-settle`、`test:source-sync-recovery`，文档 `source-sync-save-recovery.md`。
   - **事务优先源码同步（0.13.35，方案一）**：新增统一 PM transaction observer、原子 plain-text mapper、真实 step trace、LF/CRLF split 和空块 block hint。专项测试可用 `window.__hmTransactionSourcePrimary = true` 证明正文/引用/列表项普通文字不经过 canonical diff；生产默认仍不接管。默认接管试验曾被完整段落测试抓到“结构 Enter 后空块首字写错相邻块”，因此新增 quarantine/checkpoint 合同并撤回放行。详见 `transaction-source-sync-architecture.md`。
   - **事务优先源码同步第二阶段（0.13.36，方案一）**：mapper 改为 BOM/CRLF/lone-CR 归一化双视图（字节证明在 LF 视图，输出保留作者拼写）；hint 槽坐标指向完整段落分隔之后；嵌套空 textblock（列表项/引用）拒绝接管；列表输入意图只在当前源快照上重建自己的块，不再覆盖延迟窗口内的跨块编辑；`preserveChangedLineRegion` 零宽行边界粘行根因修复。回归含 LF/CRLF/BOM+CRLF + undo/redo 逐字节、列表意图跨块专项（primary 构建验证、默认构建 SKIP）、全家族矩阵双构建。`test:list-intent-cross-block-ui` 与 `test:source-transaction-sync-ui`（三行尾变体）为方案一专项。
   - **多轮持久化与列表原子提交（0.13.46 候选）**：列表 input intent 在完整 slot 重建、marker 恢复或严格中间空槽列表写回后立即消费，禁止下一次正文回调复用旧快照；批量列表写回必须完整覆盖同一 callback 的后续正文，CRLF 在 `\r` 前插入，0/1 final-EOL 分别保留正确退出列表边界。新增 `test:family-multicycle-ui`（4 轮编辑保存、5 次冷打开，默认/primary 双路径）；第四轮专门在正文与 fence 之间输入“正文 → 有序列表 → 正文”。真实 `123321.md` override 与 20/20 家族矩阵均通过。
@@ -613,12 +613,13 @@ npm run guide:capture
 - 设置页排版预览是实际编辑器的缩尺模型。页宽不能直接套用低于真实预设的固定 `max-width`；测试必须测量可见宽度，不能只检查设置值和 CSS 变量。
 - `.hm-html-block`（HTML 表格）与 `.cm-lineNumbers`（代码块行号）的 CSS 都在 `app.css`；改动后分别跑 `test:table-ui` 与 `test:issue-80-ui`/`test:issue-91-pdf-ui`。
 
-## 14. 最近一次稳定基线
+## 14. 当前候选与最近一次人工否决
 
-截至 **2026-08-11，`0.13.47` 只是诊断候选，不是稳定基线**。自动化家族矩阵、
-multicycle 和 tail-fence 都通过，但 `/Applications/HorseMD.app` 的真实长会话人工手测
-仍复现 RS-41：富文本、源码和磁盘不一致。**人工结果覆盖自动化结论；在用户明确验收
-前，禁止发版、关闭 issue 或声称家族问题已解决。**接手者先读
+`0.13.50` 是当前架构候选：自动化已覆盖单一 verified commit、应用 parser、表格 source
+ownership、独立 recovery、列表/表格/前导空格与 20/20 family matrix。`0.13.47` 则是
+最近一次安装包人工否决：真实长会话曾复现 RS-41，富文本、源码和磁盘不一致。
+**人工结果覆盖自动化结论；0.13.50 新安装包长会话经用户明确验收前，禁止发版、关闭
+issue 或声称家族问题已解决。**接手者先读
 `rich-source-divergence-incident-0.13.47.md`，抓取第一次分叉的统一 transaction trace，
 不要继续从最终 toast 反推字符串补丁。
 
@@ -626,8 +627,10 @@ multicycle 和 tail-fence 都通过，但 `/Applications/HorseMD.app` 的真实�
 是否已替换必须在每次手测前重新核验，不能只看 `dist/` 产物。除 generated-scratch
 首个 `-` 列表项 marker、连续空格中间态、`&#x20;`、空引用结构删除外，本轮新增
 跨块“编辑 → 删除 → 再编辑 → 立即切源码”的事务边界回归，防止源码保留已删内容或
-遗漏新增内容；列表项正文中新输入的 `1.` / `1)` / `-` / `+` / `*` 字面文本不得泄漏
-serializer 反斜杠或格式化未编辑列表；反引号部分/全部删除后不得保存暂停或锁住源码模式。
+遗漏新增内容；列表项正文中新输入的 `1.` / `1)` / `-` / `+` / `*` 字面文本必须保留
+阻止冷重开误解析为嵌套列表所必需的标准反斜杠，同时不能格式化未编辑列表；反引号
+部分/全部删除后不得保存暂停或锁住源码模式。全新文档删除列表后重新输入 `1. ` 当前仍
+可能规范化为 `1)`（现有 P2，非保存锁死根因），需要独立 input-intent 保真修复。
 generated scratch 与空文件首次编辑中，同一行三反引号正文不得泄漏 serializer `\``；
 完整现状见 `rich-source-fidelity-bug-family.md`、`list-item-literal-marker-escape-regression.md`、
 `backtick-source-sync-lock-regression.md` 与 `leading-space-mode-switch-regression.md`。

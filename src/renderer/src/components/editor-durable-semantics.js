@@ -10,6 +10,20 @@ const durableAttrs = (attrs) => sortedAttrs(attrs)
 // attributes deliberately flow through the default contract so a future
 // schema addition cannot silently disappear from persistence verification.
 const nodeContracts = {
+  paragraph: {
+    content(content, { location, trailingLeadingSpaceEmptyParagraph }) {
+      const declaredTerminalPlaceholder = trailingLeadingSpaceEmptyParagraph &&
+        location.directDocChild === true &&
+        location.isLastDocChild === true &&
+        content.length > 0 &&
+        content.every((inline) => (
+          inline?.type === 'text' &&
+          !inline.marks?.length &&
+          /^[ \t]+$/.test(String(inline.text || ''))
+        ))
+      return declaredTerminalPlaceholder ? [] : content
+    }
+  },
   heading: {
     attrs(attrs) {
       const { id: _derivedHeadingId, ...durable } = attrs || {}
@@ -39,13 +53,17 @@ const nodeContracts = {
           !child.content?.length || child.content.every((inline) => (
             inline?.type === 'text' &&
             !inline.marks?.length &&
-            !String(inline.text || '').trim()
+            /^[ \t]*$/.test(String(inline.text || ''))
           ))
         )
         if (!invisibleParagraph) return child
         const { content: _invisibleContent, ...paragraph } = child
         return paragraph
-      })
+      }).filter((child) => !(
+        child?.type === 'paragraph' &&
+        !child.content?.length &&
+        !Object.keys(child.attrs || {}).length
+      ))
     }
   },
   table_header: {
@@ -65,7 +83,9 @@ const nodeContracts = {
   doc: {
     content(content) {
       return content.filter((child) => !(
-        child?.type === 'paragraph' && !child.content?.length
+        child?.type === 'paragraph' &&
+        !child.content?.length &&
+        !Object.keys(child.attrs || {}).length
       ))
     }
   }
@@ -85,11 +105,18 @@ function tableCellContent(content, { location, placeholderCells }) {
 }
 
 const childLocation = (parent, index, location) => {
-  if (parent.type === 'table') return { ...location, row: index }
+  const nestedLocation = parent.type === 'doc'
+    ? {
+        ...location,
+        directDocChild: true,
+        isLastDocChild: index === (parent.content?.length || 0) - 1
+      }
+    : { ...location, directDocChild: false, isLastDocChild: false }
+  if (parent.type === 'table') return { ...nestedLocation, row: index }
   if (parent.type === 'table_row' || parent.type === 'table_header_row') {
-    return { ...location, column: index }
+    return { ...nestedLocation, column: index }
   }
-  return location
+  return nestedLocation
 }
 
 const projectValue = (value, state, location = {}) => {
@@ -124,7 +151,8 @@ const projectValue = (value, state, location = {}) => {
     )).filter(Boolean)
     if (contract?.content) content = contract.content(content, {
       location: currentLocation,
-      placeholderCells: state.placeholderCells
+      placeholderCells: state.placeholderCells,
+      trailingLeadingSpaceEmptyParagraph: state.trailingLeadingSpaceEmptyParagraph
     })
     if (content.length) projected.content = content
   }
@@ -137,7 +165,11 @@ const projectWithPlaceholderContext = (node, placeholderContext = null) => {
   const placeholderCells = new Set((placeholderContext?.emptyTableCells || []).map(
     ({ table, row, column }) => `${table}:${row}:${column}`
   ))
-  return projectValue(value, { nextTable: 0, placeholderCells })
+  return projectValue(value, {
+    nextTable: 0,
+    placeholderCells,
+    trailingLeadingSpaceEmptyParagraph: placeholderContext?.trailingLeadingSpaceEmptyParagraph === true
+  })
 }
 
 export function projectDurableSemantics(node) {

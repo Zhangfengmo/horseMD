@@ -8,6 +8,7 @@ import {
   adaptCanonicalRegionToSource,
   canonicalFreshTextToSource,
   canonicalTextToSource,
+  commonChange,
   lineAt,
   lineIndexAt,
   lineEndingNear,
@@ -341,7 +342,21 @@ export const preserveDivergedBlockTextChange = ({
   }
   if (first < 0 || !matched) return null
 
-  const replacement = unescapeCanonicalBlock(nextText)
+  // Preserve authored spelling only for the unchanged boundaries of the
+  // block. The changed canonical segment must retain any serializer spelling
+  // required for reparsing (notably a terminal `&#x20;`); unescaping the whole
+  // next block turns that visible space into disposable Markdown whitespace.
+  const change = commonChange(previousText, nextText)
+  const plainPrefix = unescapeCanonicalBlock(previousText.slice(0, change.start))
+  const plainSuffix = unescapeCanonicalBlock(previousText.slice(change.previousEnd))
+  const boundariesMatch = matched.startsWith(plainPrefix) &&
+    matched.endsWith(plainSuffix) &&
+    plainPrefix.length + plainSuffix.length <= matched.length
+  const replacement = boundariesMatch
+    ? matched.slice(0, plainPrefix.length) +
+      nextText.slice(change.start, change.nextEnd) +
+      matched.slice(matched.length - plainSuffix.length)
+    : nextText
   if (!replacement) return null
   // A Crepe-only empty-paragraph `<br />` placeholder must never enter
   // authored source through this fallback; those edits belong to the
@@ -369,6 +384,18 @@ export const preserveDivergedBlockTextChange = ({
 // the authored visible stream (unique occurrence required) and delete the
 // mapped raw range. The deleted raw text must match the canonical deletion
 // after list markers are stripped; anything else stays fail-closed.
+const uniqueSuffixBoundary = ({ canonicalVisible, sourceVisible, boundary, maxLength = 24 }) => {
+  const available = Math.min(maxLength, Math.max(0, boundary))
+  const minimum = Math.min(4, available)
+  for (let length = available; length >= minimum; length -= 1) {
+    const context = canonicalVisible.slice(boundary - length, boundary)
+    const first = sourceVisible.indexOf(context)
+    if (first < 0 || sourceVisible.indexOf(context, first + 1) >= 0) continue
+    return first + context.length
+  }
+  return null
+}
+
 export const preserveDivergedVisibleDelete = ({
   source,
   previous,
@@ -392,13 +419,17 @@ export const preserveDivergedVisibleDelete = ({
   if (!delVis) return null
 
   const CTX = 24
-  const ctxBefore = prevVis.slice(Math.max(0, vStart - CTX), vStart)
-  if (!ctxBefore) return null
-  const anchorBefore = srcVis.indexOf(ctxBefore)
-  if (anchorBefore < 0) return null
-  if (srcVis.indexOf(ctxBefore, anchorBefore + 1) >= 0) return null
-
-  const deleteStartVis = anchorBefore + ctxBefore.length
+  // Prefer the longest bounded suffix, but shrink it when an unrelated
+  // representation divergence lies inside the 24-character window. A short
+  // candidate is accepted only when it is unique; the deleted raw range is
+  // still independently checked against the canonical deletion below.
+  const deleteStartVis = uniqueSuffixBoundary({
+    canonicalVisible: prevVis,
+    sourceVisible: srcVis,
+    boundary: vStart,
+    maxLength: CTX
+  })
+  if (!Number.isFinite(deleteStartVis)) return null
   let deleteEndVis
   if (vEnd >= prevVis.length) {
     deleteEndVis = srcVis.length
@@ -429,6 +460,17 @@ export const preserveDivergedVisibleDelete = ({
     .join('\n')
   const deletedRawVis = sourceVisibleIndex(stripMarkers(source.slice(rawStart, rawEnd))).text
   if (deletedRawVis !== delVis) return null
+
+  // Visible offsets cannot own source-only blocks. An unused reference
+  // definition, HTML comment, thematic break, or similar zero-visible row can
+  // sit between the two anchors without appearing in `delVis`; deleting the
+  // raw span would then silently discard bytes the user never selected and
+  // the PM verifier cannot observe. Such spans require a block/source owner,
+  // so this visible-only fallback must refuse them.
+  const containsSourceOnlyRow = source.slice(rawStart, rawEnd)
+    .split(/\r\n|\r|\n/)
+    .some((line) => line.trim() && !sourceVisibleIndex(line).text)
+  if (containsSourceOnlyRow) return null
 
   return {
     markdown: source.slice(0, rawStart) + source.slice(rawEnd),

@@ -210,7 +210,12 @@ async function runCell(file, op, marker) {
       const recovered = await waitFor(() => visibleSource(e2), 'recovery source missing', 30).catch(() => null)
       app.setDialogResponse(false)
       if (recovered && !recovered.includes(marker)) {
-        warnings.push({ file, op, symptom: 'fail-closed-recovered', detail: { gate: gate.slice(0, 1) } })
+        warnings.push({
+          file,
+          op,
+          symptom: 'fail-closed-recovered',
+          detail: { gate: gate.slice(0, 1), fullTriple, log }
+        })
         return
       }
       failures.push({ file, op, symptom: 'source-locked-after-delete', detail: { gate, fullTriple, log, pause } })
@@ -270,6 +275,7 @@ async function main() {
     console.error('FAMILY WARNINGS (fail-closed with successful recovery):')
     for (const warning of warnings) {
       console.error(`  ${warning.symptom}: ${warning.op}@${warning.file.split('/').at(-1)}`)
+      if (warning.detail) console.error('    detail:', JSON.stringify(warning.detail).slice(0, 2000))
     }
   }
   if (failures.length) {

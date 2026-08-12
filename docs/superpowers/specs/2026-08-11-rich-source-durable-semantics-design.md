@@ -194,6 +194,16 @@ not become a failure type. Bounded retry applies only to `pending`; retrying a
 deterministic mismatch is prohibited. Recovery confirmation is shown only for
 the final three real failures.
 
+Strict rebuild and recovery copy belong to different safety domains. Rebuild
+is a proposal to re-enter the verified source/save state, so it must pass the
+same parser and durable-semantic acceptance rule as any other commit. A
+recovery copy never overwrites the original file and never advances the
+verified baseline; it must therefore remain available even when every strict
+candidate is rejected. It returns the current live document's best-effort
+canonical Markdown after stripping editor-only standalone `<br>` placeholders.
+Sending that recovery output back through the failed commit predicate would
+collapse the only escape path into the same deterministic deadlock.
+
 ## Data flow
 
 ```text
@@ -238,16 +248,18 @@ Before production changes, add failing tests that prove the current defects:
    after the first edit.
 3. In a legal table cell, press Enter and type `X`; source/save/reopen retain
    the authored `<br>` and gate diagnostics remain empty.
-4. Edit a table using one- and two-dash delimiter cells accepted by the app
+4. Repeat with a sole and a terminal cell hard break; canonical serialization,
+   source mode, save, and cold reopen must retain the final `<br>` token.
+5. Edit a table using one- and two-dash delimiter cells accepted by the app
    parser; save and reopen without recovery.
-5. Edit a cell containing an escaped pipe and a hard break; only the intended
+6. Edit a cell containing an escaped pipe and a hard break; only the intended
    cell range changes.
-6. Repeat the user's original `test.md` table edit on an isolated copy and
+7. Repeat the user's original `test.md` table edit on an isolated copy and
    verify a byte-local disk diff.
-7. Preserve the ordered-list Backspace/rejoin/Enter regression, code fences in
+8. Preserve the ordered-list Backspace/rejoin/Enter regression, code fences in
    multiple languages, scratch literals, large documents, source switching,
    forced save, export, and cold reopen.
-8. Run desktop and mobile builds because the renderer and parser contract are
+9. Run desktop and mobile builds because the renderer and parser contract are
    shared.
 
 All interactive tests use the repository's background Electron harness and
@@ -260,9 +272,13 @@ candidate source range, and first durable projection difference without
 logging unrelated document content. Release behavior keeps the original file
 safe and offers a recovery copy only for a proven unresolved conversion.
 
-The global gate must not be disabled as the final fix. A temporary rollback is
-acceptable only as an explicitly requested emergency release because it would
-restore silent mapper-loss risks.
+The global gate must not be disabled as the final fix. The safe emergency
+rollback is a known-good application commit/release, or a source-only editing
+fallback that does not claim rich/source equivalence. A runtime switch back to
+the old independent verifier is not a safe rollback because it restores silent
+mapper-loss risks. Such a feature flag is release-governance work, not evidence
+for this reproduced defect, and must include an owner, expiry, telemetry, and a
+tested removal path before it can be introduced.
 
 ## Non-goals
 

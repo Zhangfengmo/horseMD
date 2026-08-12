@@ -7,6 +7,7 @@ const repoRoot = process.cwd()
 const fixture = (...parts) => path.join(repoRoot, 'scripts', 'fixtures', ...parts)
 const realLargeDoc = '/Users/yangtingyi/vibe_everything/置身钉内/MinerU_markdown_置身钉内_14.34.50_2064164636132720640.md'
 const realComputerDoc = '/Users/yangtingyi/vibe_everything/电脑档案.md'
+const realRichSourceRepro = process.env.HORSEMD_REPRO_FILE || ''
 
 async function exists(file) {
   try {
@@ -128,6 +129,30 @@ const standalone = [
     name: 'Diverged Markdown: paragraph and nested-list edits save directly without normalization',
     script: 'scripts/test-diverged-ordinary-save-ui.mjs'
   },
+  {
+    name: 'Diverged Markdown: deletion keeps punctuation and reparsable trailing space',
+    script: 'scripts/test-diverged-delete-source-ui.mjs'
+  },
+  {
+    name: 'Diverged nested ordered list: Enter, save, and cold reopen retain structure',
+    script: 'scripts/test-nested-number-list-source-ui.mjs'
+  },
+  {
+    name: 'List item literal markers: necessary escapes survive save and cold reopen',
+    script: 'scripts/test-list-item-literal-marker-source-ui.mjs'
+  },
+  ...[
+    ['cell', 'single ragged cell edit', '10341'],
+    ['consecutive', 'consecutive ragged edits', '10342'],
+    ['hardbreak', 'table-cell hardbreak', '10343'],
+    ['terminal-hardbreak', 'terminal table-cell hardbreak', '10346'],
+    ['dashes', 'dash-heavy table cell', '10344'],
+    ['escaped-pipe', 'escaped-pipe table cell', '10345']
+].map(([fixtureName, label, port]) => ({
+    name: `Verified table source: ${label}`,
+    script: 'scripts/test-ragged-table-save-ui.mjs',
+    env: { RAGGED_CASE: fixtureName, CDP_PORT: port }
+  })),
   {
     name: 'Issue 93: inline code editing boundaries and literal backticks',
     script: 'scripts/test-inline-code-ui.mjs'
@@ -278,13 +303,27 @@ if (await exists(realComputerDoc)) {
   console.warn(`[ui-regression] skip real computer document: ${realComputerDoc}`)
 }
 
+if (realRichSourceRepro && await exists(realRichSourceRepro)) {
+  standalone.push({
+    name: 'Verified table source: isolated copy of the user reproduction',
+    script: 'scripts/test-ragged-table-save-ui.mjs',
+    env: {
+      RAGGED_CASE: 'external-copy',
+      CDP_PORT: '10347',
+      HORSEMD_REPRO_FILE: realRichSourceRepro
+    }
+  })
+} else {
+  console.warn('[ui-regression] skip external rich/source reproduction; set HORSEMD_REPRO_FILE to opt in')
+}
+
 for (const session of sessions) {
   await runSession(session)
 }
 
 for (const item of standalone) {
   console.log(`\n[ui-regression] ${item.name}`)
-  await runNode(item.script)
+  await runNode(item.script, item.args || [], item.env || {})
 }
 
 console.log(`\nPASS UI regression: ${sessions.length} sessions + ${standalone.length} standalone`)

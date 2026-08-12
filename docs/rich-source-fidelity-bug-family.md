@@ -2,7 +2,7 @@
 
 > 状态：持续维护（Living Document）
 >
-> 当前基线：HorseMD 0.13.47 自动化矩阵通过，但安装包人工验收仍复现富文本/源码分叉；RS-41 为 P0 未解决，2026-08-11
+> 当前候选：HorseMD 0.13.50 已完成 verified-commit、parser-backed table ownership 与独立 recovery 出口的自动化复核；0.13.47 的 RS-41 是历史人工否决与当前发布门禁，0.13.50 仍须安装包长会话人工验收，2026-08-12
 >
 > 适用范围：富文本编辑、源码模式、模式切换、保存/重开、列表、空段落、光标映射和 Markdown 原文保真。
 
@@ -103,7 +103,7 @@ HorseMD 同时维护两种表示：
 | RS-38 | CRLF / 无末尾换行的列表边界损坏 | CRLF 续写出现 `\r文字\n`；无 final-EOL 文件退出列表后新建列表会粘回上一列表 | 行区间把 CR 当正文；terminal newline growth 固定为 1，无法表示“终止行 + 独立块”。现在在 CR 前插入并使用局部 EOL；0-EOL 退出需要 2 个换行，1-EOL 只增长 1 个 | 已覆盖：纯函数字节级 CRLF、0/1 final-EOL 链式回归，transaction CRLF/BOM+CRLF UI，多轮混合 EOL fixture |
 | RS-39 | 冷重开后在中间空段输入列表，富文本有内容但源码仍停在列表前 | 在正文与后续代码块之间的空段输入正文、有序列表两项、退出列表再输入正文；富文本完整，切源码缺列表和尾文，继续保存会形成双快照分叉 | 中间空段 mapper 一律拒绝 list syntax，而中间位置的 input intent 没有 raw tail slot，两个专用路径都不拥有该事务。现在仅在前后锚、空槽和语法边界全部证明时原子写回“列表 + 后续正文”，完成后消费 intent；CRLF 从 `\r` 前替换完整 EOL | 已覆盖：纯函数 LF/CRLF（含 lone-CR 禁止断言）；`test:family-multicycle-ui` 第四轮 + 第五次冷打开；默认/primary 与真实 `123321.md` 临时副本 |
 | RS-40 | `/code` 创建代码块后继续编辑，源码与富文本再次分叉 | 文档末尾输入 `/code` 选择代码块，立即编辑代码、代码块后正文和前文列表；首次切源码即锁定，或源码缺 fence/后续文字 | slash code 是“删除临时 `/code` + paragraph→code_block”两条命令。旧 mapper 把 `/code`→空 fence 误判为只删除尾行，源码没有代码块槽。现在命令前捕获精确 authored 行，命令后只序列化当前 code_block，并验证完整 fence 后原子替换；重复 query 无精确映射时拒绝，CRLF 原样保留 | 已覆盖：`test:tail-fence-ui` 的 40ms `/code`、代码/尾文/前文连续编辑、源码、保存和冷重开；纯函数 CRLF、重复 query、歧义拒绝；literal/input-rule fence 变体 |
-| RS-41 | 真实长会话在 RS-40 后仍再次分叉 | 0.13.47 安装包中，真实长文档末尾建立代码块并继续多轮编辑后，富文本有新增内容但源码缺失/结构不同；保存可能暂停，也可能成功但磁盘仍与富文本不一致 | **根因尚未确认。** RS-40 只拥有 `/code` 创建瞬间；后续 transaction 仍可能在 live doc、作者源码、canonical、`tabsRef`、textarea live value 与保存边界之间失去同一所有权。必须捕获第一次分叉，不得再按最终症状补字符串 mapper | **P0 未解决，人工验收失败。** 自动化绿色不能关闭；专项见 `rich-source-divergence-incident-0.13.47.md` |
+| RS-41 | 真实长会话在 RS-40 后仍再次分叉 | 0.13.47 安装包中，真实长文档末尾建立代码块并继续多轮编辑后，富文本有新增内容但源码缺失/结构不同；保存可能暂停，也可能成功但磁盘仍与富文本不一致 | 0.13.47 只拥有 `/code` 创建瞬间且没有统一 durability authority。0.13.50 已改为 live revision + 单一 verified commit、应用 parser 与 source ownership；不能再按最终症状补字符串 mapper | **历史 P0，当前发布门禁待验。** 0.13.50 自动化不能替代新安装包长会话；专项见 `rich-source-divergence-incident-0.13.47.md` |
 
 ## 5. 代码归属
 
@@ -199,7 +199,7 @@ npm run test:task-list-persistence-ui
 - 删除列表 marker、删除列表项文字、删除整项，再继续新增有序/无序列表。
 - 在第一层转换列表类型，二三级不变；在第二层转换，一级和三级不变。
 - 覆盖 `- 1. 文本`、空列表项、任务列表勾选、相邻不同 marker 列表。
-- 在有序和无序列表项正文逐字输入 `1. 测试`、`1) 测试`、`- 测试`、`+ 测试`、`* 测试`；源码不得增加反斜杠，后续未编辑列表的 marker 和空行不得变化。自动化：`npm run test:list-item-literal-marker-source-ui`。
+- 在有序和无序列表项正文逐字输入 `1. 测试`、`1) 测试`、`- 测试`、`+ 测试`、`* 测试`；源码只能增加阻止字面正文被重解析为嵌套列表所必需的反斜杠，可见文本和层级必须不变，后续未编辑列表的 marker 和空行不得变化。自动化：`npm run test:list-item-literal-marker-source-ui`。
 - 每一步都立即切源码，并在最后保存重开。
 - 在同一已有文件中快速执行“改标题 → 删除中间列表文字 → 修改后文列表”，不等待回调立即切源码；旧文字必须消失，新文字必须齐全。自动化：`npm run test:mixed-rich-source-transaction-ui`。
 

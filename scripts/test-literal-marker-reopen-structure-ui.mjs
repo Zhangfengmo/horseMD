@@ -10,7 +10,7 @@ import { sleep } from './lib/cdp.mjs'
 const root = `/tmp/horsemd-literal-reopen-${process.pid}`
 const file = join(root, 'literal.md')
 const port = Number(process.env.CDP_PORT || 9831)
-const fixture = '- - 测试\n'
+const fixture = '- \\- 测试\n'
 
 async function waitFor(check, message, attempts = 100) {
   for (let index = 0; index < attempts; index += 1) {
@@ -39,7 +39,8 @@ async function main() {
     })()`)
     console.log('reopen structure:', JSON.stringify(structure))
     assert.equal(structure.nestedLists, 0, `escaped-literal must reopen as one level (got nested ${structure.nestedLists})`)
-    console.log('PASS literal marker reopen structure: unescaped source stays a single-level list')
+    assert.ok(structure.bodyText.includes('- 测试'), 'escaped literal marker must stay visible as ordinary text')
+    console.log('PASS literal marker reopen structure: necessary escape reopens as a single-level list')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

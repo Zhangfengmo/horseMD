@@ -62,7 +62,7 @@ export {
   restoreTypedBulletMarker
 } from './lib/markdown-preservation/lists.js'
 
-export const generatedScratchMarkdown = (canonical) => {
+export const generatedScratchMarkdown = (canonical, parseTables) => {
   // A brand-new document is authored entirely by rich typing; its canonical is
   // the only structural source. Serializer punctuation escapes outside proven
   // code/HTML literals therefore have no author-owned spelling to preserve:
@@ -75,7 +75,7 @@ export const generatedScratchMarkdown = (canonical) => {
   return canonicalFreshTextToSource(
     compactGeneratedListSpacing(
       withoutStandaloneEmptyBlockLines(
-        normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical))
+        normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical, parseTables))
       )
     )
   ).replace(/\r?\n+$/, '\n')
@@ -110,14 +110,19 @@ export function preserveRichMarkdownSource(source, previousCanonical, nextCanoni
       sourceMarkdown,
       result.trailingNewlineGrowth
     )
-    if (result.preserved !== false && !result.durableContext) {
+    if (result.preserved !== false) {
       const durableContext = tableDurableContext({
         authored: sourceMarkdown,
         previousCanonical,
         nextCanonical,
         parseTables: options.parseTables
       })
-      if (durableContext) result.durableContext = durableContext
+      if (durableContext || result.durableContext) {
+        result.durableContext = {
+          ...(result.durableContext || {}),
+          ...(durableContext || {})
+        }
+      }
     }
   }
   // Test-only opt-in diagnostics. Production never creates this array; CDP
@@ -364,6 +369,19 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     replacementVisible
   })
   if (appendedParagraph) return appendedParagraph
+  // Filling an existing empty list item is more specific than a generic tail
+  // append. It owns both the authored marker and the canonical row context,
+  // so it can preserve structurally required literal-marker escapes that a
+  // fragment-only tail mapper would otherwise strip.
+  const emptyListItemTextPreserved = preserveEmptyListItemTextChange({
+    source: sourceMarkdown,
+    previous,
+    next,
+    start,
+    previousEnd,
+    nextEnd
+  })
+  if (emptyListItemTextPreserved) return emptyListItemTextPreserved
   // A real block appended at the document tail must keep its raw paragraph
   // boundary before generic list reconciliation. This is equally true when
   // source/canonical visible streams still match: a trailing empty paragraph
@@ -397,15 +415,6 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     requireMultiple: true
   })
   if (earlyMultiListPreserved) return earlyMultiListPreserved
-  const emptyListItemTextPreserved = preserveEmptyListItemTextChange({
-    source: sourceMarkdown,
-    previous,
-    next,
-    start,
-    previousEnd,
-    nextEnd
-  })
-  if (emptyListItemTextPreserved) return emptyListItemTextPreserved
   if (sourceVisible.text !== previousVisible.text) {
     // remark parses `- 1. 甲乙` as a nested ordered list, so the canonical
     // visible stream drops the `1. ` item text while the authored source

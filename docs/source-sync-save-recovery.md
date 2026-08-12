@@ -1,6 +1,6 @@
 # 保存暂停、事务稳定与恢复副本合同
 
-> 状态：0.13.34 已实现数据保护出口；0.13.47 现场再次证明它**不是根治方案**
+> 状态：0.13.34 已实现数据保护出口；0.13.50 修复恢复出口与严格重建共用谓词的死锁；它仍**不是保真根治方案**
 >
 > 家族编号：RS-34
 >
@@ -77,8 +77,30 @@ canonical 当作作者原文，也没有推进失败事务的 baseline。持续�
 4. 只有用户选择路径后才写恢复副本；
 5. 原标签仍保持未保存状态，原文件保持原始字节。
 
+“新路径”由代码强制，而不是只靠默认文件名提示。renderer 会拒绝规范化后等于原路径
+的目标；桌面主进程还会比较 realpath 及文件 `dev + ino`，因此符号链接、硬链接和
+大小写别名也不能把恢复内容写回原文件。
+
 恢复副本的目标是“不让可见编辑只活在 renderer 内存中”，不是假装完成了原文
 保真合并。它可能采用规范化 Markdown 写法，必须与原文件分开。
+
+### 4.3 0.13.50：严格重建与灾备导出分离
+
+此前 `rebuildMarkdownFromRich()` 和 `getRecoveryMarkdown()` 对同一 live revision、
+同一组 canonical candidates 重复调用同一个 verified source predicate。这意味着严格
+重建一旦返回 `null`，恢复副本必然再次返回 `null`，用户最终只剩“保存已暂停”。
+
+当前合同明确分成两个安全域：
+
+- **重建源码**会改变后续保存基线，必须通过应用 parser 与 live ProseMirror 的耐久
+  语义比较；表格候选还必须携带同一应用 table parser 证明的 empty-cell provenance，
+  无法证明时不得用保留 `<br>` 的 fallback 猜测；失败时不得 reset、发布或覆盖原文件。
+- **恢复副本**只导出 live serializer 的 best-effort canonical Markdown，并移除内部
+  standalone `<br />`；它不再次调用 source commit verifier，不清除未保存状态，且
+  只能通过用户选择的新路径写出 `.horsemd-recovered.md`。
+
+恢复副本仍可能规范化 marker、转义和空行，不能被称为“已验证作者源码”；其安全性
+来自独立文件边界，而不是把失败的语义验收改成成功。
 
 ## 5. 根治边界
 
@@ -113,4 +135,6 @@ npm run test:rich-source-chaos-ui
 ```
 
 恢复合同单测必须证明：瞬时 `null` 会重试；持续 `null` 仍 fail closed；取消另存时
-不写文件；确认另存时只写用户选择的恢复路径，绝不接收或覆盖原文件路径。
+不写文件；确认另存时只写用户选择的恢复路径，绝不接收或覆盖原文件路径（含符号链接
+和硬链接别名）。UI 还必须覆盖 strict rebuild 返回 `null` 后恢复副本仍可写出、原文件
+字节不变且标签保持 dirty。

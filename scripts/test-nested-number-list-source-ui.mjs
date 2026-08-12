@@ -78,6 +78,10 @@ async function main() {
   let app
   try {
     app = await openApp('edit', port)
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
 
     // Split the first item mid-text with Enter, then type.
     assert.equal(await caretAfter(app.evaluate, '甲', 0), true, 'could not place the caret after 甲')
@@ -88,15 +92,37 @@ async function main() {
 
     // The typed text must reach source with the authored spelling intact.
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode')
-    await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'source textarea did not appear')
+    await waitFor(async () => (
+      app.dialogs.length > 0 ||
+      await app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)`)
+    ), 'source mode produced neither a textarea nor a recovery dialog')
+    const sourceState = await app.evaluate(`(() => {
+      const source = [...document.querySelectorAll('textarea.source-editor')]
+        .find((node) => node.offsetParent)
+      return {
+        source: source?.value,
+        gate: (window.__hmGateLog || []).slice(-4).map((entry) => ({
+          origin: entry.origin,
+          reason: entry.reason,
+          candidate: entry.candidate,
+          canonical: entry.canonical
+        })),
+        preserve: (window.__hmPreserveLog || []).slice(-4)
+      }
+    })()`)
+    if (app.dialogs.length) sourceState.dialog = app.dialogs.at(-1)?.message
+    assert.ok(
+      typeof sourceState.source === 'string',
+      `source switch was rejected: ${JSON.stringify(sourceState)}`
+    )
     const raw = await visibleSource(app.evaluate)
     assert.ok(
       raw.includes('新'),
       `the typed text must survive the mode switch (got ${JSON.stringify(raw)})`
     )
     assert.ok(
-      raw.startsWith('- 1. 甲\n- 2. 新乙'),
-      `the Entered split must become its own authored row (got ${JSON.stringify(raw)})`
+      raw.startsWith('- 1. 甲\n  2. 新乙'),
+      `the Entered split must stay inside the original outer bullet (got ${JSON.stringify(raw)})`
     )
 
     // Back to rich, save, reopen: the edit must be durable.
@@ -106,9 +132,28 @@ async function main() {
     await app.evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => app.evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not complete')
     const saved = await readFile(file, 'utf8')
-    assert.equal(saved, '- 1. 甲\n- 2. 新乙\n- 丙丁\n', 'the typed text must persist on disk')
+    const expected = '- 1. 甲\n  2. 新乙\n- 丙丁\n'
+    assert.equal(saved, expected, 'the typed text and list nesting must persist on disk')
 
-    console.log('PASS nested-number list source sync: edits inside `- 1. …` rows survive switch, save, and reopen')
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await openApp('reopen', port + 1)
+    const reopenedStructure = await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      return {
+        nestedItems: editor?.querySelectorAll('li li').length || 0,
+        text: editor?.textContent || ''
+      }
+    })()`)
+    assert.equal(reopenedStructure.nestedItems, 2, 'cold reopen must render both ordered items inside the outer bullet')
+    assert.ok(reopenedStructure.text.includes('甲') && reopenedStructure.text.includes('新乙'), 'cold reopen lost nested list text')
+    assert.equal(await toggleSource(app.evaluate), true, 'cold-reopened document could not switch to source mode')
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`),
+      'cold-reopened source textarea did not appear'
+    )
+    assert.equal(await visibleSource(app.evaluate), expected, 'cold reopen must retain the verified nested structure')
+
+    console.log('PASS nested-number list source sync: edits inside `- 1. …` rows survive switch, save, and cold reopen')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

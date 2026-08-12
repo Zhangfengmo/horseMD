@@ -1029,9 +1029,21 @@ const applyStableListRowTextDelta = ({ sourceRow, previousRow, nextRow }) => {
   const { start, previousEnd, nextEnd } = commonChange(previousView.text, nextView.text)
   const rawStart = sourceView.boundaries[start]
   const rawEnd = sourceView.boundaries[previousEnd]
-  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return null
+  const nextRawStart = nextView.boundaries[start]
+  const nextRawEnd = nextView.boundaries[nextEnd]
+  if (
+    !Number.isFinite(rawStart) ||
+    !Number.isFinite(rawEnd) ||
+    !Number.isFinite(nextRawStart) ||
+    !Number.isFinite(nextRawEnd)
+  ) return null
+  // Use semantic boundaries to isolate the user's row-local delta, but carry
+  // its canonical raw spelling into the candidate. The shared source adapter
+  // removes only escapes whose reparse meaning is unchanged; marker-shaped
+  // text at the start of a list item therefore keeps the backslash required
+  // to remain text instead of becoming a nested list.
   const content = sourceContent.slice(0, rawStart) +
-    nextView.text.slice(start, nextEnd) +
+    nextContent.slice(nextRawStart, nextRawEnd) +
     sourceContent.slice(rawEnd)
   return sourceRow.text.slice(0, sourceRow.marker.prefixEnd) + content
 }
@@ -1073,8 +1085,7 @@ const preserveOrdinalBatchedListRows = ({ source, previous, next, requireMultipl
     replacements.push({ ...sourceRow, replacement })
   }
   if (!replacements.length || (requireMultiple && replacements.length < 2)) return null
-  const filledTrailingEmptyItem = /(?:^|\r?\n)[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*\r?\n?$/.test(source) &&
-    /(?:\r?\n){2,}$/.test(next)
+  const filledTrailingEmptyItem = fillsTrailingEmptyListItem({ source, next })
   let markdown = replacements
     .sort((left, right) => right.start - left.start)
     .reduce(
@@ -1597,6 +1608,11 @@ export const preserveListBlockChange = ({ source, previous, next, start, previou
 // list markers are syntax, not visible text; it would otherwise insert the text
 // at the preceding paragraph's end. Match the list by its source-order ordinal
 // and replace only that list tree using the author's marker style.
+function fillsTrailingEmptyListItem({ source, next }) {
+  return /(?:^|\r?\n)[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*\r?\n?$/.test(source) &&
+    /(?:\r?\n){2,}$/.test(next)
+}
+
 export const preserveEmptyListItemTextChange = ({
   source,
   previous,
@@ -1627,12 +1643,16 @@ export const preserveEmptyListItemTextChange = ({
     previous.slice(previousList.start, previousList.end),
     next.slice(nextList.start, nextList.end)
   )
+  const filledTrailingEmptyItem = fillsTrailingEmptyListItem({ source, next })
+  let markdown = source.slice(0, sourceList.start) +
+    adaptCanonicalRegionToSource(replacement, source, sourceList) +
+    source.slice(sourceList.end)
+  if (filledTrailingEmptyItem) markdown += lineEndingNear(source, source.length)
   return {
-    markdown: source.slice(0, sourceList.start) +
-      adaptCanonicalRegionToSource(replacement, source, sourceList) +
-      source.slice(sourceList.end),
+    markdown,
     preserved: true,
-    reason: 'empty-list-item-filled'
+    reason: 'empty-list-item-filled',
+    trailingNewlineGrowth: filledTrailingEmptyItem ? 1 : 0
   }
 }
 
@@ -1896,7 +1916,7 @@ export const preserveDivergedNestedListChange = ({
       const prefix = !nextItem.token
         ? ' '.repeat(Math.max(1, Number(nextItem.indent) || 2))
         : /^\d/.test(nextItem.token)
-          ? `${authoredBullet} ${nextItem.token} `
+          ? `${' '.repeat(Math.max(0, Number(nextItem.indent) || 0))}${nextItem.token} `
           : `${' '.repeat(Math.max(0, Number(nextItem.indent) || 0))}${authoredBullet} `
       const inserted = leading + prefix + canonicalTextToSource(nextItem.text) + eol
       output = output.slice(0, insertAt) + inserted + output.slice(insertAt)

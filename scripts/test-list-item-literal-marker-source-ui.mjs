@@ -27,17 +27,17 @@ const initial = [
 ].join('\n')
 
 const expected = [
-  '1. 2. 测试',
-  '2. - 测试',
-  '3. + 测试',
-  '4. * 测试',
-  '5. 2) 测试',
+  '1. 2\\. 测试',
+  '2. \\- 测试',
+  '3. \\+ 测试',
+  '4. \\* 测试',
+  '5. 2\\) 测试',
   '',
-  '- 1. 测试',
-  '- - 测试',
-  '- + 测试',
-  '- * 测试',
-  '- 1) 测试',
+  '- 1\\. 测试',
+  '- \\- 测试',
+  '- \\+ 测试',
+  '- \\* 测试',
+  '- 1\\) 测试',
   ''
 ].join('\n')
 
@@ -167,10 +167,10 @@ async function assertSource(evaluate, stage) {
     console.error(`--- ${stage} actual ---\n${source}--- expected ---\n${expected}`)
   }
   assert.equal(source, expected, `${stage}: literal marker text or outer list formatting drifted`)
-  assert.doesNotMatch(
+  assert.match(
     source,
     /(?:\\[-+*]|\d+\\[.)])[ \t]/,
-    `${stage}: serializer list-marker backslash leaked into source`
+    `${stage}: structurally required literal-marker escapes disappeared`
   )
 }
 
@@ -182,6 +182,10 @@ async function main() {
   let app
   try {
     app = await openApp('edit', port)
+    await app.evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
     const cases = [
       ['有序数字点占位', '2.'],
       ['有序短横占位', '-'],
@@ -200,6 +204,25 @@ async function main() {
 
     // Switch immediately after the final character to cover the pending flush.
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode')
+    await waitFor(
+      async () => app.dialogs.length > 0 || typeof await visibleSource(app.evaluate) === 'string',
+      'first source switch produced neither a textarea nor a recovery dialog'
+    )
+    if (app.dialogs.length) {
+      const diagnostics = await app.evaluate(`({
+        gate: (window.__hmGateLog || []).slice(-6).map((entry) => ({
+          origin: entry.origin,
+          reason: entry.reason,
+          candidate: entry.candidate,
+          canonical: entry.canonical
+        })),
+        preserve: (window.__hmPreserveLog || []).slice(-6)
+      })`)
+      throw new Error(`first source switch was rejected: ${JSON.stringify({
+        ...diagnostics,
+        dialog: app.dialogs.at(-1)?.message
+      })}`)
+    }
     await assertSource(app.evaluate, 'first source switch')
     assert.equal(await toggleSource(app.evaluate), true, 'could not return to rich mode')
     assert.equal(await toggleSource(app.evaluate), true, 'could not inspect source twice')
@@ -216,7 +239,7 @@ async function main() {
     assert.equal(await toggleSource(app.evaluate), true, 'could not inspect reopened source')
     await assertSource(app.evaluate, 'full reopen')
 
-    console.log('PASS list-item literal markers: ordered and bullet item bodies keep visible `-`, `+`, `*`, `1.`, and `1)` text without serializer backslashes')
+    console.log('PASS list-item literal markers: visible marker text retains only the escapes required for save and cold-reopen structure')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

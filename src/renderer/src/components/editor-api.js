@@ -19,7 +19,11 @@ import {
 import { strikethroughSchema } from '@milkdown/kit/preset/gfm'
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
 import { settleEditorMarkdown } from '../lib/editor-flush-settle.js'
-import { canonicalSourceFallback } from './editor-source-verification.js'
+import {
+  bestEffortRecoveryMarkdown,
+  canonicalSourceFallback,
+  rebuildSourceCandidates
+} from './editor-source-verification.js'
 import { canReuseCommittedVerifiedSource } from './editor-verified-state.js'
 
 export function createEditorApi({
@@ -32,6 +36,7 @@ export function createEditorApi({
   hasPendingRichFlush,
   generatedScratchRef,
   getGeneratedScratchMarkdown,
+  getTableDurableContext,
   sourceCommitter,
   preserveSource,
   prepareMarkdown,
@@ -306,15 +311,26 @@ export function createEditorApi({
     if (isDestroyed?.() || !crepeRef.current) return null
     try {
       const canonical = canonicalForSource(serializeCurrentDocument())
-      const rebuilt = generatedScratchMarkdown(canonical)
+      const rebuilt = typeof getGeneratedScratchMarkdown === 'function'
+        ? getGeneratedScratchMarkdown(canonical)
+        : generatedScratchMarkdown(canonical)
       // The rebuilt source must satisfy the same acceptance invariant as any
       // commit. The fallback keeps canonical escapes (un-escaping is what can
       // change semantics) but must still strip Crepe's internal empty-block
       // `<br />` placeholders — raw canonical bytes would write them into the
       // user's file, violating the source boundary invariant.
       const expectedDoc = viewRef.current?.state.doc
+      const durableContext = getTableDurableContext?.({
+        authored: lastMarkdownRef.current,
+        previousCanonical: canonicalMarkdownRef.current,
+        nextCanonical: canonical
+      }) || null
       const selected = sourceCommitter.select({
-        candidates: [rebuilt, canonicalSourceFallback(canonical)],
+        candidates: rebuildSourceCandidates({
+          canonical,
+          rebuilt,
+          durableContext
+        }),
         expectedDoc
       })
       if (!selected.ok) return null
@@ -351,11 +367,12 @@ export function createEditorApi({
       // source remains untouched and the user's visible edits are not trapped
       // solely in renderer memory.
       const canonical = canonicalForSource(serializeCurrentDocument())
-      const selected = sourceCommitter.select({
-        candidates: [generatedScratchMarkdown(canonical), canonicalSourceFallback(canonical)],
-        expectedDoc: viewRef.current?.state.doc
-      })
-      return selected.ok ? selected.markdown : null
+      // Recovery is not allowed to advance source baselines or overwrite the
+      // authored path. Once strict rebuild verification has failed, running
+      // the same candidates through the same predicate here is a guaranteed
+      // dead end. Export the best-effort canonical snapshot instead; callers
+      // enforce the separate-file boundary.
+      return bestEffortRecoveryMarkdown(canonical)
     } catch {
       return null
     }

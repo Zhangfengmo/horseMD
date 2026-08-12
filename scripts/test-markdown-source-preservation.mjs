@@ -194,9 +194,10 @@ assert.equal(
 )
 
 // The real-app canonical spelling escapes the literal `*` as `\*` and the
-// surviving trailing space as `&#x20;`. The fallback must unescape the
-// canonical block to locate the authored occurrence and spell the replacement
-// in the author's plain-Markdown form.
+// surviving trailing space as `&#x20;`. The fallback must use the unescaped
+// canonical block to locate the authored occurrence, retain the author's
+// literal `*`, and keep the entity where a raw trailing space would be lost on
+// reparse.
 const divergedEscapedDeleteSource = '# 测试\n\n前段。* **输入设备：** 内容\n\n第二段保留。\n'
 const divergedEscapedDeletePrevious = '# 测试\n\n前段。\\* **输入设备：** 内容\n\n第二段保留。\n'
 const divergedEscapedDeleteNext = '# 测试\n\n前段。\\*&#x20;\n\n第二段保留。\n'
@@ -212,8 +213,8 @@ assert.equal(
 )
 assert.equal(
   divergedEscapedDelete.markdown,
-  '# 测试\n\n前段。* \n\n第二段保留。\n',
-  'the deleted text must vanish while the authored literal `*` spelling survives (no `\\*`, no `&#x20;`)'
+  '# 测试\n\n前段。*&#x20;\n\n第二段保留。\n',
+  'the deleted text must vanish while literal punctuation and the durable trailing space both survive'
 )
 
 // A canonical-only empty-paragraph `<br />` placeholder must never reach
@@ -1576,6 +1577,17 @@ assert.equal(
   `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL}        abc\n`,
   'the first visible character after held spaces must append one intact paragraph using Typora-style source spelling'
 )
+const leadingSpacePartialDelete = preserveRichMarkdownSource(
+  `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL}    abc\n`,
+  '# test\n\nanchor\n\n&#x20;   abc\n',
+  '# test\n\nanchor\n\n \n'
+)
+assert.equal(leadingSpacePartialDelete.preserved, true)
+assert.equal(
+  leadingSpacePartialDelete.markdown,
+  `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL} \n`,
+  'deleting visible text and only part of its leading spaces must retain the remaining whitespace paragraph'
+)
 
 // A typed `~` is serialized as `\~` (GFM strikethrough guard). The authored
 // source must keep the literal tilde: single `~` is never a strikethrough, so
@@ -1639,6 +1651,22 @@ assert.equal(
   '```你好```\n',
   'same-line triple-backtick text typed in a scratch document must not expose serializer escapes'
 )
+const mathWithTableLookingLines = [
+  '$$',
+  '| H |',
+  '| - |',
+  '| <br /> |',
+  '$$',
+  ''
+].join('\n')
+assert.equal(
+  generatedScratchMarkdown(
+    mathWithTableLookingLines,
+    (markdown) => ({ view: { raw: markdown }, tables: [] })
+  ),
+  mathWithTableLookingLines,
+  'generated/rebuild source must use the configured parser and leave table-looking display math untouched'
+)
 const literalTripleBacktickNewDocument = preserveRichMarkdownSource(
   '',
   '',
@@ -1696,8 +1724,8 @@ const nestedListEnterSplit = preserveRichMarkdownSource(
 assert.equal(nestedListEnterSplit.preserved, true)
 assert.equal(
   nestedListEnterSplit.markdown,
-  '- 1. 甲\n- 2. 乙\n- 丙丁\n',
-  'an Enter split plus canonical-only terminal newline drift must commit atomically'
+  '- 1. 甲\n  2. 乙\n- 丙丁\n',
+  'an Enter split must keep the inserted ordered item inside its original outer bullet'
 )
 const nestedListSplit = preserveRichMarkdownSource(
   nestedListSource,
@@ -1788,8 +1816,8 @@ assert.equal(
 )
 assert.equal(
   nestedListZeroWidthAppend.markdown,
-  '- 1. 甲乙\n- 3. 戊\n- 丙丁\n',
-  'a nested append must become its own authored top-level row'
+  '- 1. 甲乙\n  3. 戊\n- 丙丁\n',
+  'a nested append must remain an indented sibling in the authored outer row'
 )
 
 // Enter at the end of the flat row creates an EMPTY canonical item (`2. `),
@@ -1807,8 +1835,8 @@ assert.equal(
 )
 assert.equal(
   nestedListEmptyItemFilled.markdown,
-  '- 1. 甲乙\n- 2. 后记\n- 丙丁\n',
-  'filling an Entered empty item must become its own authored top-level row'
+  '- 1. 甲乙\n  2. 后记\n- 丙丁\n',
+  'filling an Entered empty item must remain inside its authored outer row'
 )
 
 // Backspace at the start of a nested ordered item removes only that inner
@@ -1992,8 +2020,8 @@ const divergedConsecutiveInsertions = preserveRichMarkdownSource(
 )
 assert.equal(
   divergedConsecutiveInsertions.markdown,
-  '- 1. A\n- 2. X\n- 3. Y\n- B\n',
-  'multiple inserted nested siblings in one callback must retain their canonical order'
+  '- 1. A\n  2. X\n  3. Y\n- B\n',
+  'multiple inserted nested siblings must retain both canonical order and nesting'
 )
 
 const divergedOnlyRowLift = preserveRichMarkdownSource(
@@ -2124,6 +2152,111 @@ assert.equal(
   'the deleted rows must vanish while the authored marker spelling survives'
 )
 
+// The family matrix deletes an appended paragraph from a document whose
+// authored `- - literal` row becomes a nested canonical list. The divergence
+// can sit inside the old fixed 24-character anchor while the immediate suffix
+// before the deletion is still unique and identical. That local suffix plus
+// an exact deleted-text check is sufficient to map the tail without forcing
+// the user through recovery.
+const divergedLiteralTailSource = [
+  '# 测试',
+  '',
+  '字面序号 1\\. 保持字面。',
+  '',
+  '- - 嵌套字面',
+  '',
+  '尾段。',
+  '',
+  '家族验证123',
+  ''
+].join('\n')
+const divergedLiteralTailPrevious = [
+  '# 测试',
+  '',
+  '字面序号 1. 保持字面。',
+  '',
+  '* <br />',
+  '',
+  '  * 嵌套字面',
+  '',
+  '尾段。',
+  '',
+  '家族验证123',
+  ''
+].join('\n')
+const divergedLiteralTailDeleted = preserveRichMarkdownSource(
+  divergedLiteralTailSource,
+  divergedLiteralTailPrevious,
+  divergedLiteralTailPrevious.slice(0, divergedLiteralTailPrevious.indexOf('尾段。')) + '尾\n'
+)
+assert.equal(
+  divergedLiteralTailDeleted.reason,
+  'diverged-visible-delete',
+  'a unique local suffix must map a verified tail deletion across an earlier representation divergence'
+)
+assert.equal(
+  divergedLiteralTailDeleted.markdown,
+  divergedLiteralTailSource.slice(0, divergedLiteralTailSource.indexOf('尾段。')) + '尾\n',
+  'the tail deletion must preserve every unrelated authored byte and its final line ending'
+)
+
+const sourceOnlyDefinition = '[unused]: https://example.com'
+const divergedTailWithHiddenSource = preserveRichMarkdownSource(
+  [
+    '# Doc',
+    '',
+    '- - nested',
+    '',
+    'Unique anchor before.',
+    '',
+    'TARGET1',
+    '',
+    sourceOnlyDefinition,
+    '',
+    'TARGET2',
+    '',
+    'Tail',
+    ''
+  ].join('\n'),
+  [
+    '# Doc',
+    '',
+    '* <br />',
+    '',
+    '  * nested',
+    '',
+    'Unique anchor before.',
+    '',
+    'TARGET1',
+    '',
+    'TARGET2',
+    '',
+    'Tail',
+    ''
+  ].join('\n'),
+  [
+    '# Doc',
+    '',
+    '* <br />',
+    '',
+    '  * nested',
+    '',
+    'Unique anchor before.',
+    '',
+    'Tail',
+    ''
+  ].join('\n')
+)
+assert.equal(
+  divergedTailWithHiddenSource.preserved,
+  false,
+  'visible deletion fallback must not consume an unused source-only definition hidden from ProseMirror'
+)
+assert.ok(
+  divergedTailWithHiddenSource.markdown.includes(sourceOnlyDefinition),
+  'fail-closed deletion must retain the hidden source asset byte-for-byte'
+)
+
 // Clearing a quote's text first leaves an authored empty quote line (`>`).
 // Pressing Backspace again removes the blockquote node itself. Both source and
 // canonical have the same visible stream, so a visible-text mapper sees a
@@ -2238,8 +2371,8 @@ const typedLiteralNumberInOrderedItem = preserveRichMarkdownSource(
 )
 assert.equal(
   typedLiteralNumberInOrderedItem.markdown,
-  '1. 第一\n2. 第二\n3. 2. 测试\n',
-  'literal numbering typed inside an ordered item must not gain a serializer backslash'
+  '1. 第一\n2. 第二\n3. 2\\. 测试\n',
+  'literal numbering inside an ordered item must retain the escape required to prevent accidental nesting'
 )
 
 const mixedListLiteralNumberEdit = preserveRichMarkdownSource(
@@ -2249,8 +2382,8 @@ const mixedListLiteralNumberEdit = preserveRichMarkdownSource(
 )
 assert.equal(
   mixedListLiteralNumberEdit.markdown,
-  '1. 第一项\n2. 2. 测试\n\n- 普通项\n- 无序占位\n',
-  'editing one ordered row must not escape its literal number or normalize a later bullet list'
+  '1. 第一项\n2. 2\\. 测试\n\n- 普通项\n- 无序占位\n',
+  'editing one ordered row must retain literal-text semantics without normalizing a later bullet list'
 )
 
 const typedLiteralNumberInBulletItem = preserveRichMarkdownSource(
@@ -2260,8 +2393,8 @@ const typedLiteralNumberInBulletItem = preserveRichMarkdownSource(
 )
 assert.equal(
   typedLiteralNumberInBulletItem.markdown,
-  '- 第一\n- 1. 测试\n',
-  'literal numbering typed inside a bullet item must not gain a serializer backslash'
+  '- 第一\n- 1\\. 测试\n',
+  'literal numbering inside a bullet item must retain the escape required to prevent accidental nesting'
 )
 
 const authoredEscapedNumberStillPreserved = preserveRichMarkdownSource(
@@ -2322,29 +2455,29 @@ const literalListMarkersInsideItems = preserveRichMarkdownSource(
 assert.equal(
   literalListMarkersInsideItems.markdown,
   [
-    '1. - 测试',
-    '2. + 测试',
-    '3. * 测试',
-    '4. 2) 测试',
+    '1. \\- 测试',
+    '2. \\+ 测试',
+    '3. \\* 测试',
+    '4. 2\\) 测试',
     '',
-    '- - 测试',
-    '- + 测试',
-    '- * 测试',
-    '- 1) 测试',
+    '- \\- 测试',
+    '- \\+ 测试',
+    '- \\* 测试',
+    '- 1\\) 测试',
     ''
   ].join('\n'),
-  'all list-marker-shaped item text must lose only serializer-owned backslashes'
+  'all list-marker-shaped item text must retain only the escapes required for literal-text semantics'
 )
 
 const laterLiteralMarkerEdit = preserveRichMarkdownSource(
-  '- - 测试\n',
+  '- \\- 测试\n',
   '* \\- 测试\n',
   '* \\- 测试新增\n'
 )
 assert.equal(
   laterLiteralMarkerEdit.markdown,
-  '- - 测试新增\n',
-  'a later edit must not reintroduce the canonical backslash removed on the first edit'
+  '- \\- 测试新增\n',
+  'a later edit must preserve the structural escape established by the first verified edit'
 )
 
 const authoredEscapedMarkerStillPreserved = preserveRichMarkdownSource(
