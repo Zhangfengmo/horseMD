@@ -37,6 +37,7 @@ import {
   setTextareaSourceValue
 } from './source-text-fidelity.js'
 import { isTabDirty } from './lib/tab-state.js'
+import { resolvePendingRichDraft } from './lib/pending-rich-draft.js'
 import { applyVerifiedRichSnapshot } from './lib/rich-source-tab-state.js'
 import { applyCustomTheme, applyUserCss } from './customThemes.js'
 import { fireToast } from './ui.js'
@@ -1021,12 +1022,16 @@ export default function App() {
     for (const tab of tabsRef.current) {
       if (!tab.pendingRichEdit || sourceTextareas.current[tab.id]) continue
       const api = editorApis.current[tab.id]
-      let markdown = api?.flushMarkdown?.({ force: true })
-      // This runs while the app is closing: there is no retry after it. A
-      // fail-closed draft would silently lose the visible edits from the
-      // session snapshot, so rebuild from the live document instead — a
-      // session draft may normalize its spelling, but must not lose content.
-      if (typeof markdown !== 'string') markdown = api?.rebuildMarkdownFromRich?.()
+      // This runs while the app is closing: there is no retry after it. For an
+      // unsaved scratch tab, keep a best-effort live recovery snapshot after
+      // verified flush and strict rebuild both fail. File-backed tabs still
+      // follow the normal dirty-file confirmation and never persist unverified
+      // bytes over their authored path.
+      const allowFallbacks = !tab.path
+      const markdown = resolvePendingRichDraft(api, {
+        allowRebuild: allowFallbacks,
+        allowRecovery: allowFallbacks
+      })
       if (typeof markdown === 'string') updates.set(tab.id, markdown)
     }
     if (!updates.size) return

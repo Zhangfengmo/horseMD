@@ -320,6 +320,10 @@ export function buildGfmTableSourceModel(markdown, remark) {
     })
   }
   const view = createMarkdownSourceView(raw)
+  // Parse only: running the configured processor would execute transforms that
+  // may replace table/cell nodes and invalidate their raw source positions.
+  // This model owns authored bytes, so its ranges must come directly from the
+  // parser AST. `test-table-source-model` guards that `runSync` is never used.
   const tree = remark.parse(view.text)
   const tableNodes = []
   const walk = (node) => {

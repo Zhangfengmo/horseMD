@@ -5,6 +5,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
+import { typeTextLikeUser } from './lib/human-input.mjs'
 
 // Each run owns its profile and fixture directory. Electron can take a moment
 // to release a prior profile on macOS, so sharing a fixed path makes repeated
@@ -166,7 +167,7 @@ const fillCell = async (app, index, text) => {
     { row: table.length - 1, column: index },
     `Click did not place the caret in added-row cell ${index}: ${JSON.stringify({ active, table })}`
   )
-  await app.send('Input.insertText', { text })
+  await typeTextLikeUser(app.send, text)
   await sleep(120)
 }
 

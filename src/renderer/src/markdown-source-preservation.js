@@ -92,7 +92,8 @@ export function preserveRichMarkdownSource(source, previousCanonical, nextCanoni
     sourceMarkdown,
     previousCanonical,
     nextCanonical,
-    options.parseTables
+    options.parseTables,
+    options.allowTableCoordinateIdentity === true
   )
   // Hard boundary invariant: an internal empty-paragraph `<br />` placeholder
   // must NEVER reach authored source, no matter which heuristic path produced
@@ -115,7 +116,8 @@ export function preserveRichMarkdownSource(source, previousCanonical, nextCanoni
         authored: sourceMarkdown,
         previousCanonical,
         nextCanonical,
-        parseTables: options.parseTables
+        parseTables: options.parseTables,
+        allowCoordinateIdentity: options.allowTableCoordinateIdentity === true
       })
       if (durableContext || result.durableContext) {
         result.durableContext = {
@@ -198,7 +200,13 @@ const preserveAllDivergedListChanges = ({ source, previous, next }) => {
   }
 }
 
-function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextCanonical, parseTables) {
+function preserveRichMarkdownSourceCore(
+  sourceMarkdown,
+  previousCanonical,
+  nextCanonical,
+  parseTables,
+  allowTableCoordinateIdentity
+) {
   // Empty list items have a Crepe-only `<br />` placeholder. Normalize it on
   // both sides of the delta before source mapping so a normal rich-text flow
   // (paragraph → Enter → `- ` → text) never persists that implementation
@@ -313,7 +321,8 @@ function preserveRichMarkdownSourceCore(sourceMarkdown, previousCanonical, nextC
     // tokens atomic. Table ownership validates against the canonical common
     // change itself, not that downstream widened working range.
     change: canonicalChange,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: allowTableCoordinateIdentity
   })
   if (tableChange.status === 'patched') {
     return {

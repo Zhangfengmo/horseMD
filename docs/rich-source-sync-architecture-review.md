@@ -2,10 +2,10 @@
 
 > 日期：2026-08-11  
 > 版本：HorseMD v0.13.29（`ea4415b6459c`）  
-> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；§1–11 保留 v0.13.29 的历史诊断，§12–15 记录修复分支各阶段复核与最终实现结果。
+> 范围：定位「列表编辑后源码/富文本不一致、无法保存、无法切源码」；§1–11 保留 v0.13.29 的历史诊断，§12–16 记录修复分支各阶段复核与最终实现结果。
 
 > 复核提示：§13 是 v0.13.48 的中间候选，§14 是 v0.13.49 的 durable table
-> 架构结论，§15 是 v0.13.50 二次审查。现场表格主因不是代码语言；列表
+> 架构结论，§15 是 v0.13.50 二次审查，§16 是 v0.13.51 真实表格录入与全量回归收口。现场表格主因不是代码语言；列表
 > Backspace 和 `- 1.` 分歧列表则是独立、可执行的同步回归，不能因表格根因成立而略过。
 
 ## 1. 结论
@@ -652,3 +652,95 @@ semantics 或往表格比较器加例外处理。
   副本上执行 `external-copy`，最后再验证原件字节未变；
 - 多语言代码围栏由 round-trip multi-language matrix 与真实表格 fixture 继续覆盖，
   Go、JavaScript、TypeScript、Python、Rust、Java、C、C++ 均不是触发条件。
+
+## 16. v0.13.51 真实表格录入复现与恢复闭环
+
+### 16.1 为什么 0.13.50 的全绿复审仍漏掉现场
+
+0.13.50 已修复“编辑现有参差表格”的 source ownership，但用户现场还有更早的一次状态
+转换：在本来就存在合法 authored/canonical 分歧的长文档里执行 `/table`。该命令增加了一个
+table node，却没有像 `/code`、`/math` 一样声明局部 source intent，而是落入通用
+`exactBaselineTableCountChange`。后者要求表格之外的整篇 normalized source 相等；现场
+文件中的旧参差表、转义与排版差异使这个前提从一开始就不成立，因此插入表格的第一次
+回调即以 `ambiguous-table-count-change` 拒绝。之后九个 cell 的编辑不是新的九个独立
+故障，而是在已经冻结的 verified baseline 上继续积压；保存 toast 只是最晚出现的结果。
+
+此前矩阵从“已有表格后的 cell edit”起步，或者用 canonical fixture 新建表格，因而没有
+覆盖“全局已分歧文档中的 slash table creation”这一真实入口。Go、JavaScript、Python、
+Rust 等代码围栏只扩大了文档形状，并不参与失败判据；在隔离的真实 `test.md` 副本中保留
+相邻围栏逐字节不变后，仍可由 `/table` 单独稳定触发旧失败。
+
+### 16.2 核心修复边界
+
+`/table` 现在复用 slash block 的原子 source intent：命令执行前捕获精确 authored 查询行
+和 PM block 位置，执行后只序列化刚创建的 table node，用 table parser 清除这个新表格中
+已知由 serializer 产生的空 cell 占位，再原子替换查询行。候选仍进入同一个
+`mirrorVerifiedState` / durable acceptance；没有增加第二写入点、第二 parser authority，
+也没有放宽整篇语义等价。九格后续逐字符输入继续走现有单 cell table ownership。
+
+恢复文件的旧问题是另一条链：best-effort canonical 会把 serializer 的空 cell 写成
+`<br />`；冷重开后 provenance 已丢失，这些字节会被解释成用户 authored hardbreak，造成
+恢复副本再次保存失败。现在 recovery 在 authored、previous canonical、live canonical
+三域仍同时存在时取得 `(table,row,column)` ownership，只清理所有坐标都仍精确指向
+serializer placeholder 的集合。分析器异常、重复坐标、坐标漂移或任何 cell 不匹配都
+返回原 canonical；recovery 出口本身仍无条件可用，不会重新调用 strict commit 谓词。
+
+### 16.3 禁止推断行列身份
+
+同形表格最终改变一个或多个 cell，都不能单靠内容签名证明它是批量改字、拖动行列，还是
+重复行之间的重排；即使字符串唯一，也可能由“先移动、后输入”构造出来。当前实现因此在
+dispatch 边界遍历每批 ProseMirror transaction 的 mapping：旧 document 的每个既有 cell
+起点必须未被删除、且精确映射到新 document 的同一 `(table,row,column)`，坐标身份才保持
+为真。该证明跨尚未提交的 revision 粘滞；任何行列增删/移动一旦使其为假，在下一次真正
+verified commit/reset 前都不能被后续单 cell 输入洗白。previous canonical 与 next
+canonical 字符串相同但 PM doc 已变化，也走同一规则，不能用 equality 快捷路径复用旧
+provenance。`/table` 的实际命令先清 query、再插表，是两个 doc-changing dispatch；局部
+intent 因此跨 batch 累积 `{valid, insertedTables}`，允许安全的零插入 clear batch，要求
+所有旧 cell 全程坐标稳定且最终恰好新增一张表。任何中间 batch 失败后不可被后续插表洗白。
+
+同一 200ms 发布窗口也可能包含多个被证明坐标稳定的 cell 编辑，例如从第一格删除真实
+`<br />` 后立即在相邻空格 Enter。此时 mapper 按每个 cell 的 parser-owned range 生成
+互不重叠的补丁并原子应用；serializer 仅在 table AST 边界旁增加或删除换行，不算第二个
+表外编辑，作者表外字节仍原样保留。文字、空格或段落 hardbreak 等非边界差异仍 fail-closed。
+
+这是有意的 fail-closed，不是等待继续追加等价特例。若产品要支持富文本表格拖动行列后
+仍逐字节保留空 cell / authored `<br />` 区别，正确方向是由 move-row / move-column
+transaction 在发生时携带显式结构 intent，而不是从最终内容反推身份。
+
+### 16.4 新增门禁
+
+- `test:table-sequential-entry-ui`：分歧 fixture 与可选真实文件隔离副本中执行
+  `/table` → 3×3 → 九格逐字符输入 → 保存，并检查相邻多语言围栏逐字节不变；
+- `test:sync-recovery-ui`：strict rebuild 失败后另存含参差表与真实 authored `<br />`
+  的恢复副本，冷重开、继续改单元格并直接保存，不出现第二次 recovery；
+- `test:table-empty-cells`：覆盖重复/漂移坐标的全有或全无清理、多 cell 重排拒绝、
+  canonical 不变但文档已变化时拒绝坐标 identity，并以真实 PM transaction 覆盖
+  `/table` 的 clear → insert 双 dispatch 累积证明；
+- `test:table-hardbreak-move-ui`：同一发布批次跨两个 cell 移动 authored hardbreak，
+  验证源码、保存、磁盘与冷重开，不进入 recovery；
+- `test:table-recovery-external-copy`：只在显式传入 `HORSEMD_REPRO_FILE` 时读取外部恢复
+  文件并在临时副本测试，绝不写用户原件。
+
+### 16.5 最终全量回归补出的非表格耐久表示差异
+
+完整 UI runner 在表格矩阵之后继续抓到两类确定性现有问题。第一类是网页 HTML 粘贴的
+顶层独立图片：ProseMirror DOM paste 产生 `paragraph[image]`，而 HorseMD 自身 parser
+会把同一 Markdown 图片重开为 `image-block`。两者源码、可见 alt/caption 与默认尺寸
+相同，但旧 durable projection 比较内部 node type，因而拒绝 serializer 自己产出的候选。
+修复只把“顶层、唯一 image、默认 ratio、无 marks、无未知 attrs”的两种表示投影为同一
+standalone image 资产；resize、混合段落、链接/marks 和未来 attrs 继续 fail-closed。
+
+第二类是空文件直接从正文起笔。Crepe 初始 PM scaffold 含首个空 H1 与空 paragraph；用户
+从 paragraph 写正文后，serializer 不输出未使用的空 H1，但严格比较会把这个 UI scaffold
+误当作者内容。现在只有 generated-scratch 候选携带
+`generatedScratchEmptyHeading` provenance，且只允许 expected 文档首位、level=1、无内容、
+无未知属性的 heading 被省略。含作者非空源码的非 generated-scratch 文档没有该 context，
+作者显式 Markdown 空标题仍严格比较；零字节、纯空白与 BOM-only 输入按现有初始化规则属于
+新草稿路径，不承诺保留其空白/BOM 字节。
+标题起笔与正文起笔都覆盖逐字符输入、即时源码切换、保存和冷重开。
+
+同轮审查还发现 file-backed tab 在应用关闭确认前虽然禁用了 recovery，却仍可能调用 strict
+rebuild 并推进 baseline。关闭阶段现在对文件标签只允许 verified flush；rebuild/recovery
+仅用于无路径 scratch session。双文件分屏中全局 `sourceMode` 误隐藏右栏富文本也由 #66
+回归确认并修复为只隐藏左栏 rich surface。这四项都有执行证据；file-close 当前由 helper
+契约与静态调用链证明，其余三项都有真实 UI 闭环，均不是为未来 schema 预设的防御性特例。

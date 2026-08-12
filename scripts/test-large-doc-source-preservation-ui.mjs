@@ -8,6 +8,7 @@ import { typeTextLikeUser } from './lib/human-input.mjs'
 const dir = '/tmp/horsemd-large-doc-source-preservation'
 const file = join(dir, 'large-source-preservation.md')
 const port = Number(process.env.CDP_PORT || 9496)
+const maxVerifiedCommitMs = Number(process.env.HORSEMD_MAX_VERIFIED_COMMIT_MS || 250)
 
 const paragraphs = Array.from({ length: 1000 }, (_, index) =>
   `保真段落 ${index}：区间 0~9，重复文本 alpha beta；` +
@@ -121,6 +122,10 @@ async function main() {
     await sleep(500)
     const verificationTiming = await evaluate(`window.__hmGateTimingLog?.at(-1) || null`)
     assert.ok(verificationTiming?.length > 120000, 'large-document hot verification was not observed')
+    assert.ok(
+      verificationTiming.durationMs <= maxVerifiedCommitMs,
+      `large-document verified commit exceeded ${maxVerifiedCommitMs}ms: ${verificationTiming.durationMs.toFixed(1)}ms`
+    )
     console.log(`large document verified commit: ${verificationTiming.durationMs.toFixed(1)}ms`)
 
     assert.equal(await toggleSource(evaluate), true, 'source toggle was unavailable')

@@ -7,5 +7,6 @@ export {
 export {
   getGfmTableDurableContext,
   mapGfmTableChange,
+  normalizeGfmTablePlaceholdersByContext,
   normalizeGfmTableSerializerPlaceholders
 } from './table-source-patch.js'

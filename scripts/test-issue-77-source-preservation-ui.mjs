@@ -290,6 +290,10 @@ async function main() {
     // the fallback here would discard the bold mark and image on a later
     // source-mode switch.
     assert.equal(await toggleSource(evaluate), true, 'Could not return to rich mode before web paste')
+    await evaluate(`(() => {
+      window.__hmPreserveLog = []
+      window.__hmGateLog = []
+    })()`)
     assert.equal(await evaluate(`(() => {
       const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
       editor?.focus()
@@ -332,11 +336,52 @@ async function main() {
     })()`)
     assert.deepEqual(webRich, { heading: '微信二级标题', bold: '保留加粗正文', image: true }, 'Structured web paste lost HTML semantics')
     assert.equal(await toggleSource(evaluate), true, 'Could not inspect source after web paste')
-    const webSource = await waitFor(() => visibleSource(evaluate), 'Source editor did not reopen after web paste')
+    let webSource
+    try {
+      webSource = await waitFor(() => visibleSource(evaluate), 'Source editor did not reopen after web paste')
+    } catch (error) {
+      const diagnostics = await evaluate(`(() => ({
+        gate: (window.__hmGateLog || []).slice(-8),
+        preserve: (window.__hmPreserveLog || []).slice(-8),
+        toasts: [...document.querySelectorAll('.toast')].map((node) => node.textContent || ''),
+        rich: [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)?.innerHTML || ''
+      }))()`)
+      throw new Error(`${error.message}: ${JSON.stringify(diagnostics)}`)
+    }
     assert.ok(webSource.includes('**保留加粗正文**'), 'Web paste source lost the HTML bold mark')
     assert.ok(webSource.includes('!['), 'Web paste source lost the HTML image')
+    await saveDocument(evaluate, send)
+    assert.equal(await readFile(file, 'utf8'), webSource, 'Web paste source did not reach the authored file')
 
-    console.log(`PASS issue 77 UI: ${sourceSnapshots} source snapshots, source/rich chain, Markdown preservation, and structured web paste semantics`)
+    await stopBuiltElectron(app, { removeProfile: true })
+    const reopened = await launchBuiltElectron({
+      profileDir: join(dir, 'web-paste-reopen-profile'),
+      port: port + 1,
+      appArgs: [file],
+      executable: process.env.HORSEMD_APP_PATH || undefined,
+      entrypoint: process.env.HORSEMD_APP_PATH ? null : undefined
+    })
+    try {
+      await waitFor(
+        () => reopened.evaluate(`(() => {
+          const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+          return editor?.querySelector('h2')?.textContent === '微信二级标题' &&
+            editor?.querySelector('strong')?.textContent === '保留加粗正文' &&
+            !!editor?.querySelector('img[alt="微信图片"]')
+        })()`),
+        'Web paste rich structure did not survive a cold reopen'
+      )
+      assert.equal(await toggleSource(reopened.evaluate), true, 'Could not inspect cold-reopened web paste source')
+      assert.equal(
+        await waitFor(() => visibleSource(reopened.evaluate), 'Cold-reopened web paste source did not open'),
+        webSource,
+        'Cold reopen changed the verified web paste source bytes'
+      )
+    } finally {
+      await stopBuiltElectron(reopened, { removeProfile: true })
+    }
+
+    console.log(`PASS issue 77 UI: ${sourceSnapshots} source snapshots, source/rich chain, Markdown preservation, and structured web paste save/reopen`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(dir, { recursive: true, force: true })

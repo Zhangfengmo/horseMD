@@ -4,7 +4,7 @@
 
 ## 0. 当前状态快照
 
-- 当前架构修复分支：`fix/rich-source-sync-architecture`；源码候选：`0.13.50`。
+- 当前架构修复分支：`fix/rich-source-sync-architecture`；源码候选：`0.13.51`。
   `0.13.47` 的真实长会话人工验收曾失败，因此仍不得仅凭专项自动化宣布稳定发布；
   事故现场和 RS-41 完成标准见 `rich-source-divergence-incident-0.13.47.md`。
   0.13.50 已把普通保存、强制 flush、源码切换统一到单一 verified-commit 边界，并落地
@@ -32,10 +32,12 @@
   - **重复引用后的 raw 位置错写（0.13.32）**：前部结构分叉后，`preserveMiddleEmptyBlock` 不得复用 canonical 的全文 visible-line index；重复“测试”引用会让错误位置伪装成有效邻接。完全对齐才可直取索引，分叉改用相邻 pair + block kind + equal-count ordinal，失败继续 fail closed。专项还必须从第三个重复引用按两次 Enter 退出并逐字输入唯一末段，直接保存后比较源码、磁盘和冷重开。禁止引入整篇 parse/stringify 语义循环，它会破坏字面列表 marker 与反引号。
   - **引用后空白直接起笔（0.13.33）**：Crepe 在末尾引用后提供的空 `<p>` 可能只序列化为 canonical terminal padding。直接点击该空白起笔是 `previous.length` 处的纯正文追加，不等同于从引用内按两次 Enter；若先走 locally-aligned 零宽 visible offset，会被前面的重复空引用误导。plain append 现提前写入物理文档末尾，结构语法明确拒绝；UI 必须真实点击空段落、逐字输入、直接保存并冷重开。
   - **保存事务 settle 与恢复副本（0.13.34，0.13.50 恢复出口修正）**：可见 ProseMirror transaction 可能早于 Milkdown 的 `markdownUpdated` / pending input intent 对账。保存和富文本→源码先调用同一 fail-closed flush 并有界让出事件循环重试，不用 canonical 覆盖作者源码；持续歧义时原文件不写。严格 rebuild 仍必须通过 verified-commit，但 `.horsemd-recovered.md` 是独立安全域：直接取得 live doc 的 best-effort canonical，剥离内部 standalone `<br>` 后供用户另存，不写原文件、不推进 verified baseline，因此绝不能再次走导致 strict rebuild 失败的同一验收谓词。专项：`test:editor-flush-settle`、`test:source-sync-recovery`，文档 `source-sync-save-recovery.md`。
+  - **斜杠表格原子提交与恢复闭环（0.13.51）**：复杂文档中 `/table` 过去由通用 table-count matcher 处理；当无关区域已有合法 authored/canonical 差异时，表格插入立即 fail-closed，后续逐格输入全部积压并在保存时进入恢复。现在命令前捕获精确 authored 查询行，命令后只序列化新表格、清除新表格 serializer 空 cell，并携带 table durable context 走原子 verified commit，不修改全局等价判据。恢复导出在三域仍齐全时按 table source model 的 cell 坐标清理已证明的空占位，真实 `<br />` 不动；普通路径的坐标身份由每批 ProseMirror transaction mapping 证明并在未提交 revision 间粘滞，行列增删/移动或 canonical 未变但 PM doc 已变化时不得从最终内容反推身份。专项覆盖真实 `test.md` 隔离副本、非 Go 代码块、九格逐字输入，以及可证明坐标的恢复副本冷重开后再次保存。
   - **事务优先源码同步（0.13.35，方案一）**：新增统一 PM transaction observer、原子 plain-text mapper、真实 step trace、LF/CRLF split 和空块 block hint。专项测试可用 `window.__hmTransactionSourcePrimary = true` 证明正文/引用/列表项普通文字不经过 canonical diff；生产默认仍不接管。默认接管试验曾被完整段落测试抓到“结构 Enter 后空块首字写错相邻块”，因此新增 quarantine/checkpoint 合同并撤回放行。详见 `transaction-source-sync-architecture.md`。
   - **事务优先源码同步第二阶段（0.13.36，方案一）**：mapper 改为 BOM/CRLF/lone-CR 归一化双视图（字节证明在 LF 视图，输出保留作者拼写）；hint 槽坐标指向完整段落分隔之后；嵌套空 textblock（列表项/引用）拒绝接管；列表输入意图只在当前源快照上重建自己的块，不再覆盖延迟窗口内的跨块编辑；`preserveChangedLineRegion` 零宽行边界粘行根因修复。回归含 LF/CRLF/BOM+CRLF + undo/redo 逐字节、列表意图跨块专项（primary 构建验证、默认构建 SKIP）、全家族矩阵双构建。`test:list-intent-cross-block-ui` 与 `test:source-transaction-sync-ui`（三行尾变体）为方案一专项。
   - **多轮持久化与列表原子提交（0.13.46 候选）**：列表 input intent 在完整 slot 重建、marker 恢复或严格中间空槽列表写回后立即消费，禁止下一次正文回调复用旧快照；批量列表写回必须完整覆盖同一 callback 的后续正文，CRLF 在 `\r` 前插入，0/1 final-EOL 分别保留正确退出列表边界。新增 `test:family-multicycle-ui`（4 轮编辑保存、5 次冷打开，默认/primary 双路径）；第四轮专门在正文与 fence 之间输入“正文 → 有序列表 → 正文”。真实 `123321.md` override 与 20/20 家族矩阵均通过。
   - **斜杠菜单代码块原子同步（0.13.47，子路径完成、家族未关闭）**：稳定复现 `/code` 已写入源码后，slash 菜单先删 query、再创建空 code_block；旧尾部 mapper 只删除 `/code`，没有写入 fence，后续代码/尾文/前文编辑全部从错误基线继续。现于命令前捕获精确 authored 行，命令后只序列化当前 code_block 并验证成对 fence 后原子替换。`test:tail-fence-ui` 在 40ms 菜单选择后不做 checkpoint，连续编辑三块，再验证源码、保存和冷重开；但安装包真实长会话继续编辑后仍能再次分叉，见 RS-41，不得把该专项绿色结果描述为整体修复。
+  - **v0.13.51 耐久表示与退出授权边界**：顶层单图 HTML paste 只允许与默认尺寸 parser `image-block` 做交叉表示投影；同类型 image block、ratio、marks、混合段落与未知 attrs 必须严格。generated scratch 仅可凭 provenance 忽略首位空 H1 scaffold，含作者非空源码的文档不得复用该 context。应用退出时 file-backed tab 只允许 verified flush，确认前严禁 rebuild/recovery/reset baseline；无路径 scratch 的第三出口只写 session。双文件分屏的 `sourceMode` 只隐藏左栏 rich surface，右栏不得跟随全局隐藏。对应门禁：`test:issue-77-ui`、`test:paragraph-source-ui`、`test:source-sync-recovery`、`test:issues-66-67-ui`。
   - **源码/富文本架构探索**：`live-preview-migration-plan.md` 当前以 transaction→source 为主线；CodeMirror Live Preview 仅保留长期备选。
   - **代码块体验**：编辑器代码块行号（不透明背景、贴左、全高、右侧分隔竖线）、**PDF 导出代码块带行号**、表格单元格单击直接编辑。提交 `5094e0b`、`7b2e50b`、`9bc9412`、`a45f958`。
   - **原生 HTML 表格自适应**：带 `width` 属性的 HTML 表格恢复作者语义（`100%` 跟随容器、固定像素收缩），`td/th` 允许列收缩，表格内图片按单元格宽度显示，不再横向溢出。提交 `8a98b5f`。
@@ -615,10 +617,10 @@ npm run guide:capture
 
 ## 14. 当前候选与最近一次人工否决
 
-`0.13.50` 是当前架构候选：自动化已覆盖单一 verified commit、应用 parser、表格 source
+`0.13.51` 是当前架构候选：自动化已覆盖单一 verified commit、应用 parser、表格 source
 ownership、独立 recovery、列表/表格/前导空格与 20/20 family matrix。`0.13.47` 则是
 最近一次安装包人工否决：真实长会话曾复现 RS-41，富文本、源码和磁盘不一致。
-**人工结果覆盖自动化结论；0.13.50 新安装包长会话经用户明确验收前，禁止发版、关闭
+**人工结果覆盖自动化结论；0.13.51 新安装包长会话经用户明确验收前，禁止发版、关闭
 issue 或声称家族问题已解决。**接手者先读
 `rich-source-divergence-incident-0.13.47.md`，抓取第一次分叉的统一 transaction trace，
 不要继续从最终 toast 反推字符串补丁。

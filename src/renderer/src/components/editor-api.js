@@ -37,6 +37,7 @@ export function createEditorApi({
   generatedScratchRef,
   getGeneratedScratchMarkdown,
   getTableDurableContext,
+  normalizeTablePlaceholdersForRecovery,
   sourceCommitter,
   preserveSource,
   prepareMarkdown,
@@ -198,6 +199,9 @@ export function createEditorApi({
       // document instead of reading Crepe's potentially stale cached snapshot.
       const canonical = canonicalForSource(serializeCurrentDocument())
       const scratch = generatedScratchRef?.current
+      const generatedScratchContext = scratch
+        ? { generatedScratchEmptyHeading: true }
+        : null
       // Scratch spelling changes candidate generation only. The immutable
       // live document captured at dispatch remains the semantic authority for
       // every document size and every durability caller.
@@ -218,7 +222,9 @@ export function createEditorApi({
         const committed = sourceCommitter.commit({
           candidates: [{
             markdown: lastMarkdownRef.current,
-            durableContext: unchanged?.durableContext || null
+            durableContext: generatedScratchContext
+              ? { ...(unchanged?.durableContext || {}), ...generatedScratchContext }
+              : unchanged?.durableContext || null
           }],
           expectedDoc,
           canonical,
@@ -267,7 +273,10 @@ export function createEditorApi({
       }
       const committed = sourceCommitter.commit({
         candidates: scratch
-          ? [preserved.markdown, canonicalSourceFallback(canonical)]
+          ? [preserved.markdown, canonicalSourceFallback(canonical)].map((markdown) => ({
+              markdown,
+              durableContext: generatedScratchContext
+            }))
           : [{
               markdown: preserved.markdown,
               durableContext: preserved.durableContext || null
@@ -320,11 +329,14 @@ export function createEditorApi({
       // `<br />` placeholders — raw canonical bytes would write them into the
       // user's file, violating the source boundary invariant.
       const expectedDoc = viewRef.current?.state.doc
-      const durableContext = getTableDurableContext?.({
+      const tableDurableContext = getTableDurableContext?.({
         authored: lastMarkdownRef.current,
         previousCanonical: canonicalMarkdownRef.current,
         nextCanonical: canonical
       }) || null
+      const durableContext = generatedScratchRef?.current
+        ? { ...(tableDurableContext || {}), generatedScratchEmptyHeading: true }
+        : tableDurableContext
       const selected = sourceCommitter.select({
         candidates: rebuildSourceCandidates({
           canonical,
@@ -372,7 +384,14 @@ export function createEditorApi({
       // the same candidates through the same predicate here is a guaranteed
       // dead end. Export the best-effort canonical snapshot instead; callers
       // enforce the separate-file boundary.
-      return bestEffortRecoveryMarkdown(canonical)
+      return bestEffortRecoveryMarkdown(canonical, {
+        getTableContext: () => getTableDurableContext?.({
+          authored: lastMarkdownRef.current,
+          previousCanonical: canonicalMarkdownRef.current,
+          nextCanonical: canonical
+        }) || null,
+        normalizeTablePlaceholders: normalizeTablePlaceholdersForRecovery
+      })
     } catch {
       return null
     }

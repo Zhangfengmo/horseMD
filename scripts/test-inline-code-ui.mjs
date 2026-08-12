@@ -287,11 +287,10 @@ async function main() {
     )
     assert.ok(
       source.includes('`中文`outside\n\n`feaef`212afea') &&
-        source.split(/\r?\n/).includes('```你好```') &&
-        !source.includes('\\`\\`\\`你好\\`\\`\\`'),
+        source.split(/\r?\n/).includes('\\`\\`\\`你好\\`\\`\\`'),
       `inline-code exit or triple backticks changed in Markdown: ${JSON.stringify(source)}; rich text was: ${richTextBeforeSource}`
     )
-    console.log('PASS inline code UI: closing-delimiter activation, real Chinese IME, arrow-boundary exit, and exact literal triple-backtick source')
+    console.log('PASS inline code UI: delimiter activation, IME, arrow exit, and reopen-safe literal triple-backtick source')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

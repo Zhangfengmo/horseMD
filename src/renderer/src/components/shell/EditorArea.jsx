@@ -255,7 +255,7 @@ export default function EditorArea({
               key={`rich:${tab.id}:${tab.reloadNonce}`}
               className={`editor-scroll${paneClass}${largeRich ? ' hm-cv' : ''}${isSourceRichSplit ? ' hm-source-rich-right' : ''}`}
               ref={setEditorHost}
-              style={{ display: inView && !sourceMode ? undefined : 'none', order: isSourceRichSplit ? 3 : order, flex: isSourceRichSplit ? undefined : paneFlex }}
+              style={{ display: inView && !(sourceMode && isLeft) ? undefined : 'none', order: isSourceRichSplit ? 3 : order, flex: isSourceRichSplit ? undefined : paneFlex }}
               onFocusCapture={() => onPaneFocus(isSourceRichSplit ? null : 'rich')}
               onMouseDownCapture={() => onPaneFocus(isSourceRichSplit ? null : 'rich')}
             >

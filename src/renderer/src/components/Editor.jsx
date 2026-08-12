@@ -56,7 +56,16 @@ import {
   mapPlainTextTransactionsToSource
 } from '../lib/source-transaction-sync.js'
 import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
-import { tableDurableContext } from '../lib/markdown-preservation/tables.js'
+import {
+  advanceTableInsertionCoordinateProof,
+  isTableInsertionCoordinateProofComplete,
+  tableCoordinatesRemainStable
+} from './editor-table-transactions.js'
+import {
+  normalizeSerializerEmptyTableCells,
+  normalizeSerializerTablePlaceholdersByContext,
+  tableDurableContext
+} from '../lib/markdown-preservation/tables.js'
 
 // Every mounted rich editor registers itself here. A rich-text tab stays mounted
 // after its first activation, so several editors (and several Crepe selection
@@ -308,17 +317,40 @@ export default function Editor({
     }
     let crepe
     let parseTables
+    let tableCoordinateIdentityProven = true
     const preserveSource = (source, previousCanonical, nextCanonical) => {
       if (!parseTables) {
         parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
       }
-      return preserveRichMarkdownSource(source, previousCanonical, nextCanonical, { parseTables })
+      return preserveRichMarkdownSource(source, previousCanonical, nextCanonical, {
+        parseTables,
+        allowTableCoordinateIdentity: tableCoordinateIdentityProven
+      })
     }
     const getTableDurableContext = (options) => {
       if (!parseTables) {
         parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
       }
-      return tableDurableContext({ ...options, parseTables })
+      const previousCommittedDoc = verifiedState?.snapshot().expectedDoc
+      const liveDoc = viewRef.current?.state.doc
+      const unchangedCanonicalHasNewDocument =
+        String(options?.previousCanonical ?? '') === String(options?.nextCanonical ?? '') &&
+        previousCommittedDoc &&
+        liveDoc &&
+        previousCommittedDoc !== liveDoc
+      return tableDurableContext({
+        ...options,
+        parseTables,
+        allowCoordinateIdentity: Object.hasOwn(options || {}, 'coordinateIdentityProven')
+          ? options.coordinateIdentityProven === true
+          : tableCoordinateIdentityProven && !unchangedCanonicalHasNewDocument
+      })
+    }
+    const normalizeTablePlaceholdersForRecovery = (markdown, context) => {
+      if (!parseTables) {
+        parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+      }
+      return normalizeSerializerTablePlaceholdersByContext(markdown, context, parseTables)
     }
     const parseAdapter = createEditorParseAdapter(() => {
       if (!crepe) return null
@@ -330,6 +362,7 @@ export default function Editor({
       const snapshot = verifiedState.snapshot()
       lastMarkdownRef.current = snapshot.source
       canonicalMarkdownRef.current = snapshot.canonical
+      tableCoordinateIdentityProven = true
       clearRichFlushPending()
       return snapshot
     }
@@ -410,12 +443,15 @@ export default function Editor({
     ) => {
       let markdown = null
       let commitType = null
+      let verificationResult = null
+      let expectedDocForDiagnostics = null
       if (preserved && preserved.preserved !== false) {
         try {
           // The dispatch boundary owns the immutable document revision. A
           // delayed markdownUpdated callback may propose bytes, but it cannot
           // replace that expected document with a reparsed callback snapshot.
           const expectedDoc = requestedCapture?.expectedDoc || viewRef.current?.state.doc
+          expectedDocForDiagnostics = expectedDoc
           const verificationStartedAt = performance.now()
           const result = sourceCommitter.commit({
             candidates: [
@@ -430,13 +466,17 @@ export default function Editor({
                   durableContext: candidate.durableContext || null
                 })),
               ...(generatedScratchRef.current
-                ? [canonicalSourceFallback(canonical)]
+                ? [{
+                    markdown: canonicalSourceFallback(canonical),
+                    durableContext: { generatedScratchEmptyHeading: true }
+                  }]
                 : [])
             ],
             expectedDoc,
             canonical,
             capture: requestedCapture
           })
+          verificationResult = result
           commitType = result.type
           if (Array.isArray(globalThis.__hmGateTimingLog)) {
             globalThis.__hmGateTimingLog.push({
@@ -469,7 +509,9 @@ export default function Editor({
             origin: 'commit',
             reason: preserved.reason || 'unknown',
             candidate: preserved.markdown,
-            canonical
+            canonical,
+            parsedDoc: verificationResult?.parsed?.toJSON?.() || null,
+            expectedDoc: expectedDocForDiagnostics?.toJSON?.() || null
           })
         }
         userEditUntil = Date.now() + 1000
@@ -574,8 +616,13 @@ export default function Editor({
     }
 
     const handleSlashCommand = ({ phase, id, view, token }) => {
+      const traceSlashIntent = (entry) => {
+        if (Array.isArray(globalThis.__hmSlashIntentLog)) {
+          globalThis.__hmSlashIntentLog.push({ phase, id, ...entry })
+        }
+      }
       if (phase === 'before') {
-        if (!(id === 'code' || id === 'math' || id?.startsWith('code:'))) return null
+        if (!(id === 'code' || id === 'math' || id === 'table' || id?.startsWith('code:'))) return null
         try {
           const serializer = crepe.editor.ctx.get(serializerCtx)
           const remark = crepe.editor.ctx.get(remarkCtx)
@@ -600,38 +647,92 @@ export default function Editor({
             sourceOffset,
             id
           })
-          if (!intent) return null
-          pendingSlashBlockIntent = { ...intent, previousCanonical }
+          if (!intent) {
+            traceSlashIntent({ ok: false, reason: 'source-intent-not-captured' })
+            return null
+          }
+          const $from = view.state.selection.$from
+          const pmBlockStart = $from.depth >= 1 ? $from.before(1) : null
+          pendingSlashBlockIntent = {
+            ...intent,
+            previousCanonical,
+            pmBlockStart,
+            coordinateIdentityProven: tableCoordinateIdentityProven
+          }
+          traceSlashIntent({ ok: true, reason: 'captured', pmBlockStart })
           markUserEdit()
           return pendingSlashBlockIntent
         } catch {
+          traceSlashIntent({ ok: false, reason: 'capture-threw' })
           pendingSlashBlockIntent = null
           return null
         }
       }
-      if (phase !== 'after' || !token || pendingSlashBlockIntent !== token) return null
+      if (phase !== 'after' || !token || pendingSlashBlockIntent !== token) {
+        traceSlashIntent({ ok: false, reason: 'missing-or-stale-token' })
+        return null
+      }
       try {
         const serializer = crepe.editor.ctx.get(serializerCtx)
         const canonical = canonicalForSource(serializer(view.state.doc))
         const $from = view.state.selection.$from
-        let codeBlock = null
+        const targetNodeName = token.id === 'table' ? 'table' : 'code_block'
+        let selectedBlock = Number.isFinite(token.pmBlockStart)
+          ? view.state.doc.nodeAt(token.pmBlockStart)
+          : null
+        if (selectedBlock?.type?.name !== targetNodeName) selectedBlock = null
         for (let depth = $from.depth; depth >= 0; depth -= 1) {
+          if (selectedBlock) break
           const candidate = $from.node(depth)
-          if (candidate?.type?.name === 'code_block') {
-            codeBlock = candidate
+          if (candidate?.type?.name === targetNodeName) {
+            selectedBlock = candidate
             break
           }
         }
-        if (!codeBlock) return null
-        const singleBlockDoc = view.state.schema.topNodeType.create(null, [codeBlock])
-        const blockMarkdown = canonicalForSource(serializer(singleBlockDoc))
+        if (!selectedBlock) {
+          traceSlashIntent({ ok: false, reason: 'target-node-not-found', pmBlockStart: token.pmBlockStart })
+          return null
+        }
+        const singleBlockDoc = view.state.schema.topNodeType.create(null, [selectedBlock])
+        const serializedBlock = canonicalForSource(serializer(singleBlockDoc))
+        if (!parseTables) {
+          parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+        }
+        const blockMarkdown = token.id === 'table'
+          ? normalizeSerializerEmptyTableCells(serializedBlock, parseTables)
+          : serializedBlock
         const markdown = applySlashBlockSourceIntent({ intent: token, blockMarkdown })
-        if (typeof markdown !== 'string') return null
+        if (typeof markdown !== 'string') {
+          traceSlashIntent({ ok: false, reason: 'source-intent-not-applied' })
+          return null
+        }
+        const durableContext = token.id === 'table'
+          ? getTableDurableContext({
+              authored: token.source,
+              previousCanonical: token.previousCanonical,
+              nextCanonical: canonical,
+              coordinateIdentityProven: isTableInsertionCoordinateProofComplete(
+                token.tableInsertionCoordinateProof
+              )
+            })
+          : null
+        const commitReason = token.id === 'table'
+          ? 'slash-table-block-atomic'
+          : 'slash-code-block-atomic'
         const committed = commitCanonicalResult(
-          { markdown, preserved: true, reason: 'slash-code-block-atomic' },
+          {
+            markdown,
+            preserved: true,
+            reason: commitReason,
+            ...(durableContext ? { durableContext } : {})
+          },
           canonical
         )
-        if (!committed) return null
+        if (!committed) {
+          traceSlashIntent({ ok: false, reason: 'verification-rejected', hasDurableContext: !!durableContext })
+          return null
+        }
+        traceSlashIntent({ ok: true, reason: 'committed', hasDurableContext: !!durableContext })
         transactionSourceBlockHints = []
         transactionSourceQuarantined = false
         if (Array.isArray(globalThis.__hmPreserveLog)) {
@@ -641,11 +742,12 @@ export default function Editor({
             next: canonical,
             markdown,
             preserved: true,
-            reason: 'slash-code-block-atomic'
+            reason: commitReason
           })
         }
         return markdown
       } catch {
+        traceSlashIntent({ ok: false, reason: 'commit-threw' })
         return null
       } finally {
         if (pendingSlashBlockIntent === token) pendingSlashBlockIntent = null
@@ -653,6 +755,20 @@ export default function Editor({
     }
 
     const handleSourceTransactions = (transactions, oldState, newState) => {
+      if (pendingSlashBlockIntent?.id === 'table') {
+        // Milkdown clears the slash query and inserts the table in separate
+        // dispatch batches. Accumulate one intent-wide proof; an invalid batch
+        // stays invalid and exactly one inserted table completes it.
+        pendingSlashBlockIntent.tableInsertionCoordinateProof =
+          advanceTableInsertionCoordinateProof({
+            proof: pendingSlashBlockIntent.tableInsertionCoordinateProof,
+            baselineProven: pendingSlashBlockIntent.coordinateIdentityProven,
+            transactions
+          })
+      }
+      if (!tableCoordinatesRemainStable(transactions)) {
+        tableCoordinateIdentityProven = false
+      }
       // Keep a captured list-input anchor attached to its ProseMirror block
       // even when markdownUpdated is deferred and the user has already moved
       // on to another block. Looking only at the *current* selection loses the
@@ -1110,7 +1226,11 @@ export default function Editor({
             preserved = { markdown: pendingPaste.markdown }
           } else if (generatedScratchRef.current) {
             const markdown = generatedScratchMarkdownForCanonical(canonical)
-            preserved = { markdown, reason: 'generated-scratch-canonical' }
+            preserved = {
+              markdown,
+              reason: 'generated-scratch-canonical',
+              durableContext: { generatedScratchEmptyHeading: true }
+            }
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical
               ? { markdown: pendingList.convertedSource }
@@ -1562,6 +1682,7 @@ export default function Editor({
           generatedScratchRef,
           getGeneratedScratchMarkdown: (canonical) => generatedScratchMarkdownForCanonical(canonical, true),
           getTableDurableContext,
+          normalizeTablePlaceholdersForRecovery,
           sourceCommitter,
           preserveSource,
           prepareMarkdown: parseAdapter.prepare,

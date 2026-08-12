@@ -73,9 +73,10 @@ const completeFenceBlock = (value) => {
 export const applySlashBlockSourceIntent = ({ intent, blockMarkdown }) => {
   if (!intent || typeof blockMarkdown !== 'string') return null
   const codeLike = intent.id === 'code' || intent.id === 'math' || intent.id.startsWith('code:')
-  if (!codeLike) return null
+  const tableLike = intent.id === 'table'
+  if (!codeLike && !tableLike) return null
   const replacement = blockMarkdown.replace(/(?:\r\n|\r|\n)+$/, '')
-  if (!completeFenceBlock(replacement)) return null
+  if (!replacement || (codeLike && !completeFenceBlock(replacement))) return null
   const authoredReplacement = replacement.replace(/\r\n|\r|\n/g, intent.lineEnding)
   return intent.source.slice(0, intent.rawStart) +
     authoredReplacement +

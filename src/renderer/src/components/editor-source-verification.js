@@ -10,7 +10,25 @@ export const canonicalSourceFallback = (canonical) =>
 // repeating the commit predicate would make both exits fail deterministically.
 // Keep the serializer's conservative spelling and remove only editor-owned
 // placeholders that must never cross the raw-source boundary.
-export const bestEffortRecoveryMarkdown = (canonical) => canonicalSourceFallback(canonical)
+export const bestEffortRecoveryMarkdown = (canonical, {
+  getTableContext,
+  normalizeTablePlaceholders
+} = {}) => {
+  const source = String(canonical ?? '')
+  let tableSafeSource = source
+  try {
+    const context = getTableContext?.()
+    if (context && typeof normalizeTablePlaceholders === 'function') {
+      const normalized = normalizeTablePlaceholders(source, context)
+      if (typeof normalized === 'string') tableSafeSource = normalized
+    }
+  } catch {
+    // Recovery must remain available when optional provenance analysis fails.
+    // The unmodified canonical snapshot is less source-clean, but it still
+    // preserves the complete live document in a separate user-chosen file.
+  }
+  return canonicalSourceFallback(tableSafeSource)
+}
 
 export const rebuildSourceCandidates = ({
   canonical,

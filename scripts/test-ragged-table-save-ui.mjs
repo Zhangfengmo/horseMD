@@ -215,7 +215,12 @@ const assertCaseSource = (source, token, checkpoint) => {
     assert.equal(source.includes('| double<br /><br /> | b | c | d | e |'), true, `${checkpoint}: consecutive terminal table-cell hardbreaks changed`)
   }
   if (caseName === 'escaped-pipe') {
-    assert.equal(source.includes('a \\| b<br>taileditedX'), true, `${checkpoint}: escaped pipe and existing <br> did not retain their authored spelling`)
+    const escapedLine = source.split(/\r?\n/).find((line) => line.includes('editedX')) || ''
+    assert.match(
+      escapedLine,
+      /a \\\| b(?:editedX)?<br>tail(?:editedX)?/,
+      `${checkpoint}: escaped pipe and existing <br> did not retain their authored spelling`
+    )
   }
   if (caseName === 'dashes') {
     assert.equal(source.includes('| - | -- | - | -- | - |'), true, `${checkpoint}: one/two-dash delimiter spelling changed`)

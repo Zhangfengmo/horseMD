@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.51] - 2026-08-12
+
+### Fixed
+- **双文件分屏切换源码** — 修复左栏进入源码模式时错误隐藏右栏富文本的问题；两栏现在继续保持各自可见，大纲按当前焦点栏更新。
+- **网页独立图片与空文件正文起笔不再锁住源码** — 网页 HTML 粘贴的顶层默认尺寸图片与 HorseMD parser 重开的 image block 现在按同一可持久化 Markdown 资产验收；同类型 image block、尺寸、混合正文、marks 与未知属性仍严格比较。内容为空或仅含空白的文件直接点击正文输入时，只忽略 Crepe 初始、未被作者使用的首个空 H1 scaffold；含作者非空源码的文档与显式 Markdown 空标题仍受保护。
+- **应用退出确认前不再重建文件源码** — 有路径文件在窗口关闭阶段只允许取得 verified rich flush；strict rebuild、recovery 与 verified baseline reset 均不会在用户确认关闭前运行，取消退出后不会留下被静默规范化的源码基线。
+- **复杂文档中新建表格不再连锁暂停保存** — 在作者源码与 canonical 已因参差表格、转义或排版产生合法差异时，通过 `/table` 插入表格现在与代码块一样，在命令执行前捕获精确 authored 查询行，执行后只序列化新表格并原子替换该行；不再把局部插入交给要求整篇源码相等的通用 table-count matcher。新表格的空 cell 只在这一已知 serializer 边界清除内部 `<br />`，随后逐单元格输入继续走原有 verified commit，不放宽全局耐久语义验收。
+- **表格恢复副本可冷重开并继续保存** — `.horsemd-recovered.md` 在仍持有 authored / previous canonical / live canonical 三域时，使用 table source model 产生的 `(table,row,column)` ownership 清除已证明属于 serializer 的空 cell 占位；用户真实的单独 `<br />` 保持不变，坐标不完整或已漂移时拒绝部分清理。坐标身份不再由最终 cell 内容或差异数猜测，而由 ProseMirror transaction mapping 证明；行列增删/移动后没有证明的真实 break 表格保持 fail-closed。已证明坐标的恢复副本冷重开后可继续编辑表格并正常保存，不再递归生成第二个恢复副本。
+- **同一批次编辑多个表格单元格不再误判为表外改动** — 在一个 200ms 发布窗口内从第一格删除真实 `<br />`、再在相邻空格按 Enter 时，事务坐标证明允许 table source model 原子写回两个 cell；serializer 仅改变表格边界换行数量、列宽 padding 或分隔线长度时，不再阻断源码切换和保存，表外正文仍须逐字一致。
+
+### Changed
+- **真实表格录入路径进入标准 UI 门禁** — 新增参差文档中 `/table` → 3×3 → 九格逐字符输入 → 保存的独立回归，并同时检查 JavaScript、Python、Rust 与原有 Go 围栏代码不会被表格提交改写；恢复测试增加“另存副本 → 新进程冷重开 → 编辑表格 → 正常保存”的闭环。
+- **退出应用时无路径草稿增加第三恢复出口** — 启用会话恢复时，无路径 scratch 若在应用退出前的 verified flush 与严格 rebuild 均失败，会把 live best-effort recovery snapshot 只写入 session；不会覆盖作者文件，也不会推进 verified baseline。这是预防最后一次可见编辑只留在 renderer 的耐久加固。
+- **安全重开优先的源码字节契约** — 富文本产生的字面列表序号会保留阻止其误解析为嵌套列表所必需的反斜杠（如 `- 1\. 测试`）；普通正文里的字面三反引号也会按需转义；可见尾随 ASCII 空格会写成 `&#x20;`，避免冷重开后消失。这些拼写会被其他 Markdown 编辑器直接看到，但对应的文档结构与可见内容可稳定重开。
+- **表格结构操作的格式边界** — 普通单元格编辑继续保留参差短行和未触碰字节；增删行列属于整表结构变更，当前会按 canonical 重写该表格块，可能整理短行和 padding，不承诺逐字节保留整表排版。
+
 ## [0.13.50] - 2026-08-12
 
 ### Fixed

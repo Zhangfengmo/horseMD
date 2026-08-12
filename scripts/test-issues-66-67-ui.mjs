@@ -24,11 +24,18 @@ async function pressMod(send, key, code, modifiers) {
   await sleep(250)
 }
 
+let activeWs = null
+
 const same = (actual, expected) =>
   Array.isArray(actual) && actual.length === expected.length && actual.every((value, index) => value === expected[index])
 
+const visibleSplitPaneCount = (evaluate) => evaluate(`[
+  ...document.querySelectorAll('.editor-scroll.hm-pane-left, .editor-scroll.hm-pane-right')
+].filter((node) => node.offsetParent).length`)
+
 async function main() {
   const { ws, send, evaluate } = await connectCdp()
+  activeWs = ws
   await send('Runtime.enable')
 
   // Launch-path files arrive through the app-ready queue. The CDP target can
@@ -55,7 +62,7 @@ async function main() {
   if (!leftReady) throw new Error('launch fixtures did not settle on the left document')
   await evaluate(`document.querySelectorAll('.activity-item')[2]?.click()`)
   await sleep(700)
-  let paneCount = await evaluate(`document.querySelectorAll('.editor-scroll.hm-pane-left, .editor-scroll.hm-pane-right').length`)
+  let paneCount = await visibleSplitPaneCount(evaluate)
   if (paneCount !== 2) {
     await evaluate(`(() => {
       const button = [...document.querySelectorAll('.topbar .icon-btn')]
@@ -63,8 +70,10 @@ async function main() {
       button?.click()
       return !!button
     })()`)
-    await sleep(1000)
-    paneCount = await evaluate(`document.querySelectorAll('.editor-scroll.hm-pane-left, .editor-scroll.hm-pane-right').length`)
+    for (let i = 0; i < 20 && paneCount !== 2; i++) {
+      await sleep(200)
+      paneCount = await visibleSplitPaneCount(evaluate)
+    }
   }
   if (paneCount !== 2) throw new Error(`split panes did not open: ${paneCount}`)
 
@@ -186,6 +195,7 @@ async function main() {
 }
 
 main().catch((error) => {
+  activeWs?.close()
   console.error(error)
   process.exitCode = 1
 })

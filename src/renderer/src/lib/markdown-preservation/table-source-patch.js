@@ -35,6 +35,12 @@ const isSerializerPlaceholderCell = (cell, model) => Boolean(
   model.view.raw.slice(cell.contentRange.start, cell.contentRange.end) === '<br />'
 )
 
+const isAuthoredSoleBreakCell = (cell) => Boolean(
+  cell?.presence === 'present' &&
+  cell.units?.length === 1 &&
+  cell.units[0].kind === 'break'
+)
+
 const semanticUnitsForCell = (
   cell,
   model,
@@ -240,6 +246,49 @@ export const normalizeGfmTableSerializerPlaceholders = (markdown, parseTables) =
         if (isSerializerPlaceholderCell(cell, model)) ranges.push(cell.contentRange)
       }
     }
+  }
+  ranges.sort((left, right) => right.start - left.start)
+  return ranges.reduce(
+    (result, range) => result.slice(0, range.start) + result.slice(range.end),
+    source
+  )
+}
+
+// A recovery copy starts from serializer output, but unlike a newly generated
+// table it can also contain user-authored sole `<br />` cells. The durable
+// context is the ownership proof produced while all three source domains are
+// still available (authored, previous canonical, next canonical). Materialize
+// that proof structurally and refuse partial cleanup if any coordinate no
+// longer points at the exact serializer placeholder it declared.
+export const normalizeGfmTablePlaceholdersByContext = (
+  markdown,
+  context,
+  parseTables
+) => {
+  const source = String(markdown ?? '')
+  const coordinates = context?.emptyTableCells
+  if (!Array.isArray(coordinates) || coordinates.length === 0) return source
+  let model
+  try {
+    model = parseTables(source)
+  } catch {
+    return source
+  }
+  if (!isValidGfmTableSourceModel(model, source)) return source
+  const ranges = []
+  const seen = new Set()
+  for (const coordinate of coordinates) {
+    const table = Number.isInteger(coordinate?.table) ? model.tables[coordinate.table] : null
+    const row = Number.isInteger(coordinate?.row) ? table?.rows[coordinate.row] : null
+    const cell = Number.isInteger(coordinate?.column) ? row?.cells[coordinate.column] : null
+    const key = `${coordinate?.table}:${coordinate?.row}:${coordinate?.column}`
+    if (
+      seen.has(key) ||
+      !cell?.contentRange ||
+      !isSerializerPlaceholderCell(cell, model)
+    ) return source
+    seen.add(key)
+    ranges.push(cell.contentRange)
   }
   ranges.sort((left, right) => right.start - left.start)
   return ranges.reduce(
@@ -471,20 +520,42 @@ const durableContextForModels = ({
   authoredModel,
   previousModel,
   nextModel,
-  parseTables
+  parseTables,
+  allowCoordinateIdentity
 }) => {
   if (authoredModel.tables.length !== previousModel.tables.length) return null
+  for (let index = 0; index < previousModel.tables.length; index += 1) {
+    if (!authoredMatchesPrevious(
+      authoredModel.tables[index],
+      authoredModel,
+      previousModel.tables[index],
+      previousModel
+    )) return null
+  }
+  const hasAuthoredSoleBreak = authoredModel.tables.some((table) => (
+    table.rows.some((row) => row.cells.some(isAuthoredSoleBreakCell))
+  ))
+  if (hasAuthoredSoleBreak && !allowCoordinateIdentity) return null
   const tableOwnership = []
   if (previousModel.tables.length === nextModel.tables.length) {
     for (let index = 0; index < nextModel.tables.length; index += 1) {
       const authoredTable = authoredModel.tables[index]
       const previousTable = previousModel.tables[index]
       const nextTable = nextModel.tables[index]
-      if (!authoredMatchesPrevious(authoredTable, authoredModel, previousTable, previousModel)) {
-        return null
-      }
-      const rowOwnership = previousTable.rows.length === nextTable.rows.length
-        ? nextTable.rows.map((_, row) => row)
+      const changedCells = previousTable.rows.length === nextTable.rows.length
+        ? changedCellCoordinates(
+            authoredTable,
+            authoredModel,
+            previousTable,
+            previousModel,
+            nextTable,
+            nextModel
+          )
+        : null
+      const rowOwnership = changedCells
+        ? allowCoordinateIdentity || changedCells.length <= 1
+          ? nextTable.rows.map((_, row) => row)
+          : null
         : matchStructuralRowOwnership({
             authoredTable,
             authoredModel,
@@ -528,7 +599,8 @@ export function getGfmTableDurableContext({
   authored,
   previousCanonical,
   nextCanonical,
-  parseTables
+  parseTables,
+  allowCoordinateIdentity = false
 }) {
   const values = [
     String(authored ?? ''),
@@ -542,7 +614,8 @@ export function getGfmTableDurableContext({
     authoredModel,
     previousModel,
     nextModel,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity
   })
 }
 
@@ -614,14 +687,27 @@ const tableContext = (model, table) => {
   }
 }
 
+const withoutLeadingLineEndings = (value) => String(value ?? '').replace(/^(?:\r\n|\r|\n)+/, '')
+const withoutTrailingLineEndings = (value) => String(value ?? '').replace(/(?:\r\n|\r|\n)+$/, '')
+
 const tablesHaveIdenticalOutsideText = (previousModel, previousTable, nextModel, nextTable) => {
   const previousContext = tableContext(previousModel, previousTable)
   const nextContext = tableContext(nextModel, nextTable)
-  return previousContext != null &&
-    previousContext.normalizedPrefix === nextContext.normalizedPrefix &&
-    previousContext.normalizedSuffix === nextContext.normalizedSuffix &&
-    previousContext.rawPrefix === nextContext.rawPrefix &&
-    previousContext.rawSuffix === nextContext.rawSuffix
+  if (previousContext == null || nextContext == null) return false
+  // A serializer can change only the count of line endings immediately beside
+  // a table while re-padding its cells. Those bytes are outside the AST table
+  // range but do not describe a second document edit; the authored source is
+  // retained, so accepting that boundary drift does not rewrite them. Spaces,
+  // text, and every non-boundary byte still have to match exactly (two trailing
+  // spaces in a paragraph, for example, remain durable Markdown content).
+  return withoutTrailingLineEndings(previousContext.normalizedPrefix) ===
+      withoutTrailingLineEndings(nextContext.normalizedPrefix) &&
+    withoutLeadingLineEndings(previousContext.normalizedSuffix) ===
+      withoutLeadingLineEndings(nextContext.normalizedSuffix) &&
+    withoutTrailingLineEndings(previousContext.rawPrefix) ===
+      withoutTrailingLineEndings(nextContext.rawPrefix) &&
+    withoutLeadingLineEndings(previousContext.rawSuffix) ===
+      withoutLeadingLineEndings(nextContext.rawSuffix)
 }
 
 const changeEquals = (left, right) => Boolean(
@@ -770,7 +856,8 @@ export function mapGfmTableChange({
   previousCanonical,
   nextCanonical,
   change = null,
-  parseTables
+  parseTables,
+  allowCoordinateIdentity = false
 }) {
   const source = String(authored ?? '')
   const previous = String(previousCanonical ?? '')
@@ -793,10 +880,19 @@ export function mapGfmTableChange({
     authoredModel,
     previousModel,
     nextModel,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity
   })
 
   if (previousModel.tables.length !== nextModel.tables.length) {
+    const authoredHasSoleBreak = authoredModel.tables.some((table) => (
+      table.rows.some((row) => (
+        row.cells.some(isAuthoredSoleBreakCell)
+      ))
+    ))
+    if (authoredHasSoleBreak && !allowCoordinateIdentity) {
+      return { status: 'unowned', reason: 'table-coordinate-provenance-required' }
+    }
     const exact = exactBaselineTableCountChange({
       authoredModel,
       previousModel,
@@ -882,6 +978,12 @@ export function mapGfmTableChange({
   const authoredTable = authoredModel.tables[index]
   const previousTable = previousModel.tables[index]
   const nextTable = nextModel.tables[index]
+  const hasAuthoredSoleBreak = authoredTable?.rows.some((row) => (
+    row.cells.some(isAuthoredSoleBreakCell)
+  ))
+  if (hasAuthoredSoleBreak && !allowCoordinateIdentity) {
+    return { status: 'unowned', reason: 'table-coordinate-provenance-required' }
+  }
   if (!tablesHaveIdenticalOutsideText(previousModel, previousTable, nextModel, nextTable)) {
     return { status: 'unowned', reason: 'mixed-table-and-outside-change' }
   }
@@ -936,74 +1038,124 @@ export function mapGfmTableChange({
     }
   }
 
-  if (changedCells.length !== 1) return { status: 'unowned', reason: 'ambiguous-table-cell-change' }
-  const coordinate = changedCells[0]
-  const authoredRow = authoredTable.rows[coordinate.row]
-  const authoredCell = authoredRow?.cells[coordinate.column]
-  const previousCell = previousTable.rows[coordinate.row]?.cells[coordinate.column]
-  const nextCell = nextTable.rows[coordinate.row]?.cells[coordinate.column]
-  if (!authoredRow || !previousCell || !nextCell) {
-    return { status: 'unowned', reason: 'missing-table-cell-coordinate' }
+  if (!changedCells.length || (changedCells.length > 1 && !allowCoordinateIdentity)) {
+    return { status: 'unowned', reason: 'ambiguous-table-cell-change' }
   }
+  const patches = []
+  for (const coordinate of changedCells) {
+    const authoredRow = authoredTable.rows[coordinate.row]
+    const authoredCell = authoredRow?.cells[coordinate.column]
+    const previousCell = previousTable.rows[coordinate.row]?.cells[coordinate.column]
+    const nextCell = nextTable.rows[coordinate.row]?.cells[coordinate.column]
+    if (!authoredRow || !previousCell || !nextCell) {
+      return { status: 'unowned', reason: 'missing-table-cell-coordinate' }
+    }
 
-  if (authoredCell?.presence === 'missing') {
-    const materialized = materializeMissingCell({
+    if (authoredCell?.presence === 'missing') {
+      if (changedCells.length > 1) {
+        return { status: 'unowned', reason: 'ambiguous-missing-cell-materialization' }
+      }
+      const materialized = materializeMissingCell({
+        authoredModel,
+        table: authoredTable,
+        row: authoredRow,
+        column: coordinate.column,
+        nextCell,
+        nextModel
+      })
+      if (!materialized) return { status: 'unowned', reason: 'unowned-missing-cell-materialization' }
+      return {
+        status: 'patched',
+        markdown: source.slice(0, materialized.sourceRange.start) +
+          materialized.replacement +
+          source.slice(materialized.sourceRange.end),
+        kind: 'materialized-cell',
+        sourceRange: materialized.sourceRange,
+        ...(durableContext ? { durableContext } : {})
+      }
+    }
+
+    if (!authoredCell?.patchable || !previousCell.patchable || !nextCell.patchable) {
+      return { status: 'unowned', reason: 'table-cell-unpatchable-token' }
+    }
+    if (cellKey(authoredCell, authoredModel, false) !== previousCanonicalCellKey(
+      authoredCell,
       authoredModel,
-      table: authoredTable,
-      row: authoredRow,
-      column: coordinate.column,
+      previousCell,
+      previousModel
+    )) {
+      return { status: 'unowned', reason: 'authored-previous-cell-token-mismatch' }
+    }
+    const previousUnits = previousCanonicalCellUnits(
+      authoredCell,
+      authoredModel,
+      previousCell,
+      previousModel
+    )
+    const nextUnits = nextCanonicalCellUnits(
+      authoredCell,
+      authoredModel,
+      previousCell,
+      previousModel,
       nextCell,
       nextModel
-    })
-    if (!materialized) return { status: 'unowned', reason: 'unowned-missing-cell-materialization' }
-    return {
-      status: 'patched',
-      markdown: source.slice(0, materialized.sourceRange.start) +
-        materialized.replacement +
-        source.slice(materialized.sourceRange.end),
-      kind: 'materialized-cell',
-      sourceRange: materialized.sourceRange,
-      ...(durableContext ? { durableContext } : {})
+    )
+    const unitChange = commonUnitChange(previousUnits, nextUnits)
+    const rawStart = unitBoundary(authoredCell, unitChange.start, 'start')
+    const rawEnd = unitBoundary(authoredCell, unitChange.previousEnd, 'end')
+    const rawReplacement = unitsRaw(nextModel, nextUnits, unitChange.start, unitChange.nextEnd)
+    if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawStart > rawEnd || rawReplacement == null) {
+      return { status: 'unowned', reason: 'unmappable-table-cell-unit-range' }
     }
+    let sourceRange = { start: rawStart, end: rawEnd }
+    let replacement = adaptCanonicalRegionToSource(rawReplacement, source, sourceRange)
+    if (
+      sourceRange.start === sourceRange.end &&
+      previousUnits.length === 0 &&
+      nextUnits.length > 0
+    ) {
+      // An authored empty cell's semantic content range is zero-width after
+      // the parser trims its interior padding. Own that padding only for this
+      // proven insertion so the result stays `| value |`, rather than placing
+      // the new token after both spaces as `|  value|`.
+      let start = sourceRange.start
+      let end = sourceRange.end
+      while (
+        start > authoredCell.range.start &&
+        (source[start - 1] === ' ' || source[start - 1] === '\t')
+      ) start -= 1
+      while (
+        end < authoredCell.range.end &&
+        (source[end] === ' ' || source[end] === '\t')
+      ) end += 1
+      const padding = source.slice(start, end)
+      const split = Math.ceil(padding.length / 2)
+      sourceRange = { start, end }
+      replacement = padding.slice(0, split) + replacement + padding.slice(split)
+    }
+    patches.push({
+      sourceRange,
+      replacement
+    })
   }
 
-  if (!authoredCell?.patchable || !previousCell.patchable || !nextCell.patchable) {
-    return { status: 'unowned', reason: 'table-cell-unpatchable-token' }
+  patches.sort((left, right) => right.sourceRange.start - left.sourceRange.start)
+  for (let index = 1; index < patches.length; index += 1) {
+    if (patches[index - 1].sourceRange.start < patches[index].sourceRange.end) {
+      return { status: 'unowned', reason: 'overlapping-table-cell-ranges' }
+    }
   }
-  if (cellKey(authoredCell, authoredModel, false) !== previousCanonicalCellKey(
-    authoredCell,
-    authoredModel,
-    previousCell,
-    previousModel
-  )) {
-    return { status: 'unowned', reason: 'authored-previous-cell-token-mismatch' }
-  }
-  const previousUnits = previousCanonicalCellUnits(
-    authoredCell,
-    authoredModel,
-    previousCell,
-    previousModel
-  )
-  const nextUnits = nextCanonicalCellUnits(
-    authoredCell,
-    authoredModel,
-    previousCell,
-    previousModel,
-    nextCell,
-    nextModel
-  )
-  const unitChange = commonUnitChange(previousUnits, nextUnits)
-  const rawStart = unitBoundary(authoredCell, unitChange.start, 'start')
-  const rawEnd = unitBoundary(authoredCell, unitChange.previousEnd, 'end')
-  const rawReplacement = unitsRaw(nextModel, nextUnits, unitChange.start, unitChange.nextEnd)
-  if (!Number.isInteger(rawStart) || !Number.isInteger(rawEnd) || rawStart > rawEnd || rawReplacement == null) {
-    return { status: 'unowned', reason: 'unmappable-table-cell-unit-range' }
-  }
-  const sourceRange = { start: rawStart, end: rawEnd }
-  const replacement = adaptCanonicalRegionToSource(rawReplacement, source, sourceRange)
+  const markdown = patches.reduce((value, patch) => (
+    value.slice(0, patch.sourceRange.start) +
+    patch.replacement +
+    value.slice(patch.sourceRange.end)
+  ), source)
+  const sourceRange = patches.length === 1
+    ? patches[0].sourceRange
+    : authoredTable.range
   return {
     status: 'patched',
-    markdown: source.slice(0, sourceRange.start) + replacement + source.slice(sourceRange.end),
+    markdown,
     kind: 'cell-text',
     sourceRange,
     ...(durableContext ? { durableContext } : {})

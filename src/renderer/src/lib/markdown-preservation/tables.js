@@ -7,6 +7,7 @@ import {
   getGfmTableDurableContext,
   getGfmTableSourceParser,
   mapGfmTableChange,
+  normalizeGfmTablePlaceholdersByContext,
   normalizeGfmTableSerializerPlaceholders
 } from './table-source-model.js'
 
@@ -53,3 +54,9 @@ export const normalizeSerializerEmptyTableCells = (
   markdown,
   parseTables = defaultParseTables
 ) => normalizeEmptyTableCells(markdown, parseTables, { provenance: 'serializer' })
+
+export const normalizeSerializerTablePlaceholdersByContext = (
+  markdown,
+  context,
+  parseTables = defaultParseTables
+) => normalizeGfmTablePlaceholdersByContext(markdown, context, parseTables)

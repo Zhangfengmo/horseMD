@@ -172,6 +172,128 @@ run('table contracts ignore colwidth but retain alignment spans and unknown attr
   }
 })
 
+run('standalone default-size image representations share one durable Markdown contract', () => {
+  const inlineImage = (attrs = {}, siblings = []) => nodeDoc([{
+    type: 'paragraph',
+    content: [
+      {
+        type: 'image',
+        attrs: {
+          src: 'data:image/gif;base64,AA==',
+          alt: '微信图片',
+          title: '微信图片',
+          ...attrs
+        }
+      },
+      ...siblings
+    ]
+  }])
+  const blockImage = (attrs = {}) => nodeDoc([{
+    type: 'image-block',
+    attrs: {
+      src: 'data:image/gif;base64,AA==',
+      alt: '微信图片',
+      caption: '微信图片',
+      ratio: 1,
+      ...attrs
+    }
+  }])
+
+  assert.equal(
+    areDurablyEquivalent(blockImage(), inlineImage()),
+    true,
+    'a standalone HTML image and the parser image-block reconstruct the same Markdown asset'
+  )
+  const mixedCandidate = nodeDoc([
+    blockImage({ alt: 'A', caption: 'A', src: 'a.png' }).toJSON().content[0],
+    blockImage({ alt: 'B', caption: 'B', src: 'b.png' }).toJSON().content[0]
+  ])
+  const mixedExpected = nodeDoc([
+    blockImage({ alt: 'A', caption: 'A', src: 'a.png' }).toJSON().content[0],
+    inlineImage({ alt: 'B', title: 'B', src: 'b.png' }).toJSON().content[0]
+  ])
+  assert.equal(
+    areDurablyEquivalent(mixedCandidate, mixedExpected),
+    true,
+    'existing block images may coexist with one newly pasted inline image'
+  )
+  assert.equal(
+    areDurablyEquivalent(
+      blockImage({ alt: 'A', caption: '' }),
+      blockImage({ alt: 'A', caption: 'A' })
+    ),
+    false,
+    'same-type image blocks retain independent alt and caption semantics'
+  )
+  assert.equal(
+    areDurablyEquivalent(
+      blockImage(),
+      nodeDoc([{
+        type: 'image-block',
+        marks: [{ type: 'link', attrs: { href: 'https://example.com' } }],
+        attrs: {
+          src: 'data:image/gif;base64,AA==',
+          alt: '微信图片',
+          caption: '微信图片',
+          ratio: 1
+        }
+      }])
+    ),
+    false,
+    'same-type image-block marks remain durable'
+  )
+  assert.equal(
+    areDurablyEquivalent(blockImage({ future: 'block' }), inlineImage({ future: 'inline' })),
+    false,
+    'unknown image attributes remain durable instead of entering the representation contract'
+  )
+  assert.equal(
+    areDurablyEquivalent(blockImage({ ratio: 2 }), inlineImage()),
+    false,
+    'a resized block image is not equivalent to the default inline representation'
+  )
+  assert.equal(
+    areDurablyEquivalent(blockImage(), inlineImage({}, [{ type: 'text', text: 'caption tail' }])),
+    false,
+    'an image embedded beside paragraph content remains structurally distinct'
+  )
+})
+
+run('generated scratch provenance owns only the initial empty heading scaffold', () => {
+  const paragraph = { type: 'paragraph', content: [{ type: 'text', text: '正文第一段' }] }
+  const expected = (attrs = { id: '', level: 1 }, prefix = true) => nodeDoc(prefix
+    ? [{ type: 'heading', attrs }, paragraph]
+    : [paragraph, { type: 'heading', attrs }])
+  const parsed = nodeDoc([paragraph])
+  const context = { generatedScratchEmptyHeading: true }
+
+  assert.equal(
+    areDurablyEquivalent(parsed, expected(), null),
+    false,
+    'ordinary authored documents never drop an empty heading'
+  )
+  assert.equal(
+    areDurablyEquivalent(parsed, expected(), context),
+    true,
+    'generated scratch may omit its untouched leading empty H1 scaffold'
+  )
+  assert.equal(
+    areDurablyEquivalent(parsed, expected({ id: '', level: 2 }), context),
+    false,
+    'the provenance does not apply to another heading level'
+  )
+  assert.equal(
+    areDurablyEquivalent(parsed, expected({ id: '', level: 1, future: true }), context),
+    false,
+    'unknown scaffold attrs remain durable'
+  )
+  assert.equal(
+    areDurablyEquivalent(parsed, expected({ id: '', level: 1 }, false), context),
+    false,
+    'only the initial leading scaffold position is owned'
+  )
+})
+
 run('table cell content order loss and movement remain durable', () => {
   const row = (cells) => nodeDoc([{
     type: 'table',
@@ -311,7 +433,8 @@ run('strict rebuild distinguishes an empty table placeholder from an authored ta
       durableContext: tableDurableContext({
         authored: canonical,
         previousCanonical: canonical,
-        nextCanonical: canonical
+        nextCanonical: canonical,
+        allowCoordinateIdentity: true
       })
     }),
     expectedDoc: tableDoc(true),

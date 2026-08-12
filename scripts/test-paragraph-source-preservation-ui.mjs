@@ -219,13 +219,35 @@ async function writeNewDocument({ path, profile, port: scenarioPort, startBlock,
       })()`),
       'empty rich editor did not open'
     )
+    await evaluate(`(() => {
+      window.__hmGateLog = []
+      window.__hmPreserveLog = []
+    })()`)
     await nativeClick(
       evaluate,
       send,
       `[...document.querySelectorAll('.ProseMirror')]
         .find((node) => node.offsetParent)?.querySelector(${JSON.stringify(startBlock)})`
     )
-    await typeHumanPaced(send, startBlock === 'h1' ? '新建标题' : '正文第一段')
+    await waitFor(
+      () => evaluate(`(() => {
+        const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        const selection = getSelection()
+        const node = selection?.anchorNode
+        const element = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node
+        return !!editor && !!element && editor.contains(element) && !!element.closest?.(${JSON.stringify(startBlock)})
+      })()`),
+      `caret did not settle in the new document ${startBlock}`
+    )
+    const firstBlockText = startBlock === 'h1' ? '新建标题' : '正文第一段'
+    await typeHumanPaced(send, firstBlockText)
+    await waitFor(
+      () => evaluate(`(() => {
+        const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        return editor?.querySelector(${JSON.stringify(startBlock)})?.textContent === ${JSON.stringify(firstBlockText)}
+      })()`),
+      `first new-document block did not receive committed text`
+    )
     await pressEnter(send)
     await typeHumanPaced(send, startBlock === 'h1' ? '正文第一段' : '正文第二段')
     if (startBlock === 'h1') {
@@ -237,8 +259,20 @@ async function writeNewDocument({ path, profile, port: scenarioPort, startBlock,
     // markdownUpdated. This is the exact path that previously mounted an
     // uncontrolled textarea from the stale empty tab snapshot.
     await nativeToggleSource(evaluate, send)
+    let sourceSnapshot
+    try {
+      sourceSnapshot = await waitFor(() => visibleSource(evaluate), 'source mode did not open for a new document')
+    } catch (error) {
+      const diagnostics = await evaluate(`(() => ({
+        gate: (window.__hmGateLog || []).slice(-8),
+        preserve: (window.__hmPreserveLog || []).slice(-8),
+        status: window.__horsemd?.getVerifiedSyncStatus?.() || null,
+        rich: window.__horsemd?.getView?.()?.state.doc.toJSON?.() || null
+      }))()`)
+      throw new Error(`${error.message}: ${JSON.stringify(diagnostics)}`)
+    }
     assert.equal(
-      await waitFor(() => visibleSource(evaluate), 'source mode did not open for a new document'),
+      sourceSnapshot,
       expected,
       'new-document paragraphs disappeared or merged during an immediate source switch'
     )

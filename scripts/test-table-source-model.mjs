@@ -106,7 +106,13 @@ const mapFullRowEdit = (authored, previousCanonical, from, to) => {
   const authored = '| A | B |\n| - | - |\n| <br> | stable |'
   const previousCanonical = '| A | B |\n| - | - |\n| <br /> | stable |'
   const nextCanonical = '| A | B |\n| - | - |\n|  | stable |'
-  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical,
+    nextCanonical,
+    parseTables,
+    allowCoordinateIdentity: true
+  })
   assert.equal(result.status, 'patched', 'a canonical serializer spelling still owns an authored sole hardbreak')
   assert.equal(result.kind, 'cell-text')
   assert.equal(
@@ -120,7 +126,13 @@ const mapFullRowEdit = (authored, previousCanonical, from, to) => {
   const authored = '| A | B |\n| - | - |\n|  | stable |'
   const previousCanonical = '| A | B |\n| - | - |\n| <br /> | stable |'
   const nextCanonical = '| A | B |\n| - | - |\n| <br> | stable |'
-  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical,
+    nextCanonical,
+    parseTables,
+    allowCoordinateIdentity: true
+  })
   assert.equal(result.status, 'patched', 'an empty-cell placeholder can become a real sole hardbreak')
   assert.equal(result.kind, 'cell-text')
   assert.notEqual(result.markdown, authored, 'the hardbreak insertion must change the durable source')
@@ -368,7 +380,13 @@ for (const fixture of [
     '| <br /> | <br /> | keep |'
   ].join('\n')
   const nextCanonical = `${previousCanonical}\n| new | <br /> | row |`
-  const result = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  const result = mapGfmTableChange({
+    authored,
+    previousCanonical,
+    nextCanonical,
+    parseTables,
+    allowCoordinateIdentity: true
+  })
   assert.equal(result.status, 'patched', 'adding a row remains owned when an existing cell has a sole hardbreak')
   assert.equal(result.kind, 'table-structure')
   const table = parseTables(result.markdown).tables[0]
@@ -439,7 +457,13 @@ for (const fixture of [
     '| <br /> | first |',
     '| <br /> | new |\n| <br /> | first |'
   )
-  const inserted = mapGfmTableChange({ authored, previousCanonical, nextCanonical, parseTables })
+  const inserted = mapGfmTableChange({
+    authored,
+    previousCanonical,
+    nextCanonical,
+    parseTables,
+    allowCoordinateIdentity: true
+  })
   assert.equal(inserted.status, 'patched', 'a uniquely anchored middle row insertion remains table-owned')
   const insertedRows = parseTables(inserted.markdown).tables[0].rows
   assert.equal(insertedRows[2].cells[0].units.length, 0, 'the inserted middle row placeholder becomes empty')
@@ -463,7 +487,8 @@ for (const fixture of [
     authored: authoredWithMiddle,
     previousCanonical: previousWithMiddle,
     nextCanonical: previousCanonical,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.equal(deleted.status, 'patched', 'a uniquely anchored middle row deletion remains table-owned')
   const deletedRows = parseTables(deleted.markdown).tables[0].rows
@@ -501,7 +526,8 @@ for (const fixture of [
     authored: table(fixture.authoredRows),
     previousCanonical: table(fixture.previousRows),
     nextCanonical: table(fixture.nextRows),
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.deepEqual(
     result,
@@ -562,7 +588,8 @@ for (const fixture of [
             authored: table(authoredRows),
             previousCanonical: table(previousRows),
             nextCanonical: table(nextRows),
-            parseTables
+            parseTables,
+            allowCoordinateIdentity: true
           })
           const label = `${operation} ${changedKind} row at ${position.label} with ${anchorKind} anchors`
           if (changedKind === 'nonempty' && anchorKind === 'duplicate') {
@@ -611,7 +638,8 @@ for (const fixture of [
     authored: table([before, realBreakSource, after]),
     previousCanonical: table([before, realBreakCanonical, after]),
     nextCanonical: table([before, emptyCanonical, realBreakCanonical, after]),
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.deepEqual(
     insertedBesideBreak,
@@ -623,7 +651,8 @@ for (const fixture of [
     authored: table([before, emptySource, realBreakSource, after]),
     previousCanonical: table([before, emptyCanonical, realBreakCanonical, after]),
     nextCanonical: table([before, realBreakCanonical, after]),
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.deepEqual(
     deletedBesideBreak,
@@ -809,7 +838,8 @@ for (const fixture of [
     authored: authoredBeforeInsert,
     previousCanonical: previousBeforeInsert,
     nextCanonical: nextAfterInsert,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.equal(inserted.status, 'patched', 'table insertion is owned across proven hardbreak/placeholder spellings')
   assert.equal(
@@ -825,7 +855,8 @@ for (const fixture of [
     authored: authoredBeforeDelete,
     previousCanonical: previousBeforeDelete,
     nextCanonical: nextAfterDelete,
-    parseTables
+    parseTables,
+    allowCoordinateIdentity: true
   })
   assert.equal(deleted.status, 'patched', 'table deletion is owned across proven hardbreak/placeholder spellings')
   assert.equal(

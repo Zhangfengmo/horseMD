@@ -7,6 +7,7 @@ import {
   sourceSyncRecoveryName
 } from '../src/renderer/src/lib/source-sync-recovery.js'
 import { bestEffortRecoveryMarkdown } from '../src/renderer/src/components/editor-source-verification.js'
+import { resolvePendingRichDraft } from '../src/renderer/src/lib/pending-rich-draft.js'
 import { isSameRecoveryFile } from '../src/main/recovery-path.js'
 
 assert.equal(sourceSyncRecoveryName('report.md'), 'report.horsemd-recovered.md')
@@ -80,6 +81,90 @@ assert.doesNotMatch(
   recoveryMarkdown,
   /<br\s*\/?>/i,
   'a recovery copy must not persist the editor-owned standalone empty-block placeholder'
+)
+
+const canonicalTableRecovery = [
+  '| A | B |',
+  '| --- | --- |',
+  '| <br /> | stable |'
+].join('\n')
+assert.equal(
+  bestEffortRecoveryMarkdown(canonicalTableRecovery, {
+    getTableContext: () => ({ emptyTableCells: [{ table: 0, row: 1, column: 0 }] }),
+    normalizeTablePlaceholders: (markdown) => markdown.replace('<br />', '')
+  }),
+  canonicalTableRecovery.replace('<br />', ''),
+  'best-effort recovery applies table cleanup when its provenance path succeeds'
+)
+assert.equal(
+  bestEffortRecoveryMarkdown(canonicalTableRecovery, {
+    getTableContext: () => { throw new Error('table provenance unavailable') },
+    normalizeTablePlaceholders: () => { throw new Error('must not run') }
+  }),
+  canonicalTableRecovery,
+  'table provenance failure degrades to canonical recovery instead of removing the recovery exit'
+)
+assert.equal(
+  bestEffortRecoveryMarkdown(canonicalTableRecovery, {
+    getTableContext: () => ({ emptyTableCells: [{ table: 0, row: 1, column: 0 }] }),
+    normalizeTablePlaceholders: () => { throw new Error('table materialization failed') }
+  }),
+  canonicalTableRecovery,
+  'table placeholder materialization failure also keeps the canonical recovery exit'
+)
+
+const closeCalls = []
+assert.equal(resolvePendingRichDraft({
+  flushMarkdown: () => {
+    closeCalls.push('flush')
+    return null
+  },
+  rebuildMarkdownFromRich: () => {
+    closeCalls.push('rebuild')
+    return null
+  },
+  getRecoveryMarkdown: () => {
+    closeCalls.push('recovery')
+    return '# final visible draft\n'
+  }
+}), '# final visible draft\n', 'close-time scratch persistence must retain a live recovery snapshot')
+assert.deepEqual(closeCalls, ['flush', 'rebuild', 'recovery'], 'close-time recovery is the bounded third exit')
+
+let strictRecoveryCalled = false
+assert.equal(resolvePendingRichDraft({
+  flushMarkdown: () => '# verified draft\n',
+  rebuildMarkdownFromRich: () => {
+    throw new Error('verified flush must stop the fallback chain')
+  },
+  getRecoveryMarkdown: () => {
+    strictRecoveryCalled = true
+    return '# recovery\n'
+  }
+}), '# verified draft\n')
+assert.equal(strictRecoveryCalled, false, 'recovery must not replace a verified close-time snapshot')
+
+const fileCloseCalls = []
+assert.equal(resolvePendingRichDraft({
+  flushMarkdown: () => {
+    fileCloseCalls.push('flush')
+    return null
+  },
+  rebuildMarkdownFromRich: () => {
+    fileCloseCalls.push('rebuild')
+    return '# normalized without consent\n'
+  },
+  getRecoveryMarkdown: () => {
+    fileCloseCalls.push('recovery')
+    return '# unverified recovery\n'
+  }
+}, {
+  allowRebuild: false,
+  allowRecovery: false
+}), null, 'file-backed close must not rebuild or recover before the user confirms the close')
+assert.deepEqual(
+  fileCloseCalls,
+  ['flush'],
+  'file-backed close may query only the verified flush and must leave the committer baseline untouched'
 )
 
 console.log('PASS source-sync recovery: persistent ambiguity writes only a user-chosen recovery copy')

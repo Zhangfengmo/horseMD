@@ -3,6 +3,7 @@
 // covered by test-menu-position.mjs because native pointer placement varies by
 // window manager while the clamping rule itself is pure.
 import { connectCdp, sleep } from './lib/cdp.mjs'
+import { typeTextLikeUser } from './lib/human-input.mjs'
 
 const issue59Dir = process.env.ISSUE59_DIR || ''
 
@@ -39,6 +40,24 @@ async function key(send, value, code = value, virtualKeyCode = value.charCodeAt(
   const params = { key: value, code, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode }
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
+}
+
+async function typeBacktick(send) {
+  const params = {
+    key: '`',
+    code: 'Backquote',
+    windowsVirtualKeyCode: 192,
+    nativeVirtualKeyCode: 192
+  }
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params })
+  await send('Input.dispatchKeyEvent', {
+    type: 'char',
+    ...params,
+    text: '`',
+    unmodifiedText: '`'
+  })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
+  await sleep(80)
 }
 
 async function main() {
@@ -104,8 +123,9 @@ async function main() {
     throw new Error(`Dollar math editing lost content/focus: ${JSON.stringify(dollarMath)}`)
   }
 
-  // #58: an empty backtick pair enters inline-code mode. After closing it,
-  // clicking the rendered trailing edge and typing appends within the mark.
+  // #58: standard incremental `ab` input creates inline code only after the
+  // closing delimiter. The later boundary contract deliberately leaves the
+  // caret outside the closed mark and is covered by test-inline-code-ui.mjs.
   const inlinePoint = await pointForText('Inline target')
   if (!inlinePoint) throw new Error('Inline-code fixture paragraph not found')
   await click(send, inlinePoint.x, inlinePoint.y)
@@ -116,11 +136,10 @@ async function main() {
   })()`)
   if (!mathSettled) throw new Error('Math source did not return to preview-only mode after blur')
   await key(send, 'End', 'End', 35)
-  await send('Input.insertText', { text: ' ' })
-  await send('Input.insertText', { text: '`' })
-  await send('Input.insertText', { text: '`' })
-  await send('Input.insertText', { text: 'ab' })
-  await send('Input.insertText', { text: '`' })
+  await typeTextLikeUser(send, ' ')
+  await typeBacktick(send)
+  await typeTextLikeUser(send, 'ab')
+  await typeBacktick(send)
   await sleep(250)
   const codePoint = await evaluate(`(() => {
     const code = [...document.querySelectorAll('.ProseMirror code')].find((node) => node.textContent === 'ab')
@@ -130,11 +149,6 @@ async function main() {
     return { x: rect.right - 0.25, y: rect.top + rect.height / 2 }
   })()`)
   if (!codePoint) throw new Error('Inline code pair did not render')
-  await click(send, codePoint.x, codePoint.y)
-  await send('Input.insertText', { text: 'c' })
-  await sleep(250)
-  const inlineText = await evaluate(`document.querySelector('code[data-issue-58="1"]')?.textContent || ''`)
-  if (inlineText !== 'abc') throw new Error(`Inline-code boundary append failed: ${inlineText}`)
 
   // #59: open the context menu on the final visible file row. The measured
   // menu must move upward enough that its destructive action remains visible.
@@ -292,7 +306,7 @@ async function main() {
   if (!invalidRange) throw new Error('Invalid PDF page range was not rejected')
   await evaluate(`document.querySelector('.hm-pdf-close')?.click()`)
 
-  console.log(`PASS Electron UI #57–#60: ${JSON.stringify({ math, dollarMath, mathSettled, inlineText, contextMenu, dialog, customDialog, preview, invalidRange })}`)
+  console.log(`PASS Electron UI #57–#60: ${JSON.stringify({ math, dollarMath, mathSettled, inlineCode: 'ab', contextMenu, dialog, customDialog, preview, invalidRange })}`)
   ws.close()
 }
 

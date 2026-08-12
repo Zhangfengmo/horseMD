@@ -13,9 +13,13 @@ import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
 import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
+import { parseGfmTableSource } from '../src/renderer/src/lib/markdown-preservation/tables.js'
 
 const root = `/tmp/horsemd-sync-recovery-${process.pid}`
 const port = Number(process.env.CDP_PORT || 10016)
+const packagedLaunch = process.env.HORSEMD_APP_PATH
+  ? { executable: process.env.HORSEMD_APP_PATH, entrypoint: null }
+  : {}
 
 async function waitFor(check, message, attempts = 100) {
   for (let index = 0; index < attempts; index += 1) {
@@ -54,7 +58,7 @@ async function main() {
 
   let app
   try {
-    app = await launchBuiltElectron({ profileDir: join(root, 'p'), port, appArgs: [file] })
+    app = await launchBuiltElectron({ ...packagedLaunch, profileDir: join(root, 'p'), port, appArgs: [file] })
     await waitFor(
       () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
       'editor did not open'
@@ -131,10 +135,20 @@ async function main() {
     await stopBuiltElectron(app, { removeProfile: true })
     app = null
     const terminalFile = join(root, 'terminal-hardbreak.md')
-    const terminalOriginal = '# Terminal recovery\n\nabc\n'
+    const terminalOriginal = [
+      '# Terminal recovery',
+      '',
+      '| A | B | C |',
+      '| --- | --- | --- |',
+      '| <br /> | stable |',
+      '',
+      'abc',
+      ''
+    ].join('\n')
     const recoveryFile = join(root, 'terminal-hardbreak.horsemd-recovered.md')
     await writeFile(terminalFile, terminalOriginal)
     app = await launchBuiltElectron({
+      ...packagedLaunch,
       profileDir: join(root, 'terminal-profile'),
       port: port + 1,
       appArgs: [terminalFile],
@@ -187,6 +201,105 @@ async function main() {
       await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
       'recovery export must not clear the original tab dirty state'
     )
+
+    const recovered = await readFile(recoveryFile, 'utf8')
+    assert.equal(
+      (recovered.match(/<br\s*\/?>/gi) || []).length,
+      1,
+      'recovery keeps the authored table hardbreak but must not materialize the missing cell as another hardbreak'
+    )
+
+    // A recovery copy is a durable exit, not a one-shot dump. Cold-open it,
+    // edit an ordinary table cell, and save without recursively producing a
+    // second recovery file.
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+    const recursiveRecoveryFile = join(root, 'terminal-hardbreak.horsemd-recovered.horsemd-recovered.md')
+    app = await launchBuiltElectron({
+      ...packagedLaunch,
+      profileDir: join(root, 'reopened-recovery-profile'),
+      port: port + 2,
+      appArgs: [recoveryFile],
+      env: { ...process.env, HORSEMD_TEST_SAVE_AS_PATH: recursiveRecoveryFile }
+    })
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
+      'recovery copy did not cold-open'
+    )
+    await sleep(900)
+    assert.equal(await app.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)
+      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        if (node.nodeValue !== 'stable') continue
+        const range = document.createRange()
+        range.setStart(node, node.nodeValue.length)
+        range.collapse(true)
+        const selection = getSelection()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        editor.focus()
+        document.dispatchEvent(new Event('selectionchange'))
+        return true
+      }
+      return false
+    })()`), true, 'could not place caret in the reopened recovery table')
+    await typeTextLikeUser(app.send, 'Y')
+    await waitFor(
+      () => app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
+      'reopened recovery table edit did not become dirty'
+    )
+    await app.evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(
+      () => app.evaluate(`!document.querySelector('.hm-save-fab')`),
+      'reopened recovery table did not save normally'
+    )
+    const stableRecovery = await readFile(recoveryFile, 'utf8')
+    assert.ok(stableRecovery.includes('stableY'), 'reopened recovery lost its table edit')
+    assert.equal(
+      (stableRecovery.match(/<br\s*\/?>/gi) || []).length,
+      1,
+      'a normal save after recovery must keep the authored break without rematerializing an empty-cell placeholder'
+    )
+    const stableModel = parseGfmTableSource(stableRecovery)
+    assert.equal(stableModel.tables.length, 1, 'reopened recovery save changed the table count')
+    assert.deepEqual(
+      stableModel.tables[0].rows.map((row) => row.cells.length),
+      [3, 3],
+      'reopened recovery save changed the table rectangle'
+    )
+    assert.equal(await toggleSource(app), true, 'source mode is unavailable after saving the recovery table')
+    await waitFor(() => sourceVisible(app), 'source mode did not open after saving the recovery table')
+    const stableSource = await app.evaluate(`(
+      [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)?.value ?? null
+    )`)
+    assert.equal(stableSource, stableRecovery, 'source mode differs from the saved recovery bytes')
+    await assert.rejects(
+      readFile(recursiveRecoveryFile, 'utf8'),
+      /ENOENT/,
+      'reopened recovery must not recursively generate another recovery copy'
+    )
+
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+    app = await launchBuiltElectron({
+      ...packagedLaunch,
+      profileDir: join(root, 'second-reopen-profile'),
+      port: port + 3,
+      appArgs: [recoveryFile]
+    })
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
+      'saved recovery did not survive a second cold reopen'
+    )
+    assert.equal(await toggleSource(app), true, 'second cold reopen cannot enter source mode')
+    await waitFor(() => sourceVisible(app), 'second cold reopen source mode did not open')
+    const secondReopenSource = await app.evaluate(`(
+      [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)?.value ?? null
+    )`)
+    assert.equal(secondReopenSource, stableRecovery, 'second cold reopen changed recovery source bytes')
+    assert.equal(app.dialogs.length, 0, 'second cold reopen must not show recovery')
 
     console.log('PASS sync recovery: strict rebuild success and rebuild-null separate-copy exits both remain available')
   } finally {

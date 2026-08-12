@@ -81,8 +81,16 @@ const nodeContracts = {
     content: tableCellContent
   },
   doc: {
-    content(content) {
-      return content.filter((child) => !(
+    content(content, { generatedScratchEmptyHeading }) {
+      const leading = content[0]
+      const withoutGeneratedScaffold = generatedScratchEmptyHeading &&
+        leading?.type === 'heading' &&
+        !leading.content?.length &&
+        Object.keys(leading.attrs || {}).length === 1 &&
+        leading.attrs?.level === 1
+        ? content.slice(1)
+        : content
+      return withoutGeneratedScaffold.filter((child) => !(
         child?.type === 'paragraph' &&
         !child.content?.length &&
         !Object.keys(child.attrs || {}).length
@@ -119,8 +127,73 @@ const childLocation = (parent, index, location) => {
   return nestedLocation
 }
 
+const hasOnlyDeclaredAttrs = (attrs, declared) => Object.keys(attrs || {})
+  .every((key) => declared.has(key))
+
+// Crepe deliberately parses a top-level Markdown image as `image-block`, while
+// ProseMirror's HTML paste path produces a paragraph whose only child is an
+// inline `image`. Markdown cannot encode that internal node-shape distinction:
+// both serialize to the same top-level image asset and reopen as image-block.
+// Normalize only the default-size, top-level forms whose complete attribute
+// sets are known. Resized images, mixed paragraphs, marks, and future attrs stay
+// under the strict default contract so this representation rule cannot widen
+// into silent semantic loss.
+const standaloneImageProjection = (value, location, representation) => {
+  if (location.directDocChild !== true) return null
+
+  const projectsBlock = representation === 'block' || representation === 'both'
+  const projectsInline = representation === 'inline' || representation === 'both'
+
+  if (projectsBlock && value.type === 'image-block') {
+    const attrs = value.attrs || {}
+    if (
+      !hasOnlyDeclaredAttrs(attrs, new Set(['src', 'alt', 'caption', 'ratio'])) ||
+      value.marks?.length ||
+      value.content?.length ||
+      Number(attrs.ratio ?? 1) !== 1
+    ) return null
+    return {
+      type: 'standalone_image',
+      attrs: sortedAttrs({
+        src: String(attrs.src || ''),
+        alt: String(attrs.alt || ''),
+        caption: String(attrs.caption || '')
+      })
+    }
+  }
+
+  if (
+    !projectsInline ||
+    value.type !== 'paragraph' ||
+    Object.keys(value.attrs || {}).length > 0 ||
+    value.content?.length !== 1
+  ) return null
+  const image = value.content[0]
+  const attrs = image?.attrs || {}
+  if (
+    image?.type !== 'image' ||
+    image.marks?.length ||
+    !hasOnlyDeclaredAttrs(attrs, new Set(['src', 'alt', 'title']))
+  ) return null
+  return {
+    type: 'standalone_image',
+    attrs: sortedAttrs({
+      src: String(attrs.src || ''),
+      alt: String(attrs.alt || ''),
+      caption: String(attrs.title || attrs.alt || '')
+    })
+  }
+}
+
 const projectValue = (value, state, location = {}) => {
   if (!value || typeof value !== 'object') return value
+
+  const standaloneImage = standaloneImageProjection(
+    value,
+    location,
+    state.standaloneImageRepresentation
+  )
+  if (standaloneImage) return standaloneImage
 
   let currentLocation = location
   if (value.type === 'table') {
@@ -152,7 +225,8 @@ const projectValue = (value, state, location = {}) => {
     if (contract?.content) content = contract.content(content, {
       location: currentLocation,
       placeholderCells: state.placeholderCells,
-      trailingLeadingSpaceEmptyParagraph: state.trailingLeadingSpaceEmptyParagraph
+      trailingLeadingSpaceEmptyParagraph: state.trailingLeadingSpaceEmptyParagraph,
+      generatedScratchEmptyHeading: state.generatedScratchEmptyHeading
     })
     if (content.length) projected.content = content
   }
@@ -160,7 +234,11 @@ const projectValue = (value, state, location = {}) => {
   return projected
 }
 
-const projectWithPlaceholderContext = (node, placeholderContext = null) => {
+const projectWithPlaceholderContext = (
+  node,
+  placeholderContext = null,
+  standaloneImageRepresentation = null
+) => {
   const value = typeof node?.toJSON === 'function' ? node.toJSON() : node
   const placeholderCells = new Set((placeholderContext?.emptyTableCells || []).map(
     ({ table, row, column }) => `${table}:${row}:${column}`
@@ -168,7 +246,9 @@ const projectWithPlaceholderContext = (node, placeholderContext = null) => {
   return projectValue(value, {
     nextTable: 0,
     placeholderCells,
-    trailingLeadingSpaceEmptyParagraph: placeholderContext?.trailingLeadingSpaceEmptyParagraph === true
+    trailingLeadingSpaceEmptyParagraph: placeholderContext?.trailingLeadingSpaceEmptyParagraph === true,
+    generatedScratchEmptyHeading: placeholderContext?.generatedScratchEmptyHeading === true,
+    standaloneImageRepresentation
   })
 }
 
@@ -183,5 +263,14 @@ export const areDurablyEquivalent = (candidate, expected, expectedContext = null
   const projectedCandidate = projectDurableSemantics(candidate)
   const projectedExpected = projectWithPlaceholderContext(expected, expectedContext)
   if (!projectedCandidate || !projectedExpected) return false
-  return JSON.stringify(projectedCandidate) === JSON.stringify(projectedExpected)
+  if (JSON.stringify(projectedCandidate) === JSON.stringify(projectedExpected)) return true
+
+  // Normalize each eligible standalone image independently. A document may
+  // contain parser-native image blocks beside a newly pasted inline image, so
+  // selecting one representation for the whole document is insufficient.
+  // Exact attributes remain in the projection; same-type semantic changes and
+  // unknown fields therefore still fail the comparison after the strict pass.
+  const normalizedCandidate = projectWithPlaceholderContext(candidate, null, 'both')
+  const normalizedExpected = projectWithPlaceholderContext(expected, expectedContext, 'both')
+  return JSON.stringify(normalizedCandidate) === JSON.stringify(normalizedExpected)
 }

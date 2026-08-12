@@ -154,8 +154,20 @@ const standalone = [
     env: { RAGGED_CASE: fixtureName, CDP_PORT: port }
   })),
   {
+    name: 'Verified table source: slash insert, sequential cell entry, and non-Go code blocks',
+    script: 'scripts/test-table-sequential-entry-ui.mjs'
+  },
+  {
+    name: 'Verified table source: move an authored hardbreak across two cells in one batch',
+    script: 'scripts/test-table-hardbreak-move-ui.mjs'
+  },
+  {
     name: 'Issue 93: inline code editing boundaries and literal backticks',
     script: 'scripts/test-inline-code-ui.mjs'
+  },
+  {
+    name: 'Literal triple backticks: safe source spelling survives save and cold reopen',
+    script: 'scripts/test-literal-triple-backtick-source-ui.mjs'
   },
   {
     name: 'Issue 98: native code copy, Markdown copy, undo, and session restore preference',

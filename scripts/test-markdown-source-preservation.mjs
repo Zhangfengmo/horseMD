@@ -96,6 +96,23 @@ assert.equal(
   'a final slash block without its own EOL must inherit the nearest preceding line ending'
 )
 
+const slashTableSource = '前文\r\n\r\n/table\r\n\r\n后文\r\n'
+const slashTableIntent = captureSlashBlockSourceIntent({
+  source: slashTableSource,
+  queryText: '/table',
+  sourceOffset: slashTableSource.indexOf('/table') + 6,
+  id: 'table'
+})
+assert.ok(slashTableIntent, 'slash table intent must locate its exact authored block')
+assert.equal(
+  applySlashBlockSourceIntent({
+    intent: slashTableIntent,
+    blockMarkdown: '| A | B |\n| --- | --- |\n|  | value |\n'
+  }),
+  '前文\r\n\r\n| A | B |\r\n| --- | --- |\r\n|  | value |\r\n\r\n后文\r\n',
+  'slash table conversion must atomically replace only its command block and retain CRLF'
+)
+
 assert.equal(
   sourceVisibleIndex('硬换行  \n下一行').text,
   sourceVisibleIndex('硬换行\\\n下一行').text,

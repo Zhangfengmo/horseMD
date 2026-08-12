@@ -5,7 +5,7 @@ description: 使用中文、英文、拼音和语言名称快速插入 Markdown 
 
 # 斜杠命令
 
-<span class="version-badge">适用于 HorseMD v0.12.10</span>
+<span class="version-badge">适用于 HorseMD v0.13.51</span>
 
 在富文本正文中输入 `/`，会打开快捷菜单。继续输入内容即可筛选，按上下方向键选择，按 Enter 执行，按 Escape 关闭。
 
@@ -24,6 +24,8 @@ description: 使用中文、英文、拼音和语言名称快速插入 Markdown 
 | `/quote` | 引用 |
 | `/javascript`、`/python` | 已设置语言的代码块 |
 | `/mermaid` | Mermaid 代码块 |
+
+在已有参差表格、特殊转义或多种语言代码块的长文档中，新建表格也只替换当前 `/table` 命令行。随后逐格输入和保存不会整理其他表格或改写 JavaScript、Python、Rust、Go 等围栏代码块。
 
 短关键词优先精确和前缀匹配，减少无关结果。没有结果时菜单会显示空状态，不会在输入过程中突然消失。
 
