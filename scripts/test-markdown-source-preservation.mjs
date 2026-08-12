@@ -2953,4 +2953,23 @@ assert.equal(
   )
 }
 
+// Restoring the author's `-` runs AFTER list spacing is compacted, so a row
+// that was safe as `*` can turn into a SETEXT underline the moment it is
+// respelled: CommonMark forbids an EMPTY list item from interrupting a
+// paragraph, so `- item\n  - ` is an `<h2>` inside the item, not a nested list.
+// Such a candidate is refused and the whole generated document falls back to
+// raw canonical, losing every authored marker.
+{
+  const generated = generatedScratchMarkdown('# T\n\n1. a\n2. b\n\n* c\n\n  * <br />\n')
+  const restored = preserveGeneratedBulletMarkers('# T\n\n1. a\n2. b\n- c\n- \n', generated)
+  assert.equal(
+    restored,
+    '# T\n\n1. a\n2. b\n- c\n\n  - \n',
+    'an empty nested `-` row keeps its separator so it stays a list, not a setext underline'
+  )
+  const shape = unified().use(remarkParse).use(remarkGfm).parse(restored)
+    .children.map((node) => node.type).join(' | ')
+  assert.equal(shape, 'heading | list | list', 'the restored bytes must still parse as two lists')
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

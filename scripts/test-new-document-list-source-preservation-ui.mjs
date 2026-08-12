@@ -34,7 +34,14 @@ const expected = [
   ...(appendBulletAfterNestedList && !deleteAndRecreateList
     ? [`- ${asciiBulletText}${editFirstBullet ? 'X' : ''}`, ...(continueBulletList ? ['- bullet-continued'] : [])]
     : []),
-  ...(deleteAndRecreateList ? ['1. 重新有序项', '   1. 继续嵌套项'] : []),
+  // `1)`, not the typed `1.`: this is a SECOND ordered list directly after the
+  // first one's nested child. CommonMark has no way to keep two adjacent
+  // ordered lists apart when they share a delimiter — `1.` here would continue
+  // the outer list as its third item (verified: remark parses that spelling as
+  // ONE 3-item list). Switching the delimiter is the only faithful spelling of
+  // the document the writer built, the same reason bullet lists alternate
+  // `-`/`*`. The typed marker is honoured wherever the format can express it.
+  ...(deleteAndRecreateList ? ['1) 重新有序项', '   1. 继续嵌套项'] : []),
   ''
 ].join('\n')
 

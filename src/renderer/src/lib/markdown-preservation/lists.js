@@ -237,6 +237,36 @@ const listMarkerTokenLines = (markdown) => markdownLines(markdown)
 // an immediate rich -> source switch can serialize the same ordered row a
 // second time after its one-shot input intent has been consumed; this must not
 // turn a visible `1.` into Crepe's default `1)`.
+// `-` is also a SETEXT heading underline, and CommonMark forbids an EMPTY list
+// item from interrupting a paragraph. So an empty `- ` row placed directly
+// under its parent row's text is not a nested list at all — `- item\n  - `
+// parses as an `<h2>` inside the item. The blank line is what keeps the two
+// apart; removing it changes the document, the candidate is refused, and the
+// whole generated source falls back to raw canonical (every authored marker
+// lost). A sibling row is unaffected: it starts at or before the parent's
+// content column, where a list-item start wins over a setext underline.
+const formsSetextUnderline = (previousRow, nextRow) => {
+  const next = nextRow.match(/^([ \t]*)-[ \t]*$/)
+  if (!next) return false
+  const previous = previousRow.match(/^([ \t]*)((?:[-+*]|\d{1,9}[.)]))([ \t]+)/)
+  if (!previous) return false
+  const contentColumn = previous[1].length + previous[2].length + previous[3].length
+  return next[1].length >= contentColumn
+}
+
+// Restoring the author's `-` happens AFTER spacing is compacted, so a row that
+// was safe as `*` can become a setext underline the moment it is respelled.
+// Give exactly those rows their separator back — the marker stays the author's.
+const separateSetextAmbiguousListRows = (markdown) => {
+  const lines = String(markdown || '').split('\n')
+  const output = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (index > 0 && formsSetextUnderline(lines[index - 1], lines[index])) output.push('')
+    output.push(lines[index])
+  }
+  return output.join('\n')
+}
+
 export const preserveGeneratedBulletMarkers = (source, markdown) => {
   const sourceLines = listMarkerTokenLines(source)
   const nextLines = listMarkerTokenLines(markdown)
@@ -338,12 +368,12 @@ export const preserveGeneratedBulletMarkers = (source, markdown) => {
     }
   }
 
-  return replacements
+  return separateSetextAmbiguousListRows(replacements
     .sort((left, right) => right.start - left.start)
     .reduce(
       (result, replacement) => result.slice(0, replacement.start) + replacement.marker + result.slice(replacement.end),
       markdown
-    )
+    ))
 }
 
 // Crepe serializes a newly-created, still-empty list item as `- <br />`.
@@ -385,8 +415,10 @@ export const normalizeEmptyListItems = (markdown) => String(markdown || '')
 // touching existing source documents where that blank line may be intentional.
 export const compactGeneratedListSpacing = (markdown) => String(markdown || '')
   .replace(
-    /(^[ \t]*(?:[-+*]|\d{1,9}[.)])\s+[^\n]*)\n(?:[ \t]*\n)+(?=[ \t]*(?:[-+*]|\d{1,9}[.)])\s+)/gm,
-    '$1\n'
+    /(^[ \t]*(?:[-+*]|\d{1,9}[.)])\s+[^\n]*)\n(?:[ \t]*\n)+(?=([ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t][^\n]*)?$))/gm,
+    (whole, previousRow, nextRow) => (
+      formsSetextUnderline(previousRow, nextRow) ? whole : `${previousRow}\n`
+    )
   )
 
 // Before the space is accepted, Markdown's list input rule is represented as a
@@ -680,10 +712,10 @@ export const restoreTypedBulletMarker = ({
     .map((line) => line.start + line.match[1].length)
     .filter((offset) => markdown[offset] !== marker)
     .sort((left, right) => right - left)
-  return offsets.reduce(
+  return separateSetextAmbiguousListRows(offsets.reduce(
     (result, offset) => result.slice(0, offset) + marker + result.slice(offset + 1),
     markdown
-  )
+  ))
 }
 
 const listMarkerMeta = (markdown) => {

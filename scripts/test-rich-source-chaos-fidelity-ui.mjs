@@ -21,7 +21,12 @@ const expected = [
   '1. one',
   '2. two',
   '   1. nested',
-  '1. rebuilt',
+  // `1)`, not the typed `1.`: a second ordered list directly after the first
+  // one's nested child. Two adjacent ordered lists cannot share a delimiter in
+  // CommonMark — `1.` here parses as a third item of the outer list, which is
+  // not the document this test builds. See the same note in
+  // test-new-document-list-source-preservation-ui.mjs.
+  '1) rebuilt',
   '   1. nested-rebuilt',
   '- final-one',
   '- final-two',
