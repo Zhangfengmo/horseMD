@@ -181,10 +181,36 @@ export const preserveEmptiedParagraph = ({
   )
   if (bareEmptyParagraph && listMarker(previousLineText)) {
     const previousVisible = sourceVisibleIndex(previousLineText).text.trim()
-    const sourceRows = markdownLines(source).filter((line) =>
-      listMarker(line.text) && sourceVisibleIndex(line.text).text.trim() === previousVisible
+    const authoredListRows = markdownLines(source).filter((line) => listMarker(line.text))
+    let sourceRows = authoredListRows.filter((line) =>
+      sourceVisibleIndex(line.text).text.trim() === previousVisible
     )
-    if (previousVisible && sourceRows.length === 1) {
+    // The lifted row can itself be EMPTY (Enter makes an empty item, Enter
+    // again lifts it out). Visible text then identifies nothing, so anchor on
+    // the item ABOVE it: the authored empty row that follows the last
+    // non-empty canonical item is the one the document no longer has. Without
+    // this the generic replacement kept the stale row and appended another,
+    // which the verified commit refused — every "Enter, Enter to leave a list"
+    // in the middle of a document became unsavable.
+    if (!previousVisible) {
+      const canonicalRows = markdownLines(previous).filter((line) => listMarker(line.text))
+      const liftedIndex = canonicalRows.findIndex((line) => line.start === previousLine.start)
+      const anchorText = liftedIndex > 0
+        ? sourceVisibleIndex(canonicalRows[liftedIndex - 1].text).text.trim()
+        : ''
+      const isEmptyRow = (line) => !sourceVisibleIndex(line.text).text.trim()
+      const emptyRows = authoredListRows.filter(isEmptyRow)
+      if (anchorText) {
+        const anchorIndex = authoredListRows.findIndex((line) =>
+          sourceVisibleIndex(line.text).text.trim() === anchorText
+        )
+        const follower = anchorIndex >= 0 ? authoredListRows[anchorIndex + 1] : null
+        sourceRows = follower && isEmptyRow(follower) ? [follower] : []
+      } else {
+        sourceRows = emptyRows.length === 1 ? emptyRows : []
+      }
+    }
+    if (sourceRows.length === 1) {
       const [row] = sourceRows
       const rowEnd = row.end < source.length && source[row.end] === '\n'
         ? row.end + 1

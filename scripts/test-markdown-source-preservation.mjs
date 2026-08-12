@@ -2853,4 +2853,36 @@ assert.equal(
   )
 }
 
+// Enter on a list item makes an empty item; Enter again LIFTS that empty item
+// out of the list into a standalone paragraph. The canonical then replaces the
+// list row with a bare `<br />`. The authored empty row must go with it: an
+// empty paragraph has no Markdown spelling, and keeping the row left the
+// source describing an item the document no longer has. The lifted row is
+// itself empty, so it cannot be located by visible text — the item above it is
+// the anchor. (Field report: "无序列表填写后，第二个回车放入然后删除这个时候
+// 保存就会报错" — every mid-document exit-the-list became unsavable.)
+{
+  const source = '# T\n\n段落\n\n- 有内容的项\n- \n\n后续段落\n\n- 1\n- 2\n'
+  const previous = '# T\n\n段落\n\n* 有内容的项\n\n* <br />\n\n后续段落\n\n* 1\n\n* 2\n\n'
+  const next = '# T\n\n段落\n\n* 有内容的项\n\n<br />\n\n后续段落\n\n* 1\n\n* 2\n\n'
+  const lifted = preserveRichMarkdownSource(source, previous, next)
+  assert.notEqual(lifted.preserved, false, `lifting an empty item must stay mappable: ${lifted.reason}`)
+  assert.equal(
+    lifted.markdown,
+    '# T\n\n段落\n\n- 有内容的项\n\n后续段落\n\n- 1\n- 2\n',
+    'the lifted empty row must be removed, and nothing added in its place'
+  )
+  assert.ok(
+    !/^- \s*$/m.test(lifted.markdown),
+    'no empty list row may survive the lift'
+  )
+  // The same shape at the END of the document keeps its existing handling.
+  const tailSource = '# T\n\n- 有内容的项\n- \n'
+  const tailPrevious = '# T\n\n* 有内容的项\n\n* <br />\n'
+  const tailNext = '# T\n\n* 有内容的项\n\n<br />\n'
+  const tail = preserveRichMarkdownSource(tailSource, tailPrevious, tailNext)
+  assert.notEqual(tail.preserved, false, `a trailing lift must stay mappable: ${tail.reason}`)
+  assert.ok(!/^- \s*$/m.test(tail.markdown), 'a trailing lifted row must be removed too')
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')
