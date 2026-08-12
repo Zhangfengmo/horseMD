@@ -28,6 +28,7 @@
     "test:codeblock-scroll-stability-ui": "node scripts/test-codeblock-scroll-stability-ui.mjs",
     "test:markdown-preservation": "node scripts/test-markdown-source-preservation.mjs",
     "test:roundtrip-acceptance": "node scripts/test-roundtrip-acceptance.mjs",
+    "test:rebuild-consent": "node scripts/test-rebuild-consent.mjs",
     "test:editor-source-verification": "node scripts/test-editor-source-verification.mjs",
     "test:verified-editor-state": "node scripts/test-verified-editor-state.mjs",
     "test:rich-source-tab-state": "node scripts/test-rich-source-tab-state.mjs",

@@ -27,6 +27,7 @@ import {
 import { fireToast } from '../ui.js'
 import { getSavedDocPosition } from '../lib/doc-positions.js'
 import { saveSourceSyncRecovery } from '../lib/source-sync-recovery.js'
+import { consumeRebuildDeclined } from '../lib/rebuild-consent.js'
 import { useWorkspace } from './useWorkspace.js'
 
 export function useFileOps({
@@ -410,6 +411,10 @@ export function useFileOps({
         ? await getSettledMarkdownForTab(id)
         : getMarkdownForTab(id)
       if (currentMarkdown == null) {
+        // Cancelling the rebuild prompt means "do nothing". Following it with
+        // the recovery-copy file picker would open a second dialog the user
+        // just refused; the tab simply stays dirty and unsaved.
+        if (consumeRebuildDeclined()) return
         const recoveryMarkdown = getRecoveryMarkdownForTab?.(id)
         if (typeof recoveryMarkdown !== 'string') {
           fireToast(tRef.current('save.sourceSyncFailed'), { sticky: true })
