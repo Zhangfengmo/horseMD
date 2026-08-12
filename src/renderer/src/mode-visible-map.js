@@ -258,7 +258,18 @@ const sourceVisibleIndex = (md) => {
   const lines = md.split(/(\n)/)
   let rawPos = 0
   let inFence = false
+  let fenceInQuote = false
   let inTable = false
+  // A blockquote prefix is block SYNTAX, not visible text, and it can wrap ANY
+  // block — fences, tables, lists, headings. Strip it once, before the
+  // classification below, so a quoted block is recognised exactly like the same
+  // block at the top level. Without this `> ```go` was not a fence and
+  // `> | a | b |` was not a table, so their raw bytes (pipes, delimiter runs,
+  // code) leaked into the visible stream while canonical's did not — every
+  // document quoting a table or a code block desynced permanently and refused
+  // every edit.
+  const QUOTE_PREFIX = /^\s{0,3}(?:>[ \t]?)+/
+  const withoutQuotePrefix = (line) => String(line || '').replace(QUOTE_PREFIX, '')
   // GFM allows a single dash per delimiter cell (`| - |`), and the serializer
   // emits width-fitted runs (`| -- |`); requiring three dashes let canonical
   // delimiter rows leak into the visible stream as text, permanently
@@ -286,6 +297,13 @@ const sourceVisibleIndex = (md) => {
       visibleLineStart += 1
     }
     if (visibleLine.endsWith('\r')) visibleLine = visibleLine.slice(0, -1)
+    // Inside a fence that was NOT opened in a quote, a leading `>` is code
+    // content (a diff, a shell transcript) and must survive untouched.
+    const quote = !inFence || fenceInQuote ? visibleLine.match(QUOTE_PREFIX) : null
+    if (quote) {
+      visibleLine = visibleLine.slice(quote[0].length)
+      visibleLineStart += quote[0].length
+    }
     // Setext underlines, thematic breaks, and reference definitions do not
     // contribute characters to ProseMirror's visible text stream.
     if (
@@ -296,6 +314,7 @@ const sourceVisibleIndex = (md) => {
     }
     const fence = visibleLine.match(/^\s*(```|~~~)/)
     if (fence) {
+      if (!inFence) fenceInQuote = !!quote
       inFence = !inFence
       continue
     }
@@ -308,8 +327,8 @@ const sourceVisibleIndex = (md) => {
     // Keep them only inside fenced code, handled above.
     visibleLine = visibleLine.replace(/[ \t]+$/, '').replace(/\\$/, '')
     const hasPipe = visibleLine.includes('|')
-    const previousLine = String(lines[i - 2] || '').replace(/\r$/, '')
-    const nextLine = String(lines[i + 2] || '').replace(/\r$/, '')
+    const previousLine = withoutQuotePrefix(String(lines[i - 2] || '').replace(/\r$/, ''))
+    const nextLine = withoutQuotePrefix(String(lines[i + 2] || '').replace(/\r$/, ''))
     const tableLike = /^\s*\|.*\|\s*$/.test(visibleLine) ||
       (hasPipe && (inTable || isTableSeparator(visibleLine) || isTableSeparator(previousLine) || isTableSeparator(nextLine)))
     if (isTableSeparator(visibleLine)) {

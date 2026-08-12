@@ -2972,4 +2972,52 @@ assert.equal(
   assert.equal(shape, 'heading | list | list', 'the restored bytes must still parse as two lists')
 }
 
+// A blockquote prefix is block SYNTAX and can wrap any block. Until it was
+// stripped before block classification, `> | a | b |` was not recognised as a
+// table and `> ```go` was not recognised as a fence, so their raw bytes leaked
+// into the visible stream while canonical's did not — every document quoting a
+// table or a code block desynced permanently and refused every edit.
+{
+  const quotedTable = sourceVisibleIndex(
+    '> | 23132  | 2311   |  |\n> | :----- | :----- | :----- |\n> |  | 3132   | 3123 |\n'
+  ).text
+  const plainTable = sourceVisibleIndex(
+    '| 23132 | 2311 |  |\n| :-- | :-- | :-- |\n|  | 3132 | 3123 |\n'
+  ).text
+  assert.equal(quotedTable, plainTable, 'a quoted table must project the same visible text as a plain one')
+
+  assert.equal(
+    sourceVisibleIndex('> ```Go\n> func f() {\n>   return b == 1\n> }\n> ```\n').text,
+    '\nfunc f() {\n  return b == 1\n}\n',
+    'a quoted fence keeps its code verbatim and drops the language token'
+  )
+  // The mirror case: inside a fence that was NOT opened in a quote, a leading
+  // `>` is code content (a diff, a shell transcript) and must survive.
+  assert.equal(
+    sourceVisibleIndex('```\n> not a quote\n```\n').text,
+    '\n> not a quote\n',
+    'a `>` line inside a top-level fence is code, not a quote prefix'
+  )
+}
+
+// A canonical offset can fall BETWEEN two visible characters — inside line
+// endings, quote prefixes and list markers, none of which carry visible text.
+// The backward mapping always lands at the START of that gap, so a new quoted
+// block was glued onto the previous paragraph (`> 段落新段`) instead of
+// starting its own block. The insertion point must keep the canonical's own
+// place inside the gap: the same number of block boundaries crossed, and the
+// same prefix kinds consumed after the last one.
+{
+  const gapInsertion = preserveRichMarkdownSource(
+    '# T\n\n> 段落\n>\n> * [ ] 任务\n>\n> | a | b |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾段\n',
+    '# T\n\n> 段落\n>\n> * [ ] 任务\n>\n> | a | b | <br /> |\n> | :--- | :--- | :--- |\n> | c | d | <br /> |\n\n尾段\n',
+    '# T\n\n> 段落\n>\n> 新段\n>\n> * [ ] 任务\n>\n> | a | b | <br /> |\n> | :--- | :--- | :--- |\n> | c | d | <br /> |\n\n尾段\n'
+  )
+  assert.equal(
+    gapInsertion.markdown,
+    '# T\n\n> 段落\n>\n> 新段\n>\n> * [ ] 任务\n>\n> | a | b |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾段\n',
+    'a new quoted paragraph starts its own block instead of being glued onto the previous one'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

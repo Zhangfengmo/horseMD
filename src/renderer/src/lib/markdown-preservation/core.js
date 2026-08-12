@@ -100,6 +100,93 @@ export const rawInsertionAtCanonicalLineStart = ({
   return at
 }
 
+const PREFIX_TOKENS = {
+  quote: /^[ \t]*>[ \t]?/,
+  list: /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/,
+  heading: /^[ \t]*#{1,6}[ \t]+/
+}
+
+const prefixTokenKinds = (text) => {
+  const kinds = []
+  let rest = String(text || '')
+  for (;;) {
+    const kind = Object.keys(PREFIX_TOKENS).find((name) => PREFIX_TOKENS[name].test(rest))
+    if (!kind) return kinds
+    rest = rest.slice(rest.match(PREFIX_TOKENS[kind])[0].length)
+    kinds.push(kind)
+  }
+}
+
+// The number of visible characters that lie strictly before a raw offset.
+const visibleCountBefore = (map, offset) => {
+  let low = 0
+  let high = map.length
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if (map[middle] < offset) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+// A canonical offset that falls BETWEEN two visible characters has no unique
+// visible position: line endings, quote prefixes and list markers carry no
+// visible text at all. The backward mapping therefore always lands at the
+// START of that gap — the end of the previous block's text — so an inserted
+// BLOCK is glued onto that text (`> 段落新段` instead of `> 段落\n>\n> 新段`).
+//
+// The gap itself is the structure. Reproduce the canonical's own place inside
+// it: cross the same number of line endings, then skip the source block's own
+// prefix exactly when the canonical skipped its own. This replaces guessing
+// with the one fact both sides agree on — how many block boundaries the
+// insertion point sits past.
+export const rawInsertionInCanonicalGap = ({
+  source,
+  previous,
+  canonicalOffset,
+  previousVisibleMap,
+  mappedSourceOffset,
+  sourceVisibleMap
+}) => {
+  const visibleIndex = visibleCountBefore(previousVisibleMap, canonicalOffset)
+  const canonicalGapStart = visibleIndex > 0 ? previousVisibleMap[visibleIndex - 1] + 1 : 0
+  if (canonicalOffset < canonicalGapStart) return null
+  const canonicalGap = previous.slice(canonicalGapStart, canonicalOffset)
+  const lineEndings = (canonicalGap.match(/\r\n|\n|\r/g) || []).length
+  // No boundary crossed: the insertion belongs at the end of the current
+  // line's text, which is what the generic mapping already produced.
+  if (!lineEndings) return null
+
+  const sourceGapEnd = visibleIndex < sourceVisibleMap.length
+    ? sourceVisibleMap[visibleIndex]
+    : source.length
+  if (!(mappedSourceOffset <= sourceGapEnd)) return null
+
+  let at = mappedSourceOffset
+  let crossed = 0
+  while (at < sourceGapEnd && crossed < lineEndings) {
+    if (source[at] === '\r') at += 1
+    if (source[at] === '\n') { at += 1; crossed += 1; continue }
+    at += 1
+  }
+  if (crossed !== lineEndings) return null
+
+  // Whatever the canonical consumed AFTER its last line ending is block prefix
+  // (`> `, `- `, `## `). Consume the same prefix KINDS on the source side — its
+  // spelling may differ (`*` vs `-`, `1.` vs `1)`) but its structure cannot.
+  // A mismatch means the two sides do not describe the same block here, so
+  // decline rather than guess.
+  const canonicalTail = canonicalGap.slice(
+    canonicalGap.search(/(?:\r\n|\n|\r)(?![\s\S]*(?:\r\n|\n|\r))/) + 1
+  )
+  for (const kind of prefixTokenKinds(canonicalTail)) {
+    const matched = source.slice(at, sourceGapEnd).match(PREFIX_TOKENS[kind])
+    if (!matched) return null
+    at += matched[0].length
+  }
+  return at
+}
+
 export const lineEndingNear = (markdown, offset = 0) => {
   const next = markdown.indexOf('\n', Math.max(0, offset))
   if (next >= 0) return markdown[next - 1] === '\r' ? '\r\n' : '\n'

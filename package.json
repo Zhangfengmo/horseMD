@@ -193,7 +193,8 @@
     "test:rich-source-verified-core": "npm run test:markdown-preservation && npm run test:roundtrip-acceptance && npm run test:editor-source-verification && npm run test:verified-editor-state && npm run test:editor-parse-adapter && npm run test:editor-table-normalization && npm run test:table-source-model && npm run test:source-sync-recovery",
     "test:empty-paragraph-caret-ui": "node scripts/test-empty-paragraph-caret-ui.mjs",
     "test:table-click-edit-ui": "node scripts/test-table-click-edit-ui.mjs",
-    "test:drop-open-ui": "node scripts/test-drop-open-ui.mjs"
+    "test:drop-open-ui": "node scripts/test-drop-open-ui.mjs",
+    "test:quoted-block-source-ui": "node scripts/test-quoted-block-source-ui.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

@@ -9,6 +9,7 @@ import {
   canonicalTextToSource,
   commonChange,
   rawInsertionAtCanonicalLineEnd,
+  rawInsertionInCanonicalGap,
   rawInsertionAtCanonicalLineStart,
   rawOffsetAtVisible
 } from './lib/markdown-preservation/core.js'
@@ -743,7 +744,19 @@ function preserveRichMarkdownSourceCore(
     startVisible.visibleIndex === endVisible.visibleIndex &&
     replacementVisible
   ) {
-    const lineEndInsertion = rawInsertionAtCanonicalLineEnd({
+    // The gap rule owns every insertion that crosses a block boundary; the two
+    // helpers below stay for the in-line cases it deliberately declines.
+    const gapInsertion = rawInsertionInCanonicalGap({
+      source: sourceMarkdown,
+      previous,
+      canonicalOffset: start,
+      previousVisibleMap: previousVisible.map,
+      mappedSourceOffset: rawStart,
+      sourceVisibleMap: sourceVisible.map
+    })
+    const lineEndInsertion = Number.isFinite(gapInsertion)
+      ? gapInsertion
+      : rawInsertionAtCanonicalLineEnd({
       source: sourceMarkdown,
       previous,
       canonicalOffset: start,
