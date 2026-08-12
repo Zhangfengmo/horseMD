@@ -22,7 +22,8 @@ import { settleEditorMarkdown } from '../lib/editor-flush-settle.js'
 import {
   bestEffortRecoveryMarkdown,
   canonicalSourceFallback,
-  rebuildSourceCandidates
+  rebuildSourceCandidates,
+  scratchCandidateContext
 } from './editor-source-verification.js'
 import { canReuseCommittedVerifiedSource } from './editor-verified-state.js'
 
@@ -199,8 +200,19 @@ export function createEditorApi({
       // document instead of reading Crepe's potentially stale cached snapshot.
       const canonical = canonicalForSource(serializeCurrentDocument())
       const scratch = generatedScratchRef?.current
-      const generatedScratchContext = scratch
-        ? { generatedScratchEmptyHeading: true }
+      // A scratch document's candidate strips serializer placeholders exactly
+      // like the preservation façade does (`* <br />` -> `* `, an empty table
+      // cell -> `|  |`), so it needs the same proof that those coordinates
+      // ARE placeholders. The façade attaches it; this branch used to attach
+      // nothing, so a brand-new document containing a table with empty cells
+      // could never be saved — the verified commit had no way to know the
+      // stripped cells were placeholders and refused every candidate.
+      const scratchTableContext = scratch
+        ? getTableDurableContext?.({
+            authored: lastMarkdownRef.current,
+            previousCanonical: canonicalMarkdownRef.current,
+            nextCanonical: canonical
+          }) || null
         : null
       // Scratch spelling changes candidate generation only. The immutable
       // live document captured at dispatch remains the semantic authority for
@@ -222,8 +234,11 @@ export function createEditorApi({
         const committed = sourceCommitter.commit({
           candidates: [{
             markdown: lastMarkdownRef.current,
-            durableContext: generatedScratchContext
-              ? { ...(unchanged?.durableContext || {}), ...generatedScratchContext }
+            durableContext: scratch
+              ? scratchCandidateContext(lastMarkdownRef.current, {
+                  ...(unchanged?.durableContext || {}),
+                  ...(scratchTableContext || {})
+                })
               : unchanged?.durableContext || null
           }],
           expectedDoc,
@@ -275,7 +290,7 @@ export function createEditorApi({
         candidates: scratch
           ? [preserved.markdown, canonicalSourceFallback(canonical)].map((markdown) => ({
               markdown,
-              durableContext: generatedScratchContext
+              durableContext: scratchCandidateContext(markdown, scratchTableContext)
             }))
           : [{
               markdown: preserved.markdown,
@@ -334,14 +349,17 @@ export function createEditorApi({
         previousCanonical: canonicalMarkdownRef.current,
         nextCanonical: canonical
       }) || null
-      const durableContext = generatedScratchRef?.current
-        ? { ...(tableDurableContext || {}), generatedScratchEmptyHeading: true }
-        : tableDurableContext
       const selected = sourceCommitter.select({
         candidates: rebuildSourceCandidates({
           canonical,
           rebuilt,
-          durableContext
+          durableContext: tableDurableContext,
+          // Each rebuild candidate declares the scaffold flag for its own
+          // bytes; a candidate that still carries the empty `#` must not ask
+          // the expected side to ignore one.
+          decorate: generatedScratchRef?.current
+            ? (markdown, context) => scratchCandidateContext(markdown, context)
+            : null
         }),
         expectedDoc
       })

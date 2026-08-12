@@ -48,6 +48,7 @@ import {
 import { pmPosToMarkdownOffset } from './editor-source-map.js'
 import {
   canonicalSourceFallback,
+  scratchCandidateContext,
   selectVerifiedSource
 } from './editor-source-verification.js'
 import { createVerifiedEditorState } from './editor-verified-state.js'
@@ -468,7 +469,10 @@ export default function Editor({
               ...(generatedScratchRef.current
                 ? [{
                     markdown: canonicalSourceFallback(canonical),
-                    durableContext: { generatedScratchEmptyHeading: true }
+                    durableContext: scratchCandidateContext(
+                      canonicalSourceFallback(canonical),
+                      preserved.durableContext
+                    )
                   }]
                 : [])
             ],
@@ -1229,7 +1233,16 @@ export default function Editor({
             preserved = {
               markdown,
               reason: 'generated-scratch-canonical',
-              durableContext: { generatedScratchEmptyHeading: true }
+              // The scaffold flag must describe THIS candidate's bytes, and a
+              // scratch document's stripped table placeholders need the same
+              // provenance the preservation façade attaches. Hard-coding the
+              // flag dropped the empty `#` from the expected side only, so a
+              // new document that kept an empty title could never be saved.
+              durableContext: scratchCandidateContext(markdown, getTableDurableContext({
+                authored: lastMarkdownRef.current,
+                previousCanonical: canonicalMarkdownRef.current,
+                nextCanonical: canonical
+              }))
             }
           } else if (pendingList?.convertedSource && pendingList?.convertedCanonical) {
             preserved = canonical === pendingList.convertedCanonical

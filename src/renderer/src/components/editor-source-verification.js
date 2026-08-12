@@ -5,6 +5,20 @@ import { normalizeEmptyListItems } from '../lib/markdown-preservation/lists.js'
 export const canonicalSourceFallback = (canonical) =>
   withoutStandaloneEmptyBlockLines(normalizeEmptyListItems(String(canonical ?? '')))
 
+// `generatedScratchEmptyHeading` tells the expected-side projection to ignore
+// Crepe's empty H1 scaffold. That is only true when the CANDIDATE omits it:
+// once the empty title is treated as authored content it stays in the
+// candidate bytes, and declaring it ignorable then drops the heading from one
+// side only, so a brand-new document could never be saved. Derive the flag
+// from the candidate itself instead of from "is this a scratch document".
+const startsWithEmptyHeadingScaffold = (markdown) =>
+  /^#[ \t]*(?:\r?\n|$)/.test(String(markdown ?? ''))
+
+export const scratchCandidateContext = (markdown, tableContext = null) => ({
+  ...(tableContext || {}),
+  generatedScratchEmptyHeading: !startsWithEmptyHeadingScaffold(markdown)
+})
+
 // A recovery copy is deliberately not a source commit. It is written only to
 // a user-chosen, separate path after verified mapping/rebuild has failed, so
 // repeating the commit predicate would make both exits fail deterministically.
@@ -33,7 +47,8 @@ export const bestEffortRecoveryMarkdown = (canonical, {
 export const rebuildSourceCandidates = ({
   canonical,
   rebuilt,
-  durableContext
+  durableContext,
+  decorate = null
 }) => {
   // Rebuild is allowed to normalize a serializer-only table `<br />` only
   // when the editor's configured table parser proved its source ownership.
@@ -42,7 +57,7 @@ export const rebuildSourceCandidates = ({
   if (!durableContext) return []
   return [rebuilt, canonicalSourceFallback(canonical)].map((markdown) => ({
     markdown,
-    durableContext
+    durableContext: decorate ? decorate(markdown, durableContext) : durableContext
   }))
 }
 
