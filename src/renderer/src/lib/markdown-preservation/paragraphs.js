@@ -195,19 +195,36 @@ export const preserveEmptiedParagraph = ({
     if (!previousVisible) {
       const canonicalRows = markdownLines(previous).filter((line) => listMarker(line.text))
       const liftedIndex = canonicalRows.findIndex((line) => line.start === previousLine.start)
-      const anchorText = liftedIndex > 0
-        ? sourceVisibleIndex(canonicalRows[liftedIndex - 1].text).text.trim()
-        : ''
       const isEmptyRow = (line) => !sourceVisibleIndex(line.text).text.trim()
-      const emptyRows = authoredListRows.filter(isEmptyRow)
-      if (anchorText) {
-        const anchorIndex = authoredListRows.findIndex((line) =>
-          sourceVisibleIndex(line.text).text.trim() === anchorText
-        )
-        const follower = anchorIndex >= 0 ? authoredListRows[anchorIndex + 1] : null
-        sourceRows = follower && isEmptyRow(follower) ? [follower] : []
+      // Row ORDINAL is the primary identity: both sides describe the same
+      // document, so the nth list row of the canonical is the nth authored
+      // list row. Text anchoring is only the fallback, because a document may
+      // legitimately repeat an item's text (two identical rows made the
+      // anchor ambiguous and pushed an ordinary "leave the list" into the
+      // rebuild prompt).
+      const byOrdinal = liftedIndex >= 0 && canonicalRows.length === authoredListRows.length
+        ? authoredListRows[liftedIndex]
+        : null
+      if (byOrdinal && isEmptyRow(byOrdinal)) {
+        sourceRows = [byOrdinal]
       } else {
-        sourceRows = emptyRows.length === 1 ? emptyRows : []
+        const anchorText = liftedIndex > 0
+          ? sourceVisibleIndex(canonicalRows[liftedIndex - 1].text).text.trim()
+          : ''
+        const emptyRows = authoredListRows.filter(isEmptyRow)
+        if (anchorText) {
+          const anchors = authoredListRows
+            .map((line, index) => ({ line, index }))
+            .filter(({ line }) => sourceVisibleIndex(line.text).text.trim() === anchorText)
+          // An ambiguous anchor must not guess: picking the first match could
+          // delete a row the user still has.
+          const follower = anchors.length === 1
+            ? authoredListRows[anchors[0].index + 1]
+            : null
+          sourceRows = follower && isEmptyRow(follower) ? [follower] : []
+        } else {
+          sourceRows = emptyRows.length === 1 ? emptyRows : []
+        }
       }
     }
     if (sourceRows.length === 1) {

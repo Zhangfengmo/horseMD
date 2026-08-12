@@ -2885,4 +2885,27 @@ assert.equal(
   assert.ok(!/^- \s*$/m.test(tail.markdown), 'a trailing lifted row must be removed too')
 }
 
+// The lifted row is empty, so it cannot identify itself by text. Row ORDINAL
+// is the identity — both sides describe the same document — and text is only
+// the fallback, because a document may legitimately repeat an item's text.
+// Guessing there could delete a row the user still has, so ambiguity refuses.
+{
+  const repeated = preserveRichMarkdownSource(
+    '# T\n\n- 重复\n\n段落\n\n- 重复\n- \n\n尾段\n',
+    '# T\n\n* 重复\n\n段落\n\n* 重复\n\n* <br />\n\n尾段\n',
+    '# T\n\n* 重复\n\n段落\n\n* 重复\n\n<br />\n\n尾段\n'
+  )
+  assert.notEqual(repeated.preserved, false, `a repeated anchor must not fail closed: ${repeated.reason}`)
+  assert.equal(
+    repeated.markdown,
+    '# T\n\n- 重复\n\n段落\n\n- 重复\n\n尾段\n',
+    'the lifted row is identified by ordinal, so a repeated item text stays intact'
+  )
+  assert.equal(
+    (repeated.markdown.match(/^- 重复$/gm) || []).length,
+    2,
+    'neither repeated row may be consumed by the lift'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')
