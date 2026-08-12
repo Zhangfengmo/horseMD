@@ -2908,4 +2908,32 @@ assert.equal(
   )
 }
 
+// A block inserted inside a blockquote must land on its own quoted line, and a
+// row joining an authored list must carry that list's marker: CommonMark starts
+// a NEW list when the bullet changes, so a serializer `*` beside an authored
+// `-` splits one list in two and the verified commit refuses the write.
+{
+  const quotedRow = preserveRichMarkdownSource(
+    '# T\n\n> - 项一\n\n后续\n',
+    '# T\n\n> * 项一\n\n后续\n',
+    '# T\n\n> * 项一\n>\n> * 项二\n\n后续\n'
+  )
+  assert.equal(
+    quotedRow.markdown,
+    '# T\n\n> - 项一\n>\n> - 项二\n\n后续\n',
+    'a row added to a quoted list keeps the authored bullet and stays inside the quote'
+  )
+
+  const quotedParagraph = preserveRichMarkdownSource(
+    '# T\n\n> 3123331\n>\n> - 3123213\n\n后续\n',
+    '# T\n\n> 3123331\n>\n> * 3123213\n\n后续\n',
+    '# T\n\n> 3123331\n>\n> * 3123213\n>\n> 新正文\n\n后续\n'
+  )
+  assert.equal(
+    quotedParagraph.markdown,
+    '# T\n\n> 3123331\n>\n> - 3123213\n>\n> 新正文\n\n后续\n',
+    'a paragraph appended after a quoted list starts on its own line, not glued to the row'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

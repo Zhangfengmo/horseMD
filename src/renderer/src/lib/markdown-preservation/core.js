@@ -37,6 +37,15 @@ export const rawInsertionAtCanonicalLineEnd = ({
 }) => {
   const previousLine = lineAt(previous, canonicalOffset)
   if (canonicalOffset !== previousLine.end) return null
+  // An EMPTY canonical line satisfies both "line end" and "line start". It is
+  // a block boundary, not the tail of authored text, so the insertion belongs
+  // on its own line — mapping it to the end of the previous source line glued
+  // the inserted block onto that line. Leave it to the line-start mapping.
+  if (
+    previousLine.start === previousLine.end &&
+    canonicalOffset > 0 &&
+    /[\r\n]/.test(previous[canonicalOffset - 1] || '')
+  ) return null
 
   const sourceLine = lineAt(source, mappedSourceOffset)
   const hiddenTail = source.slice(mappedSourceOffset, sourceLine.end)
@@ -54,6 +63,41 @@ export const rawInsertionAtCanonicalLineEnd = ({
   // Advance past syntax, but stay before authored hard-break whitespace.
   const trailingWhitespace = hiddenTail.match(/[ \t]*$/)?.[0] || ''
   return sourceLine.end - trailingWhitespace.length
+}
+
+// The symmetric case: canonical inserted a WHOLE block at a line START (a new
+// quoted paragraph, a sibling list row). Line endings carry no visible
+// characters, so the generic backward mapping lands at the end of the previous
+// line's text — before its newline — and the inserted block is glued onto that
+// line (`> - item>\n> new`). Advance past that line ending so the block starts
+// on its own line, exactly where the canonical put it.
+export const rawInsertionAtCanonicalLineStart = ({
+  source,
+  previous,
+  canonicalOffset,
+  mappedSourceOffset,
+  sourceVisibleMap
+}) => {
+  const canonicalLine = lineAt(previous, canonicalOffset)
+  if (canonicalOffset !== canonicalLine.start || canonicalOffset === 0) return null
+
+  const sourceLine = lineAt(source, mappedSourceOffset)
+  // Only a mapping that already sits past this line's last visible character
+  // may move; anything else would jump over authored text.
+  let low = 0
+  let high = sourceVisibleMap.length
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if (sourceVisibleMap[middle] < mappedSourceOffset) low = middle + 1
+    else high = middle
+  }
+  if (sourceVisibleMap[low] < sourceLine.end) return null
+  if (sourceLine.end >= source.length) return null
+
+  let at = sourceLine.end
+  if (source[at] === '\r') at += 1
+  if (source[at] === '\n') at += 1
+  return at
 }
 
 export const lineEndingNear = (markdown, offset = 0) => {
@@ -306,6 +350,42 @@ const literalSourceRegion = (source, region) => {
   const end = Math.max(start, region.end - line.start)
   return inlineLiteralRanges(source.slice(line.start, line.end))
     .some((range) => start >= range.start && end <= range.end)
+}
+
+// The authored bullet character of the list this region sits in, or null when
+// the neighbourhood is not an unambiguous single-marker bullet list.
+const BULLET_ROW = /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/
+const bulletOfLine = (line) => (line ? line.match(BULLET_ROW)?.[2] ?? null : null)
+const nearestContentLine = (text, fromEnd) => {
+  const lines = text.split(/\r?\n/)
+  if (fromEnd) lines.reverse()
+  for (const line of lines) if (line.trim()) return line
+  return null
+}
+
+// Only a pure INSERTION can adopt a neighbour's marker: a replacement may span
+// several authored lists, and rewriting their markers would merge lists the
+// user deliberately kept apart. Both neighbours must agree, so an insertion
+// between two differently-marked lists keeps the serializer's spelling and
+// stays a separate list, exactly as the editor shows it.
+const adjacentAuthoredBullet = (source, region) => {
+  if (region.start !== region.end) return null
+  const before = bulletOfLine(nearestContentLine(source.slice(0, region.start), true))
+  const after = bulletOfLine(nearestContentLine(source.slice(region.end), false))
+  if (before && after && before !== after) return null
+  return before || after
+}
+
+export const adoptAdjacentBulletMarker = (adapted, source, region) => {
+  if (!BULLET_ROW.test(adapted) && !/\n[ \t]*(?:>[ \t]?)*[-+*][ \t]/.test(adapted)) return adapted
+  const authored = adjacentAuthoredBullet(source, region)
+  if (!authored) return adapted
+  return adapted.replace(
+    /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/gm,
+    (whole, prefix, marker, space) => (
+      marker === authored ? whole : `${prefix}${authored}${space}`
+    )
+  )
 }
 
 export const adaptCanonicalRegionToSource = (replacement, source, region) => {

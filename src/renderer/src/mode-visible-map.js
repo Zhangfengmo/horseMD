@@ -338,8 +338,13 @@ const sourceVisibleIndex = (md) => {
       continue
     }
     inTable = false
+    // Block prefixes NEST: `> - item` is a list inside a quote, `> > text` a
+    // nested quote. Matching only one prefix left the inner list marker in the
+    // visible stream while the canonical's own marker was consumed elsewhere,
+    // so any quoted list diverged permanently and every edit in such a
+    // document failed closed.
     const marker = visibleLine.match(
-      /^(\s{0,3}(?:#{1,6}\s+|>\s?|(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?))/
+      /^(\s{0,3}(?:>\s?)*(?:#{1,6}\s+|(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)?)/
     )
     const offset = marker ? marker[0].length : 0
     appendInlineVisible(
