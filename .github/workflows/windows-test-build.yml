@@ -1,0 +1,57 @@
+name: Windows test build
+
+# Builds the Windows NSIS installer on demand and keeps it as a workflow
+# artifact. Nothing is published: no tag, no GitHub Release, no auto-update
+# feed — the .exe is downloadable only from this run's Artifacts section.
+#
+# Use this to hand a build to testers from any branch. `release.yml` remains
+# the only workflow that publishes, and it still runs on version tags.
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: 'What is being tested (shown in the run title)'
+        required: false
+        default: ''
+
+run-name: Windows test build — ${{ inputs.notes || github.ref_name }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build bundles
+        run: npm run build
+
+      # `--publish never` is what keeps this build private: electron-builder
+      # will not create or update a GitHub Release even if a token is present.
+      - name: Package Windows installer
+        run: npx electron-builder --win --publish never
+
+      - name: Report artifacts
+        shell: bash
+        run: |
+          ls -lh dist/*.exe
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorseMD-windows-installer
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+          if-no-files-found: error
+          retention-days: 14
