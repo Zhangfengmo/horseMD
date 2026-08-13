@@ -134,6 +134,9 @@ export function useSourceModeSwitch({
       const tab = tabsRef.current.find((item) => item.id === id)
       const recoveryMarkdown = editorApis.current[id]?.getRecoveryMarkdown?.()
       if (tab && typeof recoveryMarkdown === 'string') {
+        // Same rule as the save path: a file picker needs consent, a spelling
+        // change does not. Declining keeps the tab in rich mode, unsaved.
+        if (!window.confirm(tRef.current('save.sourceSyncRecoveryConfirm'))) return false
         try {
           const recovery = await saveSourceSyncRecovery({
             api: window.api,

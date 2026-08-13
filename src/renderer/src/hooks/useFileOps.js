@@ -418,6 +418,12 @@ export function useFileOps({
           fireToast(tRef.current('save.sourceSyncFailed'), { sticky: true })
           return
         }
+        // Opening a file picker is an action with a destination, not a
+        // notification. Formatting normalization happens silently because it
+        // costs nothing the user chose; writing a NEW file somewhere is a
+        // decision that belongs to them. Declining leaves the tab dirty and
+        // the original file untouched — the honest outcome of saying no.
+        if (!window.confirm(tRef.current('save.sourceSyncRecoveryConfirm'))) return
         fireToast(tRef.current('save.sourceSyncRecoveryPrompt'), { sticky: true })
         try {
           const recovery = await saveSourceSyncRecovery({

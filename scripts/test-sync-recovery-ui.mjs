@@ -182,8 +182,37 @@ async function main() {
       await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
       'the live text edit must be dirty before recovery'
     )
+    // Declining must do nothing at all: no picker, no file, original intact.
+    // Both entry points ask — the save button and the source switch.
+    app.setDialogResponse(false)
+    const beforeSave = app.dialogs.length
+    await app.evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await sleep(1200)
+    assert.equal(app.dialogs.length, beforeSave + 1, 'saving must ask before writing a NEW file')
+    assert.equal(
+      await readFile(recoveryFile, 'utf8').then(() => true, () => false),
+      false,
+      'declining on the save path must not write a recovery copy'
+    )
+    assert.equal(await readFile(terminalFile, 'utf8'), terminalOriginal, 'the original file stays untouched')
+    assert.ok(
+      await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
+      'the tab stays dirty after declining'
+    )
+
     const dialogCount = app.dialogs.length
     assert.equal(await toggleSource(app), true, 'could not request source after terminal hardbreak')
+    await sleep(1200)
+    assert.equal(app.dialogs.length, dialogCount + 1, 'writing a NEW file must be asked about first')
+    assert.equal(
+      await readFile(recoveryFile, 'utf8').then(() => true, () => false),
+      false,
+      'declining the recovery copy must not write one'
+    )
+    assert.equal(await readFile(terminalFile, 'utf8'), terminalOriginal, 'the original file stays untouched')
+
+    app.setDialogResponse(true)
+    assert.equal(await toggleSource(app), true, 'could not request source again')
     await waitFor(async () => {
       try {
         return (await readFile(recoveryFile, 'utf8')).includes('abcX')
@@ -191,10 +220,7 @@ async function main() {
         return false
       }
     }, 'rebuild-null branch did not write a separate recovery copy')
-    // No modal here either: this branch is reached only because the rebuild
-    // itself could not be verified, and the recovery COPY is the answer. What
-    // must never happen is writing unverified bytes over the authored file.
-    assert.equal(app.dialogs.length, dialogCount, 'the recovery copy must not be gated behind a modal')
+    assert.equal(app.dialogs.length, dialogCount + 2, 'both the declined and the accepted ask are recorded')
     assert.equal(await sourceVisible(app), false, 'a rejected strict rebuild must not enter source mode')
     assert.equal(await readFile(terminalFile, 'utf8'), terminalOriginal, 'recovery must leave the original bytes untouched')
     assert.ok(
