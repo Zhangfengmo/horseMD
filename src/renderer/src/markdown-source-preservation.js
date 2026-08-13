@@ -9,7 +9,7 @@ import {
   canonicalTextToSource,
   commonChange,
   rawInsertionAtCanonicalLineEnd,
-  rawInsertionInCanonicalGap,
+  rawOffsetInCanonicalGap,
   rawInsertionAtCanonicalLineStart,
   rawOffsetAtVisible
 } from './lib/markdown-preservation/core.js'
@@ -739,23 +739,28 @@ function preserveRichMarkdownSourceCore(
   ) {
     rawStart = sourceMarkdown.lastIndexOf('\n', Math.max(0, rawStart - 1)) + 1
   }
+  // A canonical offset inside block syntax is ambiguous for EVERY edit shape,
+  // not just insertions: the visible stream cannot distinguish "end of the
+  // previous block's text" from "start of the next block's content". Anchor it
+  // by the gap structure both sides share before anything else uses it.
+  const gapStart = rawOffsetInCanonicalGap({
+    source: sourceMarkdown,
+    previous,
+    canonicalOffset: start,
+    previousVisibleMap: previousVisible.map,
+    mappedSourceOffset: rawStart,
+    sourceVisibleMap: sourceVisible.map
+  })
+  if (Number.isFinite(gapStart)) rawStart = gapStart
   if (
     start === previousEnd &&
     startVisible.visibleIndex === endVisible.visibleIndex &&
     replacementVisible
   ) {
-    // The gap rule owns every insertion that crosses a block boundary; the two
-    // helpers below stay for the in-line cases it deliberately declines.
-    const gapInsertion = rawInsertionInCanonicalGap({
-      source: sourceMarkdown,
-      previous,
-      canonicalOffset: start,
-      previousVisibleMap: previousVisible.map,
-      mappedSourceOffset: rawStart,
-      sourceVisibleMap: sourceVisible.map
-    })
-    const lineEndInsertion = Number.isFinite(gapInsertion)
-      ? gapInsertion
+    // The gap rule already owns every insertion that crosses a block boundary;
+    // the two helpers below stay for the in-line cases it declines.
+    const lineEndInsertion = Number.isFinite(gapStart)
+      ? gapStart
       : rawInsertionAtCanonicalLineEnd({
       source: sourceMarkdown,
       previous,

@@ -100,9 +100,13 @@ export const rawInsertionAtCanonicalLineStart = ({
   return at
 }
 
+// The checkbox is its OWN token: a canonical offset can sit between the list
+// marker and the checkbox (an emptied task item deletes `[ ] text`), and
+// folding the two together would consume the checkbox the edit means to remove.
 const PREFIX_TOKENS = {
   quote: /^[ \t]*>[ \t]?/,
-  list: /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/,
+  list: /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+/,
+  task: /^\[[ xX]\][ \t]+/,
   heading: /^[ \t]*#{1,6}[ \t]+/
 }
 
@@ -140,7 +144,7 @@ const visibleCountBefore = (map, offset) => {
 // prefix exactly when the canonical skipped its own. This replaces guessing
 // with the one fact both sides agree on — how many block boundaries the
 // insertion point sits past.
-export const rawInsertionInCanonicalGap = ({
+export const rawOffsetInCanonicalGap = ({
   source,
   previous,
   canonicalOffset,
@@ -152,33 +156,46 @@ export const rawInsertionInCanonicalGap = ({
   const canonicalGapStart = visibleIndex > 0 ? previousVisibleMap[visibleIndex - 1] + 1 : 0
   if (canonicalOffset < canonicalGapStart) return null
   const canonicalGap = previous.slice(canonicalGapStart, canonicalOffset)
-  const lineEndings = (canonicalGap.match(/\r\n|\n|\r/g) || []).length
-  // No boundary crossed: the insertion belongs at the end of the current
-  // line's text, which is what the generic mapping already produced.
-  if (!lineEndings) return null
+  // No block boundary crossed: the offset is inside one line's own syntax and
+  // the generic visible mapping already resolved it.
+  if (!/\r\n|\n|\r/.test(canonicalGap)) return null
 
-  const sourceGapEnd = visibleIndex < sourceVisibleMap.length
-    ? sourceVisibleMap[visibleIndex]
-    : source.length
+  if (visibleIndex >= sourceVisibleMap.length) return null
+  const sourceGapEnd = sourceVisibleMap[visibleIndex]
   if (!(mappedSourceOffset <= sourceGapEnd)) return null
 
-  let at = mappedSourceOffset
-  let crossed = 0
-  while (at < sourceGapEnd && crossed < lineEndings) {
-    if (source[at] === '\r') at += 1
-    if (source[at] === '\n') { at += 1; crossed += 1; continue }
-    at += 1
-  }
-  if (crossed !== lineEndings) return null
-
   // Whatever the canonical consumed AFTER its last line ending is block prefix
-  // (`> `, `- `, `## `). Consume the same prefix KINDS on the source side — its
-  // spelling may differ (`*` vs `-`, `1.` vs `1)`) but its structure cannot.
-  // A mismatch means the two sides do not describe the same block here, so
-  // decline rather than guess.
+  // (`> `, `- `, `[ ] `, `## `). Its emptiness says which side of the gap owns
+  // the offset — and that is the whole decision:
   const canonicalTail = canonicalGap.slice(
-    canonicalGap.search(/(?:\r\n|\n|\r)(?![\s\S]*(?:\r\n|\n|\r))/) + 1
+    canonicalGap.search(/(?:\r\n|\n|\r)(?![^]*(?:\r\n|\n|\r))/) + 1
   )
+
+  if (!canonicalTail) {
+    // Nothing consumed: the offset sits ON a line boundary, so it belongs to
+    // the run of boundaries itself. Cross the same number the canonical did,
+    // clamped to what the source's own spacing offers.
+    const lineEndings = (canonicalGap.match(/\r\n|\n|\r/g) || []).length
+    let at = mappedSourceOffset
+    let crossed = 0
+    while (at < sourceGapEnd && crossed < lineEndings) {
+      if (source[at] === '\r') at += 1
+      if (source[at] === '\n') { at += 1; crossed += 1; continue }
+      at += 1
+    }
+    return crossed ? at : null
+  }
+
+  // Something consumed: the offset is inside the prefix of the block the gap
+  // ENDS in. Anchor on that block's line — never on a count of blank lines,
+  // because the author's spacing and the serializer's differ freely (`>\n>`
+  // vs `>`) and counting from the gap's start drifts by exactly that
+  // difference. Then consume the same prefix KINDS: the spelling may differ
+  // (`*` vs `-`, `1.` vs `1)`) but the structure cannot. A mismatch means the
+  // two sides do not describe the same block here, so decline rather than guess.
+  const lineStart = source.lastIndexOf('\n', Math.max(0, sourceGapEnd - 1)) + 1
+  if (lineStart < mappedSourceOffset) return null
+  let at = lineStart
   for (const kind of prefixTokenKinds(canonicalTail)) {
     const matched = source.slice(at, sourceGapEnd).match(PREFIX_TOKENS[kind])
     if (!matched) return null

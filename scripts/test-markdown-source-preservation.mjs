@@ -3020,4 +3020,21 @@ assert.equal(
   )
 }
 
+// Emptying a task item INSIDE a blockquote. Two separate defects met here:
+// the `<br />` placeholder normalizer did not tolerate the `> ` prefix, and the
+// deletion's start offset fell inside block syntax, so it was resolved to the
+// end of the previous row's text and the deletion swallowed both blank quote
+// lines and the row itself. The row must survive as a plain empty item (the
+// checkbox is non-durable — GFM cannot spell an empty task item).
+{
+  const source   = '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * [ ] 12312\n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n'
+  const previous = '# T\n\n> * [ ] a\n>\n> * [ ] b\n>\n> * [ ] 12312\n>\n> | x | y | <br /> |\n> | :--- | :--- | :--- |\n> | c | d | <br /> |\n\n尾\n'
+  const emptied = preserveRichMarkdownSource(source, previous, previous.replace('> * [ ] 12312', '> * [ ] <br />'))
+  assert.equal(
+    emptied.markdown,
+    '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * \n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n',
+    'an emptied quoted task item keeps its row and every surrounding byte'
+  )
+}
+
 console.log('PASS markdown source preservation: text and structural edits retain untouched source; table/list changes stay block-bounded')

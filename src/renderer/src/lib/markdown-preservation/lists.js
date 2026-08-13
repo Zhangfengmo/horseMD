@@ -396,7 +396,11 @@ export const normalizeEmptyListItems = (markdown) => String(markdown || '')
   // drops `checked` from an item with no content so both sides compare
   // equal). Dropping the checkbox here keeps that contract in one place.
   .replace(
-    /^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?[ \t]*<br\s*\/?>[ \t]*$/gim,
+    // A quoted row is still a list row. Every block-level rule in this file
+    // must tolerate the `> ` prefix, or the placeholder survives inside a
+    // blockquote and the candidate writes Crepe's internal `<br />` into the
+    // user's file — which the verified commit then refuses.
+    /^([ \t]*(?:>[ \t]?)*(?:[-+*]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?[ \t]*<br\s*\/?>[ \t]*$/gim,
     '$1'
   )
   // A deleted list row leaves a standalone `<br />` placeholder in canonical
@@ -406,7 +410,7 @@ export const normalizeEmptyListItems = (markdown) => String(markdown || '')
   // deleting a typed row fails closed and "resurrects" in source mode. Keep
   // the `<br />` token itself so the dedicated empty-block mappers still
   // recognize the placeholder.
-  .replace(/^[ \t]*<br\s*\/?>[ \t]*$/gim, '<br />')
+  .replace(/^([ \t]*(?:>[ \t]?)*)[ \t]*<br\s*\/?>[ \t]*$/gim, '$1<br />')
 
 // Rich-text-created documents have no authored list spacing to preserve yet.
 // Crepe can transiently serialize a newly indented item as a loose list

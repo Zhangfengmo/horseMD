@@ -112,12 +112,27 @@ async function run() {
       ...document.querySelectorAll('.ProseMirror')
     ].find((node) => node.offsetParent)?.textContent.includes('新段')`), 'the keystroke never reached the editor')
 
-    const expected = source.replace('> 锚点段落\n', '> 锚点段落\n>\n> 新段\n')
+    let expected = source.replace('> 锚点段落\n', '> 锚点段落\n>\n> 新段\n')
     assert.equal(await toggleMode(evaluate), true, 'no mode button')
     const shown = await waitFor(() => visibleSource(evaluate), 'source was refused after a quoted-block edit')
     assert.equal(shown, expected, 'every untouched quoted byte must survive verbatim')
 
     assert.equal(await toggleMode(evaluate), true, 'could not return to rich')
+
+    // Empty a quoted TASK item. GFM cannot spell an empty task item, so the
+    // checkbox is non-durable while the row itself persists as `> * `; the
+    // deletion's start also falls inside block syntax, where it used to be
+    // resolved to the previous row's text end and swallow the row.
+    await clickTextEnd(evaluate, send, '任务三')
+    for (let index = 0; index < 3; index += 1) {
+      await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay })
+    }
+    await waitFor(() => evaluate(`![
+      ...[...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        .querySelectorAll('li')
+    ].some((item) => item.textContent.trim() === '任务三')`), 'the task item was never emptied')
+    expected = expected.replace('> * [ ] 任务三', '> * ')
+
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
