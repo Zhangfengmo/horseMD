@@ -266,8 +266,23 @@ const translateInlineCanonicalEscapes = (line, restoreFreshPunctuation = false) 
       // A real leading space cannot be written as plain ASCII Markdown:
       // 1–3 spaces are parser indentation and 4+ become an indented code
       // block. Typora solves the same problem by placing an invisible U+200B
-      // before the authored spaces. Keep mid-line/trailing entities as normal
-      // spaces, but use the sentinel when no visible text precedes the entity.
+      // before the authored spaces. Keep mid-line entities as normal spaces,
+      // but use the sentinel when no visible text precedes the entity.
+      //
+      // At the END of a line the entity must SURVIVE: a literal trailing space
+      // is dropped by the parser on the way back in (and two of them are a
+      // hard break), so writing one produces bytes that no longer describe the
+      // document — the commit is then refused and typing a space at the end of
+      // a paragraph could not be saved at all. remark emits the entity for
+      // exactly this reason; unescaping it here undid that.
+      // Order matters: a HELD LEADING space has no visible text before it and
+      // belongs to the sentinel representation, even when it is the only thing
+      // on the line. Only a trailing space after real text takes the entity.
+      if (hasVisibleTextBefore(index) && /^[ \t]*$/.test(line.slice(index + 6))) {
+        output += '&#x20;'
+        index += 6
+        continue
+      }
       output += hasVisibleTextBefore(index) ? ' ' : `${LEADING_SPACE_SENTINEL} `
       index += 6
       continue

@@ -17,7 +17,8 @@ import {
   bulletListStyleSchema,
   listStyleStringifyHandler,
   orderedListStyleSchema,
-  remarkCaptureListStyle
+  remarkCaptureListStyle,
+  trailingSpaceTextHandler
 } from './editor-list-style.js'
 import { renderHtmlNodeView, remarkMergeInlineHtml } from './editor-html.js'
 import { remarkUnwrapNonAsciiAutolinks } from './editor-autolink.js'
@@ -240,7 +241,8 @@ export function createConfiguredCrepe({
         ...(opts?.handlers || {}),
         break: tableCellBreakHandler,
         highlight: highlightStringifyHandler,
-        list: listStyleStringifyHandler
+        list: listStyleStringifyHandler,
+        text: trailingSpaceTextHandler
       }
     }))
 
