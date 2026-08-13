@@ -10,7 +10,6 @@ import {
   commonChange,
   rawInsertionAtCanonicalLineEnd,
   rawOffsetInCanonicalGap,
-  rawInsertionAtCanonicalLineStart,
   rawOffsetAtVisible
 } from './lib/markdown-preservation/core.js'
 import {
@@ -771,21 +770,6 @@ function preserveRichMarkdownSourceCore(
     if (Number.isFinite(lineEndInsertion)) {
       rawStart = lineEndInsertion
       rawEnd = lineEndInsertion
-    } else {
-      // A whole block inserted at a canonical LINE START needs the mirror
-      // adjustment, or it lands before the previous line's newline and is
-      // glued onto it (`> - item>\n> new paragraph`).
-      const lineStartInsertion = rawInsertionAtCanonicalLineStart({
-        source: sourceMarkdown,
-        previous,
-        canonicalOffset: start,
-        mappedSourceOffset: rawStart,
-        sourceVisibleMap: sourceVisible.map
-      })
-      if (Number.isFinite(lineStartInsertion)) {
-        rawStart = lineStartInsertion
-        rawEnd = lineStartInsertion
-      }
     }
   }
   if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart > rawEnd) {

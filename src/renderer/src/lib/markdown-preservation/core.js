@@ -65,44 +65,6 @@ export const rawInsertionAtCanonicalLineEnd = ({
   return sourceLine.end - trailingWhitespace.length
 }
 
-// The symmetric case: canonical inserted a WHOLE block at a line START (a new
-// quoted paragraph, a sibling list row). Line endings carry no visible
-// characters, so the generic backward mapping lands at the end of the previous
-// line's text — before its newline — and the inserted block is glued onto that
-// line (`> - item>\n> new`). Advance past that line ending so the block starts
-// on its own line, exactly where the canonical put it.
-export const rawInsertionAtCanonicalLineStart = ({
-  source,
-  previous,
-  canonicalOffset,
-  mappedSourceOffset,
-  sourceVisibleMap
-}) => {
-  const canonicalLine = lineAt(previous, canonicalOffset)
-  if (canonicalOffset !== canonicalLine.start || canonicalOffset === 0) return null
-
-  const sourceLine = lineAt(source, mappedSourceOffset)
-  // Only a mapping that already sits past this line's last visible character
-  // may move; anything else would jump over authored text.
-  let low = 0
-  let high = sourceVisibleMap.length
-  while (low < high) {
-    const middle = (low + high) >> 1
-    if (sourceVisibleMap[middle] < mappedSourceOffset) low = middle + 1
-    else high = middle
-  }
-  if (sourceVisibleMap[low] < sourceLine.end) return null
-  if (sourceLine.end >= source.length) return null
-
-  let at = sourceLine.end
-  if (source[at] === '\r') at += 1
-  if (source[at] === '\n') at += 1
-  return at
-}
-
-// The checkbox is its OWN token: a canonical offset can sit between the list
-// marker and the checkbox (an emptied task item deletes `[ ] text`), and
-// folding the two together would consume the checkbox the edit means to remove.
 const PREFIX_TOKENS = {
   quote: /^[ \t]*>[ \t]?/,
   list: /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+/,
@@ -456,44 +418,63 @@ const literalSourceRegion = (source, region) => {
     .some((range) => start >= range.start && end <= range.end)
 }
 
-// The authored bullet character of the list this region sits in, or null when
-// the neighbourhood is not an unambiguous single-marker bullet list.
+// Which list does an inserted bullet row belong to? Under CommonMark, a row
+// joins the list of the authored row directly adjacent to it — same block
+// prefix, same indent — and a change of marker character STARTS A NEW LIST.
+// So writing the serializer's `*` next to an authored `-` does not merely look
+// different, it splits one list in two; the candidate then describes a document
+// the editor is not showing and the verified commit refuses it. Adopting the
+// adjacent row's marker is therefore not a preference for its spelling, it is
+// the only spelling that keeps the row in the list it is displayed in.
 const BULLET_ROW = /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/
-const bulletOfLine = (line) => (line ? line.match(BULLET_ROW)?.[2] ?? null : null)
+const bulletRowAt = (line) => {
+  const matched = String(line ?? '').match(BULLET_ROW)
+  if (!matched) return null
+  // Compare the prefix by SHAPE, not bytes: `>   ` and `> ` are the same quote
+  // depth, and only rows at the same depth and indent share a list.
+  return {
+    depth: (matched[1].match(/>/g) || []).length,
+    indent: matched[1].replace(/[^ \t]/g, '').length,
+    marker: matched[2]
+  }
+}
 const nearestContentLine = (text, fromEnd) => {
   const lines = text.split(/\r?\n/)
   if (fromEnd) lines.reverse()
   for (const line of lines) if (line.trim()) return line
   return null
 }
-
-// Only a pure INSERTION can adopt a neighbour's marker: a replacement may span
-// several authored lists, and rewriting their markers would merge lists the
-// user deliberately kept apart. Both neighbours must agree, so an insertion
-// between two differently-marked lists keeps the serializer's spelling and
-// stays a separate list, exactly as the editor shows it.
-const adjacentAuthoredBullet = (source, region) => {
-  if (region.start !== region.end) return null
-  const before = bulletOfLine(nearestContentLine(source.slice(0, region.start), true))
-  const after = bulletOfLine(nearestContentLine(source.slice(region.end), false))
-  if (before && after && before !== after) return null
-  return before || after
-}
+const sameList = (row, other) =>
+  !!row && !!other && row.depth === other.depth && row.indent === other.indent
 
 export const adoptAdjacentBulletMarker = (adapted, source, region) => {
-  // Exactly ONE bullet row: a single sibling joining the neighbouring list.
-  // A larger insertion spans list boundaries, and rewriting its markers
-  // uniformly would merge lists the author deliberately kept distinct.
-  const rows = adapted.match(/^[ \t]*(?:>[ \t]?)*[-+*][ \t]/gm) || []
-  if (rows.length !== 1) return adapted
-  const authored = adjacentAuthoredBullet(source, region)
-  if (!authored) return adapted
-  return adapted.replace(
-    /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/m,
-    (whole, prefix, marker, space) => (
-      marker === authored ? whole : `${prefix}${authored}${space}`
-    )
-  )
+  // Only a pure INSERTION may take its identity from its surroundings. A
+  // replacement can span several authored lists, and those rows' identities are
+  // established by the replaced region itself — rewriting them by an adjacent
+  // row would merge lists the author deliberately kept apart.
+  if (region.start !== region.end) return adapted
+  const lines = String(adapted).split('\n')
+  const rows = lines.map(bulletRowAt)
+  const first = rows.find(Boolean)
+  if (!first) return adapted
+
+  const before = bulletRowAt(nearestContentLine(source.slice(0, region.start), true))
+  const after = bulletRowAt(nearestContentLine(source.slice(region.end), false))
+  // A neighbour at a different depth or indent is a DIFFERENT list (an outer
+  // row, a nested child); it says nothing about this row.
+  const candidates = [before, after].filter((row) => sameList(row, first))
+  if (!candidates.length) return adapted
+  // Inserting between two differently-marked lists: the row cannot join both,
+  // and the format cannot express the ambiguity. Keep the serializer's
+  // spelling, which stays a separate list — exactly what the editor shows.
+  if (candidates.length === 2 && candidates[0].marker !== candidates[1].marker) return adapted
+  const authored = candidates[0].marker
+
+  return lines.map((line, index) => {
+    const row = rows[index]
+    if (!sameList(row, first) || row.marker === authored) return line
+    return line.replace(BULLET_ROW, (whole, prefix, marker, space) => `${prefix}${authored}${space}`)
+  }).join('\n')
 }
 
 export const adaptCanonicalRegionToSource = (replacement, source, region) => {

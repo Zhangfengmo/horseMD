@@ -13,7 +13,7 @@ import {
 } from '../src/renderer/src/markdown-source-preservation.js'
 import { normalizeEmptyListItems } from '../src/renderer/src/lib/markdown-preservation/lists.js'
 import { sourceVisibleIndex } from '../src/renderer/src/mode-visible-map.js'
-import { commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
+import { adoptAdjacentBulletMarker, commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
 import { createGfmTableSourceParser } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
 import {
   preserveLocallyAlignedTextChange,
@@ -3034,6 +3034,38 @@ assert.equal(
     emptied.markdown,
     '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * \n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n',
     'an emptied quoted task item keeps its row and every surrounding byte'
+  )
+}
+
+// A bullet row joins the list of the authored row directly adjacent to it —
+// SAME quote depth and SAME indent. A change of marker starts a new list in
+// CommonMark, so the adjacent row's marker is the only spelling that keeps the
+// inserted row in the list the editor displays it in. A neighbour at another
+// depth or indent belongs to a different list and says nothing about this row.
+{
+  const at = (text) => ({ start: text.length, end: text.length })
+  const nested = '- 顶层\n  * 嵌套\n'
+  assert.equal(
+    adoptAdjacentBulletMarker('* 新顶层\n', nested, at(nested)),
+    '* 新顶层\n',
+    'a nested neighbour must not lend its marker to a top-level row'
+  )
+  const quoted = '> - 引用项\n'
+  assert.equal(
+    adoptAdjacentBulletMarker('> * 新项\n', quoted, at(quoted)),
+    '> - 新项\n',
+    'a row joining a quoted list adopts that list own marker'
+  )
+  assert.equal(
+    adoptAdjacentBulletMarker('* 顶层新项\n', quoted, at(quoted)),
+    '* 顶层新项\n',
+    'a quoted neighbour must not lend its marker to a top-level row'
+  )
+  const mixed = '- 甲\n'
+  assert.equal(
+    adoptAdjacentBulletMarker('* 乙\n', mixed, { start: 0, end: mixed.length }),
+    '* 乙\n',
+    'only a pure insertion takes its identity from its surroundings'
   )
 }
 
