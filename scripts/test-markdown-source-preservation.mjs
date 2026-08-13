@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import {
+  compactGeneratedListSpacing,
   generatedScratchMarkdown,
   preserveGeneratedBulletMarkers,
   preserveRichMarkdownSource,
@@ -2953,23 +2954,32 @@ assert.equal(
   )
 }
 
-// Restoring the author's `-` runs AFTER list spacing is compacted, so a row
-// that was safe as `*` can turn into a SETEXT underline the moment it is
-// respelled: CommonMark forbids an EMPTY list item from interrupting a
-// paragraph, so `- item\n  - ` is an `<h2>` inside the item, not a nested list.
-// Such a candidate is refused and the whole generated document falls back to
-// raw canonical, losing every authored marker.
+// Compaction REWRITES authored spacing, and a rewrite can change the parse.
+// The generator does not try to predict which spellings are safe: it proposes
+// the compact one and keeps the serializer-spaced one, and the commit gate —
+// which has the parser — decides. These two assertions are why that ladder
+// exists and why it can help.
 {
-  const generated = generatedScratchMarkdown('# T\n\n1. a\n2. b\n\n* c\n\n  * <br />\n')
-  const restored = preserveGeneratedBulletMarkers('# T\n\n1. a\n2. b\n- c\n- \n', generated)
-  assert.equal(
-    restored,
-    '# T\n\n1. a\n2. b\n- c\n\n  - \n',
-    'an empty nested `-` row keeps its separator so it stays a list, not a setext underline'
+  const shape = (markdown) => JSON.stringify(
+    unified().use(remarkParse).use(remarkGfm).parse(markdown).children.map(function describe (node) {
+      return node.children ? { [node.type]: node.children.map(describe) } : node.type
+    })
   )
-  const shape = unified().use(remarkParse).use(remarkGfm).parse(restored)
-    .children.map((node) => node.type).join(' | ')
-  assert.equal(shape, 'heading | list | list', 'the restored bytes must still parse as two lists')
+  // `-` is also a setext underline and CommonMark forbids an EMPTY list item
+  // from interrupting a paragraph, so removing the blank line here turns the
+  // nested row into an `<h2>` inside the item.
+  assert.notEqual(
+    shape('- c\n\n  - \n'),
+    shape('- c\n  - \n'),
+    'compaction can change the parse — this is the hazard, stated as a parser fact'
+  )
+  const canonical = '# T\n\n1. a\n2. b\n\n* c\n\n  * <br />\n'
+  const spacious = generatedScratchMarkdown(canonical, undefined, { compactSpacing: false })
+  assert.notEqual(
+    compactGeneratedListSpacing(spacious),
+    spacious,
+    'the generator must offer the gate two distinct spellings to choose between'
+  )
 }
 
 // A blockquote prefix is block SYNTAX and can wrap any block. Until it was

@@ -37,6 +37,7 @@ import { applyImageText, createConfiguredCrepe } from './editor-crepe-setup.js'
 import { mountEditorDomBindings } from './editor-dom-bindings.js'
 import { getCommandShortcut } from '../lib/commands/shortcut-labels.js'
 import {
+  compactGeneratedListSpacing,
   generatedScratchMarkdown,
   preserveRichMarkdownSource,
   preserveGeneratedBulletMarkers,
@@ -357,6 +358,7 @@ export default function Editor({
       if (!crepe) return null
       return crepe.editor.ctx.get(parserCtx)
     })
+    let scratchSpaciousMarkdown = null
     let latestVerifiedCapture = null
     let verifiedState = null
     const mirrorVerifiedState = () => {
@@ -466,6 +468,16 @@ export default function Editor({
                   markdown: candidate.markdown,
                   durableContext: candidate.durableContext || null
                 })),
+              ...(generatedScratchRef.current && scratchSpaciousMarkdown &&
+                scratchSpaciousMarkdown !== preserved.markdown
+                ? [{
+                    markdown: scratchSpaciousMarkdown,
+                    durableContext: scratchCandidateContext(
+                      scratchSpaciousMarkdown,
+                      preserved.durableContext
+                    )
+                  }]
+                : []),
               ...(generatedScratchRef.current
                 ? [{
                     markdown: canonicalSourceFallback(canonical),
@@ -931,7 +943,7 @@ export default function Editor({
       if (!parseTables) {
         parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
       }
-      let markdown = generatedScratchMarkdown(canonical, parseTables)
+      let markdown = generatedScratchMarkdown(canonical, parseTables, { compactSpacing: false })
       const generatedInputIntents = pendingMarkdownInputIntents.length
         ? pendingMarkdownInputIntents
         : pendingMarkdownInputIntent ? [pendingMarkdownInputIntent] : []
@@ -989,7 +1001,13 @@ export default function Editor({
         pendingMarkdownInputIntents = pendingMarkdownInputIntents
           .filter((intent) => Date.now() - intent.at < 30000)
       }
-      return markdown
+      // Keep the serializer-spaced spelling of the SAME bytes. Compaction is a
+      // rewrite of authored spacing, and a rewrite can change the parse; when
+      // it does, the commit gate can fall back to this instead of to raw
+      // canonical, so an unforeseen spelling hazard costs blank lines rather
+      // than every marker the user typed.
+      scratchSpaciousMarkdown = markdown
+      return compactGeneratedListSpacing(markdown)
     }
 
     // Block controls live in editor-block-controls.js; mount them here and

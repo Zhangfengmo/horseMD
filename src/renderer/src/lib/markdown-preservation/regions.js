@@ -15,6 +15,7 @@ import {
   markdownLines,
   rawOffsetAtVisible
 } from './core.js'
+import { QUOTE_PREFIX_SOURCE } from './block-prefix.js'
 
 const lineRegion = (markdown, start, end) => {
   const first = lineAt(markdown, start)
@@ -361,7 +362,7 @@ export const preserveDivergedBlockTextChange = ({
   // A Crepe-only empty-paragraph `<br />` placeholder must never enter
   // authored source through this fallback; those edits belong to the
   // paragraph-emptied handlers that run before the divergence path.
-  if (/^[ \t]*(?:[ \t]*>[ \t]*)*<br\s*\/?>[ \t]*$/im.test(replacement)) return null
+  if (new RegExp(`^${QUOTE_PREFIX_SOURCE}[ \\t]*<br\\s*/?>[ \\t]*$`, 'im').test(replacement)) return null
 
   return {
     markdown: source.slice(0, first) +

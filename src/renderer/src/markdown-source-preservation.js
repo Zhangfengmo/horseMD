@@ -58,13 +58,20 @@ export {
   replaceMarkdownFrontmatterBlock
 } from './lib/markdown-preservation/frontmatter.js'
 export {
+  compactGeneratedListSpacing,
   preserveTypedBulletInputRule,
   preserveGeneratedBulletMarkers,
   replaceMarkdownListBlock,
   restoreTypedBulletMarker
 } from './lib/markdown-preservation/lists.js'
 
-export const generatedScratchMarkdown = (canonical, parseTables) => {
+// `compactSpacing: false` yields the same document with the SERIALIZER's own
+// blank lines between list rows. It is not a formatting preference: it is the
+// spelling whose parse is known to match the live document, because it is the
+// one Milkdown produced. The compact spelling is what users expect from
+// incremental typing, so it is proposed first — but a compaction that changed
+// the parse must cost blank lines, not every authored marker.
+export const generatedScratchMarkdown = (canonical, parseTables, { compactSpacing = true } = {}) => {
   // A brand-new document is authored entirely by rich typing; its canonical is
   // the only structural source. Serializer punctuation escapes outside proven
   // code/HTML literals therefore have no author-owned spelling to preserve:
@@ -74,12 +81,11 @@ export const generatedScratchMarkdown = (canonical, parseTables) => {
   // line (or the skeleton's empty-paragraph `<br />`). Neither is authored
   // content, so the generated source ends with exactly one final newline —
   // never a phantom trailing blank line.
+  const normalized = withoutStandaloneEmptyBlockLines(
+    normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical, parseTables))
+  )
   return canonicalFreshTextToSource(
-    compactGeneratedListSpacing(
-      withoutStandaloneEmptyBlockLines(
-        normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical, parseTables))
-      )
-    )
+    compactSpacing ? compactGeneratedListSpacing(normalized) : normalized
   ).replace(/\r?\n+$/, '\n')
 }
 

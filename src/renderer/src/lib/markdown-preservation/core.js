@@ -1,6 +1,7 @@
 import {
   sourceRawFromVisibleIndex
 } from '../../mode-visible-map.js'
+import { QUOTE_MARKER_SOURCE, QUOTE_PREFIX_SOURCE, quoteDepthOf } from './block-prefix.js'
 import { LEADING_SPACE_SENTINEL } from '../markdown-leading-space.js'
 import { markdownComparisonKey } from './roundtrip.js'
 
@@ -66,7 +67,7 @@ export const rawInsertionAtCanonicalLineEnd = ({
 }
 
 const PREFIX_TOKENS = {
-  quote: /^[ \t]*>[ \t]?/,
+  quote: new RegExp(`^${QUOTE_MARKER_SOURCE}`),
   list: /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+/,
   task: /^\[[ xX]\][ \t]+/,
   heading: /^[ \t]*#{1,6}[ \t]+/
@@ -426,14 +427,14 @@ const literalSourceRegion = (source, region) => {
 // the editor is not showing and the verified commit refuses it. Adopting the
 // adjacent row's marker is therefore not a preference for its spelling, it is
 // the only spelling that keeps the row in the list it is displayed in.
-const BULLET_ROW = /^([ \t]*(?:>[ \t]?)*)([-+*])([ \t])/
+const BULLET_ROW = new RegExp(`^(${QUOTE_PREFIX_SOURCE})([-+*])([ \\t])`)
 const bulletRowAt = (line) => {
   const matched = String(line ?? '').match(BULLET_ROW)
   if (!matched) return null
   // Compare the prefix by SHAPE, not bytes: `>   ` and `> ` are the same quote
   // depth, and only rows at the same depth and indent share a list.
   return {
-    depth: (matched[1].match(/>/g) || []).length,
+    depth: quoteDepthOf(matched[1]),
     indent: matched[1].replace(/[^ \t]/g, '').length,
     marker: matched[2]
   }

@@ -13,6 +13,7 @@ import {
   listMarker,
   markdownLines
 } from './core.js'
+import { QUOTE_PREFIX_SOURCE } from './block-prefix.js'
 import {
   preserveChangedLineRegion,
   sameVisibleLines,
@@ -354,7 +355,7 @@ export const preserveTrailingExactLineChange = ({
 }
 
 const trailingEmptyBlock = (markdown) => {
-  const match = markdown.match(/(?:^|\n{2})(?:[ \t]*>[ \t]*)*<br\s*\/?>\n*$/i)
+  const match = markdown.match(new RegExp(`(?:^|\\n{2})${QUOTE_PREFIX_SOURCE}<br\\s*/?>\\n*$`, 'i'))
   if (!match) return null
   const prefixLength = match[0].startsWith('\n\n') ? 2 : 0
   return {
@@ -373,7 +374,7 @@ const trailingCanonicalEmptyBlock = (markdown) => {
   const placeholder = trailingEmptyBlock(markdown)
   if (placeholder) return placeholder
   const match = String(markdown || '').match(
-    /(?:^|\n{2})(?:[ \t]*>[ \t]*)*[ \t]+\n*$/
+    new RegExp(`(?:^|\\n{2})${QUOTE_PREFIX_SOURCE}[ \\t]+\\n*$`)
   )
   if (!match) return null
   const prefixLength = match[0].startsWith('\n\n') ? 2 : 0
@@ -387,11 +388,11 @@ const trailingCanonicalEmptyBlock = (markdown) => {
 // blockquote that line is prefixed by the quote marker (`> <br />`); both
 // spellings are editor placeholders, never authored content.
 const standaloneEmptyBlockLines = (markdown) => markdownLines(markdown)
-  .filter((line) => /^\s*(?:[ \t]*>[ \t]*)*<br\s*\/?>\s*$/i.test(line.text))
+  .filter((line) => new RegExp(`^${QUOTE_PREFIX_SOURCE}[ \\t]*<br\\s*/?>[ \\t]*$`, 'i').test(line.text))
 
 export const withoutStandaloneEmptyBlockLines = (markdown) => String(markdown || '')
   .replace(
-    /^((?:[ \t]*>[ \t]*)*)[ \t]*<br\s*\/?>[ \t]*$/gim,
+    new RegExp(`^(${QUOTE_PREFIX_SOURCE})[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
     (match, prefix) => prefix.replace(/[ \t]+$/, '')
   )
 

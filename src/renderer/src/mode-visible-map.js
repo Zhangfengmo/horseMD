@@ -1,3 +1,9 @@
+import {
+  QUOTE_PREFIX,
+  QUOTE_PREFIX_SOURCE,
+  quoteDepthOf,
+  withoutQuotePrefix
+} from './lib/markdown-preservation/block-prefix.js'
 import { codeMirrorSelectionInfo } from './components/editor-codemirror-selection.js'
 import { decodeNamedCharacterReference } from 'decode-named-character-reference'
 import { LEADING_SPACE_SENTINEL } from './lib/markdown-leading-space.js'
@@ -268,8 +274,7 @@ const sourceVisibleIndex = (md) => {
   // code) leaked into the visible stream while canonical's did not — every
   // document quoting a table or a code block desynced permanently and refused
   // every edit.
-  const QUOTE_PREFIX = /^\s{0,3}(?:>[ \t]?)+/
-  const withoutQuotePrefix = (line) => String(line || '').replace(QUOTE_PREFIX, '')
+
   // GFM allows a single dash per delimiter cell (`| - |`), and the serializer
   // emits width-fitted runs (`| -- |`); requiring three dashes let canonical
   // delimiter rows leak into the visible stream as text, permanently
@@ -299,10 +304,14 @@ const sourceVisibleIndex = (md) => {
     if (visibleLine.endsWith('\r')) visibleLine = visibleLine.slice(0, -1)
     // Inside a fence that was NOT opened in a quote, a leading `>` is code
     // content (a diff, a shell transcript) and must survive untouched.
-    const quote = !inFence || fenceInQuote ? visibleLine.match(QUOTE_PREFIX) : null
-    if (quote) {
-      visibleLine = visibleLine.slice(quote[0].length)
-      visibleLineStart += quote[0].length
+    // The shared prefix matcher is zero-width when there is no quote, so a
+    // real prefix is one that actually contains a `>` — otherwise a fence's own
+    // `>` lines (a diff, a shell transcript) would be treated as quote syntax.
+    const quoted = (!inFence || fenceInQuote) && quoteDepthOf(visibleLine) > 0
+    if (quoted) {
+      const prefix = visibleLine.match(QUOTE_PREFIX)[0]
+      visibleLine = visibleLine.slice(prefix.length)
+      visibleLineStart += prefix.length
     }
     // Setext underlines, thematic breaks, and reference definitions do not
     // contribute characters to ProseMirror's visible text stream.
@@ -314,7 +323,7 @@ const sourceVisibleIndex = (md) => {
     }
     const fence = visibleLine.match(/^\s*(```|~~~)/)
     if (fence) {
-      if (!inFence) fenceInQuote = !!quote
+      if (!inFence) fenceInQuote = quoted
       inFence = !inFence
       continue
     }
@@ -363,7 +372,7 @@ const sourceVisibleIndex = (md) => {
     // so any quoted list diverged permanently and every edit in such a
     // document failed closed.
     const marker = visibleLine.match(
-      /^(\s{0,3}(?:>\s?)*(?:#{1,6}\s+|(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)?)/
+      new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:#{1,6}[ \\t]+|(?:[-*+]|\\d+[.)])[ \\t]+(?:\\[[ xX]\\][ \\t]+)?)?)`)
     )
     const offset = marker ? marker[0].length : 0
     appendInlineVisible(

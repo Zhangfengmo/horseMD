@@ -14,6 +14,7 @@ import {
   markdownLines,
   rawOffsetAtVisible
 } from './core.js'
+import { QUOTE_PREFIX_SOURCE } from './block-prefix.js'
 
 // Find the syntactic list tree around an offset without parsing the entire
 // Markdown again. Blank lines are retained only when they sit between members
@@ -237,36 +238,6 @@ const listMarkerTokenLines = (markdown) => markdownLines(markdown)
 // an immediate rich -> source switch can serialize the same ordered row a
 // second time after its one-shot input intent has been consumed; this must not
 // turn a visible `1.` into Crepe's default `1)`.
-// `-` is also a SETEXT heading underline, and CommonMark forbids an EMPTY list
-// item from interrupting a paragraph. So an empty `- ` row placed directly
-// under its parent row's text is not a nested list at all — `- item\n  - `
-// parses as an `<h2>` inside the item. The blank line is what keeps the two
-// apart; removing it changes the document, the candidate is refused, and the
-// whole generated source falls back to raw canonical (every authored marker
-// lost). A sibling row is unaffected: it starts at or before the parent's
-// content column, where a list-item start wins over a setext underline.
-const formsSetextUnderline = (previousRow, nextRow) => {
-  const next = nextRow.match(/^([ \t]*)-[ \t]*$/)
-  if (!next) return false
-  const previous = previousRow.match(/^([ \t]*)((?:[-+*]|\d{1,9}[.)]))([ \t]+)/)
-  if (!previous) return false
-  const contentColumn = previous[1].length + previous[2].length + previous[3].length
-  return next[1].length >= contentColumn
-}
-
-// Restoring the author's `-` happens AFTER spacing is compacted, so a row that
-// was safe as `*` can become a setext underline the moment it is respelled.
-// Give exactly those rows their separator back — the marker stays the author's.
-const separateSetextAmbiguousListRows = (markdown) => {
-  const lines = String(markdown || '').split('\n')
-  const output = []
-  for (let index = 0; index < lines.length; index += 1) {
-    if (index > 0 && formsSetextUnderline(lines[index - 1], lines[index])) output.push('')
-    output.push(lines[index])
-  }
-  return output.join('\n')
-}
-
 export const preserveGeneratedBulletMarkers = (source, markdown) => {
   const sourceLines = listMarkerTokenLines(source)
   const nextLines = listMarkerTokenLines(markdown)
@@ -368,12 +339,12 @@ export const preserveGeneratedBulletMarkers = (source, markdown) => {
     }
   }
 
-  return separateSetextAmbiguousListRows(replacements
+  return replacements
     .sort((left, right) => right.start - left.start)
     .reduce(
       (result, replacement) => result.slice(0, replacement.start) + replacement.marker + result.slice(replacement.end),
       markdown
-    ))
+    )
 }
 
 // Crepe serializes a newly-created, still-empty list item as `- <br />`.
@@ -400,7 +371,7 @@ export const normalizeEmptyListItems = (markdown) => String(markdown || '')
     // must tolerate the `> ` prefix, or the placeholder survives inside a
     // blockquote and the candidate writes Crepe's internal `<br />` into the
     // user's file — which the verified commit then refuses.
-    /^([ \t]*(?:>[ \t]?)*(?:[-+*]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?[ \t]*<br\s*\/?>[ \t]*$/gim,
+    new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+)(?:\\[[ xX]\\][ \\t]+)?[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
     '$1'
   )
   // A deleted list row leaves a standalone `<br />` placeholder in canonical
@@ -410,19 +381,23 @@ export const normalizeEmptyListItems = (markdown) => String(markdown || '')
   // deleting a typed row fails closed and "resurrects" in source mode. Keep
   // the `<br />` token itself so the dedicated empty-block mappers still
   // recognize the placeholder.
-  .replace(/^([ \t]*(?:>[ \t]?)*)[ \t]*<br\s*\/?>[ \t]*$/gim, '$1<br />')
+  .replace(new RegExp(`^(${QUOTE_PREFIX_SOURCE})[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'), '$1<br />')
 
 // Rich-text-created documents have no authored list spacing to preserve yet.
 // Crepe can transiently serialize a newly indented item as a loose list
 // (`2. item\n\n   1. child`) when several keyboard transactions are batched.
 // Generate the compact Markdown users expect from incremental typing, without
 // touching existing source documents where that blank line may be intentional.
+// Compaction REWRITES authored spacing, and a rewrite can change the parse:
+// `-` is also a setext underline, and CommonMark forbids an EMPTY list item
+// from interrupting a paragraph, so `- item\n  - ` is an `<h2>` inside the
+// item rather than a nested list. This function does not try to predict such
+// spellings. The generator keeps the serializer-spaced original alongside the
+// compacted one and the commit gate — which has the parser — decides.
 export const compactGeneratedListSpacing = (markdown) => String(markdown || '')
   .replace(
-    /(^[ \t]*(?:[-+*]|\d{1,9}[.)])\s+[^\n]*)\n(?:[ \t]*\n)+(?=([ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t][^\n]*)?$))/gm,
-    (whole, previousRow, nextRow) => (
-      formsSetextUnderline(previousRow, nextRow) ? whole : `${previousRow}\n`
-    )
+    /(^[ \t]*(?:[-+*]|\d{1,9}[.)])\s+[^\n]*)\n(?:[ \t]*\n)+(?=[ \t]*(?:[-+*]|\d{1,9}[.)])\s+)/gm,
+    '$1\n'
   )
 
 // Before the space is accepted, Markdown's list input rule is represented as a
@@ -716,10 +691,10 @@ export const restoreTypedBulletMarker = ({
     .map((line) => line.start + line.match[1].length)
     .filter((offset) => markdown[offset] !== marker)
     .sort((left, right) => right - left)
-  return separateSetextAmbiguousListRows(offsets.reduce(
+  return offsets.reduce(
     (result, offset) => result.slice(0, offset) + marker + result.slice(offset + 1),
     markdown
-  ))
+  )
 }
 
 const listMarkerMeta = (markdown) => {
@@ -1422,7 +1397,7 @@ export const preserveBatchedListBlockChanges = ({
     nextBaseline.replace(/(?:\r\n|\r|\n)+$/, '') ===
     next.replace(/(?:\r\n|\r|\n)+$/, '')
   const withoutGeneratedEmptyBlocks = (value) => String(value || '')
-    .replace(/^\s*(?:[ \t]*>[ \t]*)*<br\s*\/?>\s*$/gim, '')
+    .replace(new RegExp(`^${QUOTE_PREFIX_SOURCE}[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'), '')
     .replace(/(?:\r\n|\r|\n){3,}/g, '\n\n')
   const onlyGeneratedEmptyBlockRemains =
     withoutGeneratedEmptyBlocks(nextBaseline) === withoutGeneratedEmptyBlocks(next)
