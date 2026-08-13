@@ -6,6 +6,33 @@ const sortedAttrs = (attrs = {}) => Object.fromEntries(
 
 const durableAttrs = (attrs) => sortedAttrs(attrs)
 
+// GFM has no spelling for an EMPTY paragraph: a blank line is a separator
+// between blocks, not a block. The rich model can hold one anywhere (press
+// Enter and type nothing), so it is a state the format cannot carry — the same
+// shape as an empty task item. Declare it non-durable wherever it can occur
+// instead of letting each container discover the gap on its own: a paragraph
+// with no visible content is dropped from its parent, so a candidate that
+// cannot spell it still compares equal.
+//
+// Whitespace-only text is NOT covered here — a leading space has a spelling
+// (`&#x20;`) and the terminal case is declared separately by the doc contract.
+const withoutInvisibleParagraphs = (content) => content.map((child) => {
+  const invisibleParagraph = child?.type === 'paragraph' && (
+    !child.content?.length || child.content.every((inline) => (
+      inline?.type === 'text' &&
+      !inline.marks?.length &&
+      /^[ \t]*$/.test(String(inline.text || ''))
+    ))
+  )
+  if (!invisibleParagraph) return child
+  const { content: _invisibleContent, ...paragraph } = child
+  return paragraph
+}).filter((child) => !(
+  child?.type === 'paragraph' &&
+  !child.content?.length &&
+  !Object.keys(child.attrs || {}).length
+))
+
 // Every omission is local to the node type that owns the metadata. Unknown
 // attributes deliberately flow through the default contract so a future
 // schema addition cannot silently disappear from persistence verification.
@@ -67,24 +94,10 @@ const nodeContracts = {
       if (!hasVisibleContent) delete durable.checked
       return sortedAttrs(durable)
     },
-    content(content) {
-      return content.map((child) => {
-        const invisibleParagraph = child?.type === 'paragraph' && (
-          !child.content?.length || child.content.every((inline) => (
-            inline?.type === 'text' &&
-            !inline.marks?.length &&
-            /^[ \t]*$/.test(String(inline.text || ''))
-          ))
-        )
-        if (!invisibleParagraph) return child
-        const { content: _invisibleContent, ...paragraph } = child
-        return paragraph
-      }).filter((child) => !(
-        child?.type === 'paragraph' &&
-        !child.content?.length &&
-        !Object.keys(child.attrs || {}).length
-      ))
-    }
+    content: withoutInvisibleParagraphs
+  },
+  blockquote: {
+    content: withoutInvisibleParagraphs
   },
   table_header: {
     attrs(attrs) {

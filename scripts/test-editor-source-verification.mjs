@@ -666,4 +666,39 @@ run('preserves an intentionally empty verified source', () => {
   assert.equal(selected.markdown, '')
 })
 
+run('an empty paragraph has no GFM spelling wherever it occurs', () => {
+  // A blank line is a SEPARATOR between blocks, not a block, so a paragraph
+  // with no content cannot be written at all. The rich model can hold one
+  // anywhere the user presses Enter, so the same contract that covers a list
+  // item has to cover a blockquote: without it, a candidate that cannot spell
+  // the paragraph is refused, and a quoted document with one could not be
+  // saved by ANY candidate — not even the rebuilt one.
+  const quote = (extra) => nodeDoc([{
+    type: 'blockquote',
+    attrs: {},
+    content: [
+      { type: 'paragraph', content: [{ type: 'text', text: '内容' }] },
+      ...(extra ? [extra] : [])
+    ]
+  }])
+  assert.equal(
+    areDurablyEquivalent(quote({ type: 'paragraph' }), quote(null)),
+    true,
+    'an empty quoted paragraph is not durable'
+  )
+  assert.equal(
+    areDurablyEquivalent(quote({ type: 'paragraph', content: [] }), quote(null)),
+    true,
+    'an explicitly empty content array is the same state'
+  )
+  assert.equal(
+    areDurablyEquivalent(
+      quote({ type: 'paragraph', content: [{ type: 'text', text: '第二段' }] }),
+      quote(null)
+    ),
+    false,
+    'a paragraph WITH content stays durable'
+  )
+})
+
 console.log('\neditor source verification: all cases passed')

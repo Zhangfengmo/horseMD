@@ -393,8 +393,26 @@ const standaloneEmptyBlockLines = (markdown) => markdownLines(markdown)
 export const withoutStandaloneEmptyBlockLines = (markdown) => String(markdown || '')
   .replace(
     new RegExp(`^(${QUOTE_PREFIX_SOURCE})[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
-    (match, prefix) => prefix.replace(/[ \t]+$/, '')
+    // Inside a blockquote the bare prefix must stay: a `>` line is what keeps
+    // the surrounding blocks apart, and dropping it would merge them into one
+    // paragraph. At the END of the quote it separates nothing, so the whole
+    // line goes — otherwise every save of a document holding an empty quoted
+    // paragraph leaves `>` lines the author never wrote.
+    (match, prefix, offset, whole) => {
+      const bare = prefix.replace(/[ \t]+$/, '')
+      if (!bare) return bare
+      const after = whole.slice(offset + match.length).replace(/^\r?\n/, '')
+      const nextLine = after.slice(0, after.indexOf('\n') < 0 ? after.length : after.indexOf('\n'))
+      if (/^[ \t]*>/.test(nextLine)) return bare
+      // Standing alone, this line IS the blockquote — an authored `>` block,
+      // not a leftover. Only a quote that already has content above it can
+      // have a trailing empty paragraph to drop.
+      const before = whole.slice(0, offset).replace(/\r?\n$/, '')
+      const previousLine = before.slice(before.lastIndexOf('\n') + 1)
+      return /^[ \t]*>/.test(previousLine) ? '\u0000HM_DROP\u0000' : bare
+    }
   )
+  .replace(/\r?\n?\u0000HM_DROP\u0000/g, '')
 
 // The file's terminal line-ending run (0, 1, or more trailing newlines) is
 // authored formatting. Crepe can append a serializer blank line after the last
