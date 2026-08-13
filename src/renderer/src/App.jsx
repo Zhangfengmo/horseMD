@@ -39,7 +39,6 @@ import {
 import { isTabDirty } from './lib/tab-state.js'
 import { resolvePendingRichDraft } from './lib/pending-rich-draft.js'
 import { applyVerifiedRichSnapshot } from './lib/rich-source-tab-state.js'
-import { askRebuildConsent } from './lib/rebuild-consent.js'
 import { applyCustomTheme, applyUserCss } from './customThemes.js'
 import { fireToast } from './ui.js'
 import { useFindReplace } from './hooks/useFindReplace.js'
@@ -547,13 +546,14 @@ export default function App() {
   // the authored file untouched and hands the caller its recovery-copy exit.
   const rebuildMarkdownWithConsent = useCallback((id, editorApi) => {
     if (!editorApi) return null
-    // A refusal here must end the transaction. `askRebuildConsent` records it
-    // so the save path does not follow a cancelled dialog with a second one
-    // (the recovery-copy file picker) that the user never asked for.
-    if (!askRebuildConsent(tRef.current('sync.rebuildConfirm'))) return null
+    // Saving must not stop to ask about a formatting detail. The rebuild is
+    // still verified to describe the same document — it returns null when it
+    // cannot be — so what happens silently here is a SPELLING change, never a
+    // content change. The caller's recovery-copy exit still covers the null.
     const rebuilt = editorApi.rebuildMarkdownFromRich?.()
     if (typeof rebuilt !== 'string') return null
     commitRichSnapshotToTab(id, rebuilt)
+    fireToast(tRef.current('sync.rebuildAuto'))
     return rebuilt
   }, [commitRichSnapshotToTab, tRef])
 

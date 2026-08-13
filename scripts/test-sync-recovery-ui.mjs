@@ -88,31 +88,29 @@ async function main() {
     await typeTextLikeUser(app.send, 'X')
     await sleep(1100)
 
-    // 1. Decline recovery: the switch is refused but no longer a silent lock —
-    //    the dialog is shown, the rich editor stays usable.
+    // 1. A mapping failure costs SPELLING, not content, so it no longer stops
+    //    to ask: the source is rebuilt on its own and the switch goes through.
+    //    A modal here would be a formatting question interrupting the writing.
     assert.equal(await toggleSource(app), true, 'could not click source toggle')
-    await sleep(800)
-    if (app.dialogs.length === 0) {
-      // The mapping succeeded — this fixture no longer exercises fail-closed.
-      // That would silently degrade this regression, so fail loudly.
-      throw new Error('fixture no longer triggers fail-closed; recovery flow not exercised')
-    }
-    assert.equal(await sourceVisible(app), false, 'declining recovery must not open source mode')
-    assert.ok(
-      await app.evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`),
-      'the rich editor must stay usable after declining'
+    await waitFor(() => sourceVisible(app), 'source mode did not open after the automatic rebuild')
+    assert.deepEqual(
+      app.dialogs.map((dialog) => dialog.message),
+      [],
+      'a spelling-only rebuild must not open a modal'
     )
-
-    // 2. Accept recovery: the source is rebuilt from the live document and
-    //    source mode opens.
-    app.setDialogResponse(true)
-    assert.equal(await toggleSource(app), true, 'could not click source toggle again')
-    await waitFor(() => sourceVisible(app), 'source mode did not open after accepting recovery')
     const rebuilt = await app.evaluate(`(
       [...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)?.value ?? null
     )`)
     assert.ok(rebuilt.includes('X'), `the rebuilt source must contain the visible edit (got ${JSON.stringify(rebuilt)})`)
     assert.ok(rebuilt.includes('前置段落') && rebuilt.includes('尾部段落'), 'untouched blocks must survive the rebuild')
+
+    // 2. The normalization is reported, just not asked about.
+    assert.ok(
+      await app.evaluate(`[...document.querySelectorAll('*')].some((node) => (
+        node.children.length === 0 && /规范化|normalized/.test(node.textContent || '')
+      ))`),
+      'the automatic rebuild must report itself without blocking'
+    )
 
     // 3. Save persists the rebuilt source.
     await app.evaluate(`(() => {
@@ -184,7 +182,6 @@ async function main() {
       await app.evaluate(`Boolean(document.querySelector('.hm-save-fab'))`),
       'the live text edit must be dirty before recovery'
     )
-    app.setDialogResponse(true)
     const dialogCount = app.dialogs.length
     assert.equal(await toggleSource(app), true, 'could not request source after terminal hardbreak')
     await waitFor(async () => {
@@ -194,7 +191,10 @@ async function main() {
         return false
       }
     }, 'rebuild-null branch did not write a separate recovery copy')
-    assert.equal(app.dialogs.length, dialogCount + 1, 'strict rebuild confirmation must be exercised')
+    // No modal here either: this branch is reached only because the rebuild
+    // itself could not be verified, and the recovery COPY is the answer. What
+    // must never happen is writing unverified bytes over the authored file.
+    assert.equal(app.dialogs.length, dialogCount, 'the recovery copy must not be gated behind a modal')
     assert.equal(await sourceVisible(app), false, 'a rejected strict rebuild must not enter source mode')
     assert.equal(await readFile(terminalFile, 'utf8'), terminalOriginal, 'recovery must leave the original bytes untouched')
     assert.ok(

@@ -13,6 +13,12 @@ import { inlineCodeSchema } from '@milkdown/kit/preset/commonmark'
 import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language'
 import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
+import {
+  bulletListStyleSchema,
+  listStyleStringifyHandler,
+  orderedListStyleSchema,
+  remarkCaptureListStyle
+} from './editor-list-style.js'
 import { renderHtmlNodeView, remarkMergeInlineHtml } from './editor-html.js'
 import { remarkUnwrapNonAsciiAutolinks } from './editor-autolink.js'
 import { remarkNormalizeCodeOnlyLinkLabels } from './editor-link-labels.js'
@@ -233,12 +239,14 @@ export function createConfiguredCrepe({
       handlers: {
         ...(opts?.handlers || {}),
         break: tableCellBreakHandler,
-        highlight: highlightStringifyHandler
+        highlight: highlightStringifyHandler,
+        list: listStyleStringifyHandler
       }
     }))
 
     ctx.update(remarkPluginsCtx, (plugins) => [
       ...plugins,
+      { plugin: remarkCaptureListStyle, options: undefined },
       { plugin: remarkNormalizeRaggedGfmTables, options: undefined },
       { plugin: remarkStripLeadingSpaceSentinel, options: undefined },
       { plugin: remarkNormalizeCodeOnlyLinkLabels, options: undefined },
@@ -253,6 +261,8 @@ export function createConfiguredCrepe({
   crepe.editor.use(
     inlineCodeSchema.extendSchema((prev) => (ctx) => ({ ...prev(ctx), inclusive: false }))
   )
+  crepe.editor.use(bulletListStyleSchema)
+  crepe.editor.use(orderedListStyleSchema)
   crepe.editor.use(tableCellBreakMarkdownSchema)
   crepe.editor.use(tableHeaderBreakMarkdownSchema)
   crepe.editor.use(imageBlockMarkdownSchema)

@@ -14,7 +14,6 @@ import {
 import { getTextareaSourceValue } from '../source-text-fidelity.js'
 import { fireToast } from '../ui.js'
 import { saveSourceSyncRecovery } from '../lib/source-sync-recovery.js'
-import { askRebuildConsent, consumeRebuildDeclined } from '../lib/rebuild-consent.js'
 
 // Owns rich/source view state and the caret-vs-reading-position transition.
 // Textarea editing remains uncontrolled in EditorArea; this hook only consumes
@@ -107,15 +106,16 @@ export function useSourceModeSwitch({
       ? await api.flushMarkdownSettled()
       : api?.flushMarkdown?.()
     if (typeof markdown !== 'string' && api) {
-      // Fail-closed sync must be an exit-able state, not a dead end: the only
-      // self-service repair is editing the source, and that is exactly the
-      // view this flush gates. Offer the explicit recovery — rebuild the
-      // authored source from the live document (normalizes spelling, keeps
-      // content) — instead of silently refusing the switch. Declining ends the
-      // attempt: `askRebuildConsent` records the refusal so the caller does
-      // not answer a cancelled dialog with the recovery-copy file picker.
-      if (!askRebuildConsent(tRef.current('sync.rebuildConfirm'))) return false
+      // A mapping failure costs the author's SPELLING, never their content:
+      // the rebuild is still verified to describe the same document, and it is
+      // refused if it does not. Asking permission for a spelling change turned
+      // a formatting detail into a modal in the middle of writing, so the
+      // rebuild now happens on its own and reports itself without blocking.
+      // The recovery-copy exit below still covers the case where even the
+      // rebuild cannot be verified — that one WOULD lose content, and silence
+      // there would be corruption.
       markdown = api.rebuildMarkdownFromRich?.()
+      if (typeof markdown === 'string') fireToast(tRef.current('sync.rebuildAuto'))
     }
     if (typeof markdown !== 'string') return false
     // The source textarea is uncontrolled. Commit the synchronous mirror before
@@ -129,10 +129,6 @@ export function useSourceModeSwitch({
     if (!id || tab?.kind === 'settings') return false
     if (sourceModeRef.current) commitAllLive()
     else if (!await flushRichSource(id)) {
-      // Cancelling the rebuild means "do nothing" — answering it with a file
-      // picker would be a second dialog the user just refused. The tab stays
-      // dirty and in rich mode, which is the honest outcome of that choice.
-      if (consumeRebuildDeclined()) return false
       // The visible edit cannot be mapped byte-safely. Do not trap it in
       // renderer memory: offer the same recovery copy the save path uses.
       const tab = tabsRef.current.find((item) => item.id === id)

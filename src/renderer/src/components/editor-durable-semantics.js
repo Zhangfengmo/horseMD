@@ -30,15 +30,20 @@ const nodeContracts = {
       return sortedAttrs(durable)
     }
   },
+  // `bullet` / `delimiter` carry the AUTHOR'S SPELLING of the marker so the
+  // serializer can reproduce it per list. Spelling is exactly what durability
+  // must ignore: `- a` and `* a` are the same document, and a candidate that
+  // re-parses to a different marker character has lost nothing. Keeping them
+  // durable would make every mapped list fail verification.
   bullet_list: {
     attrs(attrs) {
-      const { spread: _serializerSpacing, ...durable } = attrs || {}
+      const { spread: _serializerSpacing, bullet: _authoredMarker, ...durable } = attrs || {}
       return sortedAttrs(durable)
     }
   },
   ordered_list: {
     attrs(attrs) {
-      const { spread: _serializerSpacing, ...durable } = attrs || {}
+      const { spread: _serializerSpacing, delimiter: _authoredMarker, ...durable } = attrs || {}
       return sortedAttrs(durable)
     }
   },
