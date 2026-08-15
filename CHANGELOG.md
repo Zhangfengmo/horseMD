@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Internal
 
 - 内部：源码权威内核（纯内核，实验尚未接入 UI）
+- 实验：源码权威内核标签页开关（状态栏源码按钮旁 ▾ 菜单），覆盖段落/标题/列表族编辑、任务勾选、IME、撤销、保存与冷重开
 
 ## [0.13.50] - 2026-08-12
 

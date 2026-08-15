@@ -207,3 +207,13 @@ npm run test:source-fidelity-probes
 ## 源码权威内核（2026-08）
 
 `src/renderer/src/lib/source-kernel/` 是 spec（docs/superpowers/specs/2026-08-14-source-authoritative-editor-kernel-design.md）方案 C 的第一阶段纯内核（MarkdownDocument 事务、语法索引、字符映射、结构命令、源码历史、种子化状态机测试，`npm run test:source-kernel`）；UI 集成（投影/Gateway/IME）见后续计划二；现有 `mapPlainTextTransactionsToSource` 通道保持不变。
+
+### kernel-mode（计划二，实验标签页开关）
+
+深入实现见 `docs/superpowers/sdd/2026-08-15-source-kernel-integration/`（计划 + 各任务报告），本节只留接线指针。
+
+- **veto 通道**：`editor-source-transactions.js` 的 `createSourceTransactionDispatch` 在拿到 kernel 分类结果后，若判定为 `blocked`/无法归属，直接返回 `{ veto: true }` 并 `return`——**不调用 `view.updateState()`**，PM 视图完全不变，交互像被吞掉，同时走 `notifyBlocked()` 限速 toast。这是 fail-closed 的唯一实现方式：没有变化就没有需要修复的东西。
+- **模块图**：`editor-kernel-mode.js`（控制器，事务分类→提交/veto、结构键 keymap、API 覆盖、`attached`/`degraded` 生命周期）→ `editor-kernel-gateway.js`（`classifyTransactions`：纯文本 `ReplaceStep` 批 vs 单 `AttrStep` 任务勾选 vs 其它一律 `blocked`；`commitPlainText`/`commitTaskToggle` 落回源码）→ `editor-kernel-reconciler.js`（`diffReplaceRange`/`reconcileProjection`：提交后校验实时视图与内核重新 parse 的投影是否一致，不一致则修复或拒绝）→ `editor-kernel-composition.js`（IME `compositionstart`/`compositionend` 期间挂起分类，避免半个候选字被当结构变更）→ `editor-kernel-projection-map.js`（`buildProjectionMap`：markdown raw offset ↔ PM 位置的块级投影，attach 时构建一次，结构提交后重建）。
+- **降级委托契约**：`attachAfterCreate()` 建立初始投影图失败是唯一被批准的降级路径——`degraded = true` 后，`inactive()` 恒真，所有 API 覆盖（flush/save/offset 等）委托回 `attachLegacyApi()` 在覆盖前捕获的**原始**实现，`kernel.doc.text` 冻结在初始内容，绝不会顶替 legacy 流程的输出。降级会通过 `notify()` 一次性提示用户（含"部分工具栏功能关闭"字样）。
+- **诊断 ring buffer**：`pushKernelDiagnostic(entry)`（`editor-kernel-mode.js`）写入 `globalThis.__hmKernelDiagnostics`，上限 100 条，`{at, ...entry}` 形状，条目只含结构化元数据（分类结果、错误码等），**绝不含文档正文**。Editor.jsx 的 kernel-mode `markdownUpdated` 网关与本模块共用同一 buffer；诊断时直接在 devtools 里读 `globalThis.__hmKernelDiagnostics`。
+- **尾部虚拟段落配对**：Crepe 无条件挂载 `@milkdown/plugin-trailing`（默认 `shouldAppend`），只要文档最后一个顶层子节点不是 `paragraph`/`heading`，实时视图就恒定多一个空尾段落；内核对源码的纯 parse 不会产生这个节点（源码里没有对应字节）。`withTrailingParagraph()` 在每次拿真实视图 doc 与 parse 结果做比较前（reconciler 目标、`verifyPlainTextProjection` diff）都给 parse 结果补挂同一个空尾段落，否则任何以列表/表格/代码块收尾的文档，每次纯文本按键都会报"投影不一致"，修复删除尾段落后插件又立刻补回——一个稳定的抖动死循环。

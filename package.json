@@ -163,7 +163,7 @@
     "test:s3-electron-sync": "node scripts/test-s3-electron-sync.mjs",
     "test:watchers": "node scripts/test-main-watchers.mjs",
     "test:criticmarkup": "node scripts/test-strike-guard.mjs && node scripts/test-substitution-headless.mjs",
-    "test:core": "npm run test:security && npm run test:pdf-export && npm run test:document-export && npm run test:ai-core && npm run test:editor-registry && npm run test:filesystem && npm run test:watchers && npm run test:source-map && npm run test:review && npm run test:criticmarkup && npm run test:editor-input && npm run test:ui-layout && npm run test:rich-source-verified-core && npm run test:source-kernel",
+    "test:core": "npm run test:security && npm run test:pdf-export && npm run test:document-export && npm run test:ai-core && npm run test:editor-registry && npm run test:filesystem && npm run test:watchers && npm run test:source-map && npm run test:review && npm run test:criticmarkup && npm run test:editor-input && npm run test:ui-layout && npm run test:rich-source-verified-core && npm run test:source-kernel && npm run test:kernel-headless",
     "cap:sync": "npm run build:mobile && cap sync",
     "cap:ios": "npm run build:mobile && cap sync ios && cap open ios",
     "cap:android": "npm run build:mobile && cap sync android && cap open android",
@@ -203,7 +203,9 @@
     "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs",
     "test:kernel-mode-ui": "node scripts/test-kernel-mode-ui.mjs",
     "test:kernel-ime-ui": "node scripts/test-kernel-ime-ui.mjs",
-    "test:kernel-nodeview-ui": "node scripts/test-kernel-nodeview-ui.mjs"
+    "test:kernel-nodeview-ui": "node scripts/test-kernel-nodeview-ui.mjs",
+    "test:kernel-ui": "npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui",
+    "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
