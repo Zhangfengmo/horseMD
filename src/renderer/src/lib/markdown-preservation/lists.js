@@ -934,6 +934,15 @@ const comparableListLine = (line) => {
   const content = canonicalTextToSource(String(line || '')
     .replace(/^\s*(?:[-+*]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/, '')
   )
+    // Leading whitespace is already comparison-invisible (the marker strip and
+    // `.trim()` both consume it), but its SPELLINGS are not one byte shape:
+    // authored source keeps the portable `&nbsp;` entity while the canonical
+    // serializer emits the parsed U+00A0 (plus raw spaces) for the same
+    // reopened document — mdast has no unsafe pattern for NBSP, so it is never
+    // entity-protected. Equate every spelling of that leading run so list
+    // conversion can align the rows and patch only markers; the authored
+    // bytes themselves are never rewritten by this comparison-only view.
+    .replace(/^(?:&nbsp;|&#xa0;|&#160;|[ \t\u00A0])+/i, '')
     .trim()
     .replace(/^<br\s*\/?>$/i, '')
   return unescapedPunctuationView(content).text
