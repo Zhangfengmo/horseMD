@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="120" viewBox="0 0 480 120">
+  <rect width="480" height="120" fill="#f7f8fa"/>
+  <g fill="#ffffff" stroke="#47647f" stroke-width="3">
+    <rect x="30" y="30" width="180" height="60" rx="8"/>
+    <rect x="270" y="30" width="180" height="60" rx="8"/>
+  </g>
+  <g fill="#243746" font-family="sans-serif" font-size="20" text-anchor="middle">
+    <text x="120" y="65">Node</text>
+    <text x="360" y="65">View</text>
+  </g>
+</svg>

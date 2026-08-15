@@ -202,7 +202,8 @@
     "test:trailing-space-source-ui": "node scripts/test-trailing-space-source-ui.mjs",
     "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs",
     "test:kernel-mode-ui": "node scripts/test-kernel-mode-ui.mjs",
-    "test:kernel-ime-ui": "node scripts/test-kernel-ime-ui.mjs"
+    "test:kernel-ime-ui": "node scripts/test-kernel-ime-ui.mjs",
+    "test:kernel-nodeview-ui": "node scripts/test-kernel-nodeview-ui.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

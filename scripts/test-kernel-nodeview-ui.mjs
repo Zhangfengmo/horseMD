@@ -1,0 +1,536 @@
+// Kernel-mode node-view identity + blocked-matrix UI regression
+// (source-kernel integration Plan 2, Task 11).
+//
+// Two things this script proves against the REAL Electron app in kernel
+// mode, neither covered by test-kernel-mode-ui.mjs / test-kernel-ime-ui.mjs:
+//
+// 1. Node-view identity: editing a FAR paragraph must not tear down and
+//    remount the DOM nodes owned by unrelated node views (CodeMirror's
+//    `.cm-editor`, an `<img>`, a `<table>`) or move the scroll position.
+//    This is the whole point of editor-kernel-reconciler.js's minimal-diff
+//    `diffReplaceRange` (see its own header comment) — this script is the
+//    first thing that actually measures DOM node IDENTITY end-to-end rather
+//    than just asserting the resulting markdown bytes.
+// 2. Blocked matrix (阻止矩阵, Task 7): slash-menu structural items stay
+//    visible-but-`.disabled` and refuse to run (both via Enter and via a
+//    real pointer click); the right-click context menu never offers format/
+//    review/turn-into/list-conversion submenus; a fenced code block stays
+//    read-only; the floating selection toolbar never appears.
+//
+// Fixture design note (see task-11-report.md "Bugs found" for the full
+// diagnosis — THREE real, pre-existing kernel-mode bugs were found while
+// building this fixture, none fixed in this task beyond one narrowly-scoped
+// plugin-ordering fix; see the report for why):
+//  (a) The document ENDS in a plain paragraph. Crepe's always-on
+//      `@milkdown/plugin-trailing` appends a synthetic empty trailing
+//      paragraph whenever a document's last top-level block is anything
+//      OTHER than heading/paragraph, and `buildProjectionMap` does not yet
+//      tolerate that synthetic node — a document ending in the list/table/
+//      code-block this script also needs would never attach kernel mode at
+//      all.
+//  (b) The image is INLINE (embedded in a paragraph WITH other text), not a
+//      standalone image on its own line. Crepe promotes a stand-alone image
+//      to its own `image-block` PM node type, which has no `PM_TO_MD` entry
+//      in editor-kernel-projection-map.js either — same class of attach
+//      failure as (a). An inline image is a true `image` atom inside an
+//      ordinary `paragraph`, already supported by character-map.js's ATOMS
+//      set, so it attaches fine and still exercises a real `<img>` node view.
+//  (c) A single-character "z" placeholder paragraph is REPLACED with "/"
+//      (not appended-then-Enter) to reach the slash menu.
+//      `splitTextBlock`'s raw byte-level paragraph split (inserting a
+//      second blank line) is invisible after CommonMark reparse when
+//      neither side of the split stays visually distinguishable, so Enter
+//      cannot currently be used to manufacture a fresh empty paragraph to
+//      type "/" into. Replacing a single existing character is a plain-text
+//      edit with no such block-boundary ambiguity.
+import assert from 'node:assert/strict'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
+import { sleep } from './lib/cdp.mjs'
+import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const root = `/tmp/horsemd-kernel-nv-${process.pid}`
+const file = join(root, 'kernel-nodeview.md')
+const svgFile = join(root, 'kernel-nodeview.svg')
+const port = Number(process.env.CDP_PORT || 10022)
+const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
+
+const FIXTURE = [
+  '# 内核节点视图测试',
+  '',
+  '前置说明段落，用于占位。',
+  '',
+  '```js',
+  'function greet(name) {',
+  '  return `你好，${name}！`;',
+  '}',
+  '```',
+  '',
+  '示意图见此：![节点视图测试图](./kernel-nodeview.svg) 图片说明结束。',
+  '',
+  '| 列一 | 列二 |',
+  '| --- | --- |',
+  '| 甲 | 乙 |',
+  '| 丙 | 丁 |',
+  '',
+  '填充一：占位文字用于撑开滚动高度。',
+  '',
+  '填充二：占位文字用于撑开滚动高度。',
+  '',
+  '填充三：占位文字用于撑开滚动高度。',
+  '',
+  '填充四：占位文字用于撑开滚动高度。',
+  '',
+  '填充五：占位文字用于撑开滚动高度。',
+  '',
+  '填充六：占位文字用于撑开滚动高度。',
+  '',
+  'z',
+  '',
+  '远段落用于打字测试。',
+  ''
+].join('\n')
+
+const FAR_PARAGRAPH = '远段落用于打字测试。'
+const TYPED = '东南西北中'
+const FAR_PARAGRAPH_AFTER_TYPING = FAR_PARAGRAPH + TYPED
+
+// Derived directly from FIXTURE by string substitution: both edits below are
+// plain-text (append at a paragraph's visible end; single-character replace
+// within a one-character paragraph), neither touches any markdown syntax
+// requiring escaping, so the raw bytes are exactly the visible text —
+// verified structurally via buildSyntaxIndex in the task's own investigation
+// (kernel oracle; see task-11-report.md).
+const AFTER_TYPING = FIXTURE.replace(`${FAR_PARAGRAPH}\n`, `${FAR_PARAGRAPH_AFTER_TYPING}\n`)
+const SAVED = AFTER_TYPING.replace('\nz\n\n', '\n/\n\n')
+
+async function waitFor(check, message, attempts = 80) {
+  for (let index = 0; index < attempts; index += 1) {
+    const value = await check()
+    if (value) return value
+    await sleep(100)
+  }
+  throw new Error(message)
+}
+
+// A lazy-mounted, kept-mounted onboarding/welcome tab (or any other
+// previously-opened tab) can leave ITS OWN `.cm-editor`/img/table in the DOM
+// alongside this fixture's — every query below must be scoped to the
+// currently VISIBLE `.ProseMirror` (offsetParent-truthy), never a bare
+// `document.querySelector`, or an assertion could silently read/target the
+// wrong tab's node view.
+const VISIBLE_EDITOR = `[...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`
+// Crepe's table node view renders a SECOND, empty `<table>` inside
+// `.drag-preview` (a column-drag ghost) alongside the real, populated one —
+// a bare `querySelector('table')` can silently grab that empty ghost
+// instead of the actual table. `realTable(editor)` filters it out.
+const REAL_TABLE = (editorExpr) =>
+  `[...(${editorExpr})?.querySelectorAll('table') || []].find((node) => !node.closest('.drag-preview'))`
+
+const mounted = (evaluate) => evaluate(`(${VISIBLE_EDITOR})?.textContent`)
+
+const visibleSource = (evaluate) => evaluate(`(
+  [...document.querySelectorAll('textarea.source-editor')]
+    .find((node) => node.offsetParent)?.value ?? null
+)`)
+
+// Same split-button convention test-kernel-mode-ui.mjs documents: the plain
+// `.status-btn` (not the kernel caret button) toggles rich/source.
+async function toggleSourceMode(evaluate) {
+  const clicked = await evaluate(`(() => {
+    const button = [...document.querySelectorAll('.status-btn')]
+      .find((node) => node.offsetParent && !node.classList.contains('block-switch-caret-btn') &&
+        /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
+    button?.click()
+    return !!button
+  })()`)
+  assert.ok(clicked, 'no source-toggle trigger button')
+}
+
+async function toggleKernelMode(evaluate) {
+  const opened = await evaluate(`(() => {
+    const button = document.querySelector('.block-switch-caret-btn')
+    button?.click()
+    return !!button
+  })()`)
+  assert.ok(opened, 'no kernel-mode caret button — tab not kernel-eligible?')
+  await sleep(150)
+  const clicked = await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.block-switch-menu .block-menu-item')]
+      .find((node) => node.offsetParent)
+    item?.click()
+    return !!item
+  })()`)
+  assert.ok(clicked, 'kernel-toggle menu item missing')
+}
+
+// Same off-screen-click trap test-kernel-mode-ui.mjs / test-quoted-block-
+// source-ui.mjs document: a document taller than the window needs a real
+// scroll before the synthetic click can land on the right node.
+async function clickTextEnd(evaluate, send, text) {
+  const point = await evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+    const node = [...(editor?.querySelectorAll('p, td, th') || [])]
+      .find((candidate) => candidate.textContent === ${JSON.stringify(text)})
+    if (!node) return null
+    node.scrollIntoView({ block: 'center' })
+    const rect = node.getBoundingClientRect()
+    return { x: rect.left + 8, y: rect.top + Math.min(12, rect.height / 2) }
+  })()`)
+  assert.ok(point, `missing editable block: ${text}`)
+  await sleep(400)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+  await sleep(150)
+  // 'End' can race the click's own selection settling (observed flake: the
+  // caret stayed at the click position instead of moving to the block's
+  // end) — verify the DOM selection actually reached the end and retry
+  // 'End' a few times rather than trusting a single keypress blindly.
+  const atEnd = () => evaluate(`(() => {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return false
+    const node = sel.focusNode
+    const text = node?.nodeType === Node.TEXT_NODE ? node.textContent : node?.textContent
+    return sel.focusOffset === (text?.length ?? -1)
+  })()`)
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await pressKey(send, { key: 'End', code: 'End', delayMs: delay })
+    if (await atEnd()) return
+  }
+  assert.fail(`caret never reached the end of block: ${text}`)
+}
+
+const scrollTop = (evaluate) => evaluate(`(() => {
+  const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+  return editor?.closest('.editor-scroll')?.scrollTop ?? null
+})()`)
+
+const paragraphTexts = (evaluate) => evaluate(`(() => {
+  const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+  return [...(editor?.querySelectorAll('p') || [])].map((node) => node.textContent)
+})()`)
+
+const slashItems = (evaluate) => evaluate(`[
+  ...document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item')
+].map((node) => ({ disabled: node.classList.contains('disabled'), index: node.dataset.index }))`)
+
+async function click(send, point) {
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point })
+}
+
+async function run() {
+  await rm(root, { recursive: true, force: true })
+  await mkdir(root, { recursive: true })
+  await writeFile(file, FIXTURE)
+  await writeFile(svgFile, await readFile(join(__dirname, 'fixtures', 'kernel-nodeview.svg')))
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file] })
+    let { evaluate, send } = app
+
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('远段落') && text.includes('填充六') ? text : null
+    }, 'initial document did not mount')
+    await waitFor(() => evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('.cm-editor')`), 'code block never mounted')
+    await waitFor(() => evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('img')`), 'image never mounted')
+    await waitFor(() => evaluate(`!!(${REAL_TABLE(VISIBLE_EDITOR)})`), 'table never mounted')
+    assert.equal(app.dialogs.length, 0, 'no dialog on plain mount')
+
+    // ---- enable kernel mode ----
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'kernel mode did not remount the tab')
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('远段落') && text.includes('填充六') ? text : null
+    }, 'document did not remount after enabling kernel mode')
+    await sleep(300)
+
+    // Sanity: this fixture ends in a plain paragraph specifically so kernel
+    // mode genuinely attaches (see the header comment) — assert it did, not
+    // just that the UI toggled, so a future regression that silently
+    // degrades kernel mode again fails LOUDLY here instead of the rest of
+    // this script quietly exercising the legacy fallback.
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy fallback for this fixture: ${attachDiagnostics}`
+    )
+    assert.equal(app.dialogs.length, 0, 'no dialog after enabling kernel mode')
+
+    // ============================================================
+    // 1) Node-view identity across an edit in a FAR paragraph
+    // ============================================================
+    await clickTextEnd(evaluate, send, FAR_PARAGRAPH)
+    await sleep(150)
+    await evaluate(`(() => {
+      const editor = ${VISIBLE_EDITOR}
+      window.__hmProbeCm = editor.querySelector('.cm-editor')
+      window.__hmProbeImg = editor.querySelector('img')
+      window.__hmProbeTable = (${REAL_TABLE('editor')})
+      true
+    })()`)
+    const scrollBefore = await scrollTop(evaluate)
+    assert.ok(Number.isFinite(scrollBefore), 'scroll container not found before typing')
+
+    await typeTextLikeUser(send, TYPED, { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes(FAR_PARAGRAPH_AFTER_TYPING),
+      'typed characters never reached the kernel-mode editor')
+    await sleep(200)
+
+    const cmIdentityKept = await evaluate(`window.__hmProbeCm === (${VISIBLE_EDITOR})?.querySelector('.cm-editor')`)
+    const imgIdentityKept = await evaluate(`window.__hmProbeImg === (${VISIBLE_EDITOR})?.querySelector('img')`)
+    const tableIdentityKept = await evaluate(`window.__hmProbeTable === (${REAL_TABLE(VISIBLE_EDITOR)})`)
+    assert.equal(cmIdentityKept, true, 'CodeMirror .cm-editor DOM node was torn down/remounted by an edit in a far paragraph')
+    assert.equal(imgIdentityKept, true, 'img DOM node was torn down/remounted by an edit in a far paragraph')
+    assert.equal(tableIdentityKept, true, 'table DOM node was torn down/remounted by an edit in a far paragraph')
+    const scrollAfter = await scrollTop(evaluate)
+    assert.equal(scrollAfter, scrollBefore, 'scroll position moved from an edit in a far paragraph')
+
+    // Verify the CodeMirror/image/table CONTENT is also unchanged (identity
+    // alone would not catch a node view that kept its DOM node but silently
+    // re-rendered wrong content into it).
+    const cmContentUnchanged = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent.includes('function greet')`)
+    const tableTextUnchanged = await evaluate(`(() => {
+      const table = (${REAL_TABLE(VISIBLE_EDITOR)})
+      return !!table && table.textContent.includes('甲') && table.textContent.includes('丁')
+    })()`)
+    assert.equal(cmContentUnchanged, true, 'code block content changed unexpectedly')
+    assert.equal(tableTextUnchanged, true, 'table content changed unexpectedly')
+
+    // ============================================================
+    // 2) Blocked matrix — slash menu (阻止矩阵)
+    // ============================================================
+    // Reach the slash menu via a plain-text REPLACE (not Enter-based split —
+    // see header comment): select the whole one-character 'z' placeholder
+    // and retype it as '/'.
+    await clickTextEnd(evaluate, send, 'z')
+    await pressKey(send, { key: 'Home', code: 'Home', modifiers: 8, delayMs: delay }) // Shift+Home
+    await sleep(150)
+    await typeTextLikeUser(send, '/', { delayMs: delay })
+    await waitFor(async () => (await paragraphTexts(evaluate)).includes('/'), 'placeholder paragraph never became "/"')
+
+    await waitFor(() => evaluate(`document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item').length > 0`),
+      'slash menu never opened')
+    let items = await slashItems(evaluate)
+    assert.ok(items.length > 5, `slash menu opened with too few items: ${JSON.stringify(items)}`)
+    assert.ok(items.every((item) => item.disabled), `every structural slash item must be .disabled in kernel mode: ${JSON.stringify(items)}`)
+
+    // (a) Enter on the highlighted (first) disabled item: menu closes,
+    // document bytes unchanged, no command ran.
+    let beforeEnter = await paragraphTexts(evaluate)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(300)
+    let afterEnter = await paragraphTexts(evaluate)
+    assert.deepEqual(afterEnter, beforeEnter, 'a blocked slash item ran (or otherwise changed the document) on Enter')
+    const menuShownAfterEnter = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
+    assert.equal(menuShownAfterEnter, 'false', 'slash menu did not close after refusing a blocked item via Enter')
+
+    // (b) reopen (click away, click back — no text change, shouldShow just
+    // re-evaluates the same still-'/'-starting block) and click a blocked
+    // item with the pointer instead of the keyboard.
+    await clickTextEnd(evaluate, send, FAR_PARAGRAPH_AFTER_TYPING)
+    await sleep(150)
+    await clickTextEnd(evaluate, send, '/')
+    await waitFor(() => evaluate(`document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item').length > 0`),
+      'slash menu never reopened for the click-based check')
+    items = await slashItems(evaluate)
+    assert.ok(items.every((item) => item.disabled), `reopened slash menu items must still be .disabled: ${JSON.stringify(items)}`)
+
+    const firstItemPoint = await evaluate(`(() => {
+      const li = document.querySelector('.milkdown-slash-menu[data-show="true"] .hm-slash-item[data-index="0"]')
+      const rect = li?.getBoundingClientRect()
+      return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null
+    })()`)
+    assert.ok(firstItemPoint, 'first slash item is not hit-testable')
+    const beforeClick = await paragraphTexts(evaluate)
+    await click(send, firstItemPoint)
+    await sleep(300)
+    const afterClick = await paragraphTexts(evaluate)
+    assert.deepEqual(afterClick, beforeClick, 'a blocked slash item ran (or otherwise changed the document) on click')
+    const menuShownAfterClick = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
+    assert.equal(menuShownAfterClick, 'false', 'slash menu did not close after refusing a blocked item via click')
+    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the blocked slash-menu interactions')
+
+    // ============================================================
+    // 3) Blocked matrix — selection toolbar (never appears in kernel mode)
+    // ============================================================
+    // With DEFAULT settings (selection toolbar enabled), the floating
+    // toolbar must still never appear in kernel mode: Task 5 disables
+    // Crepe's whole Toolbar FEATURE for kernel tabs ([Feature.Toolbar]:
+    // !kernelMode), independent of the user's settings toggle.
+    const dragSelection = async (text) => {
+      // The visible-editor lookup has been observed to flip to a different
+      // (kept-mounted, offscreen) tab for a single query in between two
+      // otherwise-adjacent evaluate() calls with no app interaction between
+      // them — a transient DOM/layout settle, not a real navigation (the
+      // very next query always finds this tab's own content again). Poll
+      // instead of trusting one query.
+      const geometry = await waitFor(() => evaluate(`(() => {
+        const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        const node = [...(editor?.querySelectorAll('p') || [])].find((candidate) => candidate.textContent === ${JSON.stringify(text)})
+        if (!node) return null
+        node.scrollIntoView({ block: 'center' })
+        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+        const textNode = walker.nextNode()
+        if (!textNode) return null
+        const range = document.createRange()
+        range.setStart(textNode, 0)
+        range.setEnd(textNode, Math.min(6, textNode.textContent.length))
+        const rect = range.getBoundingClientRect()
+        if (!rect.width) return null
+        return { startX: rect.left + 2, endX: rect.right - 2, y: rect.top + rect.height / 2 }
+      })()`), `could not locate a text range to select in: ${text}`, 20)
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: geometry.startX, y: geometry.y, button: 'left', clickCount: 1 })
+      for (let step = 1; step <= 4; step += 1) {
+        const x = geometry.startX + ((geometry.endX - geometry.startX) * step) / 4
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y: geometry.y, button: 'left', buttons: 1 })
+      }
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: geometry.endX, y: geometry.y, button: 'left', clickCount: 1 })
+      await sleep(200)
+      return { startX: geometry.startX, y: geometry.y }
+    }
+
+    await dragSelection(FAR_PARAGRAPH_AFTER_TYPING)
+    const selectedText = await evaluate(`window.getSelection()?.toString() || ''`)
+    assert.ok(selectedText.length > 0, 'mouse drag did not create a text selection')
+    await sleep(300)
+    const toolbarVisible = await evaluate(`(() => {
+      const toolbar = document.querySelector('.milkdown-toolbar')
+      if (!toolbar) return false
+      const style = getComputedStyle(toolbar)
+      const rect = toolbar.getBoundingClientRect()
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+    })()`)
+    assert.equal(toolbarVisible, false, 'floating selection toolbar appeared in kernel mode')
+
+    // ============================================================
+    // 4) Blocked matrix — right-click context menu (format/turn-into/
+    //    list-conversion submenus must not exist)
+    // ============================================================
+    // Disable the selection-toolbar SETTING too (same setup
+    // test-selection-toolbar-ui.mjs uses) so the fallback ctxMenu's
+    // `showTextFormatting` would normally be TRUE for a non-empty selection
+    // — proving the kernel-mode gate (`!sourceKernelMode &&`), not just the
+    // toolbar-setting default, is what keeps the submenu away.
+    const settingsOpened = await evaluate(`(() => {
+      const button = [...document.querySelectorAll('button')].find((node) => {
+        const rect = node.getBoundingClientRect()
+        return rect.width && rect.height && /设置|Settings/.test(node.title || node.textContent || '')
+      })
+      button?.click()
+      return Boolean(button)
+    })()`)
+    assert.ok(settingsOpened, 'Settings button is missing')
+    await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some((node) => /编辑器|Editor/.test(node.textContent || '') && node.offsetParent)`),
+      'Editor settings tab is missing')
+    await evaluate(`[...document.querySelectorAll('button')].find((node) => /编辑器|Editor/.test(node.textContent || '') && node.offsetParent)?.click()`)
+    await waitFor(() => evaluate(`[...document.querySelectorAll('.settings-row')].some((row) => /选中文字时显示浮动工具栏|Selection toolbar/.test(row.textContent || ''))`),
+      'Selection toolbar setting is missing')
+    const toggledOff = await evaluate(`(() => {
+      const row = [...document.querySelectorAll('.settings-row')].find((node) => /选中文字时显示浮动工具栏|Selection toolbar/.test(node.textContent || ''))
+      const toggle = row?.querySelector('.hm-toggle')
+      toggle?.click()
+      return Boolean(toggle)
+    })()`)
+    assert.ok(toggledOff, 'selection toolbar toggle is missing')
+    await sleep(150)
+
+    // A default onboarding/welcome tab can be open alongside this fixture's
+    // tab (kept-mounted, per the app's lazy-mount convention) — a generic
+    // "not Settings" match can click that instead of this fixture's own
+    // tab. Target the fixture's tab by its filename specifically.
+    const fixtureTabExists = await evaluate(`!![...document.querySelectorAll('.tab')].find((node) => (node.textContent || '').includes('kernel-nodeview.md'))`)
+    assert.ok(fixtureTabExists, "this fixture's own tab is missing after opening settings")
+    await evaluate(`[...document.querySelectorAll('.tab')].find((node) => (node.textContent || '').includes('kernel-nodeview.md'))?.click()`)
+    await waitFor(() => evaluate(`(${VISIBLE_EDITOR})?.textContent.includes('填充六')`), 'document did not return after settings')
+    await sleep(200)
+
+    const point = await dragSelection(FAR_PARAGRAPH_AFTER_TYPING)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.startX + 8, y: point.y, button: 'right', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.startX + 8, y: point.y, button: 'right', clickCount: 1 })
+    await waitFor(() => evaluate(`!!document.querySelector('.block-ctxmenu')`), 'right-click context menu did not open')
+
+    const ctxMenuAudit = await evaluate(`({
+      hasFormatTrigger: !!document.querySelector('[data-context-submenu-trigger="format"]'),
+      hasReviewTrigger: !!document.querySelector('[data-context-submenu-trigger="review"]'),
+      hasBlockTrigger: !!document.querySelector('[data-context-submenu-trigger="block"]'),
+      hasListTrigger: !!document.querySelector('[data-context-submenu-trigger="list"]'),
+      hasFormatSubmenu: !!document.querySelector('[data-context-submenu="format"]'),
+      hasBlockTextFormat: document.querySelectorAll('.block-text-format').length,
+      hasListConversion: document.querySelectorAll('.block-list-conversion').length,
+      menuVisible: !!document.querySelector('.block-ctxmenu')
+    })`)
+    assert.deepEqual(ctxMenuAudit, {
+      hasFormatTrigger: false,
+      hasReviewTrigger: false,
+      hasBlockTrigger: false,
+      hasListTrigger: false,
+      hasFormatSubmenu: false,
+      hasBlockTextFormat: 0,
+      hasListConversion: 0,
+      menuVisible: true
+    }, `kernel mode's right-click menu must offer NO format/review/turn-into/list-conversion surfaces: ${JSON.stringify(ctxMenuAudit)}`)
+
+    await evaluate(`document.querySelector('.menu-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`)
+    await sleep(200)
+    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the right-click blocked-matrix check')
+
+    // ============================================================
+    // 5) Blocked matrix — fenced code block stays read-only
+    // ============================================================
+    const codePoint = await evaluate(`(() => {
+      const line = (${VISIBLE_EDITOR})?.querySelector('.cm-editor .cm-line')
+      const rect = line?.getBoundingClientRect()
+      return rect ? { x: rect.left + 4, y: rect.top + rect.height / 2 } : null
+    })()`)
+    assert.ok(codePoint, 'code block line is not hit-testable')
+    const cmTextBefore = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...codePoint, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...codePoint, button: 'left', clickCount: 1 })
+    await sleep(200)
+    await typeTextLikeUser(send, 'BLOCKED', { delayMs: delay })
+    await sleep(300)
+    const cmTextAfter = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
+    assert.equal(cmTextAfter, cmTextBefore, 'typing into the fenced code block changed its content (must be read-only in kernel mode)')
+
+    // ============================================================
+    // 6) Save and assert byte-exact kernel output; cold reopen
+    // ============================================================
+    await toggleSourceMode(evaluate)
+    const shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear')
+    assert.equal(shown, SAVED, 'kernel-mode source bytes must match the derived expectation exactly (identity + blocked-matrix edits only)')
+
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
+    assert.equal(await readFile(file, 'utf8'), SAVED, 'disk bytes must match the derived expectation exactly')
+    assert.equal(app.dialogs.length, 0, `no rebuild prompt may appear: ${JSON.stringify(app.dialogs.map((dialog) => dialog.message))}`)
+
+    await stopBuiltElectron(app, { removeProfile: false })
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, cleanProfile: false, appArgs: [file] })
+    ;({ evaluate, send } = app)
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes(FAR_PARAGRAPH_AFTER_TYPING) && text.includes('填充六') ? text : null
+    }, 'reopened document did not mount with the saved content')
+    await toggleSourceMode(evaluate)
+    const reopened = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
+    assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
+    assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
+
+    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click/code-block/selection-toolbar all refuse structural operations; save and cold reopen match the kernel-derived byte string')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+  }
+}
+
+run().catch((error) => {
+  console.error(error)
+  process.exit(1)
+})
