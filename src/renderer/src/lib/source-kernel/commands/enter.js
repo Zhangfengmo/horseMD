@@ -1,0 +1,71 @@
+// Enter 命令族：段落/标题分裂、列表续项、空项退出。
+// 本目录（source-kernel）禁止 import electron/react/@milkdown。
+import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
+
+const endingAt = (index, offset) => {
+  const line = index.lineAt(offset)
+  return line.ending || index.dominantEnding
+}
+
+// QUOTE_PREFIX's leading `[ \t]*` is unconditional, so it also matches pure
+// leading whitespace with zero '>' — treat a match as a real quote prefix
+// only when it actually contains '>' (same idiom as syntax-index.js buildItem).
+const quotePrefixAt = (index, offset) => {
+  const raw = (index.lineAt(offset).text.match(QUOTE_PREFIX) || [''])[0]
+  return raw.includes('>') ? raw : ''
+}
+
+const bareQuote = (prefix) => prefix.replace(/[ \t]+$/, '')
+
+const txn = (doc, from, to, insert, intent, caret) => ({
+  ok: true,
+  transaction: {
+    baseRevision: doc.revision,
+    from,
+    to,
+    insert,
+    intent,
+    selection: { anchor: caret, head: caret }
+  }
+})
+
+// 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
+// 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
+export function splitTextBlock({ doc, index, offset }) {
+  const block = index.blockAt(offset)
+  if (!block || (block.type !== 'paragraph' && block.type !== 'heading')) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const ending = endingAt(index, offset)
+  const prefix = quotePrefixAt(index, offset)
+  const insert = prefix
+    ? ending + bareQuote(prefix) + ending + prefix
+    : ending + ending
+  return txn(doc, offset, offset, insert, 'split-block', offset + insert.length)
+}
+
+// 非空列表项 Enter：插入 `ending + quotePrefix + indent + nextMarker + spacing
+// (+ '[ ]' + taskSpacing)`。有序 marker 沿用当前显式编号 + 1 与其分隔符，绝不
+// 重排既有兄弟项的编号；任务项新项恒为未勾选，spacing 逐字沿用原项。
+export function splitListItem({ doc, index, offset }) {
+  const item = index.listItemAt(offset)
+  if (!item || item.empty) return { ok: false, code: 'unsupported-structure' }
+  const ending = endingAt(index, offset)
+  const marker = item.ordered
+    ? String(item.ordered.number + 1) + item.ordered.delimiter
+    : item.marker
+  const insert = ending + item.quotePrefix + item.indent + marker + item.spacing +
+    (item.task ? '[ ]' + item.taskSpacing : '')
+  return txn(doc, offset, offset, insert, 'split-list-item', offset + insert.length)
+}
+
+// 空列表项 Enter：删除该 marker 行的 `indent+marker+spacing(+task+taskSpacing)`
+// （从引用前缀之后到行尾），保留引用前缀；caret 停在删除点。
+export function exitEmptyListItem({ doc, index, offset }) {
+  const item = index.listItemAt(offset)
+  if (!item?.empty) return { ok: false, code: 'unsupported-structure' }
+  const line = index.lines[item.markerLineIndex]
+  const from = line.start + item.quotePrefix.length
+  const to = line.end
+  return txn(doc, from, to, '', 'exit-empty-list-item', from)
+}
