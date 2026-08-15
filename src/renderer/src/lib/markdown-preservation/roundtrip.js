@@ -15,6 +15,12 @@ import { gfmFromMarkdown } from 'mdast-util-gfm'
 
 const BR_RE = /^<br\s*\/?>$/i
 
+// `&nbsp;` is the portable source spelling for a leading ASCII space that
+// CommonMark would otherwise trim or reinterpret as an indented code block.
+// This is a comparison-only projection: committed source retains `&nbsp;`,
+// and an authored NBSP anywhere other than the first character remains data.
+const normalizePortableLeadingSpace = (value) => String(value || '').replace(/^\u00A0/, ' ')
+
 const stableStringify = (value) => {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
   if (value && typeof value === 'object') {
@@ -81,7 +87,7 @@ const normalizeNode = (node, definitions) => {
         child?.type === 'paragraph' &&
         (!child.children ||
           !child.children.some((inline) =>
-            inline?.type !== 'text' || String(inline.value || '').replace(/\u200B/g, '').trim()
+            inline?.type !== 'text' || String(inline.value || '').trim()
           ))
       ) {
         continue
@@ -95,12 +101,8 @@ const normalizeNode = (node, definitions) => {
           : { type: 'image', url: definition.url, title: definition.title, alt: resolved.alt ?? '' }
       }
       const normalized = normalizeNode(resolved, definitions)
-      // U+200B is the app's leading-space sentinel (lib/markdown-leading-space.js):
-      // authored source spells protected leading spaces as `U+200B + spaces`
-      // while the canonical spells the same text as `&#x20;`. The sentinel is
-      // never content, so it does not participate in equivalence.
       if (normalized.type === 'text' && normalized.value) {
-        normalized.value = normalized.value.replace(/\u200B/g, '')
+        normalized.value = normalizePortableLeadingSpace(normalized.value)
       }
       if (normalized.type === 'text' && !normalized.value) continue
       const last = children[children.length - 1]

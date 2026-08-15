@@ -1,18 +1,7 @@
-// Regression: typing a space at the END of a block could not be saved at all.
-//
-// Milkdown overrides remark's `text` handler and returns a value ending in
-// whitespace VERBATIM, bypassing `state.safe()` — the step that writes a
-// trailing space as `&#x20;`. Mid-paragraph that is correct: the space is
-// followed by more inline content and survives a re-parse untouched. As the
-// LAST inline of a block it is not: a literal trailing space is dropped by the
-// parser (and two of them are a hard break), so the bytes stopped describing
-// the document, every candidate was refused, and the user was pushed to the
-// recovery-copy dialog for one keystroke.
-//
-// `&#x20;` is a numeric character reference for U+0020: CommonMark decodes it
-// to a space while parsing, and HTML collapses trailing whitespace anyway, so
-// the rendered result is identical everywhere. It is the only spelling that
-// round-trips.
+// Regression: saving a space typed at the END of a block must preserve the
+// literal source spelling. `&#x20;` was introduced as an internal
+// round-trip workaround, but it changes the user's Markdown and is not a
+// representation other editors produce or need to understand specially.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -28,21 +17,21 @@ const CASES = [
   {
     name: 'paragraph',
     source: '# T\n\n段落甲\n\n段落乙\n',
-    expected: '# T\n\n段落甲&#x20;\n\n段落乙\n',
+    expected: '# T\n\n段落甲 \n\n段落乙\n',
     target: '段落甲',
     selector: 'p'
   },
   {
     name: 'quoted paragraph',
     source: '# T\n\n> 引用甲\n>\n> 引用乙\n\n尾段\n',
-    expected: '# T\n\n> 引用甲&#x20;\n>\n> 引用乙\n\n尾段\n',
+    expected: '# T\n\n> 引用甲 \n>\n> 引用乙\n\n尾段\n',
     target: '引用甲',
     selector: 'blockquote > p'
   },
   {
     name: 'list item',
     source: '# T\n\n- 项一\n- 项二\n\n尾段\n',
-    expected: '# T\n\n- 项一&#x20;\n- 项二\n\n尾段\n',
+    expected: '# T\n\n- 项一 \n- 项二\n\n尾段\n',
     target: '项一',
     selector: 'li > p, li > div'
   }
@@ -93,7 +82,9 @@ async function runCase(testCase, port) {
       [],
       `one keystroke must not need a dialog: ${JSON.stringify(app.dialogs.map((d) => d.message))}`
     )
-    assert.equal(await readFile(file, 'utf8'), testCase.expected, `${testCase.name}: trailing space must round-trip`)
+    const saved = await readFile(file, 'utf8')
+    assert.equal(saved, testCase.expected, `${testCase.name}: trailing space must remain literal source`)
+    assert.ok(!saved.includes('&#x20;'), `${testCase.name}: source must not gain an HTML space entity`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
@@ -107,7 +98,7 @@ async function run() {
     await runCase(testCase, port)
     port += 1
   }
-  console.log('PASS trailing space: a space at the end of a paragraph, quote or list item saves and round-trips')
+  console.log('PASS trailing space: terminal spaces stay literal in paragraph, quote and list source')
 }
 
 run().catch((error) => {

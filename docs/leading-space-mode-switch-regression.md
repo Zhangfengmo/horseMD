@@ -1,4 +1,4 @@
-# 行首多空格导致源码乱码与模式切换失真（0.13.22）
+# 行首多空格导致源码乱码与模式切换失真（0.13.22；0.13.65 更新）
 
 ## 用户现象
 
@@ -55,16 +55,21 @@ CommonMark 会吞掉 1–3 个行首 ASCII 空格作为缩进，4 个以上则�
 所以 `&#x20;       abc` 直接改成八个普通空格，重新打开后会变成代码块，canonical/source
 再次分叉。0.13.21 只解决“实体可见”，没有守住 Markdown 重解析语义，因此不是完整根因修复。
 
-## Typora 对照
+## 0.13.65：标准可移植源码
 
-本机 Typora 使用同一真实 CGEvent 序列后，磁盘字节为：
+旧版曾仿照 Typora 写入不可见 `U+200B`，再由 HorseMD parser、visible map 和 caret map
+把它当作私有语法吞掉。该做法会让同一份 Markdown 在其他产品里出现不可见字符，违背源码
+优先原则。
 
-```text
-U+200B + 8 个 ASCII 空格 + abc
+现在磁盘与源码模式统一写作：
+
+```md
+&nbsp;       abc
 ```
 
-即先写一个不可见零宽空格哨兵，再保留作者输入的全部普通空格。源码界面不会显示 HTML
-实体，而 Markdown parser 也不会把后续空格当成代码缩进。HorseMD 0.13.22 采用相同语义。
+即 `&nbsp;` 表示第一个必须保留的空格，余下 7 个仍是 ASCII 空格。`&nbsp;` 是标准
+Markdown/HTML 实体，其他编辑器直接解析，不需要 HorseMD 特殊规则；新写入路径不再产生
+`U+200B` 或 `&#x20;`。
 
 ## 工程修复
 
@@ -79,21 +84,20 @@ U+200B + 8 个 ASCII 空格 + abc
 `canonicalTextToSource()` 只在 `&#x20;` 位于该块首个可见字符时写入：
 
 ```text
-U+200B + 普通空格
+&nbsp;
 ```
 
 行中、行尾的 `&#x20;` 仍恢复为普通空格，避免给既有分歧删除等路径增加哨兵。
 
-### 3. 哨兵是源码语法，不是正文
+### 3. 没有 HorseMD 私有源码语法
 
-- `remarkStripLeadingSpaceSentinel()` 在 Markdown 进入 ProseMirror 前剥离哨兵；
-- `sourceVisibleIndex()` 和 snippet mapper 忽略哨兵；
-- canonical 再次出现行首实体时，源码保真层恢复哨兵；
-- 因此富文本内容、源码显示、保存字节和模式切换光标保持一致。
+- `&nbsp;` 交给所有标准 Markdown/HTML parser 正常解析；
+- visible/caret map 正常解码实体，不再跳过零宽字符；
+- canonical 再次出现 `&#x20;` 时，源码保真层统一写成 `&nbsp;`；
+- 因此富文本内容、源码显示、保存字节和模式切换光标保持一致，也可被其他产品直接打开。
 
 实现集中在：
 
-- `lib/markdown-leading-space.js`；
 - `lib/markdown-preservation/core.js`；
 - `lib/markdown-preservation/paragraphs.js`；
 - `mode-visible-map.js`；
@@ -119,5 +123,5 @@ macOS CGEvent 再验：第一次与第二次源码快照、光标 offset、磁�
 1. 不得把 serializer entity 当成单纯字符串美化问题；先验证重新解析语义。
 2. 不得让 whitespace-only rich paragraph 进入 generic structural mapper。
 3. 测试必须强制产生多个 `markdownUpdated`，不能只测被 debounce 合并后的最终状态。
-4. 新增源码语法哨兵时，解析、序列化、visible map、caret map、保存重开必须一起验证。
+4. 新增源码拼写时，解析、序列化、visible map、caret map、保存重开必须一起验证；不得新增应用私有哨兵。
 5. 自动化通过后仍需用 `docs/macos-real-input-testing.md` 的 CGEvent 路径复核真实键盘时序。

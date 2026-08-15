@@ -188,6 +188,48 @@ const cases = []
 }
 
 {
+  // `&nbsp;` is one visible rich-text space but six source characters. The
+  // source map must retain that raw width so source/rich switching restores a
+  // caret after text typed following the held leading spaces.
+  const markdown = '&nbsp;       abc\n'
+  const pmDoc = doc(paragraph('        abc'))
+  const rawEnd = markdown.indexOf('abc') + 'abc'.length
+  const pmEnd = nthTextblockPos(pmDoc, '        abc') + '        abc'.length
+  assert.equal(markdownOffsetToPmPos(markdown, rawEnd, pmDoc, remark)?.pos, pmEnd)
+  assert.equal(pmPosToMarkdownOffset(markdown, pmEnd, pmDoc, remark), rawEnd)
+  assertTextRoundTrip({
+    label: 'portable leading-space entity text offset',
+    markdown,
+    pmDoc,
+    token: 'abc',
+    local: 2,
+    pmText: '        abc'
+  })
+  cases.push('portable leading-space entity raw width')
+}
+
+{
+  // A literal Tab at a paragraph start would become an indented code block in
+  // raw Markdown. `&#x9;` is the portable source spelling and is one visible
+  // rich-text character despite its six-byte source width.
+  const markdown = '&#x9;abc\n'
+  const pmDoc = doc(paragraph('\tabc'))
+  const rawEnd = markdown.indexOf('abc') + 'abc'.length
+  const pmEnd = nthTextblockPos(pmDoc, '\tabc') + '\tabc'.length
+  assert.equal(markdownOffsetToPmPos(markdown, rawEnd, pmDoc, remark)?.pos, pmEnd)
+  assert.equal(pmPosToMarkdownOffset(markdown, pmEnd, pmDoc, remark), rawEnd)
+  assertTextRoundTrip({
+    label: 'portable leading-Tab entity text offset',
+    markdown,
+    pmDoc,
+    token: 'abc',
+    local: 2,
+    pmText: '\tabc'
+  })
+  cases.push('portable leading-Tab entity raw width')
+}
+
+{
   const markdown = [
     '| Item | Command | Note |',
     '| --- | --- | --- |',

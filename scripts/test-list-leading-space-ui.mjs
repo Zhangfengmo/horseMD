@@ -1,7 +1,7 @@
 // Regression: multiple leading spaces typed inside an ordered/bullet list
 // item must never leak the serializer's `&#x20;` entity into authored source
-// (RS-14 family, list-item variant). The paragraph-level U+200B sentinel
-// contract must also apply inside list items.
+// (RS-14 family, list-item variant). The standard `&nbsp;` source spelling
+// must also apply inside list items, without private bytes.
 import assert from 'node:assert/strict'
 import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -121,6 +121,7 @@ async function main() {
       !source.includes('&#x20;'),
       `list-item leading spaces leaked the &#x20; entity: ${JSON.stringify(source)}`
     )
+    assert.ok(!source.includes('\u200B'), 'list-item source must not write a private zero-width sentinel')
     if (process.env.FILE) {
       assert.ok(
         source.includes('分叉空格'),
@@ -136,7 +137,7 @@ async function main() {
         `list item lost the typed content: ${JSON.stringify(itemLine)}`
       )
     }
-    console.log('PASS list leading space: no &#x20; entity, content survived, item line:', JSON.stringify(itemLine))
+    console.log('PASS list leading space: no &#x20; or private sentinel, content survived, item line:', JSON.stringify(itemLine))
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

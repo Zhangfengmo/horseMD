@@ -25,4 +25,4 @@ Convert this paragraph to a task list.
 Leading-space list stays authored:
 
 - Leading root
-- ​     Leading spaced item
+- &nbsp;    Leading spaced item

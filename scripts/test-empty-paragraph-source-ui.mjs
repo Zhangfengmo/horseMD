@@ -249,7 +249,427 @@ async function main() {
     )
     assert.ok(sourceValueD.includes('正文乙'), 'the unrelated paragraph must survive the heading empty-line dance')
 
-    console.log('PASS empty-paragraph source fidelity: emptied paragraphs never leak <br />, save/reopen stays clean')
+    // Scenario E: a writer presses Enter at the end of a paragraph while a
+    // later paragraph already exists. The resulting empty rich block must
+    // become physical Markdown blank lines, survive save, and remain visible
+    // in source mode after a cold reopen.
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(file, '# 空行\n\n段落甲\n\n段落乙\n')
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-e'),
+      port: port + 2,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    send = app.send
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('段落乙')`),
+      'middle-empty fixture did not reload'
+    )
+    await clickRichBlock(evaluate, send, 'p')
+    await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('p')].find((node) => node.textContent === '段落甲')
+      const text = paragraph?.firstChild
+      if (!text) return false
+      const range = document.createRange()
+      range.setStart(text, text.nodeValue.length)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 60 })
+    await sleepMs(700)
+    await toggleSource(evaluate)
+    const expectedMiddleBlankLines = '# 空行\n\n段落甲\n\n\n\n段落乙\n'
+    assert.equal(
+      await waitFor(() => visibleSource(evaluate), 'middle-empty source did not open'),
+      expectedMiddleBlankLines,
+      'a newly created middle empty paragraph must save as physical blank lines'
+    )
+    await toggleSource(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'middle-empty save button did not appear')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'middle-empty save did not finish')
+    assert.equal(await readFile(file, 'utf8'), expectedMiddleBlankLines,
+      'middle empty paragraph was not written as portable Markdown blank lines')
+
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-e-reopen'),
+      port: port + 3,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`),
+      'middle-empty document did not cold reopen'
+    )
+    await toggleSource(evaluate)
+    assert.equal(
+      await waitFor(() => visibleSource(evaluate), 'middle-empty source did not open after cold reopen'),
+      expectedMiddleBlankLines,
+      'cold reopen rewrote the physical blank-line source'
+    )
+
+    // Scenario F: Enter on a middle empty ordered-list item exits into an
+    // empty paragraph and splits the rich list. A second Enter used to leave
+    // that transient split in the document; the empty-item source mapper then
+    // dropped every later list row and the durable gate made source/save fail.
+    // Source-first behavior must collapse only this newly split `.` list back
+    // into a portable ordered list before the mapper publishes it.
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(file, '1. 第一项\n\n2. \n\n3. 第三项\n\n4. 第四项\n\n# 后续\n')
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-f'),
+      port: port + 4,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    send = app.send
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('第四项')`),
+      'middle-list-exit fixture did not reload'
+    )
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('li p')].find((node) => !node.textContent.trim())
+      if (!paragraph) return false
+      const range = document.createRange()
+      range.setStart(paragraph, 0)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not place the caret in the middle empty list item')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 70 })
+    await sleepMs(500)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 70 })
+    await sleepMs(700)
+    assert.equal(await toggleSource(evaluate), true, 'list-exit source toggle did not run')
+    const listExitSource = await waitFor(
+      () => visibleSource(evaluate),
+      'list-exit source was rejected by the durable gate'
+    )
+    assert.ok(!/<br\s*\/?>/.test(listExitSource), 'list exit leaked an internal <br /> into source')
+    assert.ok(!/^\s*\d+\)/m.test(listExitSource), 'list exit used a synthetic 1) delimiter')
+    assert.ok(listExitSource.includes('第一项'), 'list exit lost the first list item')
+    assert.ok(listExitSource.includes('第三项'), 'list exit lost the following list item')
+    assert.ok(listExitSource.includes('第四项'), 'list exit lost the final list item')
+    assert.ok(listExitSource.includes('# 后续'), 'list exit lost the following heading')
+    await toggleSource(evaluate)
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const heading = editor?.querySelector('h1')
+      const text = heading?.firstChild
+      if (!text) return false
+      const range = document.createRange()
+      range.setStart(text, text.nodeValue.length)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not edit the heading after the list exit')
+    await rawKey(send, 'X', 'KeyX', 88)
+    await sleepMs(500)
+    assert.equal(await toggleSource(evaluate), true, 'list-exit source did not reopen after a later edit')
+    const savedListExitSource = await waitFor(
+      () => visibleSource(evaluate),
+      'list-exit source was rejected after a later edit'
+    )
+    assert.ok(savedListExitSource.includes('# 后续X'), 'later heading edit did not reach source')
+    assert.ok(savedListExitSource.includes('第三项'), 'later source flush lost the following list item')
+    assert.ok(!/<br\s*\/?>/.test(savedListExitSource), 'later source flush leaked an internal <br />')
+    await toggleSource(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'list-exit save button did not appear')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'list-exit save did not finish')
+    assert.equal(await readFile(file, 'utf8'), savedListExitSource,
+      'list-exit source did not save byte-for-byte')
+
+    // Scenario G: the same exit can start inside a nested ordered list. It
+    // must either remain nested or lift through standard list semantics, but
+    // it may never leave a source-only `<br />` placeholder or lock source
+    // mode just because a rich list subtree changed shape.
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(file, '- 外层\n  1. 嵌套一\n  2. \n  3. 嵌套三\n- 尾项\n\n# 后续\n')
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-g'),
+      port: port + 5,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    send = app.send
+    await evaluate(`(() => {
+      window.__hmGateLog = []
+      window.__hmPreserveLog = []
+    })()`)
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('嵌套三')`),
+      'nested-list-exit fixture did not reload'
+    )
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('li p')].find((node) => !node.textContent.trim())
+      if (!paragraph) return false
+      const range = document.createRange()
+      range.setStart(paragraph, 0)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not place the caret in the nested empty list item')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 70 })
+    await sleepMs(500)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 70 })
+    await sleepMs(700)
+    assert.equal(await toggleSource(evaluate), true, 'nested-list-exit source toggle did not run')
+    let nestedListExitSource = null
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      nestedListExitSource = await visibleSource(evaluate)
+      if (nestedListExitSource != null || app.dialogs.length) break
+      await sleepMs(100)
+    }
+    const nestedExitDiagnostics = await evaluate(`(() => ({
+      gate: window.__hmGateLog || [],
+      preserve: window.__hmPreserveLog || []
+    }))()`)
+    assert.equal(
+      typeof nestedListExitSource,
+      'string',
+      `nested-list-exit source was rejected: ${JSON.stringify({ dialogs: app.dialogs, ...nestedExitDiagnostics })}`
+    )
+    assert.ok(!/<br\s*\/?>/.test(nestedListExitSource), 'nested list exit leaked an internal <br />')
+    assert.ok(nestedListExitSource.includes('嵌套一'), 'nested list exit lost the first nested item')
+    assert.ok(nestedListExitSource.includes('嵌套三'), 'nested list exit lost the following nested item')
+    assert.ok(nestedListExitSource.includes('尾项'), 'nested list exit lost the outer sibling')
+    assert.ok(nestedListExitSource.includes('# 后续'), 'nested list exit lost the following heading')
+
+    // Scenario H: deleting the text from the item immediately before an
+    // already-empty parent list item creates two consecutive empty list
+    // parents. The second parent owns nested ordered children, just as in the
+    // reported document. Source mode, save and cold reopen must retain every
+    // sibling and child rather than rejecting the rich document as unowned.
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(file, [
+      '1. 21313',
+      '2. 测试',
+      '3. 1312312',
+      '   23123',
+      '4. 牛逼',
+      '5. ',
+      '6. 213123',
+      '7. 临时',
+      '8. ',
+      '   1. 测试',
+      '   2. 啊但是大大',
+      '',
+      '2313122312',
+      '',
+      '我觉得还可以',
+      ''
+    ].join('\n'))
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-h'),
+      port: port + 6,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    send = app.send
+    await evaluate(`(() => {
+      window.__hmGateLog = []
+      window.__hmPreserveLog = []
+    })()`)
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('啊但是大大')`),
+      'consecutive-empty-list fixture did not reload'
+    )
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('li p')].find((node) => node.textContent === '临时')
+      const text = paragraph?.firstChild
+      if (!text) return false
+      const range = document.createRange()
+      range.setStart(text, text.nodeValue.length)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not place the caret in the item before consecutive empty list parents')
+    for (const _ of '临时') {
+      await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: 70 })
+    }
+    await sleepMs(800)
+    assert.equal(await toggleSource(evaluate), true, 'consecutive-empty-list source toggle did not run')
+    let consecutiveEmptySource = null
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      consecutiveEmptySource = await visibleSource(evaluate)
+      if (consecutiveEmptySource != null || app.dialogs.length) break
+      await sleepMs(100)
+    }
+    const consecutiveEmptyDiagnostics = await evaluate(`(() => ({
+      gate: window.__hmGateLog || [],
+      preserve: window.__hmPreserveLog || []
+    }))()`)
+    assert.equal(
+      typeof consecutiveEmptySource,
+      'string',
+      `consecutive empty list parents rejected source: ${JSON.stringify({ dialogs: app.dialogs, ...consecutiveEmptyDiagnostics })}`
+    )
+    assert.ok(!/<br\s*\/?>/.test(consecutiveEmptySource), 'consecutive empty list parents leaked an internal <br />')
+    assert.ok(!consecutiveEmptySource.includes('临时'), 'clearing the list item did not reach source')
+    assert.ok(consecutiveEmptySource.includes('213123'), 'consecutive empty list parents lost the preceding sibling')
+    assert.ok(consecutiveEmptySource.includes('啊但是大大'), 'consecutive empty list parents lost the nested child')
+    assert.ok(consecutiveEmptySource.includes('2313122312'), 'consecutive empty list parents lost following prose')
+    await toggleSource(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'consecutive-empty-list save button did not appear')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'consecutive-empty-list save did not finish')
+    assert.equal(await readFile(file, 'utf8'), consecutiveEmptySource,
+      'consecutive empty list parents did not save byte-for-byte')
+
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-h-reopen'),
+      port: port + 7,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('啊但是大大')`),
+      'consecutive empty list parents did not cold reopen'
+    )
+    assert.equal(await toggleSource(evaluate), true, 'consecutive-empty-list source did not open after cold reopen')
+    assert.equal(
+      await waitFor(() => visibleSource(evaluate), 'consecutive-empty-list source did not appear after cold reopen'),
+      consecutiveEmptySource,
+      'cold reopen rewrote the consecutive empty list parent source'
+    )
+
+    // Scenario I: create the first empty parent through Enter immediately
+    // before a parent that already has nested children, then clear that
+    // parent's text. This preserves the transaction history from the report:
+    // a fresh empty item and an emptied parent-with-children become adjacent.
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(file, [
+      '1. 21313',
+      '2. 测试',
+      '3. 1312312',
+      '   23123',
+      '4. 牛逼',
+      '5. ',
+      '6. 213123',
+      '7. 临时',
+      '   1. 测试',
+      '   2. 啊但是大大',
+      '',
+      '2313122312',
+      '',
+      '我觉得还可以',
+      ''
+    ].join('\n'))
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-i'),
+      port: port + 8,
+      appArgs: [file]
+    })
+    evaluate = app.evaluate
+    send = app.send
+    await evaluate(`(() => {
+      window.__hmGateLog = []
+      window.__hmPreserveLog = []
+    })()`)
+    await waitFor(
+      () => evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('啊但是大大')`),
+      'consecutive-empty-history fixture did not reload'
+    )
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('li p')].find((node) => node.textContent === '213123')
+      const text = paragraph?.firstChild
+      if (!text) return false
+      const range = document.createRange()
+      range.setStart(text, text.nodeValue.length)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not place the caret before the first consecutive empty parent')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: 70 })
+    await sleepMs(500)
+    assert.equal(await evaluate(`(() => {
+      const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+      const paragraph = [...editor.querySelectorAll('li p')].find((node) => node.textContent === '临时')
+      const text = paragraph?.firstChild
+      if (!text) return false
+      const range = document.createRange()
+      range.setStart(text, text.nodeValue.length)
+      range.collapse(true)
+      const selection = getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      editor.focus()
+      document.dispatchEvent(new Event('selectionchange'))
+      return true
+    })()`), true, 'could not place the caret in the parent with nested children')
+    for (const _ of '临时') {
+      await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: 70 })
+    }
+    await sleepMs(800)
+    assert.equal(await toggleSource(evaluate), true, 'consecutive-empty-history source toggle did not run')
+    let consecutiveHistorySource = null
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      consecutiveHistorySource = await visibleSource(evaluate)
+      if (consecutiveHistorySource != null || app.dialogs.length) break
+      await sleepMs(100)
+    }
+    const consecutiveHistoryDiagnostics = await evaluate(`(() => ({
+      gate: window.__hmGateLog || [],
+      preserve: window.__hmPreserveLog || []
+    }))()`)
+    assert.equal(
+      typeof consecutiveHistorySource,
+      'string',
+      `consecutive empty list history rejected source: ${JSON.stringify({ dialogs: app.dialogs, ...consecutiveHistoryDiagnostics })}`
+    )
+    assert.ok(!/<br\s*\/?>/.test(consecutiveHistorySource), 'consecutive empty list history leaked an internal <br />')
+    assert.ok(!consecutiveHistorySource.includes('临时'), 'clearing the nested parent did not reach source')
+    assert.ok(consecutiveHistorySource.includes('213123'), 'consecutive empty list history lost the preceding sibling')
+    assert.ok(consecutiveHistorySource.includes('啊但是大大'), 'consecutive empty list history lost the nested child')
+    assert.ok(consecutiveHistorySource.includes('2313122312'), 'consecutive empty list history lost following prose')
+    await toggleSource(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'consecutive-empty-history save button did not appear')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'consecutive-empty-history save did not finish')
+    assert.equal(await readFile(file, 'utf8'), consecutiveHistorySource,
+      'consecutive empty list history did not save byte-for-byte')
+
+    console.log('PASS empty-paragraph source fidelity: placeholders never leak, created middle blanks save as source lines, and nested or top-level list exits stay portable')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

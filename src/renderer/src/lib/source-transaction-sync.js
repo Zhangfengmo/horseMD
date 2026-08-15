@@ -18,7 +18,6 @@ export {
 
 const unsafeInlineSyntax = /[`*_{}\[\]<>#|\\]/
 const unsafeAtBlockStart = /^(?:[-+>]|\d+[.)])/u
-const leadingSpaceSentinel = '\u200B'
 
 const plainSliceText = (slice) => {
   if (!slice || slice.size === 0 || slice.content?.size === 0) return ''
@@ -341,18 +340,18 @@ export function mapPlainTextTransactionsToSource({
       const nextBlockText = nextTextblock?.isTextblock
         ? nextTextblock.textBetween(0, nextTextblock.content.size, '', '\uFFFC')
         : null
-      const hasLeadingSpaceSentinel = markdown.charAt(rawBlockStart - 1) === leadingSpaceSentinel
-      const needsLeadingSpaceSentinel = typeof nextBlockText === 'string' && /^\s/u.test(nextBlockText)
+      // This direct byte mapper intentionally owns only byte-identical plain
+      // text. A block that now begins with whitespace needs the portable
+      // `&nbsp;` source spelling, whose entity length is not a raw PM offset.
+      // Leave it to the canonical source-first path instead of reintroducing a
+      // private zero-width byte or guessing a coordinate adjustment here.
+      if (typeof nextBlockText === 'string' && /^[ \t]/u.test(nextBlockText)) {
+        return fail('leading-whitespace-requires-canonical-source')
+      }
       let patchFrom = rawFrom
       let patchTo = rawTo
       let replacement = inserted
       let currentHintRawStart = blockHint?.rawStart ?? null
-      if (hasLeadingSpaceSentinel || needsLeadingSpaceSentinel) {
-        patchFrom = rawBlockStart - (hasLeadingSpaceSentinel ? 1 : 0)
-        patchTo = rawBlockEnd
-        replacement = `${needsLeadingSpaceSentinel ? leadingSpaceSentinel : ''}${nextBlockText || ''}`
-        currentHintRawStart = view.toRaw[patchFrom] + (needsLeadingSpaceSentinel ? leadingSpaceSentinel.length : 0)
-      }
       const edited = applyViewEdit(view, patchFrom, patchTo, replacement, null)
       if (!edited.ok) return fail('view-edit-failed')
       markdown = view.text

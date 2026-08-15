@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
+import { typeTextLikeUser } from './lib/human-input.mjs'
 
 const dir = join(tmpdir(), 'horsemd-issues-70-72')
 const visiblePm = `[...document.querySelectorAll('.ProseMirror')].find((pm) => pm.offsetParent !== null)`
@@ -20,6 +21,18 @@ async function activateTab(evaluate, name) {
   await evaluate(`([...document.querySelectorAll('.tab')].find((tab) => tab.textContent.includes(${JSON.stringify(name)}))?.click(), true)`)
   await sleep(300)
 }
+
+const visibleSource = (app) => app.evaluate(`(
+  [...document.querySelectorAll('textarea.source-editor')]
+    .find((node) => node.offsetParent)?.value ?? null
+)`)
+
+const toggleSourceMode = (app) => app.evaluate(`(() => {
+  const button = [...document.querySelectorAll('.status-btn')]
+    .find((node) => node.offsetParent && /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
+  button?.click()
+  return !!button
+})()`)
 
 async function testOutlineFoldState() {
   await mkdir(dir, { recursive: true })
@@ -126,44 +139,34 @@ async function testTaskListInput() {
       selection.addRange(range)
       return true
     })()`)
-    await app.send('Input.insertText', { text: '- [ ] ' })
+    // Task-list input rules are triggered while the user types: do not model
+    // this as one paste transaction, or a regression in the intermediate
+    // ordinary-list state stays invisible.
+    await typeTextLikeUser(app.send, '* [ ] ')
+    await typeTextLikeUser(app.send, '牛逼')
     await sleep(600)
 
     const snapshot = JSON.parse(await app.evaluate(`(() => {
       const pm = ${visiblePm}
       return JSON.stringify({
         taskControls: pm.querySelectorAll('.milkdown-list-item-block .label.unchecked, .milkdown-list-item-block .label.checked, .task-list-item, li[data-item-type="task"], input[type="checkbox"]').length,
+        taskText: [...pm.querySelectorAll('.milkdown-list-item-block .children')]
+          .map((node) => node.textContent || '').join(' | '),
         html: pm.innerHTML.slice(0, 500)
       })
     })()`))
     if (snapshot.taskControls < 1) throw new Error(`Issue #72 still reproduces: ${JSON.stringify(snapshot)}`)
+    if (!snapshot.taskText.includes('牛逼')) throw new Error(`Issue #72 lost text typed after the task marker: ${JSON.stringify(snapshot)}`)
 
-    await app.evaluate(`(() => {
-      const pm = ${visiblePm}
-      pm.focus()
-      const range = document.createRange()
-      range.selectNodeContents(pm)
-      range.collapse(false)
-      const selection = getSelection()
-      selection.removeAllRanges()
-      selection.addRange(range)
-      return true
-    })()`)
-    await app.send('Input.insertText', { text: '- [x] ' })
-    await sleep(600)
-
-    const checkedSnapshot = JSON.parse(await app.evaluate(`(() => {
-      const pm = ${visiblePm}
-      return JSON.stringify({
-        checkedControls: pm.querySelectorAll('.milkdown-list-item-block .label.checked, input[type="checkbox"]:checked, li[data-checked="true"]').length,
-        taskControls: pm.querySelectorAll('.milkdown-list-item-block .label.unchecked, .milkdown-list-item-block .label.checked, .task-list-item, li[data-item-type="task"], input[type="checkbox"]').length,
-        html: pm.innerHTML.slice(0, 800)
-      })
-    })()`))
-    if (checkedSnapshot.taskControls < 2 || checkedSnapshot.checkedControls < 1) {
-      throw new Error(`Issue #72 checked task conversion failed: ${JSON.stringify(checkedSnapshot)}`)
+    if (!await toggleSourceMode(app)) throw new Error('Could not open source mode after task-list input')
+    await waitFor(() => visibleSource(app), 'task-list source mode')
+    const source = await visibleSource(app)
+    if (!/^\* \[ \][ \t]+牛逼$/m.test(source) || source.includes('\\[ ]')) {
+      throw new Error(`Issue #72 task source was not preserved as task syntax: ${JSON.stringify(source)}`)
     }
-    return checkedSnapshot.taskControls
+    if (!await toggleSourceMode(app)) throw new Error('Could not return to rich mode after task-list input')
+
+    return snapshot.taskControls
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

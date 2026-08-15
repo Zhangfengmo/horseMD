@@ -34,14 +34,10 @@ const expected = [
   ...(appendBulletAfterNestedList && !deleteAndRecreateList
     ? [`- ${asciiBulletText}${editFirstBullet ? 'X' : ''}`, ...(continueBulletList ? ['- bullet-continued'] : [])]
     : []),
-  // `1)`, not the typed `1.`: this is a SECOND ordered list directly after the
-  // first one's nested child. CommonMark has no way to keep two adjacent
-  // ordered lists apart when they share a delimiter — `1.` here would continue
-  // the outer list as its third item (verified: remark parses that spelling as
-  // ONE 3-item list). Switching the delimiter is the only faithful spelling of
-  // the document the writer built, the same reason bullet lists alternate
-  // `-`/`*`. The typed marker is honoured wherever the format can express it.
-  ...(deleteAndRecreateList ? ['1) 重新有序项', '   1. 继续嵌套项'] : []),
+  // Source is the durable cross-editor authority. Markdown cannot spell two
+  // directly adjacent `1.` list trees, so rich mode must merge them before
+  // source publication instead of inventing a `1)` delimiter.
+  ...(deleteAndRecreateList ? ['3. 重新有序项', '   1. 继续嵌套项'] : []),
   ''
 ].join('\n')
 
@@ -217,6 +213,13 @@ async function main() {
         : ['第一项', '第二项', '嵌套项'],
       'rich ordered-list hierarchy was not created'
     )
+    if (deleteAndRecreateList) {
+      const topLevelOrderedListCount = await evaluate(`(() => {
+        const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+        return [...(editor?.children || [])].filter((node) => node.tagName === 'OL').length
+      })()`)
+      assert.equal(topLevelOrderedListCount, 1, 'source-first ordered lists must merge before save')
+    }
     if (appendBulletAfterNestedList) {
       const bulletShape = await evaluate(`(() => {
         const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)

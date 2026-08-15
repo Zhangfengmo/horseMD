@@ -1,6 +1,5 @@
 import { bulletListSchema, orderedListSchema } from '@milkdown/kit/preset/commonmark'
 import { defaultHandlers } from 'mdast-util-to-markdown'
-import { LEADING_SPACE_SENTINEL } from '../lib/markdown-leading-space.js'
 
 // The author's list marker is a per-LIST decision, but remark-stringify's
 // `bullet` / `bulletOrdered` are single global options: one document cannot say
@@ -126,24 +125,23 @@ export const listStyleStringifyHandler = (node, parent, state, info) => {
   }
 }
 
-// Milkdown returns a text node whose value ENDS in whitespace verbatim,
-// bypassing `state.safe()` — the step that writes a trailing space as
-// `&#x20;`. Mid-paragraph that is right: the space is followed by more inline
-// content and survives a re-parse untouched. As the LAST inline of a block it
-// is not: a literal trailing space is dropped by the parser (and two of them
-// become a hard break), so the bytes stop describing the document, every
-// candidate is refused, and typing a space at the end of a paragraph could not
-// be saved at all. Hand exactly that position back to `state.safe`.
-export const trailingSpaceTextHandler = (node, parent, state, info) => {
+// Milkdown's text handler intentionally returns a value ending in whitespace
+// verbatim. That keeps ordinary terminal ASCII spaces source-first, but a
+// literal Tab at a block's end is not stable Markdown text: it is consumed as
+// formatting when reparsed, so the verified-save gate correctly rejects it.
+// Keep plain spaces literal while spelling only terminal Tabs with the standard
+// HTML numeric character reference. This is portable Markdown/HTML source, not
+// a HorseMD sentinel, and applies equally to paragraphs, headings and lists.
+const milkdownText = (value, state, info) => /^[^*_\\]*\s+$/.test(value)
+  ? value
+  : state.safe(value, { ...info, encode: [] })
+
+export const terminalTabTextHandler = (node, parent, state, info) => {
   const value = String(node.value ?? '')
-  if (!/^[^*_\\]*\s+$/.test(value)) return state.safe(value, { ...info, encode: [] })
-  // A text node that is ONLY whitespace is a held LEADING space, which has its
-  // own representation (the U+200B sentinel, itself not matched by `\s`) and
-  // its own tests. Routing it through `state.safe` rewrites those spaces as
-  // entities and the sentinel machinery stops recognising its own bytes.
-  if (!value.replace(new RegExp(`[\\s${LEADING_SPACE_SENTINEL}]`, 'g'), '')) return value
-  // Mid-paragraph the trailing space is followed by more inline content and
-  // survives a re-parse untouched, so Milkdown's verbatim shortcut is right.
+  const terminalWhitespace = value.match(/[ \t]+$/)?.[0] || ''
   const lastInline = !parent?.children?.length || parent.children[parent.children.length - 1] === node
-  return lastInline ? state.safe(value, { ...info, encode: [] }) : value
+  const rendered = milkdownText(value, state, info)
+  return lastInline && terminalWhitespace.includes('\t')
+    ? rendered.replace(/\t/g, '&#x9;')
+    : rendered
 }

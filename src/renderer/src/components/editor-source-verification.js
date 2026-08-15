@@ -16,7 +16,13 @@ const startsWithEmptyHeadingScaffold = (markdown) =>
 
 export const scratchCandidateContext = (markdown, tableContext = null) => ({
   ...(tableContext || {}),
-  generatedScratchEmptyHeading: !startsWithEmptyHeadingScaffold(markdown)
+  generatedScratchEmptyHeading: !startsWithEmptyHeadingScaffold(markdown),
+  // Scratch bytes are generated from the current rich document, so a leading
+  // `&nbsp;` is HorseMD's standard leading-space spelling rather than an
+  // opaque author-owned NBSP from an existing source file. Empty task items
+  // are now demoted to ordinary `[ ]` / `[x]` text before this boundary, so
+  // they do not receive any entity-backed exception here.
+  ...(String(markdown ?? '').includes('&nbsp;') ? { portableLeadingSpace: true } : {})
 })
 
 // A recovery copy is deliberately not a source commit. It is written only to

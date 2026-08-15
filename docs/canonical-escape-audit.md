@@ -18,7 +18,7 @@ round-trip 语义不变，会对部分字符做转义。**canonical 是序列化
 
 | 形态 | 触发条件 | visible-map 处理 | 主路径(visible 一致) | 分歧回退 | scratch/new-doc | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `&#x20;` | 行首或需保语义的空格 | 解码为 1 可见字符 → **走主路径** | 行首用 `U+200B + space`，行中/行尾用 space | 同左 | 同左 | ✅ 0.13.22（Typora 语义） |
+| `&#x20;` | 行首或需保语义的空格 | 解码为 1 可见字符 → **走主路径** | 行首用标准 `&nbsp;`，行中/行尾用 space | 同左 | 同左 | ✅ 0.13.65（可移植源码） |
 | `\~` | 波浪线（防 GFM 删除线 `~~`） | 按 2 字符 → **走分歧路径** | 不出现（分歧） | 已反转义 | 曾泄漏 → 已反转义 | ✅ 0.13.15 |
 | `\*`、`\_`、`` \` ``、`\[`、`\]`、`\(`、`\)`、`\!`、`\+`、`\-`、`\#`、`\.`、`\>`、`\|`、`\{`、`\}` | 强调/代码/链接/列表边界字面量 | 按 2 字符 → 走分歧路径 | fresh replacement 还原；旧作者区域保持 | `unescapeCanonicalBlock` 已反转义 | 输入规则恢复作者 marker；稳定列表正文用语义视图 + raw 边界表；generated scratch / empty-file 首次编辑走 fresh 翻译；代码/HTML literal 不动 | ✅ 0.13.28，含三反引号 IME 保存重开 |
 | `\\` | 反斜杠本身 | 按 2 字符 → 走分歧路径 | 不出现 | 已反转义 | **泄漏**（`a\b` → `a\\b`） | ⚠️ 见下 |
@@ -31,7 +31,7 @@ round-trip 语义不变，会对部分字符做转义。**canonical 是序列化
 1. **上下文感知翻译函数** `canonicalTextToSource`（`lib/markdown-preservation/core.js`）：
    所有 canonical → 源码文本翻译的汇聚点（`adaptCanonicalRegionToSource` 内部、
    scratch/new-document、exact-canonical baseline、列表 direct-join）。只在 Markdown
-   文本上下文处理 `&#x20;`：首个可见字符使用 `U+200B + space`，行中/行尾使用普通
+   文本上下文处理 `&#x20;`：首个可见字符使用标准 `&nbsp;`，行中/行尾使用普通
    空格；`\~`→`~`；fenced/inline code、HTML comment、
    HTML raw block 保持字面值。行内 HTML 与 code span 按**实际 token 边界**扫描：HTML
    元素/属性和反引号跨度内部不改，同行标签外的 `0\~9` 仍恢复为 `0~9`；双反引号代码
@@ -40,9 +40,9 @@ round-trip 语义不变，会对部分字符做转义。**canonical 是序列化
    列表续行和嵌套块本身就带结构缩进，作者继续输入的真实空格会紧跟其后序列化成
    `&#x20;`。0.13.21 修复了这里曾存在的整行跳过逻辑；否则普通顶格测试通过，但嵌套/
    续行上下文仍会把实体写进源码。真实代码块由 serializer 输出为 fenced code，局部
-   作者 literal 则由源码区域上下文保护。0.13.22 进一步确认“全部改成普通空格”会让
-   四空格重新解析为代码块，因此采用本机 Typora 实测的零宽哨兵；解析插件和 visible map
-   都必须把该哨兵视为源码语法。详见 `leading-space-mode-switch-regression.md`。
+   作者 literal 则由源码区域上下文保护。0.13.65 确认“全部改成普通空格”会让四空格
+   重新解析为代码块，因此改用所有 Markdown/HTML 工具都能直接理解的 `&nbsp;`，不再
+   由 parser 或 visible map 隐藏任何 HorseMD 私有字节。详见 `leading-space-mode-switch-regression.md`。
 2. **分歧回退** `unescapeCanonicalBlock`（`lib/markdown-preservation/regions.js`）：
    可见流分歧时反转义 `\X`（escapePunctuation 全集）+ 全部 HTML 实体，定位作者块
    并拼写替换文本。仅单 canonical 块 + 源码唯一出现时启用，否则 fail-closed。

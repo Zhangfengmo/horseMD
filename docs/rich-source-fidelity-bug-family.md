@@ -77,7 +77,7 @@ HorseMD 同时维护两种表示：
 | RS-11 | 相邻列表被 canonical 合并 | 独立的 `-`、`+`、`*` 列表互相污染，空行被吞 | ProseMirror 可把相邻列表合并成一棵树；按作者文字围栏拆分回写，不让一个 canonical tree 扩散到相邻列表 | 已覆盖：`test:rich-source-chaos-ui`、`test:diverged-list-structure-ui` |
 | RS-12 | 删除→新增→回改的组合漂移 | 第一次操作正常，继续删除/新增列表后源码“一团糟” | 延迟回调、批量事务和错误基线推进叠加；每次成功映射后同步推进双快照，失败不得清 pending | 持续防回归：chaos、continuous、nested/list structure 测试 |
 | RS-13 | serializer 转义污染 | `0~9` 变 `0\~9`，空格变 `&#x20;`，字面符号被转义 | canonical 拼写不能直接当作者源码；只把语义 delta 映射到原文，必要时做受限反转义 | 已覆盖/有边界：`canonical-escape-audit.md`、纯函数矩阵 |
-| RS-14 | 多个前导空格乱码与切换卡住 | 按住空格再输入，源码出现 `&#x20;`；有时切源码显示旧快照 | whitespace-only 中间 canonical 曾被误判成结构变化并破坏分隔；把中间态视为空，首个可见字符后按 Typora 写成 `U+200B + 空格` | 已覆盖：`test:leading-space-entity-ui`、真实 CGEvent、保存重开 |
+| RS-14 | 多个前导空格乱码与切换卡住 | 按住空格再输入，源码出现 `&#x20;`；有时切源码显示旧快照 | whitespace-only 中间 canonical 曾被误判成结构变化并破坏分隔；把中间态视为空，首个可见字符后写成标准 `&nbsp;` 加余下字面空格 | 已覆盖：`test:leading-space-entity-ui`、真实 CGEvent、保存重开 |
 | RS-15 | 光标 raw offset 漂移 | 模式切换后上下差一行，或落到相同关键词的错误位置 | 可见字符索引不足以表达 Markdown 原始位置；使用 block-aware raw offset，snippet/context 只作 fallback，并等待编辑器 selection settle | 已覆盖：`test:mode-switch-raw-offset-ui`、`test:mode-switch-caret-settle-ui` |
 | RS-16 | 源码 textarea 换行格式漂移 | 改一个字符后整篇 CRLF 变 LF，BOM/混合换行丢失 | textarea 是 uncontrolled live source；提交时按原文行尾策略映射，不能用 React 受控值全量规范化 | 已覆盖：`test:source-text-fidelity` |
 | RS-17 | 新建文档骨架污染 | 新文件首行、列表或尾部出现虚假 H1、空行、`<br />` | scratch tab 有程序生成骨架，但它不是作者源码；区分 generated scratch 与用户真正编辑过的 source | 已覆盖：`test:new-document-list-source-ui`、`test:new-source-fidelity-ui` |
@@ -90,7 +90,7 @@ HorseMD 同时维护两种表示：
 | RS-24 | 跨块连续编辑后双快照分叉 | 富文本删除的旧内容仍在源码，新增内容缺失，立即切源码偶尔卡住 | Milkdown 延迟回调把多个不相邻块合成一个不可安全映射的 delta；跨顶层块输入前先提交上一块，并用稳定顶层起点避开 paragraph→list input-rule 中间态；分叉文档只允许唯一上下文局部回写 | 已覆盖：`test:mixed-rich-source-transaction-ui`、`test:rich-list-source-ui`、continuous/chaos/list 矩阵；详见 `mixed-rich-source-transaction-regression.md` |
 | RS-25 | 列表项正文字面标记被 serializer 转义 | 在有序/无序项正文输入 `1. 测试`、`1) 测试`、`- 测试`、`+ 测试` 或 `* 测试`，源码多出 `\`；还可能格式化后续未编辑列表 | remark 为防嵌套列表歧义输出 serializer escape；用去转义语义视图与 raw 边界表只映射本次行文字 delta，保留作者已有转义、marker 与间距 | 已覆盖：`test:list-item-literal-marker-source-ui`、纯函数/列表/chaos 矩阵；详见 `list-item-literal-marker-escape-regression.md` |
 | RS-26 | 反引号删除后保存暂停、源码切换锁死 | 逐字输入/删除一个或三个反引号后，保存提示无法安全映射，源码按钮无响应；后续文字可能留在富文本却无法写盘 | 部分删除被误判为整行删除，重复反引号行依赖全文唯一匹配，独立 `<br />` 空段落让零宽 offset 锚错，未变化列表还会抢先消费无关事务；按完整 next line、同行 ordinal、空段落邻接行和 live doc 修复，保留 fail-closed 数据保护 | 已覆盖：`test:code-fence-delete-source-ui`、`test:inline-code-ui`、`test:source-fidelity-ui`、纯函数/continuous/chaos 矩阵；详见 `backtick-source-sync-lock-regression.md` |
-| RS-27 | 前导空格列表无法转换类型 | 含 `U+200B + 多空格` 的无序列表转换为有序列表时提示“无法安全转换”，如 `11111.md` | 作者源码的 `U+200B + 5 spaces` 与 canonical 的 `&#x20; + 4 spaces` 是同一语义；只在列表正文比较视图执行 `canonicalTextToSource`，输出仍只替换目标 marker | 已覆盖：`test:markdown-preservation`、`test:list-conversion-ui`；原始空格字节和其他层级保持不动 |
+| RS-27 | 前导空格列表无法转换类型 | 含前导空格的无序列表转换为有序列表时提示“无法安全转换”，如 `11111.md` | 作者源码的 `&nbsp; + 4 spaces` 与 canonical 的 `&#x20; + 4 spaces` 是同一语义；只在列表正文比较视图执行 `canonicalTextToSource`，输出仍只替换目标 marker | 已覆盖：`test:markdown-preservation`、`test:list-conversion-ui`；原始空格字节和其他层级保持不动 |
 | RS-28 | 行内代码提前激活与代码块退出竞态 | 输入左反引号后第一个中文字符立即变 code，方向键难以退出；恢复闭合触发后，``` + Space→Backspace→快速正文可能与上一段合并 | 未闭合 delimiter 不应创建 mark；只在最后单反引号闭合时转换。空 fenced block 退出属于异步结构边界，下一任务必须立即从 live doc 对账，不能等 260ms 批处理 | 已覆盖：真实 IME `test:inline-code-ui`、`test:code-fence-delete-source-ui`、unit；详见 `backtick-source-sync-lock-regression.md` |
 | RS-29 | 新文档字面三反引号泄漏 canonical 转义 | 富文本逐键输入同一行 ```` ```你好``` ````，切源码变成 ```` \`\`\`你好\`\`\` ```` | generated scratch / empty-file 首次编辑全部来自本次富文本输入，没有既有作者转义需要保护；必须使用 `canonicalFreshTextToSource` 只还原 Markdown 文本中的 serializer punctuation，fenced code、inline code 与 HTML literal 保持字节不动 | 已覆盖：`test:literal-triple-backtick-source-ui` 逐键 delimiter + 真实中文 IME + 源码/保存/完整重开，另有纯函数和 `test:inline-code-ui`；详见 `backtick-source-sync-lock-regression.md` |
 | RS-30 | 复杂分叉文档的普通编辑被错误暂停保存 | 文档其他位置有嵌套列表、字面三反引号、空引用和重复“测试”时，只给独立正文追加文字也提示“保存已暂停” | 旧块级回退要求目标文字在全文只出现一次，把标题/列表/引用中的同名子串误当作当前块歧义；现在先按非空 Markdown 块和 source/canonical 等数量 ordinal 对齐，只替换当前块，候选数量不等仍 fail closed | 已覆盖：`test:diverged-ordinary-save-ui`、纯函数唯一块/重复块/数量不等三组合同，以及 diverged delete、mixed transaction、code fence、continuous 家族；详见 `diverged-ordinary-save-regression.md` |
@@ -104,6 +104,8 @@ HorseMD 同时维护两种表示：
 | RS-39 | 冷重开后在中间空段输入列表，富文本有内容但源码仍停在列表前 | 在正文与后续代码块之间的空段输入正文、有序列表两项、退出列表再输入正文；富文本完整，切源码缺列表和尾文，继续保存会形成双快照分叉 | 中间空段 mapper 一律拒绝 list syntax，而中间位置的 input intent 没有 raw tail slot，两个专用路径都不拥有该事务。现在仅在前后锚、空槽和语法边界全部证明时原子写回“列表 + 后续正文”，完成后消费 intent；CRLF 从 `\r` 前替换完整 EOL | 已覆盖：纯函数 LF/CRLF（含 lone-CR 禁止断言）；`test:family-multicycle-ui` 第四轮 + 第五次冷打开；默认/primary 与真实 `123321.md` 临时副本 |
 | RS-40 | `/code` 创建代码块后继续编辑，源码与富文本再次分叉 | 文档末尾输入 `/code` 选择代码块，立即编辑代码、代码块后正文和前文列表；首次切源码即锁定，或源码缺 fence/后续文字 | slash code 是“删除临时 `/code` + paragraph→code_block”两条命令。旧 mapper 把 `/code`→空 fence 误判为只删除尾行，源码没有代码块槽。现在命令前捕获精确 authored 行，命令后只序列化当前 code_block，并验证完整 fence 后原子替换；重复 query 无精确映射时拒绝，CRLF 原样保留 | 已覆盖：`test:tail-fence-ui` 的 40ms `/code`、代码/尾文/前文连续编辑、源码、保存和冷重开；纯函数 CRLF、重复 query、歧义拒绝；literal/input-rule fence 变体 |
 | RS-41 | 真实长会话在 RS-40 后仍再次分叉 | 0.13.47 安装包中，真实长文档末尾建立代码块并继续多轮编辑后，富文本有新增内容但源码缺失/结构不同；保存可能暂停，也可能成功但磁盘仍与富文本不一致 | 0.13.47 只拥有 `/code` 创建瞬间且没有统一 durability authority。0.13.50 已改为 live revision + 单一 verified commit、应用 parser 与 source ownership；不能再按最终症状补字符串 mapper | **历史 P0，当前发布门禁待验。** 0.13.50 自动化不能替代新安装包长会话；专项见 `rich-source-divergence-incident-0.13.47.md` |
+| RS-42 | 嵌套空有序项连续退出后源码锁定 | 在有后续嵌套项的空有序项中按 Enter 退出，再按 Enter；富文本显示完整列表，但源码切换/保存被耐久门拒绝 | Crepe 把提升和拆分时的空段写成缩进 `<br />`；旧空项填字处理器仅重建前半个嵌套列表，丢掉后续项。现在仅替换所属顶层列表，删内部占位并输出标准的空父项加缩进子列表；作者原有 `<br />` 不进入该路径 | 已覆盖：`test:empty-paragraph-source-ui` 的嵌套场景，源码切换、保存、冷重开与后续标题保留 |
+| RS-43 | 中间空段直接转列表留下额外空行 | 两段之间按 Enter 创建空段，直接输入列表 marker；富文本正确，但源码在列表前多出物理空白 | 空段 mapper 已把该 raw 槽替换为列表，延迟的列表 input intent 又按旧快照重建同一列表。现由空段 mapper 独占槽位，input intent 只恢复作者 marker 并立刻消费 | 已覆盖：`test:rich-list-source-ui` 的中间段场景，逐字输入、源码、保存与冷重开 |
 
 ## 5. 代码归属
 
@@ -118,7 +120,7 @@ HorseMD 同时维护两种表示：
 - `src/renderer/src/lib/source-transaction-sync.js`：方案一的原子 transaction→raw source 映射器；当前生产不默认接管。
 - `src/renderer/src/lib/markdown-preservation/tables.js`：表格局部编辑与 cell `<br>` 边界。
 - `src/renderer/src/lib/markdown-preservation/frontmatter.js`：YAML 文档头边界，避免正文 `---` / `Q3:` 误判。
-- `src/renderer/src/lib/markdown-leading-space.js`：新增前导空格 sentinel 的写法和 parse-side 清除。
+- `src/renderer/src/lib/markdown-preservation/core.js`：canonical `&#x20;` 写入标准 `&nbsp;` 前导空格语法；不再有 parse-side 私有哨兵。
 
 ### 5.2 编辑器生命周期与强制同步
 
@@ -229,7 +231,7 @@ npm run test:task-list-persistence-ui
 1. **双表示同步本身复杂**：ProseMirror 不保存全部 Markdown 拼写信息，HorseMD 只能用作者源码 + canonical delta 重建局部修改。
 2. **语法信息已经丢失时不能猜**：同一段文字重复出现、结构跨度不清或多种 raw 写法都可能匹配时，必须拒绝大范围覆盖并保留诊断证据。
 3. **反斜杠仍是高风险字符**：它可能是作者字面字符、Markdown hard break、LaTeX 或 serializer escape，不能全局反转义。
-4. **`U+200B` 只用于富文本中新写的前导空格**：它是为了让 CommonMark 往返保留可见空格；不得扫描并修改既有文件。
+4. **前导空格只用标准 `&nbsp;`**：它让 CommonMark 往返保留可见空格；不得扫描、吞掉或新增既有文件中的零宽字符。
 5. **测试通过不等于所有组合已穷尽**：必须持续把真实用户操作序列加入 chaos/continuous 回归，而不是只测单次输入。
 6. **长期终局仍是源码即数据模型的 Live Preview**：它可从架构上消除双表示同步家族，但属于独立迁移项目，见 `live-preview-migration-plan.md`；当前版本仍须维护现有保真层。
 7. **禁止用全局“重新解析后语义相等”作为通行证**：作者正文里的 `- - 文本`、`1. 2. 文本` 和字面反引号本就可能被 parser 重解释；整篇循环 parse/stringify 会把合法作者拼写误判为错误并引入列表、反引号和空行回归。修复必须证明本次局部 raw 映射。
@@ -306,7 +308,7 @@ npm run test:task-list-persistence-ui
 - 2026-08-08 / 0.13.24：增加 RS-24；跨顶层块快速编辑在下一块输入前提交上一块，避免一个延迟 callback 同时携带多处不相邻变化；顶层 key 特别保护 paragraph→list input rule，不得让 `-` 回退为 `*` 或黏回上一行。
 - 2026-08-09 / 0.13.25：增加 RS-25；列表项正文中的 `数字. 文本` 不再泄漏 serializer `\.`，稳定行文字编辑也不得格式化未编辑列表的 marker 与紧凑间距。
 - 2026-08-09 / 0.13.26：扩展 RS-25 到 `数字)`、`-`、`+`、`*` 字面标记；增加 RS-26，修复反引号部分/重复删除造成的双快照分叉、保存暂停和源码切换锁死，并保护空段落后的零宽编辑与未变化列表。
-- 2026-08-09 / 0.13.27：增加 RS-27、RS-28；列表转换比较统一反转义 `U+200B / &#x20;` 语义，行内代码改为闭合反引号触发，恢复标准 fenced code-block 输入并补快速退出同步边界。
+- 2026-08-09 / 0.13.27：增加 RS-27、RS-28；当时列表转换比较统一了历史 `U+200B / &#x20;` 语义。该私有哨兵方案已于 0.13.65 被标准 `&nbsp;` 源码替代；行内代码改为闭合反引号触发，恢复标准 fenced code-block 输入并补快速退出同步边界。
 - 2026-08-09 / 0.13.28：增加 RS-29；generated scratch 与空文件首次编辑改走 fresh canonical 翻译，修复同一行 ```` ```你好``` ```` 切源码后出现六个 serializer 反斜杠；增加逐键 delimiter、真实中文 IME、保存和完整重开回归。
 - 2026-08-09 / 0.13.29：未新增家族分支；在加入桌面拖入打开后重新执行纯函数、逐字段落/列表/反引号、空段落/空引用、模式切换光标、保存重开、源码 + 预览、连续/嵌套写作与四组 chaos 的完整矩阵，全部通过。同步把 `test:paragraph-source-ui` 从旧“首字符自动激活”改为当前“闭合反引号触发”合同。
 - 2026-08-09 / 0.13.30：增加 RS-30；复杂分叉文档中的普通重复短文本不再因全文子串重复而暂停保存。单块回退改为 source/canonical 等数量块的 ordinal 映射，候选数量不等仍 fail closed；新增富文本直接保存、源码、磁盘和冷重开专项。完整家族矩阵 26 组、桌面/移动/教程构建通过；覆盖安装后又通过六组高风险安装包回归。
@@ -330,3 +332,8 @@ npm run test:task-list-persistence-ui
   内容不同”都存在。此前所有绿色矩阵只保留为已覆盖路径证据，不再作为家族关闭结论。
   新增 P0 事故文档，要求捕获 live doc / authored / canonical / tab / textarea / disk
   第一次分叉的统一 trace，并以安装包 10 轮长会话作为最终验收。
+- 2026-08-14 / 0.13.64：增加 RS-42、RS-43。嵌套有序列表的空项连续退出改为可移植的
+  “空父项 + 缩进子列表”源码；中间空段直接输入列表时，空段 mapper 独占 raw 槽位，
+  input intent 只恢复 marker，不再重复插入列表或物理空行。新增专项并重跑空段、列表、
+  空格、事务、多轮与 chaos 回归。
+- 2026-08-14 / 0.13.65：前导空格源码从历史的私有 `U+200B` 哨兵迁移为标准 `&nbsp;` 加余下字面空格；移除 parse-side 哨兵剥离和可见流特殊规则。`&#x20;` 只留在 serializer canonical 视图，永不写入新的作者源码；已有作者的零宽字符按普通源码内容处理，不再由 HorseMD 隐式吞掉。补齐普通段落、列表转换、连续空白、Tab 列表缩进、保存及冷重开的回归。

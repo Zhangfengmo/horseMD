@@ -1,4 +1,5 @@
 import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+import { decodeNamedCharacterReference } from 'decode-named-character-reference'
 
 const nodeStart = (node) => node?.position?.start?.offset
 const nodeEnd = (node) => node?.position?.end?.offset
@@ -52,7 +53,76 @@ const valueSpan = (markdown, node) => {
   return { start: start + idx, end: start + idx + value.length, value }
 }
 
+const decodeMarkdownEntity = (value) => {
+  if (/^#x[0-9a-f]+$/i.test(value)) {
+    try { return String.fromCodePoint(Number.parseInt(value.slice(2), 16)) } catch { return null }
+  }
+  if (/^#[0-9]+$/.test(value)) {
+    try { return String.fromCodePoint(Number.parseInt(value.slice(1), 10)) } catch { return null }
+  }
+  return decodeNamedCharacterReference(value) || null
+}
+
+// Text nodes retain their raw source range, while remark decodes entities and
+// Markdown escapes in `node.value`. Map every decoded character to its whole
+// authored unit so raw offsets after `&nbsp;` (six source characters, one rich
+// character) do not drift. This is a general source-map rule, not a leading
+// space special case: `&amp;`, numeric entities and escaped punctuation need
+// the same treatment.
+const decodedTextItems = (markdown, node) => {
+  const start = nodeStart(node)
+  const end = nodeEnd(node)
+  const value = node?.value == null ? '' : String(node.value)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !value) return null
+
+  const raw = markdown.slice(start, end)
+  const items = []
+  let rawIndex = 0
+  let valueIndex = 0
+
+  while (rawIndex < raw.length && valueIndex < value.length) {
+    const entity = raw.slice(rawIndex).match(/^&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/i)
+    const decodedEntity = entity ? decodeMarkdownEntity(entity[1]) : null
+    if (decodedEntity && value.startsWith(decodedEntity, valueIndex)) {
+      for (let index = 0; index < decodedEntity.length; index += 1) {
+        items.push({
+          rawStart: start + rawIndex,
+          rawEnd: start + rawIndex + entity[0].length
+        })
+      }
+      rawIndex += entity[0].length
+      valueIndex += decodedEntity.length
+      continue
+    }
+
+    // remark consumes a backslash before escaped punctuation into one text
+    // character. Keep both raw source characters attached to that character.
+    if (
+      raw[rawIndex] === '\\' &&
+      rawIndex + 1 < raw.length &&
+      raw[rawIndex + 1] === value[valueIndex]
+    ) {
+      items.push({ rawStart: start + rawIndex, rawEnd: start + rawIndex + 2 })
+      rawIndex += 2
+      valueIndex += 1
+      continue
+    }
+
+    if (raw[rawIndex] !== value[valueIndex]) return null
+    items.push({ rawStart: start + rawIndex, rawEnd: start + rawIndex + 1 })
+    rawIndex += 1
+    valueIndex += 1
+  }
+
+  return valueIndex === value.length ? items : null
+}
+
 const pushTextItems = (items, markdown, node) => {
+  const decoded = decodedTextItems(markdown, node)
+  if (decoded) {
+    items.push(...decoded)
+    return
+  }
   const span = valueSpan(markdown, node)
   if (!span) return
   for (let i = 0; i < span.value.length; i++) {

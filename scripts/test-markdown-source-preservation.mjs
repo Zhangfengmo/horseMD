@@ -1096,7 +1096,7 @@ assert.equal(
   'an ambiguous combined conversion/text delta must fail closed instead of replacing the canonical list tree'
 )
 
-const leadingSpaceListSource = '- 是的v\n- 色粉色\n- \u200B     色粉色分\n'
+const leadingSpaceListSource = '- 是的v\n- 色粉色\n- &nbsp;    色粉色分\n'
 const leadingSpaceListCanonical = '* 是的v\n* 色粉色\n* &#x20;    色粉色分\n'
 assert.equal(
   replaceMarkdownListBlock({
@@ -1107,8 +1107,8 @@ assert.equal(
     previousOffset: 2,
     nextOffset: 3
   }),
-  '1. 是的v\n2. 色粉色\n3. \u200B     色粉色分\n',
-  'list conversion must treat U+200B authored leading spaces and canonical &#x20; as the same item text'
+  '1. 是的v\n2. 色粉色\n3. &nbsp;    色粉色分\n',
+  'list conversion must preserve standard leading-space source while changing only list markers'
 )
 
 const listChanged = preserveRichMarkdownSource(listSource, listCanonical, listNext)
@@ -1274,8 +1274,30 @@ assert.equal(
 )
 assert.equal(
   middleEmptyParagraphCreated.markdown,
+  '# 标题\n\n前段内容\n\n\n\n## 后续标题\n\n后段内容\n',
+  'pressing Enter between existing blocks must become physical Markdown blank lines'
+)
+
+const twoMiddleEmptyParagraphsCreated = preserveRichMarkdownSource(
   middleSource,
-  'pressing Enter between existing blocks must not leak an editor <br /> placeholder'
+  middleCanonical,
+  '# 标题\n\n前段内容\n\n<br />\n\n<br />\n\n## 后续标题\n\n后段内容\n'
+)
+assert.equal(
+  twoMiddleEmptyParagraphsCreated.markdown,
+  '# 标题\n\n前段内容\n\n\n\n\n\n## 后续标题\n\n后段内容\n',
+  'two created empty paragraphs must add two source blank-line slots'
+)
+
+const crlfMiddleEmptyParagraphCreated = preserveRichMarkdownSource(
+  '前段\r\n\r\n后段\r\n',
+  '前段\r\n\r\n后段\r\n',
+  '前段\r\n\r\n<br />\r\n\r\n后段\r\n'
+)
+assert.equal(
+  crlfMiddleEmptyParagraphCreated.markdown,
+  '前段\r\n\r\n\r\n\r\n后段\r\n',
+  'a created empty paragraph must preserve the authored CRLF spelling'
 )
 
 const middleEmptyParagraphFilled = preserveRichMarkdownSource(
@@ -1521,28 +1543,27 @@ assert.equal(
 
 // Leading spaces typed in rich mode are serialized by remark-stringify as the
 // `&#x20;` entity (a literal space at line start would be parsed as indentation
-// or a list). That is a canonical spelling, never authored source: every
-// canonical→source translation must restore the real spaces.
-const LEADING_SPACE_SENTINEL = '\u200B'
+// or a list). It is a canonical spelling; authored source uses the standard
+// portable `&nbsp;` spelling, never a HorseMD-private zero-width byte.
 assert.equal(
   generatedScratchMarkdown('# &#x20;       hello\n'),
-  `# ${LEADING_SPACE_SENTINEL}        hello\n`,
-  'a generated scratch document must spell leading spaces with an invisible Markdown-safe sentinel, not an entity'
+  '# &nbsp;       hello\n',
+  'a generated scratch document must use portable leading-space syntax'
 )
 assert.equal(
   generatedScratchMarkdown('    &#x20;缩进正文\n'),
-  `    ${LEADING_SPACE_SENTINEL} 缩进正文\n`,
-  'canonical structural indentation must not hide a generated leading-space entity'
+  '    &nbsp;缩进正文\n',
+  'canonical structural indentation must retain standard leading-space syntax'
 )
 assert.equal(
   generatedScratchMarkdown('* 父项\n\n    &#x20;列表续行\n'),
-  `* 父项\n\n    ${LEADING_SPACE_SENTINEL} 列表续行\n`,
-  'a list continuation with four structural spaces must still restore the authored leading space'
+  '* 父项\n\n    &nbsp;列表续行\n',
+  'a list continuation with four structural spaces must retain the portable leading space'
 )
 assert.equal(
   generatedScratchMarkdown('\t&#x20;制表缩进正文\n'),
-  `\t${LEADING_SPACE_SENTINEL} 制表缩进正文\n`,
-  'canonical tab indentation must not hide a generated leading-space entity'
+  '\t&nbsp;制表缩进正文\n',
+  'canonical tab indentation must retain standard leading-space syntax'
 )
 const leadingSpaceChange = preserveRichMarkdownSource(
   '第一段正文。\n',
@@ -1551,14 +1572,14 @@ const leadingSpaceChange = preserveRichMarkdownSource(
 )
 assert.equal(
   leadingSpaceChange.markdown,
-  `第一段正文。\n\n${LEADING_SPACE_SENTINEL}      顶格文字\n`,
-  'a canonical line-leading `&#x20;` must reach the authored source as a real space'
+  '第一段正文。\n\n&nbsp;     顶格文字\n',
+  'a canonical line-leading `&#x20;` must reach authored source as portable syntax'
 )
 const leadingSpaceNewDocument = preserveRichMarkdownSource('', '', '# &#x20;     顶格文字\n')
 assert.equal(
   leadingSpaceNewDocument.markdown,
-  `# ${LEADING_SPACE_SENTINEL}      顶格文字\n`,
-  'the empty-document canonical path must unescape leading-space entities too'
+  '# &nbsp;     顶格文字\n',
+  'the empty-document canonical path must use portable leading-space syntax too'
 )
 
 // A held Space key emits multiple whitespace-only canonical snapshots before
@@ -1593,18 +1614,30 @@ const heldSpaceText = preserveRichMarkdownSource(
 )
 assert.equal(
   heldSpaceText.markdown,
-  `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL}        abc\n`,
-  'the first visible character after held spaces must append one intact paragraph using Typora-style source spelling'
+  '# test\n\nanchor\n\n&nbsp;       abc\n',
+  'the first visible character after held spaces must append one intact portable paragraph'
+)
+const leadingTabChange = preserveRichMarkdownSource(
+  heldSpaceSource,
+  heldSpaceSource,
+  '# test\n\nanchor\n\n\t\n'
+)
+assert.equal(leadingTabChange.preserved, true)
+assert.equal(leadingTabChange.reason, 'trailing-leading-tab-created')
+assert.equal(
+  leadingTabChange.markdown,
+  '# test\n\nanchor\n\n&#x9;\n',
+  'a literal first-character Tab must commit as standard portable source'
 )
 const leadingSpacePartialDelete = preserveRichMarkdownSource(
-  `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL}    abc\n`,
+  '# test\n\nanchor\n\n&nbsp;   abc\n',
   '# test\n\nanchor\n\n&#x20;   abc\n',
   '# test\n\nanchor\n\n \n'
 )
 assert.equal(leadingSpacePartialDelete.preserved, true)
 assert.equal(
   leadingSpacePartialDelete.markdown,
-  `# test\n\nanchor\n\n${LEADING_SPACE_SENTINEL} \n`,
+  '# test\n\nanchor\n\n&nbsp; \n',
   'deleting visible text and only part of its leading spaces must retain the remaining whitespace paragraph'
 )
 
@@ -1650,7 +1683,7 @@ assert.equal(
     '\\~',
     '</div>',
     '',
-    `# ${LEADING_SPACE_SENTINEL}  hi 0~9`,
+    '# &nbsp; hi 0~9',
     ''
   ].join('\n'),
   'canonical escape translation must not alter fenced or inline-code literals'
@@ -1723,7 +1756,7 @@ const exactBaselineEscapes = preserveRichMarkdownSource(
 )
 assert.equal(
   exactBaselineEscapes.markdown,
-  `# 标题\n\n正文 0~9\n\n${LEADING_SPACE_SENTINEL}  后续\n`,
+  '# 标题\n\n正文 0~9\n\n&nbsp; 后续\n',
   'the exact-canonical baseline must use the same context-aware translation as every other canonical write'
 )
 
@@ -2688,7 +2721,7 @@ const tailAppendUnescapesSpaceEntities = preserveRichMarkdownSource(
 )
 assert.equal(
   tailAppendUnescapesSpaceEntities?.markdown,
-  'A\n\n1. 测试\n2. \u200B    新内容\n',
+  'A\n\n1. 测试\n2. &nbsp;   新内容\n',
   'diverged-tail append must unescape &#x20; item-leading spaces'
 )
 
@@ -2823,23 +2856,26 @@ assert.equal(
   )
 }
 
-// GFM has no spelling for an EMPTY task item: a checkbox must be followed by
-// content, so `- [ ] ` re-parses as a plain bullet whose literal text is
-// `[ ]`. That is a state the rich model can hold and the format cannot carry.
-// The contract is NOT to invent a byte convention for it: the checkbox is
-// declared non-durable on an empty item (see editor-durable-semantics.js) and
-// the row persists as a plain empty item, so the authored bytes stay standard
-// Markdown. Locking the normalization here keeps the two halves in step.
+// GFM has no spelling for an EMPTY task item. Source-first behavior therefore
+// demotes it to ordinary list text (`- [ ]` / `- [x]`) instead of inventing an
+// entity, a comment, or a HorseMD-only parsing rule. The live task node must
+// be converted before this normalizer reaches the source boundary.
 {
   const emptyTaskItem = normalizeEmptyListItems('* [ ] 待办\n\n* [ ] <br />\n')
   assert.equal(
     emptyTaskItem,
-    '* [ ] 待办\n\n* \n',
-    'an emptied task item must normalize to a plain empty item, never to an invented spelling'
+    '* [ ] 待办\n\n* [ ]\n',
+    'an emptied task item must become ordinary portable Markdown text'
   )
-  assert.ok(
-    !/&#x20;|\u200B/.test(emptyTaskItem),
-    'an emptied task item must not carry an entity or sentinel spelling'
+  assert.equal(
+    normalizeEmptyListItems('* [x] <br />\n'),
+    '* [x]\n',
+    'an emptied checked task must preserve its visible marker as ordinary text'
+  )
+  assert.equal(
+    normalizeEmptyListItems('* \\[ ]\n'),
+    '* [ ]\n',
+    'the serializer escape on a demoted task marker must not reach source'
   )
   assert.equal(
     normalizeEmptyListItems('* 普通\n\n* <br />\n'),
@@ -3030,19 +3066,16 @@ assert.equal(
   )
 }
 
-// Emptying a task item INSIDE a blockquote. Two separate defects met here:
-// the `<br />` placeholder normalizer did not tolerate the `> ` prefix, and the
-// deletion's start offset fell inside block syntax, so it was resolved to the
-// end of the previous row's text and the deletion swallowed both blank quote
-// lines and the row itself. The row must survive as a plain empty item (the
-// checkbox is non-durable — GFM cannot spell an empty task item).
+// Emptying a task item INSIDE a blockquote. The live task node is demoted to
+// ordinary `[ ]` text before source mapping; that keeps the following edit
+// fully standard GFM while preserving the quote row and surrounding blanks.
 {
   const source   = '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * [ ] 12312\n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n'
   const previous = '# T\n\n> * [ ] a\n>\n> * [ ] b\n>\n> * [ ] 12312\n>\n> | x | y | <br /> |\n> | :--- | :--- | :--- |\n> | c | d | <br /> |\n\n尾\n'
-  const emptied = preserveRichMarkdownSource(source, previous, previous.replace('> * [ ] 12312', '> * [ ] <br />'))
+  const emptied = preserveRichMarkdownSource(source, previous, previous.replace('> * [ ] 12312', '> * [ ]'))
   assert.equal(
     emptied.markdown,
-    '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * \n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n',
+    '# T\n\n> * [ ] a\n> * [ ] b\n>\n>\n> * [ ]\n>\n>\n>\n> | x | y |  |\n> | :-- | :-- | :-- |\n> | c | d |  |\n\n尾\n',
     'an emptied quoted task item keeps its row and every surrounding byte'
   )
 }

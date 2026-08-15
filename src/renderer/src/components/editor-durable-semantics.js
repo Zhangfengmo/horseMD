@@ -1,5 +1,3 @@
-const leadingSpaceSentinel = '\u200B'
-
 const sortedAttrs = (attrs = {}) => Object.fromEntries(
   Object.entries(attrs).sort(([left], [right]) => left.localeCompare(right))
 )
@@ -14,8 +12,9 @@ const durableAttrs = (attrs) => sortedAttrs(attrs)
 // with no visible content is dropped from its parent, so a candidate that
 // cannot spell it still compares equal.
 //
-// Whitespace-only text is NOT covered here — a leading space has a spelling
-// (`&#x20;`) and the terminal case is declared separately by the doc contract.
+// Whitespace-only text is NOT covered here — a leading space has the portable
+// `&nbsp;` spelling and the terminal case is declared separately by the doc
+// contract.
 const withoutInvisibleParagraphs = (content) => content.map((child) => {
   const invisibleParagraph = child?.type === 'paragraph' && (
     !child.content?.length || child.content.every((inline) => (
@@ -33,6 +32,24 @@ const withoutInvisibleParagraphs = (content) => content.map((child) => {
   !Object.keys(child.attrs || {}).length
 ))
 
+// CommonMark treats literal ASCII spaces at a text block's end as source
+// formatting, rather than durable inline content. Keep those bytes literal for
+// source fidelity, while comparing them as non-durable so standards-compliant
+// reparsing does not reject the save. This is intentionally narrow: tabs,
+// hard breaks, marks, and non-terminal whitespace stay strictly comparable.
+const withoutTerminalPlainSpaces = (content) => {
+  const terminal = content.at(-1)
+  if (terminal?.type !== 'text' || terminal.marks?.length || !/ +$/.test(terminal.text || '')) {
+    return content
+  }
+  const text = terminal.text.replace(/ +$/, '')
+  // A whitespace-only paragraph is a different state: in particular it can
+  // be the app-owned leading-space transition. Do not generalize the source
+  // formatting exception to it, nor to tabs.
+  if (!text || text.includes('\t') || !/\S/.test(text)) return content
+  return [...content.slice(0, -1), { ...terminal, text }]
+}
+
 // Every omission is local to the node type that owns the metadata. Unknown
 // attributes deliberately flow through the default contract so a future
 // schema addition cannot silently disappear from persistence verification.
@@ -48,14 +65,16 @@ const nodeContracts = {
           !inline.marks?.length &&
           /^[ \t]+$/.test(String(inline.text || ''))
         ))
-      return declaredTerminalPlaceholder ? [] : content
+      if (declaredTerminalPlaceholder) return []
+      return withoutTerminalPlainSpaces(content)
     }
   },
   heading: {
     attrs(attrs) {
       const { id: _derivedHeadingId, ...durable } = attrs || {}
       return sortedAttrs(durable)
-    }
+    },
+    content: withoutTerminalPlainSpaces
   },
   // `bullet` / `delimiter` carry the AUTHOR'S SPELLING of the marker so the
   // serializer can reproduce it per list. Spelling is exactly what durability
@@ -75,23 +94,12 @@ const nodeContracts = {
     }
   },
   list_item: {
-    attrs(attrs, node) {
-      const { spread: _serializerSpacing, ...durable } = attrs || {}
-      // A checkbox needs content to exist in GFM (`- [ ] ` re-parses as a
-      // bullet whose literal text is `[ ]`), so an EMPTY task item is a state
-      // the rich model can hold and the format cannot carry. Declare the
-      // checkbox non-durable exactly there instead of inventing a byte
-      // spelling for it: the row still persists as a plain empty item, and an
-      // authored `- ` therefore compares equal to the editor's empty task
-      // item. As soon as the item has content, `checked` is durable again.
-      const hasVisibleContent = (node?.content || []).some((child) => (
-        child?.type !== 'paragraph' ||
-        (child.content || []).some((inline) => (
-          inline?.type !== 'text' ||
-          String(inline.text || '').replaceAll(leadingSpaceSentinel, '').trim()
-        ))
-      ))
-      if (!hasVisibleContent) delete durable.checked
+    attrs(attrs) {
+      const { spread: _serializerSpacing, checked, ...durable } = attrs || {}
+      // A task item's checked state is durable whenever the item is actually a
+      // task.  Empty tasks are demoted to ordinary `[ ]` / `[x]` text before
+      // source verification, because GFM has no checkbox spelling for them.
+      if (checked === true || checked === false) durable.checked = checked
       return sortedAttrs(durable)
     },
     content: withoutInvisibleParagraphs
@@ -236,7 +244,12 @@ const projectValue = (value, state, location = {}) => {
 
   const projected = { type: value.type }
   if (typeof value.text === 'string') {
-    projected.text = value.text.replaceAll(leadingSpaceSentinel, '')
+    // The parser decodes source `&nbsp;` to NBSP. Normalize that one
+    // source-provenance spelling only on the candidate side; a user's NBSP
+    // stays durable content everywhere else.
+    projected.text = state.portableLeadingSpace === true
+      ? value.text.replace(/^\u00A0/, ' ')
+      : value.text
     if (!projected.text) return null
   }
 
@@ -256,6 +269,7 @@ const projectValue = (value, state, location = {}) => {
       childLocation(value, index, currentLocation)
     )).filter(Boolean)
     if (contract?.content) content = contract.content(content, {
+      node: value,
       location: currentLocation,
       placeholderCells: state.placeholderCells,
       trailingLeadingSpaceEmptyParagraph: state.trailingLeadingSpaceEmptyParagraph,
@@ -270,7 +284,8 @@ const projectValue = (value, state, location = {}) => {
 const projectWithPlaceholderContext = (
   node,
   placeholderContext = null,
-  standaloneImageRepresentation = null
+  standaloneImageRepresentation = null,
+  portableLeadingSpace = false
 ) => {
   const value = typeof node?.toJSON === 'function' ? node.toJSON() : node
   const placeholderCells = new Set((placeholderContext?.emptyTableCells || []).map(
@@ -281,12 +296,13 @@ const projectWithPlaceholderContext = (
     placeholderCells,
     trailingLeadingSpaceEmptyParagraph: placeholderContext?.trailingLeadingSpaceEmptyParagraph === true,
     generatedScratchEmptyHeading: placeholderContext?.generatedScratchEmptyHeading === true,
-    standaloneImageRepresentation
+    standaloneImageRepresentation,
+    portableLeadingSpace
   })
 }
 
-export function projectDurableSemantics(node) {
-  return projectWithPlaceholderContext(node)
+export function projectDurableSemantics(node, context = null) {
+  return projectWithPlaceholderContext(node, null, null, context?.portableLeadingSpace === true)
 }
 
 export const areDurablyEquivalent = (candidate, expected, expectedContext = null) => {
@@ -298,12 +314,26 @@ export const areDurablyEquivalent = (candidate, expected, expectedContext = null
   if (!projectedCandidate || !projectedExpected) return false
   if (JSON.stringify(projectedCandidate) === JSON.stringify(projectedExpected)) return true
 
+  // The exact source mapper can prove one candidate came from canonical
+  // `&#x20;` and deliberately emitted portable `&nbsp;`. Try that candidate
+  // projection only after strict equality: an externally authored NBSP still
+  // remains its own durable character when both sides already agree on it.
+  if (expectedContext?.portableLeadingSpace === true) {
+    const portableCandidate = projectDurableSemantics(candidate, expectedContext)
+    if (JSON.stringify(portableCandidate) === JSON.stringify(projectedExpected)) return true
+  }
+
   // Normalize each eligible standalone image independently. A document may
   // contain parser-native image blocks beside a newly pasted inline image, so
   // selecting one representation for the whole document is insufficient.
   // Exact attributes remain in the projection; same-type semantic changes and
   // unknown fields therefore still fail the comparison after the strict pass.
-  const normalizedCandidate = projectWithPlaceholderContext(candidate, null, 'both')
+  const normalizedCandidate = projectWithPlaceholderContext(
+    candidate,
+    null,
+    'both',
+    expectedContext?.portableLeadingSpace === true
+  )
   const normalizedExpected = projectWithPlaceholderContext(expected, expectedContext, 'both')
   return JSON.stringify(normalizedCandidate) === JSON.stringify(normalizedExpected)
 }

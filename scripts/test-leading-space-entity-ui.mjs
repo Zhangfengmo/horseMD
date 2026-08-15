@@ -76,11 +76,29 @@ const caretDocEnd = (evaluate) => evaluate(`(() => {
   return true
 })()`)
 
-const typeSpaces = async (send, count, delayMs = 80) => {
-  for (let i = 0; i < count; i += 1) {
-    await send('Input.insertText', { text: ' ' })
-    await sleepMs(delayMs)
+// Space starts a Markdown-sensitive input path.  Exercise the actual keyboard
+// sequence rather than text injection, otherwise the test misses input-rule
+// and whitespace-only transaction behavior that a user can trigger.
+const typeSpace = async (send, delayMs) => {
+  const common = {
+    key: ' ',
+    code: 'Space',
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32
   }
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
+  await send('Input.dispatchKeyEvent', {
+    type: 'char',
+    ...common,
+    text: ' ',
+    unmodifiedText: ' '
+  })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+  await sleepMs(delayMs)
+}
+
+const typeSpaces = async (send, count, delayMs = 80) => {
+  for (let i = 0; i < count; i += 1) await typeSpace(send, delayMs)
 }
 
 async function openApp(profile, appPort) {
@@ -125,7 +143,7 @@ async function main() {
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode (A)')
     await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'source textarea did not appear (A)')
     const sourceA = await visibleSource(app.evaluate)
-    if (process.env.TRANSACTION_TRACE === '1' && sourceA !== '第一段正文。\n\n\u200B      顶格文字\n') {
+    if (process.env.TRANSACTION_TRACE === '1' && sourceA !== '第一段正文。\n\n&nbsp;     顶格文字\n') {
       console.error('TRANSACTION_TRACE', JSON.stringify(await app.evaluate(`({
         transactions: window.__hmSourceTransactionTrace || [],
         mapped: window.__hmSourceTransactionLog || [],
@@ -137,10 +155,11 @@ async function main() {
       !sourceA.includes('&#x20;'),
       `leading spaces must not leak as the &#x20; entity (got ${JSON.stringify(sourceA)})`
     )
+    assert.ok(!sourceA.includes('\u200B'), 'source must not write a private zero-width sentinel')
     assert.equal(
       sourceA,
-      '第一段正文。\n\n\u200B      顶格文字\n',
-      'the authored source must keep the six literal leading spaces'
+      '第一段正文。\n\n&nbsp;     顶格文字\n',
+      'the authored source must use standard, portable leading-space syntax'
     )
 
     // Back to rich, then a fresh empty document: spaces typed BEFORE any text
@@ -184,6 +203,7 @@ async function main() {
       !sourceB.includes('&#x20;'),
       `the scratch-document path must also spell leading spaces literally (got ${JSON.stringify(sourceB)})`
     )
+    assert.ok(!sourceB.includes('\u200B'), 'scratch source must not write a private zero-width sentinel')
 
     // Scenario C: a typed `~` must not surface as the `\~` escape (GFM
     // strikethrough guard) in the authored source.
@@ -231,8 +251,9 @@ async function main() {
     assert.equal(await toggleSource(app.evaluate), true, 'could not switch to source mode (D)')
     await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'source textarea did not appear (D)')
     const sourceD = await visibleSource(app.evaluate)
-    assert.equal(sourceD, '# \u200B        scratch\n', 'true scratch typing must keep eight literal spaces after an invisible Markdown-safe sentinel')
-    assert.ok(!sourceD.includes('&#x20;'), 'true scratch typing must never expose a serializer entity')
+    assert.equal(sourceD, '# &nbsp;       scratch\n', 'true scratch typing must use standard portable leading-space syntax')
+    assert.ok(!sourceD.includes('&#x20;'), 'true scratch typing must never expose the serializer entity')
+    assert.ok(!sourceD.includes('\u200B'), 'true scratch typing must never write a private sentinel')
     assert.equal(
       await app.evaluate(`(() => {
         const save = document.querySelector('.hm-save-fab')
@@ -242,11 +263,11 @@ async function main() {
       true,
       'save control was unavailable for the true scratch document'
     )
-    await waitFor(async () => (await readFile(file, 'utf8')) === '# \u200B        scratch\n', 'true scratch document was not saved')
+    await waitFor(async () => (await readFile(file, 'utf8')) === '# &nbsp;       scratch\n', 'true scratch document was not saved')
     assert.equal(
       await readFile(file, 'utf8'),
-      '# \u200B        scratch\n',
-      'saving a true scratch document must persist literal spaces, not an entity'
+      '# &nbsp;       scratch\n',
+      'saving a true scratch document must persist portable source syntax'
     )
 
     await stopBuiltElectron(app, { removeProfile: true })
@@ -256,8 +277,8 @@ async function main() {
     await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'reopened source textarea did not appear (D)')
     assert.equal(
       await visibleSource(app.evaluate),
-      '# \u200B        scratch\n',
-      'a full reopen must retain the literal-space spelling byte-for-byte'
+      '# &nbsp;       scratch\n',
+      'a full reopen must retain the portable spelling byte-for-byte'
     )
 
     // Scenario E: exact real-user sequence. Two Enters leave an empty rich
@@ -300,8 +321,8 @@ async function main() {
     await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'held-space source textarea did not appear')
     const sourceE = await visibleSource(app.evaluate)
     const expectedHeldSpaceSource = process.env.EXPECT_TRANSACTION_PRIMARY === '1'
-      ? '# test\n\nanchor\n\n\n\n\u200B        abc\n'
-      : '# test\n\nanchor\n\n\u200B        abc\n'
+      ? '# test\n\nanchor\n\n\n\n&nbsp;       abc\n'
+      : '# test\n\nanchor\n\n&nbsp;       abc\n'
     if (process.env.TRANSACTION_TRACE === '1' && sourceE !== expectedHeldSpaceSource) {
       console.error('HELD_SPACE_TRACE', JSON.stringify(await app.evaluate(`({
         transactions: window.__hmSourceTransactionTrace || [],
@@ -315,6 +336,7 @@ async function main() {
       `held spaces must not merge into the previous paragraph or leave trailing garbage (got ${JSON.stringify(sourceE)})`
     )
     assert.ok(!sourceE.includes('&#x20;'), 'held spaces must not expose a serializer entity')
+    assert.ok(!sourceE.includes('\u200B'), 'held spaces must not write a private zero-width sentinel')
     assert.equal(
       await app.evaluate(`([...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)?.selectionStart ?? -1)`),
       sourceE.length - 1,
@@ -328,7 +350,7 @@ async function main() {
     assert.equal(
       await app.evaluate(`([...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)?.selectionStart ?? -1)`),
       sourceE.length - 1,
-      'the invisible sentinel must not move the caret during a rich/source round trip'
+      'the portable leading-space spelling must not move the caret during a rich/source round trip'
     )
     assert.equal(await app.evaluate(`(() => {
       const save = document.querySelector('.hm-save-fab')
@@ -343,7 +365,7 @@ async function main() {
     await waitFor(() => app.evaluate(`!![...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)`), 'reopened held-space source textarea did not appear')
     assert.equal(await visibleSource(app.evaluate), sourceE, 'a full reopen changed the held-space source')
 
-    console.log('PASS canonical escapes: normal, scratch, and held-space sequences preserve Markdown-safe leading spaces without entities or mode-switch corruption')
+    console.log('PASS canonical escapes: normal, scratch, and held-space sequences preserve portable leading spaces without private sentinels or mode-switch corruption')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

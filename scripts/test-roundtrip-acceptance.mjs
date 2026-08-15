@@ -72,11 +72,11 @@ check('trailing newline drift passes', () => {
   assert.ok(roundTripPreserved('# T\n\ntext\n', '# T\n\ntext\n\n'))
 })
 
-check('leading-space sentinel spellings pass', () => {
-  // Authored `U+200B + spaces` vs canonical `&#x20;` are the same protected
-  // leading spaces (lib/markdown-leading-space.js).
-  assert.ok(roundTripPreserved('\u200B  缩进文本\n', '&#x20;&#x20;缩进文本\n'))
-  assert.ok(roundTripPreserved('- \u200B 项目\n', '* &#x20;项目\n'))
+check('standard leading-space spellings pass', () => {
+  // `&nbsp;` keeps a leading visible space without a HorseMD-private byte;
+  // the canonical `&#x20;` represents the same rich document.
+  assert.ok(roundTripPreserved('&nbsp; 缩进文本\n', '&#x20;&#x20;缩进文本\n'))
+  assert.ok(roundTripPreserved('- &nbsp;项目\n', '* &#x20;项目\n'))
 })
 
 check('display math spellings pass', () => {

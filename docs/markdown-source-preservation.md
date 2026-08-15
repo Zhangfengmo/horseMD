@@ -147,7 +147,7 @@ canonical 删除后：  前段。\*&#x20;
 
 新建文档的 generated 路径有两个独立缺口：
 
-1. `generatedScratchMarkdown` 只剥离**裸** `<br />` 行，带列表标记的空项（`- <br />`、`3. <br />`、`  * <br />`）会漏进源码。现在它同样经过 `normalizeEmptyListItems`。
+1. `generatedScratchMarkdown` 只剥离**裸** `<br />` 行，带列表标记的空项（`- <br />`、`3. <br />`、`  * <br />`）会漏进源码。现在它同样经过 `normalizeEmptyListItems`。普通空项保留合法 marker；空任务项在源码边界先转换为普通 `- [ ]` / `- [x]` 文本，因为裸写法在 GFM 中本就不是 checkbox。这里不写 `&nbsp;`、HTML 数字实体或 HorseMD 哨兵，避免不同 Markdown 产品对同一源码产生不同理解。
 2. 列表输入规则意图有 30 秒 TTL。用户先打 `1. ` 有序列表、退出后又打 `- ` 无序列表并 Tab 缩进时，过期的 `1.` 意图仍在挂起；Tab 事件（光标在列表内）会触发 `preserveTypedBulletInputRule`，用**意图捕获时的旧快照**重建列表块，把 `1. 测试` 黏到标题行（`## 测试1. 测试`），覆盖掉正确的 `- 测试` 基线，后续 marker 全部丢失（`-` 变 `*`）。现在意图只有在**基线一致**时才会应用：`pendingMarkdownInputIntent.canonical` 必须等于当前已提交的 `canonicalMarkdownRef`，否则视为过期并清除。真实序列（标题/正文/二级标题/有序两项/退出/`- 测试`/空项/Tab 嵌套）已固化为 UI 回归：`npm run test:list-marker-empty-source-ui`。
 
 3. 新建文档在第一次源码编辑前持续使用 generated-scratch 路径。旧版
@@ -173,9 +173,9 @@ Milkdown 会在最后一块后追加序列化空行（`块\n\n`）或骨架空�
 serializer 写成 `&#x20;`。旧判断让顶层段落测试全绿，却在真实嵌套文档里重新泄漏实体。
 现在完整代码块只通过 fence 状态保护，行内 code/HTML 按 token 范围保护，局部已有源码
 的字面区域由 `adaptCanonicalRegionToSource()` 判断；结构缩进行仍执行 canonical escape
-翻译。但行首实体也不能直接变成 ASCII spaces：四空格会重新解析成代码块。0.13.22 按
-Typora 实测写入不可见 `U+200B` 再跟作者空格；remark parse 时剥离哨兵，visible/caret map
-忽略哨兵。连续按空格产生的 whitespace-only canonical snapshots 只推进 baseline，不写
+翻译。但行首实体也不能直接变成 ASCII spaces：四空格会重新解析成代码块。历史版本曾按
+Typora 写入不可见 `U+200B` 再跟作者空格；0.13.65 改为标准 `&nbsp;` 加余下字面空格，
+不再由 remark parse、visible/caret map 忽略私有哨兵。连续按空格产生的 whitespace-only canonical snapshots 只推进 baseline，不写
 源码，首个可见字符才一次性追加段落。完整时序和 CGEvent 证据见
 `leading-space-mode-switch-regression.md`。
 

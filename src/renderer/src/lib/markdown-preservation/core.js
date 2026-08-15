@@ -2,7 +2,6 @@ import {
   sourceRawFromVisibleIndex
 } from '../../mode-visible-map.js'
 import { QUOTE_MARKER_SOURCE, QUOTE_PREFIX_SOURCE, quoteDepthOf } from './block-prefix.js'
-import { LEADING_SPACE_SENTINEL } from '../markdown-leading-space.js'
 import { markdownComparisonKey } from './roundtrip.js'
 
 export const commonChange = (previous, next) => {
@@ -181,7 +180,9 @@ export const lineEndingNear = (markdown, offset = 0) => {
 // ProseMirror 文本节点里存的是解码后的真实字符，这些只是 canonical 的序列化
 // 拼写。所有 canonical 片段写入作者源码前必须还原为作者会打的字面字符，否则
 // 用户的源文件会出现 HTML 实体或多余反斜杠（`       文字` 变成 `&#x20;     文字`、
-// `0~9` 变成 `0\~9`）。
+// `0~9` 变成 `0\~9`）。行首空格是唯一的例外：普通 ASCII 空格会被
+// CommonMark 当作缩进（四个以上会变成代码块），因此使用通用的 `&nbsp;`
+// 保住第一个可见空格；它是标准 Markdown/HTML 字节，不依赖 HorseMD 私有语法。
 // 注意：`\\`（反斜杠）刻意不在其中——行尾 `\` 是硬换行语法，反转义会改变语义；
 // 反斜杠形态需要独立的输入法级方案，见 docs/canonical-escape-audit.md。
 const inlineLiteralRanges = (line) => {
@@ -265,25 +266,11 @@ const translateInlineCanonicalEscapes = (line, restoreFreshPunctuation = false) 
     if (line.startsWith('&#x20;', index)) {
       // A real leading space cannot be written as plain ASCII Markdown:
       // 1–3 spaces are parser indentation and 4+ become an indented code
-      // block. Typora solves the same problem by placing an invisible U+200B
-      // before the authored spaces. Keep mid-line entities as normal spaces,
-      // but use the sentinel when no visible text precedes the entity.
+      // block. Use a standard HTML entity rather than an invisible private
+      // character. Keep mid-line entities as normal spaces, where Markdown
+      // is unambiguous.
       //
-      // At the END of a line the entity must SURVIVE: a literal trailing space
-      // is dropped by the parser on the way back in (and two of them are a
-      // hard break), so writing one produces bytes that no longer describe the
-      // document — the commit is then refused and typing a space at the end of
-      // a paragraph could not be saved at all. remark emits the entity for
-      // exactly this reason; unescaping it here undid that.
-      // Order matters: a HELD LEADING space has no visible text before it and
-      // belongs to the sentinel representation, even when it is the only thing
-      // on the line. Only a trailing space after real text takes the entity.
-      if (hasVisibleTextBefore(index) && /^[ \t]*$/.test(line.slice(index + 6))) {
-        output += '&#x20;'
-        index += 6
-        continue
-      }
-      output += hasVisibleTextBefore(index) ? ' ' : `${LEADING_SPACE_SENTINEL} `
+      output += hasVisibleTextBefore(index) ? ' ' : '&nbsp;'
       index += 6
       continue
     }

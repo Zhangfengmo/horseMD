@@ -495,25 +495,21 @@ export const preserveMiddleEmptyBlock = ({
   const nextChangedText = withoutStandaloneEmptyBlockLines(
     next.slice(start, nextEnd)
   ).trim()
-
-  if (
-    nextEmpty.length > previousEmpty.length &&
+  const createdEmptyCount = nextEmpty.length - previousEmpty.length
+  const createdMiddleEmptyBlock =
+    createdEmptyCount > 0 &&
     nextChangedEmpty &&
     !previousChangedText &&
     !nextChangedText
-  ) {
-    return {
-      markdown: source,
-      preserved: true,
-      reason: 'middle-empty-block-created'
-    }
-  }
 
   const directBlockInsertion =
     previousEnd === start &&
     !previousChangedText &&
     !!nextChangedText
-  if ((!previousChangedEmpty && !directBlockInsertion) || !nextChangedText) return null
+  if (
+    (!previousChangedEmpty && !directBlockInsertion && !createdMiddleEmptyBlock) ||
+    (!nextChangedText && !createdMiddleEmptyBlock)
+  ) return null
   const changedRegion = next.slice(start, nextEnd)
   const middleListSlotFill = previousChangedEmpty && isMiddleListSlotFill(changedRegion)
   if (hasDedicatedBlockSyntax(changedRegion) && !middleListSlotFill) return null
@@ -600,6 +596,20 @@ export const preserveMiddleEmptyBlock = ({
     : sourceBefore.end
   const sourceGap = source.slice(sourceBeforeContentEnd, sourceAfter.start)
   if (standaloneEmptyBlockLines(sourceGap).length) return null
+  if (createdMiddleEmptyBlock) {
+    // Markdown has no empty-paragraph node: a physical blank line is only a
+    // block separator. Preserve the writer's requested vertical slot in the
+    // portable source by adding two line endings per new rich empty paragraph,
+    // while leaving the surrounding authored gap byte-for-byte intact.
+    const eol = lineEndingNear(source, sourceAfter.start)
+    return {
+      markdown: source.slice(0, sourceAfter.start) +
+        eol.repeat(2 * createdEmptyCount) +
+        source.slice(sourceAfter.start),
+      preserved: true,
+      reason: 'middle-empty-block-created'
+    }
+  }
   const nextGap = next.slice(nextBefore.end, nextAfter.start)
   if (directBlockInsertion) {
     const previousGap = previous.slice(previousBefore.end, previousAfter.start)
@@ -738,7 +748,32 @@ export const preserveTrailingEmptyBlock = ({
   const nextEmpty = trailingCanonicalEmptyBlock(next)
 
   if (!sourceEmpty && !previousEmpty && nextEmpty) {
-    // A leading-space segment (`&#x20;   文本`, U+200B-sentineled in source)
+    const nextBlankText = next.slice(nextEmpty.start, nextEmpty.end)
+      .replace(/(?:\r\n|\r|\n)+$/, '')
+    // The blank-paragraph guard above exists for intermediate Space snapshots:
+    // while a space is held, Crepe emits rows containing only whitespace before
+    // it can serialize a stable leading-space entity. A literal Tab is
+    // different: it is already real paragraph text. Raw Markdown cannot put a
+    // Tab at the start of a paragraph without interpreting it as indented-code
+    // syntax, so commit it using the standard HTML numeric character reference.
+    // It parses back to the same U+0009 text character in every CommonMark/HTML
+    // consumer; no editor-specific sentinel is involved.
+    if (/^\t+[ \t]*$/.test(nextBlankText)) {
+      const markdown = appendBlockAtDocumentEnd(
+        source,
+        nextBlankText.replace(/\t/g, '&#x9;')
+      )
+      if (markdown !== null) {
+        return {
+          markdown,
+          preserved: true,
+          reason: 'trailing-leading-tab-created'
+        }
+      }
+    }
+
+    // A leading-space segment (`&#x20;   文本` canonical, `&nbsp;   文本` in
+    // authored source)
     // deleted down to a blank canonical row makes `nextEmpty` true — this is
     // a deletion, not a newly created empty block. When the canonical tail
     // segment is a leading-space segment and the authored tail segment shows
@@ -758,32 +793,30 @@ export const preserveTrailingEmptyBlock = ({
     }
     const sourceTailLine = trailingVisibleLine(source)
     const previousTailLine = trailingVisibleLine(previous)
-    const stripSentinel = (line) => String(line || '')
-      .replace(/\u200B/g, '')
+    const stripPortableLeadingSpace = (line) => String(line || '')
+      .replace(/&nbsp;/gi, ' ')
       .replace(/&#x20;/g, ' ')
       .replace(/^\s+/, '')
     if (
       sourceTailLine &&
       previousTailLine &&
-      /^\s*(?:\u200B|&#x20;)/.test(previousTailLine.text) &&
-      stripSentinel(sourceTailLine.text) === stripSentinel(previousTailLine.text) &&
+      /^\s*(?:&nbsp;|&#x20;)/i.test(previousTailLine.text) &&
+      stripPortableLeadingSpace(sourceTailLine.text) === stripPortableLeadingSpace(previousTailLine.text) &&
       // Only a change that actually touches the segment is a deletion. Pressing
       // Enter after the segment (canonical grows a `<br />` empty block, which
       // makes `nextEmpty` true) must NOT drop the authored leading-space row.
       start <= previousTailLine.end
     ) {
-      const nextBlankText = next.slice(nextEmpty.start, nextEmpty.end)
-        .replace(/(?:\r\n|\r|\n)+$/, '')
-      const sentinelPrefix = sourceTailLine.text.match(/^([ \t]*)\u200B/)
-      if (sentinelPrefix && /^[ \t]+$/.test(nextBlankText)) {
+      const portablePrefix = sourceTailLine.text.match(/^([ \t]*)&nbsp;/i)
+      if (portablePrefix && /^[ \t]+$/.test(nextBlankText)) {
         // The user removed the visible text and only part of its leading
         // spaces. A whitespace-only canonical paragraph is still present in
         // the live document, so deleting the complete authored row would make
         // the verified candidate reconstruct one fewer paragraph. Keep the
-        // Markdown-safe sentinel and exactly the remaining whitespace.
+        // standard Markdown/HTML spelling and exactly the remaining whitespace.
         return {
           markdown: source.slice(0, sourceTailLine.start) +
-            sentinelPrefix[1] + '\u200B' + nextBlankText +
+            portablePrefix[1] + '&nbsp;' + nextBlankText +
             source.slice(sourceTailLine.end),
           preserved: true,
           reason: 'trailing-leading-space-partially-deleted',

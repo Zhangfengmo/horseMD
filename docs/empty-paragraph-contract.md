@@ -36,7 +36,13 @@
 - `preserveEmptiedParagraph`：段落文字被删光 → 源码删掉该段落文字、留空行；
   只要求变更区间内至少一个空段落占位（`.some`），全文其他空段落不影响；
   不要求全文可见流相等（`。* ` 之类行内结构会让可见流分叉，那是无关的）。
-- 空列表项：`normalizeEmptyListItems` 把 `- <br />` 写成 `- `（保留 marker）。
+- 空列表项：`normalizeEmptyListItems` 把普通 `- <br />` 写成 `- `（保留 marker）；
+  空任务项先在 live 文档中降级为普通 `- [ ]` / `- [x]` 文本。裸写法不符合 GFM
+  任务项规则，正因如此不再用实体伪造空复选框；源码、保存结果和其他 Markdown 工具
+  对它的理解保持一致。
+- 新建的中间空段直接触发列表输入规则时，`preserveMiddleEmptyBlock()` 是该 raw
+  槽位的唯一写入者：它以列表替换空段后，列表 input intent 只能恢复作者键入的
+  marker，不能再重建同一列表，否则会额外插入物理空行。
 
 ### 3.2 生成路径（新建文档）
 

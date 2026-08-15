@@ -716,11 +716,11 @@ export const preserveDivergedTailBlockAppend = ({
     .replace(/^(\s*)[-+*](?=\s)/, (match, ws) => `${ws}*`)
     .replace(/^(\s*)(\d{1,9})[.)](?=\s)/, (match, ws, num) => `${ws}${num}.`)
     .replace(/&#x20;/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
     // remark escapes a literal pipe in list text so it cannot be reparsed as
     // table syntax. The authored source may keep the literal `|`; normalize
     // only this serializer escape for tail-anchor comparison.
     .replace(/\\\|/g, '|')
-    .replace(/\u200B/g, '')
   const equivalentLine = (left, right) =>
     markerNormalized(stripBacktickSpans(left.trimEnd())) ===
     markerNormalized(stripBacktickSpans(right.trimEnd()))

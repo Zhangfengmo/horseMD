@@ -358,20 +358,31 @@ export const preserveGeneratedBulletMarkers = (source, markdown) => {
 // empty list item while the caret is there.  Do not touch `text<br>text`, which
 // is a real hard break authored inside a list item.
 export const normalizeEmptyListItems = (markdown) => String(markdown || '')
-  // GFM has no spelling for an EMPTY task item: a checkbox must be followed
-  // by content, so `- [ ] ` re-parses as a plain bullet whose text is the
-  // literal `[ ]`. Rather than invent a byte convention for a state the
-  // format cannot carry, the checkbox is declared non-durable while the item
-  // itself persists as a plain empty item — the row the user sees survives,
-  // only the checkbox does not (see `editor-durable-semantics.js`, which
-  // drops `checked` from an item with no content so both sides compare
-  // equal). Dropping the checkbox here keeps that contract in one place.
+  // A task marker needs content after `]`; bare `- [ ]` re-parses as ordinary
+  // list text.  That is the deliberate source-first fallback for a rich-only
+  // empty checkbox: never emit an entity or a private sentinel just to keep a
+  // UI control that portable GFM cannot represent.
   .replace(
     // A quoted row is still a list row. Every block-level rule in this file
     // must tolerate the `> ` prefix, or the placeholder survives inside a
     // blockquote and the candidate writes Crepe's internal `<br />` into the
     // user's file — which the verified commit then refuses.
-    new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+)(?:\\[[ xX]\\][ \\t]+)?[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
+    new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+\\[[ xX]\\])[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
+    '$1'
+  )
+  // Once an empty task has been demoted in the live document, Milkdown's
+  // general-purpose serializer escapes the leading `[` even though bare
+  // `[ ]` / `[x]` is already unambiguous ordinary GFM list text.  Remove only
+  // that exact whole-row escape so source stays the portable spelling chosen
+  // by the user, without touching authored bracket text that has content.
+  .replace(
+    new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+)\\\\(\\[[ xX]\\])(?=[ \\t]*$)`, 'gim'),
+    '$1$2'
+  )
+  // A plain empty list item needs no synthetic inline content: its marker is
+  // valid Markdown by itself, so remove only Crepe's editor-owned placeholder.
+  .replace(
+    new RegExp(`^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+)[ \\t]*<br\\s*/?>[ \\t]*$`, 'gim'),
     '$1'
   )
   // A deleted list row leaves a standalone `<br />` placeholder in canonical
@@ -1634,6 +1645,75 @@ export const preserveListBlockChange = ({ source, previous, next, start, previou
 function fillsTrailingEmptyListItem({ source, next }) {
   return /(?:^|\r?\n)[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*\r?\n?$/.test(source) &&
     /(?:\r?\n){2,}$/.test(next)
+}
+
+// Pressing Enter on a nested empty item lifts the caret into its parent item.
+// Pressing Enter there once more splits that parent item into two list items:
+// the following nested list moves under a new EMPTY parent item. Crepe spells
+// the two transient empty paragraphs as indented standalone `<br />` lines.
+// The old empty-item mapper treated that as text entering the original nested
+// list and rebuilt only its first fragment, which correctly failed the durable
+// reparse gate because the following nested rows had disappeared.
+//
+// Markdown can represent the live durable shape without private sentinels:
+// an empty parent list marker followed by its indented child list. Rebuild only
+// the owning top-level list, preserve everything outside it byte-for-byte, and
+// only enter this path when the original source contains no authored `<br>` in
+// that list. The verified commit remains the final authority.
+export const preserveNestedEmptyListExit = ({
+  source,
+  previous,
+  next,
+  start,
+  previousEnd,
+  nextEnd
+}) => {
+  const previousOuter = outerTopLevelListBlock(previous, start)
+  const nextOuter = outerTopLevelListBlock(next, start)
+  if (!previousOuter || !nextOuter) return null
+  if (!hasEmptyListItem(previous, previousOuter)) return null
+
+  const changedCanonical = next.slice(start, nextEnd)
+  if (!/^[ \t]+<br\s*\/?>[ \t]*$/mi.test(changedCanonical)) return null
+  if (!/^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*$/mi.test(changedCanonical)) return null
+
+  const previousBlocks = topLevelListBlocksInSourceOrder(previous)
+  const previousIndex = previousBlocks.findIndex((block) =>
+    block.start === previousOuter.start && block.end === previousOuter.end
+  )
+  if (previousIndex < 0) return null
+  const sourceOuter = topLevelListBlocksInSourceOrder(source)[previousIndex]
+  if (!sourceOuter) return null
+
+  const sourceBlock = source.slice(sourceOuter.start, sourceOuter.end)
+  if (/<br\s*\/?>/i.test(sourceBlock)) return null
+  if (
+    comparableListText(sourceBlock) !==
+    comparableListText(previous.slice(previousOuter.start, previousOuter.end))
+  ) return null
+
+  const replacement = next
+    .slice(nextOuter.start, nextOuter.end)
+    // Bare indented placeholders represent the empty paragraphs created by
+    // list lifting. Empty list markers are intentionally retained: `-` plus
+    // an indented child list is portable Markdown for the new empty parent.
+    .replace(/^[ \t]+<br\s*\/?>[ \t]*(?:\r?\n|$)/gim, '')
+    // A blank line after that empty parent ends its list before the indented
+    // child can attach. Keep just its line ending (`-\n  1. child`) so the
+    // standard nested-list syntax retains the complete live list tree.
+    .replace(
+      /^([ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]*)(\r?\n)(?:[ \t]*\r?\n)+(?=[ \t]+(?:[-+*]|\d{1,9}[.)])[ \t]+)/gm,
+      '$1$2'
+    )
+
+  if (!replacement || /<br\s*\/?>/i.test(replacement)) return null
+  return {
+    markdown: source.slice(0, sourceOuter.start) +
+      adaptCanonicalRegionToSource(replacement, source, sourceOuter) +
+      source.slice(sourceOuter.end),
+    preserved: true,
+    reason: 'nested-empty-list-exit'
+  }
 }
 
 export const preserveEmptyListItemTextChange = ({

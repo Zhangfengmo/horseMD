@@ -102,6 +102,36 @@ run('durable node contracts ignore only declared derived attrs', () => {
     ), false, 'Unicode whitespace in a list item is authored content, not an internal ASCII placeholder')
   }
 
+  // GFM cannot spell an empty task item. Source-first persistence demotes that
+  // live-only state to ordinary `[ ]` / `[x]` list text before verification;
+  // an NBSP entity is not a durable task-placeholder exception.
+  const emptyTaskItem = (checked, text = null) => nodeDoc([{
+    type: 'bullet_list',
+    content: [{
+      type: 'list_item',
+      attrs: { checked },
+      content: text == null
+        ? [{ type: 'paragraph' }]
+        : [{ type: 'paragraph', content: [{ type: 'text', text }] }]
+    }]
+  }])
+  assert.equal(areDurablyEquivalent(
+    emptyTaskItem(false, '\u00A0'),
+    emptyTaskItem(false)
+  ), false, 'an NBSP must not preserve an otherwise-empty unchecked task')
+  assert.equal(areDurablyEquivalent(
+    emptyTaskItem(true, '\u00A0'),
+    emptyTaskItem(true)
+  ), false, 'an NBSP must not preserve an otherwise-empty checked task')
+  assert.equal(areDurablyEquivalent(
+    emptyTaskItem(true, '\u00A0'),
+    emptyTaskItem(false)
+  ), false, 'an empty task checkbox state remains durable')
+  assert.equal(areDurablyEquivalent(
+    emptyTaskItem(false, '\u00A0有内容'),
+    emptyTaskItem(false)
+  ), false, 'only the exact lone NBSP task placeholder is non-durable')
+
   const liftedNestedItem = (withPlaceholder) => nodeDoc([{
     type: 'bullet_list',
     content: [{
@@ -142,6 +172,39 @@ run('durable node contracts ignore only declared derived attrs', () => {
     topLevelWhitespace('\u00A0'),
     { trailingLeadingSpaceEmptyParagraph: true }
   ), false, 'mapper provenance never authorizes dropping Unicode whitespace')
+})
+
+run('terminal literal spaces are source formatting, without weakening other inline semantics', () => {
+  const paragraph = (text, marks = []) => nodeDoc([{
+    type: 'paragraph',
+    content: [{ type: 'text', text, ...(marks.length ? { marks } : {}) }]
+  }])
+  const heading = (text) => nodeDoc([{
+    type: 'heading',
+    attrs: { level: 1 },
+    content: [{ type: 'text', text }]
+  }])
+  const listItem = (text) => nodeDoc([{
+    type: 'bullet_list',
+    content: [{
+      type: 'list_item',
+      content: [{ type: 'paragraph', content: [{ type: 'text', text }] }]
+    }]
+  }])
+
+  assert.equal(areDurablyEquivalent(paragraph('正文'), paragraph('正文 ')), true)
+  assert.equal(areDurablyEquivalent(heading('标题'), heading('标题 ')), true)
+  assert.equal(areDurablyEquivalent(listItem('项目'), listItem('项目 ')), true)
+  assert.equal(areDurablyEquivalent(paragraph('正文'), paragraph('正文\t ')), false,
+    'a tab remains durable even when followed by a plain terminal space')
+  assert.equal(areDurablyEquivalent(
+    paragraph('正文', [{ type: 'strong' }]),
+    paragraph('正文 ', [{ type: 'strong' }])
+  ), false, 'marked terminal spaces are not a source-formatting exception')
+  assert.equal(areDurablyEquivalent(
+    paragraph('正文'),
+    nodeDoc([{ type: 'paragraph', content: [{ type: 'text', text: '正文' }, { type: 'hardbreak' }] }])
+  ), false, 'a Markdown hard break remains durable')
 })
 
 run('table contracts ignore colwidth but retain alignment spans and unknown attrs', () => {
@@ -496,12 +559,13 @@ run('ignores live list spread metadata that source reparsing normalizes', () => 
   }), 'committed')
 })
 
-run('normalizes the internal leading-space sentinel without hiding list content', () => {
+run('accepts standard leading-space source without hiding list content', () => {
   assert.equal(verified({
-    markdown: '\u200B  indented\n',
+    markdown: '&nbsp; indented\n',
     expectedDoc: paragraphDoc('  indented'),
-    parseMarkdown: () => paragraphDoc('\u200B  indented')
-  }), 'committed', 'the app-owned leading-space sentinel is not document content')
+    parseMarkdown: () => paragraphDoc('\u00A0 indented'),
+    expectedContext: { portableLeadingSpace: true }
+  }), 'committed', 'a standard leading-space entity is equivalent to the rich ASCII space')
 
   const listDoc = (text) => ({
     toJSON: () => ({
@@ -521,15 +585,22 @@ run('normalizes the internal leading-space sentinel without hiding list content'
     })
   })
   assert.equal(verified({
-    markdown: '- \u200B  \n',
+    markdown: '- &nbsp; \n',
     expectedDoc: listDoc('  '),
-    parseMarkdown: () => listDoc('\u200B')
-  }), 'committed', 'an empty list item must not fail because its internal whitespace spelling changed')
+    parseMarkdown: () => listDoc('\u00A0 '),
+    expectedContext: { portableLeadingSpace: true }
+  }), 'committed', 'an empty list item must accept the standard leading-space spelling')
   assert.equal(verified({
-    markdown: '- \u200Bwrong\n',
+    markdown: '- &nbsp;wrong\n',
     expectedDoc: listDoc('expected'),
-    parseMarkdown: () => listDoc('\u200Bwrong')
+    parseMarkdown: () => listDoc('\u00A0wrong')
   }), 'semantic-loss', 'visible list-item text must still be compared')
+
+  assert.equal(verified({
+    markdown: '\u200B  indented\n',
+    expectedDoc: paragraphDoc('  indented'),
+    parseMarkdown: () => paragraphDoc('\u200B  indented')
+  }), 'semantic-loss', 'a legacy zero-width byte is ordinary source content, not HorseMD syntax')
 })
 
 run('ignores table column-width layout metadata that Markdown cannot encode', () => {

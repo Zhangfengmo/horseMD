@@ -26,6 +26,7 @@ import {
   scratchCandidateContext
 } from './editor-source-verification.js'
 import { canReuseCommittedVerifiedSource } from './editor-verified-state.js'
+import { demoteEmptyTaskItemsInView } from './editor-task-list.js'
 
 export function createEditorApi({
   viewRef,
@@ -190,10 +191,19 @@ export function createEditorApi({
       // Saves and exports pass `force` because data durability outranks that
       // optimization: a node view can have a visible transaction even if an
       // edit-intent event was missed or an asynchronous callback is delayed.
+      const hasPending = hasPendingRichFlush?.() === true
+      const status = sourceCommitter.diagnostics().status
+      // An empty task checkbox is a rich-only state: standard GFM reads a
+      // bare `* [ ]` as normal list text.  Convert it in the live document at
+      // every durable boundary before looking at cached source, so the source,
+      // save result, and a cold reopen all agree on the ordinary text form.
+      if (force || hasPending || status !== 'committed') {
+        demoteEmptyTaskItemsInView(viewRef.current)
+      }
       if (canReuseCommittedVerifiedSource({
         force,
-        hasPendingRichFlush: hasPendingRichFlush?.() === true,
-        status: sourceCommitter.diagnostics().status
+        hasPendingRichFlush: hasPending,
+        status
       })) return lastMarkdownRef.current
       // Saves and source-mode switches can occur before Milkdown publishes its
       // delayed markdownUpdated callback. Serialize the current ProseMirror

@@ -242,57 +242,32 @@ const runHintShiftCase = (lineEnding) => {
 runHintShiftCase('\n')
 runHintShiftCase('\r\n')
 
-// Leading spaces are authored as U+200B + literal spaces so Markdown does not
-// reinterpret them as an indented code block. The sentinel disappears again
-// when the block no longer starts with whitespace.
-const sentinelDoc = schema.nodes.doc.create(null, [paragraph('a')])
-state = EditorState.create({ schema, doc: sentinelDoc })
-const sentinelSplit = state.tr.split(2)
-let sentinelState = state.apply(sentinelSplit)
-let sentinelMapped = mapTransactions({
+// The byte-identical transaction mapper must decline a new leading space: the
+// canonical source-first path owns its portable `&nbsp;` spelling and entity
+// offsets. It must never emit a private zero-width byte.
+const leadingSpaceDoc = schema.nodes.doc.create(null, [paragraph('a')])
+state = EditorState.create({ schema, doc: leadingSpaceDoc })
+const leadingSpaceSplit = state.tr.split(2)
+const leadingSpaceState = state.apply(leadingSpaceSplit)
+const leadingSpaceMapped = mapTransactions({
   source: 'a',
-  transactions: [sentinelSplit],
+  transactions: [leadingSpaceSplit],
   oldState: state,
-  newState: sentinelState,
+  newState: leadingSpaceState,
   mapPosition
 })
-const sentinelSpace = sentinelState.tr.insertText(' ', 4)
-let sentinelNextState = sentinelState.apply(sentinelSpace)
-sentinelMapped = mapTransactions({
-  source: sentinelMapped.markdown,
-  transactions: [sentinelSpace],
-  oldState: sentinelState,
-  newState: sentinelNextState,
-  blockHints: sentinelMapped.blockHints,
+const leadingSpaceInsert = leadingSpaceState.tr.insertText(' ', 4)
+const leadingSpaceNextState = leadingSpaceState.apply(leadingSpaceInsert)
+const leadingSpaceResult = mapTransactions({
+  source: leadingSpaceMapped.markdown,
+  transactions: [leadingSpaceInsert],
+  oldState: leadingSpaceState,
+  newState: leadingSpaceNextState,
+  blockHints: leadingSpaceMapped.blockHints,
   mapPosition
 })
-assert.equal(sentinelMapped.ok, true)
-assert.equal(sentinelMapped.markdown, 'a\n\n\u200B ')
-sentinelState = sentinelNextState
-const sentinelText = sentinelState.tr.insertText('x', 5)
-sentinelNextState = sentinelState.apply(sentinelText)
-sentinelMapped = mapTransactions({
-  source: sentinelMapped.markdown,
-  transactions: [sentinelText],
-  oldState: sentinelState,
-  newState: sentinelNextState,
-  blockHints: sentinelMapped.blockHints,
-  mapPosition
-})
-assert.equal(sentinelMapped.markdown, 'a\n\n\u200B x')
-sentinelState = sentinelNextState
-const removeLeadingSpace = sentinelState.tr.delete(4, 5)
-sentinelNextState = sentinelState.apply(removeLeadingSpace)
-sentinelMapped = mapTransactions({
-  source: sentinelMapped.markdown,
-  transactions: [removeLeadingSpace],
-  oldState: sentinelState,
-  newState: sentinelNextState,
-  blockHints: sentinelMapped.blockHints,
-  mapPosition
-})
-assert.equal(sentinelMapped.ok, true)
-assert.equal(sentinelMapped.markdown, 'a\n\nx')
+assert.equal(leadingSpaceResult.ok, false)
+assert.equal(leadingSpaceResult.reason, 'leading-whitespace-requires-canonical-source')
 
 // An empty block that was not created by the mapper has no byte ownership.
 // Even if a caller supplies an optimistic position, it must fail closed.

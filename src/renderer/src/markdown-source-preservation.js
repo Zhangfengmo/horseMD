@@ -8,6 +8,7 @@ import {
   canonicalFreshTextToSource,
   canonicalTextToSource,
   commonChange,
+  markdownLines,
   rawInsertionAtCanonicalLineEnd,
   rawOffsetInCanonicalGap,
   rawOffsetAtVisible
@@ -22,6 +23,7 @@ import {
   preserveDivergedNestedListChange,
   preserveDivergedListContinuation,
   preserveEmptyListItemTextChange,
+  preserveNestedEmptyListExit,
   preserveListBlockChange,
   preserveStableListRowChanges,
   preserveTypedBulletInputRule,
@@ -38,6 +40,7 @@ import {
   preserveTrailingEmptyBlock,
   withoutStandaloneEmptyBlockLines
 } from './lib/markdown-preservation/paragraphs.js'
+import { QUOTE_PREFIX_SOURCE } from './lib/markdown-preservation/block-prefix.js'
 import {
   hasStructuralPrefixChange,
   preserveDivergedBlockTextChange,
@@ -89,6 +92,94 @@ export const generatedScratchMarkdown = (canonical, parseTables, { compactSpacin
   ).replace(/\r?\n+$/, '\n')
 }
 
+// GFM deliberately treats a bare `* [ ]` as ordinary list text.  When the
+// rich editor deletes the final label of an actual task, editor-task-list
+// changes the live node to precisely that ordinary text before this mapper
+// runs.  The old and new canonical lists therefore differ in a way the normal
+// task-prefix scanner must not erase: `[ ]` has changed from syntax to text.
+//
+// Map only the strict row-for-row case.  Every untouched list row must have
+// the same task body in source and canonical, while each changed row must be
+// a task with content becoming the exact bare `[ ]` / `[x]` text.  This keeps
+// authored quote prefixes, indentation, marker spelling, line endings, and
+// all neighbouring bytes intact without teaching the parser any HorseMD-only
+// syntax.
+const listRowsForTaskDemotion = (markdown) => markdownLines(String(markdown || ''))
+  .map((line) => {
+    const match = line.text.match(new RegExp(
+      `^(${QUOTE_PREFIX_SOURCE}(?:[-+*]|\\d{1,9}[.)])[ \\t]+)(.*)$`
+    ))
+    if (!match) return null
+    const body = match[2]
+    const eol = body.endsWith('\r') ? '\r' : ''
+    const content = eol ? body.slice(0, -1) : body
+    const task = content.match(/^\[([ xX])\][ \t]+(.*)$/)
+    const bare = content.match(/^\[([ xX])\]$/)
+    return {
+      ...line,
+      prefix: match[1],
+      content,
+      eol,
+      task: task ? { checked: task[1].toLowerCase(), text: task[2] } : null,
+      bare: bare ? bare[1].toLowerCase() : null
+    }
+  })
+  .filter(Boolean)
+
+const preserveTaskItemDemotion = ({ source, previous, next }) => {
+  const sourceRows = listRowsForTaskDemotion(source)
+  const previousRows = listRowsForTaskDemotion(previous)
+  const nextRows = listRowsForTaskDemotion(next)
+  if (!sourceRows.length || sourceRows.length !== previousRows.length || previousRows.length !== nextRows.length) {
+    return null
+  }
+
+  const replacements = []
+  for (let index = 0; index < sourceRows.length; index += 1) {
+    const sourceRow = sourceRows[index]
+    const previousRow = previousRows[index]
+    const nextRow = nextRows[index]
+    // Other ordinary list rows may sit in the same document (including inside
+    // the same blockquote). They are not part of this transform, but their
+    // exact unchanged content is a useful fence proving this row alignment.
+    if (!previousRow.task) {
+      if (sourceRow.content !== previousRow.content || nextRow.content !== previousRow.content) return null
+      continue
+    }
+    if (!sourceRow.task) return null
+    if (
+      sourceRow.task.checked !== previousRow.task.checked ||
+      sourceRow.task.text !== previousRow.task.text
+    ) return null
+
+    if (nextRow.bare === previousRow.task.checked) {
+      replacements.push({
+        start: sourceRow.start,
+        end: sourceRow.end,
+        text: `${sourceRow.prefix}[${nextRow.bare}]${sourceRow.eol}`
+      })
+      continue
+    }
+    if (
+      !nextRow.task ||
+      nextRow.task.checked !== previousRow.task.checked ||
+      nextRow.task.text !== previousRow.task.text
+    ) return null
+  }
+
+  if (!replacements.length) return null
+  return {
+    markdown: replacements
+      .sort((left, right) => right.start - left.start)
+      .reduce(
+        (result, replacement) => result.slice(0, replacement.start) + replacement.text + result.slice(replacement.end),
+        source
+      ),
+    preserved: true,
+    reason: 'task-item-demoted-to-ordinary-text'
+  }
+}
+
 // Milkdown serializes the complete document after every rich-text transaction.
 // Preserve the user's untouched source spelling by applying only the serializer's
 // localized delta. Structural edits are bounded to a list, table, or touched
@@ -127,10 +218,18 @@ export function preserveRichMarkdownSource(source, previousCanonical, nextCanoni
         parseTables: options.parseTables,
         allowCoordinateIdentity: options.allowTableCoordinateIdentity === true
       })
-      if (durableContext || result.durableContext) {
+      // The canonical serializer emits `&#x20;` for the first visible space.
+      // `canonicalTextToSource` deliberately writes standard `&nbsp;` in the
+      // authored candidate. Mark this exact generated equivalence so durable
+      // validation can distinguish it from a user's literal NBSP.
+      const portableLeadingSpace =
+        String(nextCanonical || '').includes('&#x20;') &&
+        String(result.markdown || '').includes('&nbsp;')
+      if (durableContext || result.durableContext || portableLeadingSpace) {
         result.durableContext = {
           ...(result.durableContext || {}),
-          ...(durableContext || {})
+          ...(durableContext || {}),
+          ...(portableLeadingSpace ? { portableLeadingSpace: true } : {})
         }
       }
     }
@@ -248,6 +347,13 @@ function preserveRichMarkdownSourceCore(
   if (!next) {
     return { markdown: '', preserved: true, reason: 'document-emptied' }
   }
+
+  const taskDemotion = preserveTaskItemDemotion({
+    source: sourceMarkdown,
+    previous,
+    next
+  })
+  if (taskDemotion) return taskDemotion
 
   const sourceVisible = sourceVisibleIndex(sourceMarkdown)
   const previousVisible = sourceVisibleIndex(previous)
@@ -412,6 +518,15 @@ function preserveRichMarkdownSourceCore(
     replacementVisible
   })
   if (appendedParagraph) return appendedParagraph
+  const nestedEmptyListExit = preserveNestedEmptyListExit({
+    source: sourceMarkdown,
+    previous,
+    next,
+    start,
+    previousEnd,
+    nextEnd
+  })
+  if (nestedEmptyListExit) return nestedEmptyListExit
   // Filling an existing empty list item is more specific than a generic tail
   // append. It owns both the authored marker and the canonical row context,
   // so it can preserve structurally required literal-marker escapes that a
