@@ -705,7 +705,8 @@ export default function App() {
     requestHtmlExport,
     requestPandocExport,
     setSidebarOpen,
-    initialFolderRoots: initialFolderRoots
+    initialFolderRoots: initialFolderRoots,
+    editorApis
   })
 
   const syncWorkspaces = useSyncWorkspaces({ folderRoots, addFolder })

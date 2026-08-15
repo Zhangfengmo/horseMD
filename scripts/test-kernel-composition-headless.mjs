@@ -344,4 +344,47 @@ console.log('--- kernel composition headless ---')
   assert.deepEqual(h.revertCalls, ['composition-range-invalidated'], 'a late cancel is also a no-op')
 }
 
+// Case (l): the PRODUCTION queue pattern — reloadTabFromDisk (useFileOps.js)
+// does not call queueExternal directly (it only has the tab's public
+// flushMarkdownSettled, never a handle on this module's private session); it
+// achieves "external modifications during composition are queued until
+// compositionend" (合成期间外部修改排队) by awaiting settled() before
+// applying the external content. Lock that this ordering actually holds:
+// an external apply awaiting settled() must not run until AFTER the
+// composition's commit/revert lands, and must run once no session is
+// active (no artificial delay for an unrelated external change).
+{
+  const pmBaseDoc = doc(p('ab'))
+  const view = makeView(pmBaseDoc, { from: 2, to: 2 })
+  const map = linearMap(1, 3)
+  const h = makeHarness(view, map)
+
+  // No active composition: an external apply modeled on settled() must run
+  // right away, exactly like a normal (non-mid-composition) file reload.
+  const idleLog = []
+  const idleApply = async () => { await h.session.settled(); idleLog.push('applied') }
+  await idleApply()
+  assert.deepEqual(idleLog, ['applied'], 'settled() resolves immediately with no active session')
+
+  // Mid-composition: the external apply must block until commit/revert.
+  h.session.onStart()
+  const externalLog = []
+  const externalApply = (() => {
+    const promise = (async () => {
+      await h.session.settled()
+      externalLog.push('applied')
+    })()
+    return promise
+  })()
+  await tick()
+  assert.deepEqual(externalLog, [], 'external apply must not run while a composition is in flight')
+
+  view.state.doc = doc(p('a甲b'))
+  h.session.onEnd() // commits the composition
+  await externalApply
+  assert.deepEqual(externalLog, ['applied'], 'external apply runs only after the composition settles')
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲', pmFrom: 2 }],
+    'the composition itself still committed normally — the external apply did not preempt it')
+}
+
 console.log('PASS kernel composition headless')

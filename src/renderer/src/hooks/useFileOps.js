@@ -15,6 +15,9 @@
 //   isMobile/t/tRef — i18n + mobile save-dialog branch
 //   setRenameState/setSaveNameState — rename / mobile-save modal triggers
 //   setSidebarOpen/initialFolderRoots — forwarded to useWorkspace
+//   editorApis — per-tab editor API ref (id -> api), used by
+//     reloadTabFromDisk to await composition settle before an external
+//     reload is applied (source-kernel composition queue, see there)
 import { useCallback, useEffect, useRef } from 'react'
 import { isTabDirty } from '../lib/tab-state.js'
 import {
@@ -54,7 +57,8 @@ export function useFileOps({
   requestHtmlExport,
   requestPandocExport,
   setSidebarOpen,
-  initialFolderRoots
+  initialFolderRoots,
+  editorApis
 }) {
   const workspace = useWorkspace({ initialFolderRoots, setSidebarOpen })
   const { bumpRefresh } = workspace
@@ -577,6 +581,21 @@ export function useFileOps({
 
   const reloadTabFromDisk = useCallback(async (id, path) => {
     commitAllLive() // so the "don't clobber unsaved" check below sees live edits
+    // Source-kernel composition queue: the spec requires external file
+    // modifications that land WHILE an IME composition is in flight to be
+    // QUEUED until compositionend, never applied mid-composition (合成期间
+    // 外部修改排队). `flushMarkdownSettled()` awaits the tab's
+    // CompositionSession settle (its single committed edit, or a clean
+    // revert — bounded by a ≤3s safety timeout, so this can never hang) *
+    // before* this reload reads/applies the on-disk content, which achieves
+    // the queue semantics at the call site that actually owns "apply the
+    // external change now" — see the module comment on `queueExternal` in
+    // editor-kernel-composition.js for why that primitive itself is not
+    // invoked directly here. A tab with no active composition (or no live
+    // editor API yet, e.g. a not-yet-mounted lazy editor) resolves
+    // immediately; legacy (non-kernel) tabs expose the same method as a
+    // harmless no-op await.
+    await editorApis?.current?.[id]?.flushMarkdownSettled?.().catch(() => null)
     try {
       const { content, mtimeMs } = await window.api.readFile(path)
       setTabs((prev) =>
@@ -602,7 +621,7 @@ export function useFileOps({
     } catch {
       /* file vanished mid-reload; leave the tab as-is */
     }
-  }, [commitAllLive, setTabs, liveContentRef])
+  }, [commitAllLive, setTabs, liveContentRef, editorApis])
 
   useEffect(() => {
     const off = window.api.onFileChanged(({ path, mtimeMs }) => {

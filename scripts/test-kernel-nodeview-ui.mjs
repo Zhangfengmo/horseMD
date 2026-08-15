@@ -6,11 +6,14 @@
 //
 // 1. Node-view identity: editing a FAR paragraph must not tear down and
 //    remount the DOM nodes owned by unrelated node views (CodeMirror's
-//    `.cm-editor`, an `<img>`, a `<table>`) or move the scroll position.
-//    This is the whole point of editor-kernel-reconciler.js's minimal-diff
-//    `diffReplaceRange` (see its own header comment) — this script is the
-//    first thing that actually measures DOM node IDENTITY end-to-end rather
-//    than just asserting the resulting markdown bytes.
+//    `.cm-editor`, an `<img>`, a `<table>`, and — spec criterion 4 names it
+//    explicitly — a Mermaid diagram's rendered `<svg>`, which is a code-block
+//    PREVIEW substitution rather than a plain element, see
+//    editor-mermaid.js) or move the scroll position. This is the whole point
+//    of editor-kernel-reconciler.js's minimal-diff `diffReplaceRange` (see
+//    its own header comment) — this script is the first thing that actually
+//    measures DOM node IDENTITY end-to-end rather than just asserting the
+//    resulting markdown bytes.
 // 2. Blocked matrix (阻止矩阵, Task 7): slash-menu structural items stay
 //    visible-but-`.disabled` and refuse to run (both via Enter and via a
 //    real pointer click); the right-click context menu never offers format/
@@ -67,6 +70,10 @@ const FIXTURE = [
   'function greet(name) {',
   '  return `你好，${name}！`;',
   '}',
+  '```',
+  '',
+  '```mermaid',
+  'graph TD; A-->B;',
   '```',
   '',
   '示意图见此：![节点视图测试图](./kernel-nodeview.svg) 图片说明结束。',
@@ -129,6 +136,16 @@ const VISIBLE_EDITOR = `[...document.querySelectorAll('.ProseMirror')].find((nod
 // instead of the actual table. `realTable(editor)` filters it out.
 const REAL_TABLE = (editorExpr) =>
   `[...(${editorExpr})?.querySelectorAll('table') || []].find((node) => !node.closest('.drag-preview'))`
+// Mermaid renders via Crepe's code-block "preview" mechanism
+// (editor-mermaid.js `createMermaidPreviewRenderer`), not a custom widget: a
+// ```mermaid block's `.milkdown-code-block` gets a `.preview` div holding the
+// rendered `<svg>` once the (lazily imported) Mermaid render lands. Locate it
+// by the block's language-button text, the same convention
+// test-mermaid-long-document-ui.mjs uses for the same node type.
+const MERMAID_PREVIEW_SVG = (editorExpr) =>
+  `[...(${editorExpr})?.querySelectorAll('.milkdown-code-block') || []]
+    .find((block) => block.querySelector('.language-button')?.textContent?.trim().toLowerCase() === 'mermaid')
+    ?.querySelector('.preview svg')`
 
 const mounted = (evaluate) => evaluate(`(${VISIBLE_EDITOR})?.textContent`)
 
@@ -240,6 +257,10 @@ async function run() {
     await waitFor(() => evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('.cm-editor')`), 'code block never mounted')
     await waitFor(() => evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('img')`), 'image never mounted')
     await waitFor(() => evaluate(`!!(${REAL_TABLE(VISIBLE_EDITOR)})`), 'table never mounted')
+    // Mermaid lazy-loads its renderer on first use — give the async render
+    // (dynamic import + mermaid.render()) time to land before relying on the
+    // svg existing for anything below.
+    await waitFor(() => evaluate(`!!(${MERMAID_PREVIEW_SVG(VISIBLE_EDITOR)})`), 'mermaid preview never rendered', 150)
     assert.equal(app.dialogs.length, 0, 'no dialog on plain mount')
 
     // ---- enable kernel mode ----
@@ -249,6 +270,11 @@ async function run() {
       const text = await mounted(evaluate)
       return text && text.includes('远段落') && text.includes('填充六') ? text : null
     }, 'document did not remount after enabling kernel mode')
+    // Enabling kernel mode itself remounts the tab (a fresh Crepe instance),
+    // so the mermaid preview must re-render here before it can be used as an
+    // identity baseline below — this wait is expected to fire once, not a
+    // symptom of the far-edit regression this section actually probes for.
+    await waitFor(() => evaluate(`!!(${MERMAID_PREVIEW_SVG(VISIBLE_EDITOR)})`), 'mermaid preview never re-rendered after enabling kernel mode', 150)
     await sleep(300)
 
     // Sanity: this fixture ends in a plain paragraph specifically so kernel
@@ -273,6 +299,8 @@ async function run() {
       window.__hmProbeCm = editor.querySelector('.cm-editor')
       window.__hmProbeImg = editor.querySelector('img')
       window.__hmProbeTable = (${REAL_TABLE('editor')})
+      window.__hmProbeMermaid = (${MERMAID_PREVIEW_SVG('editor')})
+      window.__hmProbeMermaidChildCount = window.__hmProbeMermaid?.children?.length ?? 0
       true
     })()`)
     const scrollBefore = await scrollTop(evaluate)
@@ -286,22 +314,38 @@ async function run() {
     const cmIdentityKept = await evaluate(`window.__hmProbeCm === (${VISIBLE_EDITOR})?.querySelector('.cm-editor')`)
     const imgIdentityKept = await evaluate(`window.__hmProbeImg === (${VISIBLE_EDITOR})?.querySelector('img')`)
     const tableIdentityKept = await evaluate(`window.__hmProbeTable === (${REAL_TABLE(VISIBLE_EDITOR)})`)
+    // Spec criterion 4 names Mermaid explicitly (rendered via the code-block
+    // preview mechanism, not a plain DOM element like img/table) — its
+    // rendered `<svg>` must survive a far-paragraph edit exactly like the
+    // other node views, not just "some Mermaid preview exists somewhere".
+    const mermaidIdentityKept = await evaluate(`window.__hmProbeMermaid === (${MERMAID_PREVIEW_SVG(VISIBLE_EDITOR)})`)
     assert.equal(cmIdentityKept, true, 'CodeMirror .cm-editor DOM node was torn down/remounted by an edit in a far paragraph')
     assert.equal(imgIdentityKept, true, 'img DOM node was torn down/remounted by an edit in a far paragraph')
     assert.equal(tableIdentityKept, true, 'table DOM node was torn down/remounted by an edit in a far paragraph')
+    assert.equal(mermaidIdentityKept, true, 'Mermaid preview svg DOM node was torn down/remounted by an edit in a far paragraph')
     const scrollAfter = await scrollTop(evaluate)
     assert.equal(scrollAfter, scrollBefore, 'scroll position moved from an edit in a far paragraph')
 
-    // Verify the CodeMirror/image/table CONTENT is also unchanged (identity
-    // alone would not catch a node view that kept its DOM node but silently
-    // re-rendered wrong content into it).
+    // Verify the CodeMirror/image/table/Mermaid CONTENT is also unchanged
+    // (identity alone would not catch a node view that kept its DOM node but
+    // silently re-rendered wrong content into it).
     const cmContentUnchanged = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent.includes('function greet')`)
     const tableTextUnchanged = await evaluate(`(() => {
       const table = (${REAL_TABLE(VISIBLE_EDITOR)})
       return !!table && table.textContent.includes('甲') && table.textContent.includes('丁')
     })()`)
+    // Compare structural child count rather than assuming a specific inner
+    // tag (Mermaid's SVG internals — <text> vs foreignObject <span> labels —
+    // vary by diagram type/version); a node view that kept the SAME svg
+    // element but silently re-rendered emptied/different content would still
+    // show a count mismatch or a drop to zero.
+    const mermaidContentUnchanged = await evaluate(`(() => {
+      const svg = (${MERMAID_PREVIEW_SVG(VISIBLE_EDITOR)})
+      return !!svg && svg.children.length > 0 && svg.children.length === window.__hmProbeMermaidChildCount
+    })()`)
     assert.equal(cmContentUnchanged, true, 'code block content changed unexpectedly')
     assert.equal(tableTextUnchanged, true, 'table content changed unexpectedly')
+    assert.equal(mermaidContentUnchanged, true, 'Mermaid preview svg content went missing/empty unexpectedly')
 
     // ============================================================
     // 2) Blocked matrix — slash menu (阻止矩阵)

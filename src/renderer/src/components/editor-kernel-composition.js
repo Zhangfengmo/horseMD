@@ -55,7 +55,27 @@
 //    right after that session settles; run immediately when no session is
 //    active. Mirrors the waiters-Set pattern in
 //    src/renderer/src/lib/editor-api-registry.js (never rejects, always
-//    resolves/flushes).
+//    resolves/flushes). NOT dead code, but also not the production queue
+//    point for the one caller that actually needs this guarantee today:
+//    `reloadTabFromDisk` in src/renderer/src/hooks/useFileOps.js (the
+//    external-file-change handler) achieves the same "queued until
+//    compositionend" contract by AWAITING `api.flushMarkdownSettled()`
+//    (which awaits `composition.settled()`, see the override in
+//    editor-kernel-mode.js) before it reads/applies the on-disk content,
+//    rather than pushing a callback through this queue. That is the right
+//    layer for it: useFileOps only has the tab's public editor API (id ->
+//    flushMarkdownSettled/…), never a handle on this module's private
+//    `compositionSession`, and blocking the async reload until settle is
+//    simpler than round-tripping a callback through queueExternal for a
+//    caller that has nothing else useful to do meanwhile anyway. This
+//    primitive stays as the general-purpose fire-or-queue mechanism (kept
+//    wired through `kernel.composition.queueExternal`, kept regression-
+//    locked by case (g) in scripts/test-kernel-composition-headless.mjs, and
+//    matching the binding spec in
+//    docs/superpowers/plans/2026-08-15-source-kernel-integration.md) for any
+//    future caller that DOES hold a `compositionSession`/`composition`
+//    handle directly and needs fire-immediately-or-queue semantics instead
+//    of blocking its own caller.
 import { diffReplaceRange } from './editor-kernel-reconciler.js'
 
 const COMPOSITION_INVALIDATED = 'composition-range-invalidated'
