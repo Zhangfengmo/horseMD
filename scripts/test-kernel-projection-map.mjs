@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
-import { KERNEL_CODES } from '../src/renderer/src/lib/source-kernel/index.js'
+import { KERNEL_CODES, buildCharacterMap } from '../src/renderer/src/lib/source-kernel/index.js'
 
 assert.equal(KERNEL_CODES.STALE, 'stale-revision')
 assert.equal(KERNEL_CODES.INVALID, 'invalid-range')
@@ -37,6 +37,9 @@ const schema = new Schema({
     ordered_list: { content: 'list_item+', group: 'block' },
     list_item: { content: 'paragraph block*' },
     code_block: { content: 'text*', group: 'block', code: true },
+    table: { content: 'table_row+', group: 'block' },
+    table_row: { content: 'table_cell+' },
+    table_cell: { content: 'paragraph+' },
     image: { group: 'inline', inline: true, atom: true, attrs: { src: { default: '' } } },
     text: { group: 'inline' }
   },
@@ -174,6 +177,140 @@ console.log('--- kernel projection map ---')
   const after = map.rawToPmPos(12)
   assert.equal(after.pos, 3)
   assert.equal(after.atom, false)
+}
+
+// --- Review-fix regressions (non-editable leaf class, opaque table, empty
+// textblock guard, ordered-flag cross-check) ---
+
+// Case 6: paragraph, non-empty fenced code block, paragraph. Raw indices of
+// 'p1\n\n```\nhi\n```\n\np2\n': p=0 1=1 \n=2 \n=3 `=4 `=5 `=6 \n=7 h=8 i=9
+// \n=10 `=11 `=12 `=13 \n=14 \n=15 p=16 2=17 \n=18. mdast (kernel run):
+// paragraph[0,2), code[4,14), paragraph[16,18).
+// PM: paragraph1@0 (content start 1, size 2 -> range [1,3]); code_block@4
+// (non-editable: charMap must be null even though it has real content —
+// this is the case that used to null the WHOLE map via the content.size
+// mismatch); paragraph2@8 (content start 9, size 2 -> range [9,11]).
+{
+  const md = 'p1\n\n```\nhi\n```\n\np2\n'
+  const d = doc(p(text('p1')), schema.node('code_block', null, text('hi')), p(text('p2')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc containing a non-empty code block must still map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].charMap, null, 'code_block pair must be non-editable')
+  assert.equal(map.pmPosToRaw(1), 0) // before p1
+  assert.equal(map.pmPosToRaw(3), 2) // after p1
+  assert.equal(map.pmPosToRaw(9), 16) // before p2
+  assert.equal(map.pmPosToRaw(11), 18) // after p2
+  assert.equal(map.pmPosToRaw(5), null) // inside the code block's PM content
+  assert.equal(map.rawToPmPos(9), null) // raw 9 = 'i' of "hi", inside the fence
+}
+
+// Case 7: empty fenced code block ('```\n```\n'). mdast code node has NO
+// `.children` at all regardless of whether its `.value` is empty or not —
+// buildCharacterMap would return an empty (non-null) units array either
+// way, so this case specifically proves the fix isn't just "big code blocks
+// null the whole map" but "code blocks never claim a charMap, period" —
+// an empty one must NOT silently report its fence position as a valid
+// content boundary.
+{
+  const md = '```\n```\n'
+  const d = doc(schema.node('code_block', null, []))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with only an empty code block must still map (non-editable, not rejected)')
+  assert.equal(map.blockPairs.length, 1)
+  assert.equal(map.blockPairs[0].charMap, null)
+  assert.equal(map.pmPosToRaw(1), null) // content pos of the empty code block
+  assert.equal(map.rawToPmPos(2), null) // third backtick of the opening fence
+}
+
+// Case 8: empty ATX heading ('#\nP\n') followed by a normal paragraph.
+// mdast (kernel run): heading[0,1) with 0 children, paragraph[2,3) "P".
+// # =0 \n=1 P=2 \n=3.
+// PM: heading@0 (content start 1, EMPTY -> content.size 0, so the
+// content.size check alone can't catch this — the empty-textblock guard
+// is what forces charMap:null here); paragraph@2 (heading's nodeSize is
+// 1+0+1=2, so paragraph follows immediately) content start 3, size 1.
+// This locks BOTH halves of the guard: a non-paragraph zero-unit textblock
+// is rejected, and a real (non-empty) paragraph elsewhere in the SAME doc
+// is unaffected by that rejection.
+{
+  const md = '#\nP\n'
+  const d = doc(schema.node('heading', { level: 1 }, []), p(text('P')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with an empty heading must still map')
+  assert.equal(map.blockPairs.length, 2)
+  assert.equal(map.blockPairs[0].charMap, null, 'empty heading must be non-editable')
+  assert.equal(map.pmPosToRaw(1), null) // content pos of the empty heading
+  assert.equal(map.rawToPmPos(0), null) // the '#' itself
+  assert.equal(map.pmPosToRaw(3), 2) // before P — untouched by the heading fix
+  assert.equal(map.pmPosToRaw(4), 3) // after P
+}
+
+// Case 8b: the kernel-level guarantee the paragraph branch of the guard
+// relies on, proven directly against buildCharacterMap. Real CommonMark
+// never emits a genuinely empty (0-child) `paragraph` mdast node — a blank
+// line simply isn't a paragraph at all — so buildProjectionMap can never
+// actually exercise "md.type === 'paragraph' && units.length === 0" via a
+// real document. This proves the fallback it relies on IS correct, using a
+// hand-built mdast-shaped node (buildCharacterMap is a pure function of
+// `(text, node)`, it doesn't require a real remark parse).
+{
+  const md = 'X\n'
+  const fakeEmptyParagraph = { type: 'paragraph', children: [], position: { start: { offset: 0 }, end: { offset: 0 } } }
+  const charMap = buildCharacterMap(md, fakeEmptyParagraph)
+  assert.ok(charMap)
+  assert.equal(charMap.units.length, 0)
+  assert.equal(charMap.visibleLength, 0)
+  assert.equal(charMap.visibleToRaw(0), 0) // == the fabricated paragraph's own start offset, correctly
+}
+
+// Case 9: 2x2 GFM table treated as one opaque pair, plus a trailing
+// paragraph. Raw '| a | b |\n| - | - |\n| c | d |\n\nP\n':
+// row1 [0,10) row2 [10,20) row3 [20,30) blank \n@30 'P'@31 \n@32.
+// mdast (kernel run): table[0,29) (rows/cells nested inside, not walked),
+// paragraph[31,32) "P".
+// PM (descendants would normally walk table_row/table_cell/paragraph
+// inside the table, but flattenPm stops descending once it records the
+// `table` pair) -> table@0 (opaque, charMap null), paragraph@26 (content
+// start 27, size 1) — position 26 is whatever ProseMirror's own node
+// numbering gives the table's full subtree; irrelevant to pairing since we
+// never try to look inside it.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n\nP\n'
+  const d = doc(
+    schema.node('table', null, [
+      schema.node('table_row', null, [
+        schema.node('table_cell', null, [p(text('a'))]),
+        schema.node('table_cell', null, [p(text('b'))])
+      ]),
+      schema.node('table_row', null, [
+        schema.node('table_cell', null, [p(text('c'))]),
+        schema.node('table_cell', null, [p(text('d'))])
+      ])
+    ]),
+    p(text('P'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, '2x2 table + paragraph must still map')
+  assert.equal(map.blockPairs.length, 2, 'table subtree must not be descended into')
+  assert.equal(map.blockPairs[0].charMap, null, 'table pair must be opaque/non-editable')
+  assert.equal(map.pmPosToRaw(27), 31) // before P
+  assert.equal(map.pmPosToRaw(28), 32) // after P
+  assert.equal(map.rawToPmPos(5), null) // inside the table's raw span
+}
+
+// Case 10: bullet_list PM paired against ORDERED markdown -> whole map
+// null, even though every block type string ('list'/'listItem'/'paragraph')
+// still lines up. md = '1. 甲\n2. 乙\n' parses to an mdast `list` with
+// `ordered: true` (confirmed by kernel run); pairing it with a PM
+// `bullet_list` must be rejected.
+{
+  const md = '1. 甲\n2. 乙\n'
+  const d = doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(text('甲'))]),
+    schema.node('list_item', null, [p(text('乙'))])
+  ]))
+  assert.equal(buildProjectionMap(md, d), null, 'bullet_list vs ordered markdown must reject the whole map')
 }
 
 console.log('PASS kernel projection map')

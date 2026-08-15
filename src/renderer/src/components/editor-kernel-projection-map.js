@@ -9,9 +9,16 @@
 // kernel's mdast (rather than a fresh remark parse) so ProjectionMap can
 // reuse the kernel's single source of truth for block boundaries.
 //
-// Fail-closed: any structural mismatch (block count, block type, or a
-// textblock the kernel can't character-map) rejects the WHOLE map (`null`),
-// never a partial/best-effort map. See docs referenced by Task 1 brief:
+// Fail-closed: any structural mismatch (block count, block type, ordered
+// flag, or a textblock the kernel can't character-map) rejects the WHOLE
+// map (`null`), never a partial/best-effort map. Some block TYPES are
+// non-editable by construction, though — they still occupy a slot in the
+// structural pairing (so a document CONTAINING one still maps its other
+// blocks), but never carry a charMap and any offset targeting them (or
+// their raw span) resolves to `null`: `code_block`/`html` (no reliable
+// character-level decode contract; math shares `code_block` on the PM
+// side) and `table` (treated as one opaque leaf — see OPAQUE_TYPES below).
+// See docs referenced by Task 1 brief:
 // scripts/test-editor-source-map.mjs for the hand-built-PM-schema precedent
 // and src/renderer/src/lib/source-kernel/character-map.js for the unit
 // model (`units[]`, `kind` in char|escape|entity|atom|linebreak, boundary
@@ -37,14 +44,46 @@ const PM_TO_MD = {
 
 const MD_BLOCK_TYPES = new Set(Object.values(PM_TO_MD).flat())
 
+// PM leaf types that structurally pair (so a doc CONTAINING one still gets
+// a map for its other blocks) but are never treated as character-mappable
+// content, regardless of what buildCharacterMap would report:
+//  - `code_block` (mdast `code`/`math`): the mdast `code`/`math` node has no
+//    `.children` — its text lives in `.value` — so `buildCharacterMap`'s
+//    `collectUnits` (which only reads `.children`) sees zero children and
+//    returns an EMPTY units array (not null) for any code block, empty or
+//    not. That's not a proof of alignment, it's collectUnits never looking
+//    at the payload at all — treating it as editable let a non-empty code
+//    block null the WHOLE map (content.size mismatch) and let an empty code
+//    block silently report its own fence position as if it were a valid
+//    content boundary. Both are wrong; the fix is to never claim character
+//    mapping for this node type in the first place.
+//  - `html`: block HTML is opaque prose (may contain raw markdown-like
+//    bytes with no decode contract) — kept non-editable even on schemas
+//    where it's declared as a textblock rather than an atom.
+const NON_EDITABLE_LEAF_TYPES = new Set(['code_block', 'html'])
+
+// PM/mdast types whose subtree is intentionally NOT walked into for
+// pairing purposes: `table` is recorded as ONE opaque pair. A typical PM
+// table schema wraps cell content in `table_cell > paragraph`, but GFM
+// `tableCell` in mdast holds phrasing content directly (no paragraph
+// wrapper) — descending into both subtrees would zip a PM `paragraph` pair
+// against no mdast counterpart and null the WHOLE document. Treating the
+// table as opaque (no interior offsets, like an atom) keeps every other
+// block in the document mappable.
+const OPAQUE_TYPES = new Set(['table'])
+
 // Walk every descendant of the PM doc, collecting the ones whose type name
 // is a recognized structural pair (containers AND textblocks) in document
 // order. `descendants` is guaranteed pre-order (parent before children,
-// siblings in order), matching the mdast walk below.
+// siblings in order), matching the mdast walk below. Opaque types are
+// recorded but their subtree is skipped (`return false`).
 function flattenPm(pmDoc) {
   const result = []
   pmDoc.descendants((node, pos) => {
-    if (PM_TO_MD[node.type.name]) result.push({ node, pos })
+    if (PM_TO_MD[node.type.name]) {
+      result.push({ node, pos })
+      if (OPAQUE_TYPES.has(node.type.name)) return false
+    }
     return true
   })
   return result
@@ -53,11 +92,15 @@ function flattenPm(pmDoc) {
 // Walk the mdast tree the kernel parsed, collecting the same recognized
 // structural set, same pre-order convention (a node is recorded before its
 // children are visited) so index i on both sides refers to "the i-th
-// structural node encountered in document order".
+// structural node encountered in document order". Opaque types are
+// recorded but their children are not walked.
 function flattenMd(tree) {
   const result = []
   const walk = (node) => {
-    if (MD_BLOCK_TYPES.has(node.type)) result.push(node)
+    if (MD_BLOCK_TYPES.has(node.type)) {
+      result.push(node)
+      if (OPAQUE_TYPES.has(node.type)) return
+    }
     for (const child of node.children || []) walk(child)
   }
   for (const child of tree.children || []) walk(child)
@@ -90,12 +133,26 @@ export function buildProjectionMap(markdown, pmDoc) {
   for (let i = 0; i < pmBlocks.length; i += 1) {
     const pm = pmBlocks[i]
     const md = mdBlocks[i]
-    const allowed = PM_TO_MD[pm.node.type.name] || []
+    const pmType = pm.node.type.name
+    const allowed = PM_TO_MD[pmType] || []
     if (!allowed.includes(md.type)) return null
 
-    const leaf = pm.node.isTextblock
+    // `bullet_list`/`ordered_list` both structurally pair with mdast
+    // `list`, but the ordered flag itself is part of the structure (a
+    // marker-numbering scheme, not decoration) — a `bullet_list` PM node
+    // over an `ordered: true` mdast list (or vice versa) must reject the
+    // whole map, not silently pass because the block-type strings matched.
+    if (md.type === 'list') {
+      const ordered = !!md.ordered
+      if (pmType === 'ordered_list' && !ordered) return null
+      if (pmType === 'bullet_list' && ordered) return null
+    }
+
+    const editable = pm.node.isTextblock &&
+      !NON_EDITABLE_LEAF_TYPES.has(pmType) &&
+      !OPAQUE_TYPES.has(pmType)
     let charMap = null
-    if (leaf) {
+    if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character
       // alignment — no charMap means the kernel couldn't prove the raw
       // source round-trips through this block's decoded text, so the whole
@@ -108,6 +165,17 @@ export function buildProjectionMap(markdown, pmDoc) {
       // visible length. This is a numeric comparison of two independently
       // derived structural counts, not a text/string match.
       if (pm.node.content.size !== charMap.visibleLength) return null
+      // Empty-textblock guard: a zero-unit charMap's ONLY boundary is
+      // `boundaries[0] = blockNode.position.start.offset` (buildCharacterMap's
+      // fallback when there's no first unit to anchor to) — i.e. literally
+      // the mdast block's own start offset. For `paragraph` that fallback
+      // is genuinely the content start: a paragraph carries no leading
+      // marker syntax, so its own start offset IS where content would
+      // begin. For any other textblock type (e.g. an empty ATX heading
+      // `'#\n'`) the block's start offset is the MARKER's position (the
+      // `#`), not the content start — serving that as a boundary would be
+      // a silent wrong mapping, so treat it as non-editable instead.
+      if (charMap.units.length === 0 && md.type !== 'paragraph') charMap = null
     }
     blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap })
   }
