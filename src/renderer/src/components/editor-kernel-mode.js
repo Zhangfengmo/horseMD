@@ -47,7 +47,16 @@ export function pushKernelDiagnostic(entry) {
 
 const STRUCTURAL_KEYS = ['Enter', 'Tab', 'Shift-Tab', 'Backspace', 'Delete']
 
-export function createKernelMode({ initialContent, getView, parse, notify, getT, onChange }) {
+export function createKernelMode({
+  initialContent,
+  getView,
+  parse,
+  prepareMarkdown,
+  notify,
+  getT,
+  onChange,
+  onStructureChange
+}) {
   const kernel = {
     doc: createMarkdownDocument(initialContent ?? ''),
     history: createSourceHistory(),
@@ -60,6 +69,12 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
   let attached = false
   let degraded = false
   let disposed = false
+  // Legacy API implementations captured by attachLegacyApi() BEFORE Editor.jsx
+  // installs the overrides. In degraded mode every override delegates to these
+  // (kernel.doc.text is frozen at the initial content there — serving it from
+  // flush/save/recovery would silently discard every edit the legacy pipeline
+  // owns).
+  let legacyApi = null
 
   const inactive = () => disposed || degraded || !attached
 
@@ -67,13 +82,21 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     const value = getT?.(key)
     return !value || value === key ? fallback : value
   }
+  // A held key at a blocked position produces vetoes at key-repeat rate
+  // (~30Hz). One toast per code per cooldown window keeps the signal without
+  // a permanently flashing toast. Diagnostics/veto behavior are unaffected.
+  const NOTIFY_COOLDOWN_MS = 1500
+  const lastNotifyAt = new Map()
   const notifyBlocked = (code) => {
+    const now = Date.now()
+    if (now - (lastNotifyAt.get(code) || 0) < NOTIFY_COOLDOWN_MS) return
+    lastNotifyAt.set(code, now)
     notify?.(`${tOr('kernelMode.unsupported', 'Kernel mode blocked this edit')} (${code})`)
   }
   const notifyUnmappable = () => {
     notify?.(tOr(
       'kernelMode.unmappable',
-      'Kernel mode could not map this document; legacy editing stays active'
+      'Kernel mode could not map this document; legacy editing stays active (some toolbar features remain off)'
     ))
   }
 
@@ -176,7 +199,7 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
           return { veto: true }
         }
         kernel.doc = committed.applied.doc
-        kernel.history.record(committed.applied, committed.transaction)
+        recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
@@ -224,7 +247,7 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
       return false
     }
     kernel.doc = result.doc
-    if (record) kernel.history.record(result, txn)
+    if (record) recordHistory(result, txn)
     try {
       reconcileProjection({ view, newDoc: parsed })
     } catch {
@@ -315,6 +338,16 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     return true
   }
 
+  // Redo-stack mirror so a null undo/redo can be told apart: null with a
+  // non-empty stack means the history's internal revision pointer no longer
+  // matches kernel.doc (an external action broke the linear chain) — the
+  // stacks are effectively frozen and that deserves a diagnostic, not
+  // silence. record() clears redo; a successful undo/redo moves one group.
+  let redoDepth = 0
+  const recordHistory = (applyResult, txn) => {
+    kernel.history.record(applyResult, txn)
+    redoDepth = 0
+  }
   const historyHandler = (direction) => (state, dispatch, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -322,7 +355,20 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     const txn = kernel.history[direction](kernel.doc)
     // Nothing to undo/redo: STILL swallow the key. PM's own history plugin
     // must never replay a structural step in kernel mode.
-    if (!txn) return true
+    if (!txn) {
+      const stackHadEntries = direction === 'undo'
+        ? kernel.history.depth() > 0
+        : redoDepth > 0
+      if (stackHadEntries) {
+        pushKernelDiagnostic({
+          type: 'history-frozen',
+          direction,
+          revision: kernel.doc.revision
+        })
+      }
+      return true
+    }
+    redoDepth += direction === 'undo' ? 1 : -1
     applyKernelTransaction(txn, view, { record: false })
     return true
   }
@@ -348,19 +394,64 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     return false
   }
 
+  // Editor.jsx calls this with the legacy createEditorApi() result BEFORE
+  // installing the overrides, so the pre-override implementations remain
+  // callable. Degradation is decided later (attachAfterCreate) — that is why
+  // the overrides below delegate AT CALL TIME instead of being conditionally
+  // assigned: a degraded tab's flush/save/offset/recovery calls must reach
+  // the legacy pipeline (which is the only publisher there), never the frozen
+  // kernel.doc.text.
+  const attachLegacyApi = (api) => {
+    if (!api) return
+    legacyApi = {
+      flushMarkdown: api.flushMarkdown,
+      flushMarkdownSettled: api.flushMarkdownSettled,
+      replaceMarkdown: api.replaceMarkdown,
+      getVerifiedSyncStatus: api.getVerifiedSyncStatus,
+      getRecoveryMarkdown: api.getRecoveryMarkdown,
+      markdownOffsetFromSelection: api.markdownOffsetFromSelection,
+      restoreMarkdownOffset: api.restoreMarkdownOffset,
+      applyTextFormat: api.applyTextFormat,
+      toggleHighlight: api.toggleHighlight,
+      applyReviewMarkup: api.applyReviewMarkup
+    }
+  }
+  const legacy = (name) => (degraded && typeof legacyApi?.[name] === 'function'
+    ? legacyApi[name]
+    : null)
+
   const apiOverrides = {
     // kernel.doc.text IS the durable source; no serializer round-trip, no
-    // preservation mapper, no fail-closed null path.
-    flushMarkdown: () => kernel.doc.text,
+    // preservation mapper, no fail-closed null path. NOTE every delegate
+    // branch below is an explicit `if`, never `??`: a legacy result of
+    // null/undefined (fail-closed flush, void toggleHighlight) is a REAL
+    // result that must propagate, not fall through to the kernel value.
+    flushMarkdown: (...args) => {
+      const delegate = legacy('flushMarkdown')
+      if (delegate) return delegate(...args)
+      return kernel.doc.text
+    },
     // Task 6 supplies the real composition settle; until then the kernel text
     // is immediately settled by construction.
-    flushMarkdownSettled: async () => kernel.doc.text,
+    flushMarkdownSettled: async (...args) => {
+      const delegate = legacy('flushMarkdownSettled')
+      if (delegate) return delegate(...args)
+      return kernel.doc.text
+    },
     replaceMarkdown: (markdown) => {
+      const delegate = legacy('replaceMarkdown')
+      if (delegate) return delegate(markdown)
       if (disposed) return false
       const view = getView?.()
       if (!view) return false
       const source = String(markdown ?? '')
-      const parsed = safeParse(source)
+      // Same normalization the legacy replace path applies before parsing
+      // (review-markup + display-math spelling); the kernel keeps the RAW
+      // authored bytes as its text, exactly like the legacy baseline reset.
+      const prepared = typeof prepareMarkdown === 'function'
+        ? String(prepareMarkdown(source))
+        : source
+      const parsed = safeParse(prepared)
       if (!parsed) return false
       try {
         // Minimal-diff projection replace (sourceProjection meta keeps the
@@ -374,18 +465,32 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
       }
       kernel.doc = createMarkdownDocument(source)
       kernel.history = createSourceHistory()
+      redoDepth = 0
       bindMap(view.state.doc)
+      onStructureChange?.()
       return true
     },
-    getVerifiedSyncStatus: () => ({ status: 'kernel-authoritative' }),
-    getRecoveryMarkdown: () => kernel.doc.text,
-    markdownOffsetFromSelection: () => {
+    getVerifiedSyncStatus: (...args) => {
+      const delegate = legacy('getVerifiedSyncStatus')
+      if (delegate) return delegate(...args)
+      return { status: 'kernel-authoritative' }
+    },
+    getRecoveryMarkdown: (...args) => {
+      const delegate = legacy('getRecoveryMarkdown')
+      if (delegate) return delegate(...args)
+      return kernel.doc.text
+    },
+    markdownOffsetFromSelection: (...args) => {
+      const delegate = legacy('markdownOffsetFromSelection')
+      if (delegate) return delegate(...args)
       const view = getView?.()
       if (!view || !kernel.map) return null
       const raw = kernel.map.pmPosToRaw(view.state.selection.head)
       return Number.isFinite(raw) ? raw : null
     },
     restoreMarkdownOffset: (rawOffset, follow = false) => {
+      const delegate = legacy('restoreMarkdownOffset')
+      if (delegate) return delegate(rawOffset, follow)
       const view = getView?.()
       if (!view || !kernel.map) return false
       const target = kernel.map.rawToPmPos(rawOffset)
@@ -404,9 +509,22 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     },
     // Rich formatting surfaces are not yet kernel-owned: refuse with a
     // notification instead of producing an unowned structural transaction.
-    applyTextFormat: () => notifyUnsupportedApi('applyTextFormat'),
-    toggleHighlight: () => notifyUnsupportedApi('toggleHighlight'),
-    applyReviewMarkup: () => notifyUnsupportedApi('applyReviewMarkup')
+    // (In degraded mode the legacy implementations own them again.)
+    applyTextFormat: (...args) => {
+      const delegate = legacy('applyTextFormat')
+      if (delegate) return delegate(...args)
+      return notifyUnsupportedApi('applyTextFormat')
+    },
+    toggleHighlight: (...args) => {
+      const delegate = legacy('toggleHighlight')
+      if (delegate) return delegate(...args)
+      return notifyUnsupportedApi('toggleHighlight')
+    },
+    applyReviewMarkup: (...args) => {
+      const delegate = legacy('applyReviewMarkup')
+      if (delegate) return delegate(...args)
+      return notifyUnsupportedApi('applyReviewMarkup')
+    }
   }
 
   const dispose = () => {
@@ -422,6 +540,7 @@ export function createKernelMode({ initialContent, getView, parse, notify, getT,
     structuralHandlers,
     historyHandlers,
     apiOverrides,
+    attachLegacyApi,
     refreshProjectionMap,
     attachAfterCreate,
     isDegraded: () => degraded,

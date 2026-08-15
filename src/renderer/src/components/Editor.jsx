@@ -373,9 +373,11 @@ export default function Editor({
           initialContent: initialContent || '',
           getView: () => viewRef.current,
           parse: (md) => parseAdapter.parse(md),
+          prepareMarkdown: parseAdapter.prepare,
           notify: fireToast,
           getT: (key) => tRef.current(key),
-          onChange: (markdown, opts) => onChange?.(markdown, opts)
+          onChange: (markdown, opts) => onChange?.(markdown, opts),
+          onStructureChange: () => onStructureChange?.()
         })
       : null
     if (kernelController) cleanups.push(() => kernelController.dispose())
@@ -1239,8 +1241,12 @@ export default function Editor({
       api.markdownUpdated((_ctx, md) => {
         // Kernel mode: the serializer callback is diagnostics-only. It must
         // never advance lastMarkdownRef/canonicalMarkdownRef or publish —
-        // kernel.doc.text is the sole source authority for this tab.
-        if (kernelModeEnabled) {
+        // kernel.doc.text is the sole source authority for this tab. A
+        // DEGRADED kernel tab is fully legacy-owned, though: its edits are
+        // published only by this handler, so it must fall through — gating it
+        // here would leave the tab undirtiable and let save write the frozen
+        // initial content.
+        if (kernelController && !kernelController.isDegraded()) {
           pushKernelDiagnostic({
             type: 'markdown-updated',
             length: typeof md === 'string' ? md.length : null
@@ -1780,9 +1786,14 @@ export default function Editor({
         api.convertList = convertList
         api.convertBlockToList = convertBlockToList
         // Kernel mode: kernel.doc.text replaces the serializer/preservation
-        // pipeline as the flush/save/offset authority. Applied BEFORE the
-        // destructure below so onReady and the DEV hook see the overrides.
-        if (kernelController) Object.assign(api, kernelController.apiOverrides)
+        // pipeline as the flush/save/offset authority. The legacy
+        // implementations are captured FIRST so a degraded tab's overrides
+        // can delegate to them at call time; applied BEFORE the destructure
+        // below so onReady and the DEV hook see the overrides.
+        if (kernelController) {
+          kernelController.attachLegacyApi(api)
+          Object.assign(api, kernelController.apiOverrides)
+        }
         const {
           getPdfSource,
           getMarkdown,

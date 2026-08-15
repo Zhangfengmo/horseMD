@@ -56,7 +56,7 @@ const makeView = (initialDoc) => {
   }
 }
 
-const makeHarness = (initialContent, initialDoc) => {
+const makeHarness = (initialContent, initialDoc, extra = {}) => {
   const notifications = []
   const changes = []
   const view = makeView(initialDoc)
@@ -66,7 +66,8 @@ const makeHarness = (initialContent, initialDoc) => {
     parse: stubParse,
     notify: (message) => notifications.push(message),
     getT: (key) => key,
-    onChange: (markdown, flag) => changes.push([markdown, flag])
+    onChange: (markdown, flag) => changes.push([markdown, flag]),
+    ...extra
   })
   return { view, controller, notifications, changes }
 }
@@ -123,6 +124,14 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(session.controller.kernel.doc.text, '甲丙乙\n', 'kernel bytes untouched')
   assert.equal(session.view.state.doc.textContent, '甲丙乙', 'view untouched after veto')
   assert.ok(session.notifications.length > before, 'blocked edit notifies the user')
+
+  // Toast cooldown: an immediately repeated blocked edit (key-repeat veto
+  // storm) still vetoes but must NOT stack another toast within the window.
+  const notifCount = session.notifications.length
+  const repeat = session.view.state.tr.insertText('X', 1)
+  repeat.setMeta('uiEvent', 'drop')
+  assert.deepEqual(dispatchThrough(session, repeat), { veto: true })
+  assert.equal(session.notifications.length, notifCount, 'repeat toast suppressed by cooldown')
 }
 
 // Case 3: structural Enter mid-paragraph. Fresh session '甲乙\n', caret at PM
@@ -215,6 +224,49 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   }
   assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), false)
   assert.equal(h.controller.historyHandlers.redo(h.view.state, h.view.dispatch, h.view), false)
+  assert.equal(h.controller.isDegraded(), true)
+
+  // Degraded-aware API delegation: every override must reach the captured
+  // legacy implementation at call time — the frozen kernel.doc.text is a
+  // data-loss trap here (save would silently write the initial content).
+  const legacyCalls = []
+  h.controller.attachLegacyApi({
+    flushMarkdown: () => h.view.state.doc.textContent + '\n',
+    flushMarkdownSettled: async () => h.view.state.doc.textContent + '\n',
+    replaceMarkdown: (md) => { legacyCalls.push(['replaceMarkdown', md]); return true },
+    getVerifiedSyncStatus: () => ({ status: 'committed' }),
+    getRecoveryMarkdown: () => 'LEGACY-RECOVERY',
+    markdownOffsetFromSelection: () => 42,
+    restoreMarkdownOffset: (raw) => { legacyCalls.push(['restore', raw]); return true },
+    applyTextFormat: () => true,
+    toggleHighlight: () => undefined,
+    applyReviewMarkup: () => true
+  })
+  const api = h.controller.apiOverrides
+
+  // A real text edit passes through to the view (legacy ownership) and the
+  // delegated flush then returns the EDITED content, not the frozen bytes.
+  const edit = h.view.state.tr.insertText('新', 1)
+  const applied = h.view.state.apply(edit)
+  assert.equal(h.controller.handleTransactions([edit], h.view.state, applied), undefined)
+  h.view.updateState(applied)
+  assert.equal(h.view.state.doc.textContent, '新甲乙')
+  assert.equal(api.flushMarkdown(), '新甲乙\n', 'flush reflects the edit via legacy delegation')
+  assert.notEqual(api.flushMarkdown(), h.controller.kernel.doc.text, 'never the frozen kernel bytes')
+  assert.equal(await api.flushMarkdownSettled(), '新甲乙\n')
+  assert.notEqual(api.getVerifiedSyncStatus().status, 'kernel-authoritative',
+    'degraded tab must not claim kernel authority')
+  assert.equal(api.getRecoveryMarkdown(), 'LEGACY-RECOVERY')
+  assert.equal(api.markdownOffsetFromSelection(), 42)
+  assert.equal(api.restoreMarkdownOffset(7), true)
+  assert.equal(api.replaceMarkdown('X\n'), true)
+  assert.deepEqual(legacyCalls, [['restore', 7], ['replaceMarkdown', 'X\n']])
+  const notifBefore = h.notifications.length
+  assert.equal(api.applyTextFormat('bold'), true, 'legacy owns formatting again when degraded')
+  assert.equal(api.toggleHighlight(), undefined,
+    'a void legacy result propagates (no ?? fallback to the refusal path)')
+  assert.equal(api.applyReviewMarkup('insert'), true)
+  assert.equal(h.notifications.length, notifBefore, 'no unsupported-API toast in degraded mode')
 }
 
 // Case 7 (wiring guard): before attachAfterCreate has run (Crepe still
@@ -235,7 +287,13 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
 // projection map (never the ordinal editor-source-map path); unsupported
 // rich formatting APIs refuse with a notification.
 {
-  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  globalThis.__hmKernelDiagnostics = []
+  const prepareCalls = []
+  const structureCalls = []
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))), {
+    prepareMarkdown: (source) => { prepareCalls.push(source); return source },
+    onStructureChange: () => structureCalls.push(1)
+  })
   assert.equal(h.controller.attachAfterCreate(), true)
   const api = h.controller.apiOverrides
   assert.equal(api.flushMarkdown(), '甲乙\n')
@@ -250,10 +308,20 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(api.applyTextFormat('bold'), false)
   assert.equal(api.toggleHighlight(), false)
   assert.equal(api.applyReviewMarkup('insert'), false)
-  assert.equal(h.notifications.length, before + 3, 'unsupported APIs notify, never silently no-op')
+  assert.equal(h.notifications.length, before + 1,
+    'unsupported APIs notify (cooldown collapses the burst to one toast)')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'unsupported-api').length,
+    3,
+    'every refusal is individually diagnosed'
+  )
 
-  // replaceMarkdown resets the kernel + history and reconciles the view.
+  // replaceMarkdown resets the kernel + history, reconciles the view, runs
+  // the legacy prepare normalization before parsing, and reports the
+  // structure change (outline refresh parity with the legacy path).
   assert.equal(api.replaceMarkdown('甲\n\n乙\n'), true)
+  assert.deepEqual(prepareCalls, ['甲\n\n乙\n'], 'prepareMarkdown ran before parse')
+  assert.equal(structureCalls.length, 1, 'onStructureChange fired once')
   assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
   assert.equal(h.controller.kernel.doc.revision, 0, 'replace resets the revision line')
   assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(text('乙')))))
@@ -262,6 +330,32 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     true, 'undo after replace is suppressed (history cleared)'
   )
   assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+}
+
+// Case 9: history-frozen diagnostic. A null undo caused by revision desync
+// (the stack still has entries but the doc's revision no longer matches the
+// history's rolling pointer) is diagnosed, not silently identical to an
+// empty stack.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const oldState = h.view.state
+  const tr = oldState.tr.insertText('丙', 2)
+  dispatchThrough(h, tr) // records one undo group
+  await flushMicrotasks()
+  // External desync: same bytes, foreign revision — breaks the linear chain
+  // createSourceHistory tracks via its rolling lastKnownRevision pointer.
+  h.controller.kernel.doc = { text: h.controller.kernel.doc.text, revision: 99 }
+  const handled = h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true, 'frozen history still swallows the key')
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n', 'nothing replayed')
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.some(
+      (entry) => entry.type === 'history-frozen' && entry.direction === 'undo'
+    ),
+    'history-frozen diagnostic recorded'
+  )
 }
 
 console.log('PASS kernel mode headless')
