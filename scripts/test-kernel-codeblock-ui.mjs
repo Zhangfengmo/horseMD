@@ -1,10 +1,22 @@
 // Kernel-mode code-block domain end-to-end regression (source-kernel
 // integration Plan 3, Task 6): the first REAL, live-app exercise of every
 // P3-1..P3-5 code-block behavior chained together in one document — LF
-// top-level fence multi-line editing, quoted-fence per-line prefix
-// expansion, the language picker's AttrStep rewrite, Mod-Enter exit, CM-
-// focused kernel undo, the per-block dynamic gate refusing a mermaid block,
-// and a save + cold reopen.
+// top-level fence multi-line editing (type/Enter/Backspace, both within a
+// line and ACROSS a line boundary), quoted-fence per-line prefix expansion
+// on both insert AND delete, the language picker's AttrStep rewrite,
+// Mod-Enter exit, CM-focused kernel undo, the per-block dynamic gate
+// refusing a mermaid block, and a save + cold reopen.
+//
+// The delete path matters as its own case (review round 1 finding): a
+// live DOM Backspace routes through CodeMirror's own changeset ->
+// `forwardUpdate` -> an EMPTY-insert PM ReplaceStep -> the SAME
+// `commitPlainText` gateway a typed insert uses, and — for a Backspace at
+// a line's START — the deleted PM range crosses the code_block's internal
+// bare '\n' (there is no separate hardbreak node inside a code block's
+// text* content model), which `buildCodeMap`'s linebreak-unit raw span
+// maps to MORE than one raw byte for a quoted fence: the terminator AND
+// the next line's '> ' prefix. This script proves both shapes byte-exact,
+// not just the insert-only paths.
 //
 // Every "expected bytes" string below is DERIVED, not guessed: it is the
 // literal output of running the real kernel primitives this UI exercises
@@ -97,7 +109,11 @@ const AFTER_JS_EDIT = [
   ''
 ].join('\n')
 
-const AFTER_PY_EDIT = [
+// Backspace x2 at the end of "NEXTLINE" deletes its last two chars ("NE"),
+// a plain within-line delete through the SAME `commitPlainText` path a
+// typed insert uses (an empty-insert `ReplaceStep`, `plainSliceText`
+// explicitly allows `slice.size === 0`).
+const AFTER_JS_BACKSPACE = [
   '# 内核代码块测试',
   '',
   '前置段落用于占位。',
@@ -106,7 +122,63 @@ const AFTER_PY_EDIT = [
   'function greet(name) {',
   '  return name;',
   '}TAILMARK',
-  'NEXTLINE',
+  'NEXTLI',
+  '```',
+  '',
+  '引用中的代码：',
+  '',
+  '> ```py',
+  '> print(name)',
+  '> ```',
+  '',
+  '```mermaid',
+  'graph TD; A-->B;',
+  '```',
+  '',
+  '尾段落用于占位。',
+  ''
+].join('\n')
+
+// Backspace at the START of "NEXTLI" joins it with the previous line: CM's
+// flat code_block text model has no separate hardbreak node (a bare '\n' IS
+// the content — editor-kernel-gateway.js's `allowNewline` comment), so this
+// is a ONE-character PM deletion whose raw span is the codeMap linebreak
+// unit's full span. For this UNPREFIXED top-level fence that span is just
+// the '\n' itself (linePrefix === '').
+const AFTER_JS_JOIN = [
+  '# 内核代码块测试',
+  '',
+  '前置段落用于占位。',
+  '',
+  '```js',
+  'function greet(name) {',
+  '  return name;',
+  '}TAILMARKNEXTLI',
+  '```',
+  '',
+  '引用中的代码：',
+  '',
+  '> ```py',
+  '> print(name)',
+  '> ```',
+  '',
+  '```mermaid',
+  'graph TD; A-->B;',
+  '```',
+  '',
+  '尾段落用于占位。',
+  ''
+].join('\n')
+
+const AFTER_PY_EDIT = [
+  '# 内核代码块测试',
+  '',
+  '前置段落用于占位。',
+  '',
+  '```js',
+  'function greet(name) {',
+  '  return name;',
+  '}TAILMARKNEXTLI',
   '```',
   '',
   '引用中的代码：',
@@ -124,21 +196,52 @@ const AFTER_PY_EDIT = [
   ''
 ].join('\n')
 
+// Backspace at the START of "DONEMARK" joins it with the previous quoted
+// line: the codeMap linebreak unit's raw span for a QUOTED fence spans the
+// terminator AND the next line's '> ' prefix (buildCodeMap's own
+// `rawEnd = nextLine.start + prefix.length` for a linebreak unit), so this
+// single CM-visible character deletion must swallow '\n> ' (3 raw bytes),
+// not just '\n' — the exact case Task 6's review round called out.
+const AFTER_PY_JOIN = [
+  '# 内核代码块测试',
+  '',
+  '前置段落用于占位。',
+  '',
+  '```js',
+  'function greet(name) {',
+  '  return name;',
+  '}TAILMARKNEXTLI',
+  '```',
+  '',
+  '引用中的代码：',
+  '',
+  '> ```py',
+  '> print(name) OKMARKDONEMARK',
+  '> ```',
+  '',
+  '```mermaid',
+  'graph TD; A-->B;',
+  '```',
+  '',
+  '尾段落用于占位。',
+  ''
+].join('\n')
+
 // `__LANG__` stands in for whatever exact casing the live LanguagePicker's
 // `data-language` reports for "python" (@codemirror/language-data) —
 // substituted at runtime, never assumed.
 const withLang = (template, lang) => template.split('__LANG__').join(lang)
 
-const AFTER_LANG_SWITCH_TPL = AFTER_PY_EDIT.replace('```js\n', '```__LANG__\n')
+const AFTER_LANG_SWITCH_TPL = AFTER_PY_JOIN.replace('```js\n', '```__LANG__\n')
 
 const AFTER_EXIT_TPL = AFTER_LANG_SWITCH_TPL.replace(
-  'NEXTLINE\n```\n\n引用中的代码',
-  'NEXTLINE\n```\n\n\n\n引用中的代码'
+  'NEXTLI\n```\n\n引用中的代码',
+  'NEXTLI\n```\n\n\n\n引用中的代码'
 )
 
 const AFTER_EXIT_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
-  'NEXTLINE\n```\n\n引用中的代码',
-  'NEXTLINE\n```\nZ\n\n\n引用中的代码'
+  'NEXTLI\n```\n\n引用中的代码',
+  'NEXTLI\n```\nZ\n\n\n引用中的代码'
 )
 
 async function waitFor(check, message, attempts = 80) {
@@ -280,7 +383,31 @@ async function clickCmLineEnd(evaluate, send, blockRef, { last = false } = {}) {
   await pressKey(send, { key: 'End', code: 'End', delayMs: delay })
 }
 
+// Mirror of clickCmLineEnd for the cross-line-join Backspace tests: land the
+// caret at a CM line's START via 'Home' instead of 'End', so the very next
+// Backspace deletes the PRECEDING line's terminator (joining the two lines)
+// instead of a content character.
+async function clickCmLineStart(evaluate, send, blockRef, { last = false } = {}) {
+  const point = await evaluate(`(() => {
+    const block = ${blockRef}
+    if (!block) return null
+    block.scrollIntoView({ block: 'center' })
+    const lines = [...block.querySelectorAll('.cm-editor .cm-line')]
+    const line = ${last} ? lines[lines.length - 1] : lines[0]
+    const rect = line?.getBoundingClientRect()
+    return rect && rect.width ? { x: rect.left + 2, y: rect.top + rect.height / 2 } : null
+  })()`)
+  assert.ok(point, 'CodeMirror line is not hit-testable')
+  await sleep(400)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+  await sleep(200)
+  await pressKey(send, { key: 'Home', code: 'Home', delayMs: delay })
+}
+
 const cmContent = (evaluate, blockRef) => evaluate(`(${blockRef})?.querySelector('.cm-content')?.textContent`)
+
+const cmFocused = (evaluate) => evaluate(`document.activeElement?.className || ''`)
 
 // Open the js block's language picker, filter to "python", read back the
 // EXACT `data-language` string the live picker offers, and click it.
@@ -373,6 +500,41 @@ async function run() {
     await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the js edit verification')
     await sleep(200)
 
+    // ---- 2a) Backspace x2: within-line delete through the live DOM ->
+    // CM changeset -> gateway path (the empty-insert ReplaceStep shape
+    // `commitPlainText` explicitly allows) ----
+    await clickCmLineEnd(evaluate, send, 'window.__hmJsBlock', { last: true })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmJsBlock') || '').includes('NEXTLI') &&
+      !(await cmContent(evaluate, 'window.__hmJsBlock') || '').includes('NEXTLIN'),
+      'Backspace x2 did not remove the last two typed characters in the js CodeMirror editor')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the js Backspace x2')
+    assert.equal(shown, AFTER_JS_BACKSPACE, 'js block within-line Backspace x2 must match the kernel-derived bytes exactly')
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the js Backspace x2 verification')
+    await sleep(200)
+
+    // ---- 2b) cross-line-join Backspace: caret at a line START joins it
+    // with the previous line, which must remove the codeMap linebreak
+    // unit's WHOLE raw span (just '\n' for this unprefixed top-level fence)
+    // ----
+    await clickCmLineStart(evaluate, send, 'window.__hmJsBlock', { last: true })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmJsBlock') || '').includes('TAILMARKNEXTLI'),
+      'cross-line-join Backspace did not merge the two js CodeMirror lines')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the js cross-line-join Backspace')
+    assert.equal(shown, AFTER_JS_JOIN, 'js block cross-line-join Backspace must remove exactly the linebreak, byte-exact')
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the js join verification')
+    await sleep(200)
+
     // ============================================================
     // 3) quoted py fence: multi-line CM edit, per-line '> ' prefix expansion
     // ============================================================
@@ -392,6 +554,23 @@ async function run() {
       "quoted py block multi-line edit must match the kernel-derived bytes exactly (every new line carries '> ')")
     await toggleSourceMode(evaluate)
     await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the py edit verification')
+    await sleep(200)
+
+    // ---- 3a) cross-line-join Backspace on the QUOTED fence: must swallow
+    // the '> ' prefix too, not just the terminator (the linebreak unit's
+    // raw span spans BOTH per buildCodeMap) ----
+    await clickCmLineStart(evaluate, send, 'window.__hmPyBlock', { last: true })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmPyBlock') || '').includes('OKMARKDONEMARK'),
+      'cross-line-join Backspace did not merge the two py CodeMirror lines')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the py cross-line-join Backspace')
+    assert.equal(shown, AFTER_PY_JOIN,
+      "quoted py block cross-line-join Backspace must swallow the '> ' prefix along with the linebreak, byte-exact")
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the py join verification')
     await sleep(200)
 
     // ============================================================
@@ -453,6 +632,14 @@ async function run() {
     // ============================================================
     await ensureCmVisible(evaluate, send, 'window.__hmMermaidBlock')
     await clickCmLineEnd(evaluate, send, 'window.__hmMermaidBlock', { last: true })
+    // Positive control (mirrors test-kernel-nodeview-ui.mjs's read-only/
+    // undo-bridge probe): prove the click actually focused the mermaid
+    // CodeMirror editor BEFORE asserting typing had no effect — otherwise a
+    // missed click would pass this step vacuously (nothing focused, nothing
+    // typed anywhere, "unchanged" trivially true).
+    const mermaidCmFocused = await cmFocused(evaluate)
+    assert.ok(mermaidCmFocused.includes('cm-content'),
+      `click did not focus the mermaid CodeMirror editor (activeElement: ${mermaidCmFocused})`)
     const mermaidBefore = await cmContent(evaluate, 'window.__hmMermaidBlock')
     await typeTextLikeUser(send, 'MERMAIDBLOCKED', { delayMs: delay })
     await sleep(300)
@@ -487,7 +674,7 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode code-block domain UI: js multi-line edit, quoted py per-line prefix expansion, language picker rewrite, Mod-Enter exit, CM-focused undo groups, mermaid gate refusal, save and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode code-block domain UI: js multi-line edit + Backspace (within-line and cross-line-join), quoted py per-line prefix expansion on insert AND delete, language picker rewrite, Mod-Enter exit, CM-focused undo groups, mermaid gate refusal (with a focus positive-control), save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
