@@ -35,6 +35,7 @@ import {
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { classifyTransactions, commitPlainText } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
+import { createCompositionSession } from './editor-kernel-composition.js'
 
 // Bounded diagnostics ring buffer (<=100 entries). Shared by this module and
 // Editor.jsx's kernel-mode markdownUpdated gate. Entries carry structural
@@ -185,7 +186,10 @@ export function createKernelMode({
       case 'selection-only':
         return undefined
       case 'composition':
-        // Pass through; CompositionSession bookkeeping arrives with Task 6.
+        // Pass through unconditionally: the kernel never writes bytes or
+        // records history mid-composition. `composition` (below) owns the
+        // start/end/cancel bookkeeping and turns the whole composition into
+        // ONE kernel commit (or a clean revert) once it settles.
         return undefined
       case 'blocked':
         notifyBlocked(classified.blockedCode)
@@ -260,6 +264,79 @@ export function createKernelMode({
     setCaretFromRaw(view, anchor)
     onChange?.(kernel.doc.text, false)
     return true
+  }
+
+  // CompositionSession's sole write path (Task 6): a whole IME composition
+  // becomes ONE kernel transaction here, never a byte-by-byte stream while
+  // composing (handleTransactions' 'composition' branch passes every
+  // in-flight PM change through untouched — see above). `history.breakGroup()`
+  // brackets the commit on BOTH sides: 'ime-commit' is not
+  // insert-text-coalescable on its own (createSourceHistory's
+  // asCoalescableEdit only merges 'insert-text' intents), so this is a
+  // second, explicit fence — it keeps the commit isolated as its own undo
+  // unit even if a future intent rename ever made it coalescable, and it
+  // stops whatever plain-text edit comes right after the composition from
+  // merging backward into it.
+  const commitReplace = ({ rawFrom, rawTo, text }) => {
+    const view = getView?.()
+    if (!view || disposed) return false
+    kernel.history.breakGroup()
+    const applied = applyKernelTransaction({
+      baseRevision: kernel.doc.revision,
+      from: rawFrom,
+      to: rawTo,
+      insert: text,
+      intent: 'ime-commit'
+    }, view)
+    kernel.history.breakGroup()
+    return applied
+  }
+
+  // CompositionSession's sole revert path: reconcile the view back to
+  // parse(kernel.doc.text) with NO kernel change — the kernel bytes were
+  // never touched mid-composition, so there is nothing to undo on that side,
+  // only the PM view needs to be pulled back off the in-flight composition
+  // candidate. `code` (when present) is diagnostic-only, describing WHY the
+  // composition was refused; the user-facing toast is CompositionSession's
+  // own `notify` call, not this function.
+  const revertProjection = (code) => {
+    const view = getView?.()
+    if (!view || disposed) return
+    const parsed = safeParse(kernel.doc.text)
+    if (!parsed) {
+      pushKernelDiagnostic({ type: 'composition-revert-parse-failure' })
+      return
+    }
+    try {
+      reconcileProjection({ view, newDoc: parsed })
+    } catch {
+      pushKernelDiagnostic({ type: 'composition-revert-failed' })
+    }
+    bindMap(view.state.doc)
+    if (code) pushKernelDiagnostic({ type: 'composition-reverted', code })
+  }
+
+  const compositionSession = createCompositionSession({
+    getView,
+    kernel,
+    commitReplace,
+    revertProjection,
+    notify,
+    getT
+  })
+  // Wrappers gate on `inactive()` exactly like every other kernel-mode entry
+  // point: before attach (Crepe still creating / chunks still appending),
+  // while degraded (legacy owns IME natively via Editor.jsx's existing
+  // markdownUpdated/view.composing path), or after dispose, composition
+  // tracking must be a no-op — it must never open a session it could not
+  // later settle.
+  const composition = {
+    onStart: () => { if (!inactive()) compositionSession.onStart() },
+    onEnd: () => { if (!inactive()) compositionSession.onEnd() },
+    onCancel: () => { if (!inactive()) compositionSession.onCancel() },
+    isActive: () => compositionSession.isActive(),
+    settled: () => compositionSession.settled(),
+    queueExternal: (fn) => compositionSession.queueExternal(fn)
   }
 
   // Tab (and future plain inserts) on the not-structural path: source-first
@@ -431,11 +508,17 @@ export function createKernelMode({
       if (delegate) return delegate(...args)
       return kernel.doc.text
     },
-    // Task 6 supplies the real composition settle; until then the kernel text
-    // is immediately settled by construction.
+    // Await any in-flight IME composition before serving the flush: a save
+    // (or any other flush caller) that ran mid-composition must see the
+    // SETTLED result — either the composition's single committed edit or a
+    // clean revert — never the transient in-flight candidate text.
+    // `composition.settled()` never rejects and never hangs forever (a stuck
+    // composition times out into a forced revert), so this can never block a
+    // save indefinitely.
     flushMarkdownSettled: async (...args) => {
       const delegate = legacy('flushMarkdownSettled')
       if (delegate) return delegate(...args)
+      await composition.settled()
       return kernel.doc.text
     },
     replaceMarkdown: (markdown) => {
@@ -530,6 +613,7 @@ export function createKernelMode({
   const dispose = () => {
     disposed = true
     kernel.map = null
+    compositionSession.dispose()
   }
 
   return {
@@ -544,6 +628,7 @@ export function createKernelMode({
     refreshProjectionMap,
     attachAfterCreate,
     isDegraded: () => degraded,
+    composition,
     dispose
   }
 }

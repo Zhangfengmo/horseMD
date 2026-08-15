@@ -1725,6 +1725,30 @@ export default function Editor({
           isDestroyed: () => destroyed
         })
 
+        // IME composition session (kernel mode only, Task 6): compositionstart
+        // proves the current selection against the projection map and opens a
+        // bounded overlay confined to that textblock; compositionend/
+        // compositioncancel settle it into ONE kernel commit (or a clean
+        // revert) — see editor-kernel-composition.js. Capture phase on
+        // view.dom, the same channel editor-dom-bindings.js already listens
+        // on for `compositionend` (markUserEdit only, no state read — no
+        // conflict). Registered only when kernelController exists; the
+        // controller's own composition.onStart/onEnd/onCancel wrappers no-op
+        // before attach / while degraded / after dispose.
+        if (kernelController && view?.dom) {
+          const onCompositionStart = () => kernelController.composition.onStart()
+          const onCompositionEnd = () => kernelController.composition.onEnd()
+          const onCompositionCancel = () => kernelController.composition.onCancel()
+          view.dom.addEventListener('compositionstart', onCompositionStart, true)
+          view.dom.addEventListener('compositionend', onCompositionEnd, true)
+          view.dom.addEventListener('compositioncancel', onCompositionCancel, true)
+          cleanups.push(() => {
+            view.dom.removeEventListener('compositionstart', onCompositionStart, true)
+            view.dom.removeEventListener('compositionend', onCompositionEnd, true)
+            view.dom.removeEventListener('compositioncancel', onCompositionCancel, true)
+          })
+        }
+
         // Typora-style new document: first line is an empty Heading 1 (title),
         // with an empty paragraph below it. The title is there if you want it,
         // but the body block lets you skip the title and start writing straight

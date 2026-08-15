@@ -358,4 +358,41 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   )
 }
 
+// Case 10 (Task 6 integration): apiOverrides.flushMarkdownSettled awaits an
+// active IME composition session instead of resolving immediately.
+// composition.onStart/onEnd bypass handleTransactions entirely (composition
+// transactions are the caller's pass-through concern, not the kernel's — see
+// case 'composition' in handleTransactions), so this drives the controller's
+// `composition` surface directly and mutates the stub view the same way a
+// real compositionupdate would (view.updateState with the composed doc)
+// before calling onEnd. Same '甲乙\n' -> insert '丙' at raw 1 -> '甲丙乙\n'
+// fixture as case 1, so the committed text is provable by inspection.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+
+  h.controller.composition.onStart()
+  assert.equal(h.controller.composition.isActive(), true)
+
+  let settled = false
+  const flushPromise = h.controller.apiOverrides.flushMarkdownSettled()
+    .then((text) => { settled = true; return text })
+  await flushMicrotasks()
+  assert.equal(settled, false, 'flushMarkdownSettled must wait for the open composition')
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'kernel untouched while composing')
+
+  // The composed edit lands in the view (composition transactions never
+  // reach the kernel mid-flight — only compositionend's diff does).
+  h.view.updateState(h.view.state.apply(h.view.state.tr.insertText('丙', 2)))
+  h.controller.composition.onEnd()
+  await flushMicrotasks()
+
+  const settledText = await flushPromise
+  assert.equal(settled, true)
+  assert.equal(settledText, '甲丙乙\n', 'flush resolves to the settled (committed) kernel text')
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n')
+  assert.equal(h.controller.composition.isActive(), false)
+}
+
 console.log('PASS kernel mode headless')
