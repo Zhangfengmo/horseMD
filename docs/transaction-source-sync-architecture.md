@@ -48,7 +48,7 @@ ProseMirror 文档 → 整篇 Markdown serializer → canonical/source 猜测对
   - 整个 textblock 的 raw span 与 PM 文字逐字符相等；
 - 反引号、内联语法、开放 slice、跨块删除、列表结构等均拒绝猜测；
 - **字节归一化视图**：入口把 BOM 剥离、全部行尾归一化为单个 `\n`，remark/PM 的坐标只在归一化视图上精确；编辑同步应用到原始副本，出口返回作者原始 BOM/CRLF/lone-CR 拼写。这修复了 remark 剥 BOM 导致全部偏移差 1、以及旧回退把新文字插进 `\r\n` 中间产生 `\r文字\n` 的家族根因；
-- **前导空格哨兵**由事务层直接维护（`U+200B + 字面空格`），不再回退到 serializer 的 `&#x20;` 拼写；
+- **前导空格**不由事务层猜测或维护私有字节；它安全交回 canonical source-first 路径，并写为标准 `&nbsp;` 加余下字面空格，避免回退到 serializer 的 `&#x20;` 拼写；
 - Enter 新尾段使用临时 block hint 记录“新 PM 块 → raw 空槽”；槽坐标指向**完整段落分隔（两对换行）之后**，即使源里已存在部分换行（separator 较短）也不漂移；
 - 顶层空段只有带 hint 时才可接管；**嵌套空 textblock（列表项/引用内）一律拒绝**，其容器 marker 在槽之前，写字符会落到 marker 前面，必须交给列表/引用 preservation；
 - 一个 textblock 被整个删空（`textblock-emptied`）也拒绝接管：常见后继是反引号围栏或 Enter 退出列表这类结构事务，混合两套基线会污染空块；
@@ -203,3 +203,7 @@ npm run test:source-fidelity-probes
 - 不得在 transaction batch 失败后保留前半段 source patch；
 - 不得为追求“测试绿”而关闭 fail-closed 或 recovery；
 - 不得在缺少全家族回归时默认打开新的接管分类。
+
+## 源码权威内核（2026-08）
+
+`src/renderer/src/lib/source-kernel/` 是 spec（docs/superpowers/specs/2026-08-14-source-authoritative-editor-kernel-design.md）方案 C 的第一阶段纯内核（MarkdownDocument 事务、语法索引、字符映射、结构命令、源码历史、种子化状态机测试，`npm run test:source-kernel`）；UI 集成（投影/Gateway/IME）见后续计划二；现有 `mapPlainTextTransactionsToSource` 通道保持不变。
