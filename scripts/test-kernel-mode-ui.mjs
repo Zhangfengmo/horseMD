@@ -185,6 +185,19 @@ async function run() {
       const text = await mounted(evaluate)
       return text && text.includes('段甲') && text.includes('乙') ? text : null
     }, 'document did not remount after enabling kernel mode')
+    await sleep(300)
+
+    // PROVE the kernel actually attached for this fixture. It ends in a
+    // list, the exact shape @milkdown/plugin-trailing appends its synthetic
+    // empty paragraph after — pre-Task-11.5, that node silently rejected the
+    // whole projection map and this entire script ran in the DEGRADED legacy
+    // fallback while still passing (Task 11 Bug 2). This assertion makes any
+    // future silent degradation fail LOUDLY here instead.
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy fallback for this fixture: ${attachDiagnostics}`
+    )
 
     // Step 3a: end of 段甲 -> type 新 -> Enter -> type 乙段.
     await clickTextEnd(evaluate, send, '段甲')

@@ -227,6 +227,17 @@ async function run() {
       const text = await mounted(evaluate)
       return text && text.includes('段落甲') ? text : null
     }, 'document did not remount after enabling kernel mode')
+    await sleep(300)
+
+    // PROVE the kernel actually attached (same guard as
+    // test-kernel-nodeview-ui.mjs / test-kernel-mode-ui.mjs): a silent
+    // degradation to the legacy fallback must fail LOUDLY here, not let the
+    // rest of this script quietly exercise the legacy pipeline.
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy fallback for this fixture: ${attachDiagnostics}`
+    )
 
     // --- (a) a full real composition, byte-exact, no pinyin residue -------
     await clickTextEnd(evaluate, send, '段落甲')
