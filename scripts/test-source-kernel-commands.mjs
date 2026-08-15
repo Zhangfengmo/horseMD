@@ -192,11 +192,135 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
   assert.deepEqual(splitTextBlock({ ...c, offset: 1 }),
     { ok: false, code: 'unsupported-structure' })   // offset 1: inside 'marker+spacing', still before content
   // A valid split right at contentStart (and further into the content) must
-  // still work — regression guard for the guard above.
-  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '# \n\n头\n')
+  // still work — regression guard for the guard above. Semantic note (Task 2,
+  // plan 3): offset 2 IS the heading's content start, so this is now the
+  // 段首 Enter branch — a blank line inserted ABOVE the intact '# 头' line
+  // (caret shifts to raw 3, still right before '头') — not the old mid-split
+  // that tore the heading into an empty '# ' heading plus a plain-paragraph
+  // '头'. See the dedicated 段首 Enter block below for the byte derivation.
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '\n# 头\n')
 }
 
 console.log('PASS source-kernel commands (enter)')
+
+// ---- Task 2 (plan 3): splitTextBlock 抛光 — 段首 Enter · 连续 Enter ----
+// Byte-authoritative: every string below was derived by actually running
+// splitTextBlock/applySourceTransaction (see the task's oracle transcript),
+// not guessed.
+
+// 段首 Enter: caret at the block's visible content start inserts exactly ONE
+// `ending` ABOVE the block (at the physical line start, never at `offset`),
+// caret shifts by the inserted byte count so it stays anchored on the SAME
+// original character. Replaces the old "ending+ending AT offset" behavior,
+// which produced leading blank-byte accumulation with the caret left after
+// the separator instead of on the text.
+{
+  const src = '甲乙\n'
+  const c = ctx(src)
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 0 })), '\n甲乙\n')
+  const r = splitTextBlock({ ...c, offset: 0 })
+  assert.equal(r.transaction.selection.anchor, 1, 'caret raw 1: right before 甲, shifted by the 1 inserted byte')
+}
+
+// 段首 Enter inside a blockquote: the new blank line is itself a bare quote
+// line ('>' with no trailing space, via bareQuote) so the blockquote is
+// never broken — CommonMark tolerates a blank line WITHIN a blockquote.
+{
+  const src = '> 甲\n'
+  const c = ctx(src)
+  const offset = src.indexOf('甲')
+  const r = splitTextBlock({ ...c, offset })
+  assert.equal(r.ok, true)
+  assert.equal(apply(c.doc, r), '>\n> 甲\n')
+  assert.equal(r.transaction.selection.anchor, 4, 'caret raw 4: 甲 shifted by the 2 inserted bytes (">" + ending)')
+}
+
+// 段首 Enter mid-document: a paragraph preceded by another block gets one
+// MORE blank line above it (not "leading blank accumulation" in any bad
+// sense — every repeat is a legitimate extra blank line, caret always
+// returns to the original text).
+{
+  const src = '甲\n\n乙\n'
+  const c = ctx(src)
+  const offset = src.indexOf('乙')
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset })), '甲\n\n\n乙\n')
+}
+
+// CRLF 段首 Enter: the inserted blank line reuses the document's own '\r\n'.
+{
+  const src = '甲乙\r\n'
+  const c = ctx(src)
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 0 })), '\r\n甲乙\r\n')
+}
+
+// CRLF 段首 Enter inside a blockquote.
+{
+  const src = '> 甲\r\n'
+  const c = ctx(src)
+  const offset = src.indexOf('甲')
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset })), '>\r\n> 甲\r\n')
+}
+
+// Repeated 段首 Enter: each press adds one more blank line above, caret
+// staying anchored on the original text every time (verified two presses
+// deep, feeding the first press's own caret back in as the next offset —
+// exactly how the live kernel-mode controller re-derives `offset` from the
+// restored caret before routing the next keystroke).
+{
+  const src = '甲乙\n'
+  const doc0 = createMarkdownDocument(src)
+  const index0 = buildSyntaxIndex(src)
+  const r1 = splitTextBlock({ doc: doc0, index: index0, offset: 0 })
+  const applied1 = applySourceTransaction(doc0, r1.transaction)
+  assert.equal(applied1.doc.text, '\n甲乙\n')
+  const index1 = buildSyntaxIndex(applied1.doc.text)
+  const r2 = splitTextBlock({ doc: applied1.doc, index: index1, offset: r1.transaction.selection.anchor })
+  const applied2 = applySourceTransaction(applied1.doc, r2.transaction)
+  assert.equal(applied2.doc.text, '\n\n甲乙\n')
+  assert.equal(r2.transaction.selection.anchor, 2, 'caret still right before 甲')
+}
+
+// 块尾连续 Enter: the FIRST Enter at a block's end is unchanged (the existing
+// degenerate-split branch, general/mid-offset path — inserts `ending+ending`
+// at the block end). Enter pressed AGAIN at the resulting trailing raw
+// offset (the exact spot editor-kernel-mode.js's ensureSplitPlaceholder
+// anchors its virtual paragraph to) used to be refused (`resolveBlock`
+// returns null there — no block claims a blank-line-run offset). It must now
+// extend the blank-line run by exactly one more `ending`, reusing the line's
+// own convention, so a THIRD/FOURTH… Enter keeps working identically.
+{
+  const src = '标题\n\n段落\n'
+  let doc = createMarkdownDocument(src)
+  let offset = src.indexOf('段落') + '段落'.length // block.end of '段落'
+  const expected = [
+    '标题\n\n段落\n\n\n',
+    '标题\n\n段落\n\n\n\n',
+    '标题\n\n段落\n\n\n\n\n'
+  ]
+  for (let i = 0; i < 3; i += 1) {
+    const index = buildSyntaxIndex(doc.text)
+    const r = splitTextBlock({ doc, index, offset })
+    assert.equal(r.ok, true, `enter #${i + 1} must not be refused`)
+    const applied = applySourceTransaction(doc, r.transaction)
+    assert.equal(applied.doc.text, expected[i], `enter #${i + 1} byte state`)
+    doc = applied.doc
+    offset = r.transaction.selection.anchor
+  }
+}
+
+// 块尾连续 Enter must NOT swallow a genuine mid-document blank-line GAP
+// between two real blocks — the existing regression this file already locks
+// (line ~176 above) stays true with the new fallback branch in place: a gap
+// offset that has a REAL block starting somewhere after it is never treated
+// as a "trailing" run.
+{
+  const src = '甲乙\n\n丙\n'
+  const c = ctx(src)
+  assert.deepEqual(splitTextBlock({ ...c, offset: 3 }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
+console.log('PASS source-kernel commands (splitTextBlock polish: paragraph-start + repeated-enter)')
 
 // ---- Task: final-review coverage gaps (`+` marker, lone-CR ending) ----
 
