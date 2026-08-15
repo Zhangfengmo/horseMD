@@ -78,7 +78,20 @@ export function diffReplaceRange(oldDoc, newDoc) {
 // `sourceProjection` key instead of a bare `true`, letting the caller stash
 // whatever provenance (e.g. the raw transaction that produced this
 // projection) downstream consumers of the meta might want.
-export function reconcileProjection({ view, newDoc, mapMeta = null }) {
+//
+// `decorateTransaction` (when provided) runs on the built transaction right
+// before dispatch — the sanctioned hook for a caller to put a SELECTION on
+// the SAME transaction that changes the doc. This matters for async node
+// views (Crepe's Vue-rendered list-item blocks): a doc-change dispatch
+// followed by a SEPARATE selection-only dispatch leaves the DOM caret
+// behind whenever the selection targets content whose node-view DOM has not
+// mounted yet, and PM's DOM observer then drags the state selection back to
+// the stale DOM caret — the "typed text lands in the wrong block" family
+// (Task 11 Bug 3). One transaction carrying both the content change and the
+// selection is exactly how PM's own commands behave, and the DOM caret
+// follows correctly. Kept as a callback (not a position parameter) so this
+// module stays free of prosemirror-state imports.
+export function reconcileProjection({ view, newDoc, mapMeta = null, decorateTransaction = null }) {
   const diff = diffReplaceRange(view.state.doc, newDoc)
   if (!diff) return false
 
@@ -87,6 +100,7 @@ export function reconcileProjection({ view, newDoc, mapMeta = null }) {
   tr.replace(from, to, newDoc.slice(insertFrom, insertTo))
   tr.setMeta('sourceProjection', mapMeta || true)
   tr.setMeta('addToHistory', false)
+  if (typeof decorateTransaction === 'function') decorateTransaction(tr)
   view.dispatch(tr)
   return true
 }

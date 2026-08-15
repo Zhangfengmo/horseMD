@@ -105,12 +105,29 @@ function flattenPm(pmDoc) {
 // children are visited) so index i on both sides refers to "the i-th
 // structural node encountered in document order". Opaque types are
 // recorded but their children are not walked.
-function flattenMd(tree) {
+//
+// Empty list items ('- \n', the exact byte shape splitListItem's Enter
+// leaves behind before the user types the new item's text): mdast gives the
+// `listItem` ZERO children, but ProseMirror's parse goes through
+// `createAndFill`, which fills the schema-required `paragraph` in — so the
+// PM side always has one more node than the mdast side for every empty
+// item. Synthesize the missing wrapper here (a marker object, not a fake
+// mdast node) so the zip stays aligned; the pairing loop below turns it
+// into a virtual pair anchored at the item's contentStart (right after the
+// marker + spacing), which is exactly where typed text must land in the raw
+// source ('- ' + typed -> '- x').
+function flattenMd(tree, index) {
   const result = []
   const walk = (node) => {
     if (MD_BLOCK_TYPES.has(node.type)) {
       result.push(node)
       if (OPAQUE_TYPES.has(node.type)) return
+      if (node.type === 'listItem' && (!node.children || node.children.length === 0)) {
+        const start = node.position?.start?.offset
+        const item = Number.isInteger(start) ? index.listItemAt(start) : null
+        result.push({ syntheticEmptyItemParagraph: true, item })
+        return
+      }
     }
     for (const child of node.children || []) walk(child)
   }
@@ -166,18 +183,50 @@ function walkUnits(charMap, onUnit) {
   return vis
 }
 
-export function buildProjectionMap(markdown, pmDoc) {
+export function buildProjectionMap(markdown, pmDoc, options = {}) {
   if (typeof markdown !== 'string' || !pmDoc || typeof pmDoc.descendants !== 'function') return null
 
   const index = buildSyntaxIndex(markdown)
   const pmBlocks = flattenPm(pmDoc)
-  const mdBlocks = flattenMd(index.tree)
+  const mdBlocks = flattenMd(index.tree, index)
+  // A split-block placeholder the kernel-mode controller itself just created
+  // (editor-kernel-mode.js `ensureSplitPlaceholder`): ONE empty PM paragraph
+  // at exactly `pmPos`, representing a caret parked on a blank line the
+  // reparse cannot show (CommonMark collapses any run of blank lines to one
+  // block boundary, so an Enter at the end of a paragraph writes real bytes
+  // — '\n\n' — that parse back to NO new block). The controller vouches for
+  // it explicitly per map build; this is NOT a general mid-document
+  // tolerance — without the option, an extra mid-doc empty paragraph still
+  // rejects the whole map below.
+  const pending = options.pendingPlaceholder &&
+    Number.isFinite(options.pendingPlaceholder.pmPos) &&
+    Number.isFinite(options.pendingPlaceholder.rawOffset)
+    ? options.pendingPlaceholder
+    : null
 
   const blockPairs = []
   let mdIndex = 0
   for (let pmIndex = 0; pmIndex < pmBlocks.length; pmIndex += 1) {
     const pm = pmBlocks[pmIndex]
     const pmType = pm.node.type.name
+
+    // Controller-vouched split placeholder: pair it as a virtual editable
+    // block anchored at the blank-line raw offset the split's caret sits on.
+    // Anything other than an empty paragraph at that exact position means
+    // the caller's bookkeeping is stale — reject the whole map (the caller
+    // fails closed and removes the placeholder again).
+    if (pending && pm.pos === pending.pmPos) {
+      if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
+      blockPairs.push({
+        mdBlock: null,
+        pmNode: pm.node,
+        pmPos: pm.pos,
+        charMap: virtualCharMap(pending.rawOffset),
+        virtual: true,
+        insertPrefix: ''
+      })
+      continue
+    }
 
     if (mdIndex >= mdBlocks.length) {
       // Crepe ships `@milkdown/plugin-trailing` UNCONDITIONALLY: its
@@ -217,8 +266,31 @@ export function buildProjectionMap(markdown, pmDoc) {
     const md = mdBlocks[mdIndex]
     mdIndex += 1
 
+    // Synthetic wrapper for an empty list item's PM auto-filled paragraph
+    // (see flattenMd): editable only when the item record proves a real
+    // marker with spacing ('- ' — typing at contentStart yields '- x', a
+    // valid item). A bare marker with no spacing ('-') would turn typed text
+    // into '-x', which is not a list item at all — that pairing stays
+    // non-editable (typing there is refused, fail-closed).
+    if (md.syntheticEmptyItemParagraph) {
+      if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
+      const item = md.item
+      const editable = !!item && item.empty &&
+        Number.isFinite(item.contentStart) && item.spacing !== ''
+      blockPairs.push({
+        mdBlock: null,
+        pmNode: pm.node,
+        pmPos: pm.pos,
+        charMap: editable ? virtualCharMap(item.contentStart) : null,
+        virtual: editable,
+        insertPrefix: editable ? '' : undefined
+      })
+      continue
+    }
+
     const allowed = PM_TO_MD[pmType] || []
     if (!allowed.includes(md.type)) return null
+
     // image-block only ever replaces a paragraph whose SINGLE child is an
     // `image` (its remark plugin's exact condition) — pairing it against any
     // other paragraph shape means the two trees have diverged structurally.

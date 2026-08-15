@@ -134,11 +134,30 @@ export function createKernelMode({
     }
   }
 
+  // Split placeholder session (Task 11.5, splitTextBlock's degenerate case):
+  // an Enter at the end/degenerate position of a paragraph/heading writes
+  // real bytes ('\n\n') whose reparse shows NO new block — CommonMark
+  // collapses blank-line runs — so the transaction's caret raw offset lands
+  // in an inter-block gap no PM position can represent. The controller then
+  // materializes ONE empty PM paragraph (the visual "caret on a blank line")
+  // right after the split block, vouches for it to buildProjectionMap via
+  // `pendingPlaceholder`, and the next plain-text/IME commit into it lands at
+  // exactly that raw offset — making the placeholder real on both sides at
+  // once. Any OTHER kernel commit ends the session; the reconcile that
+  // commit performs (or the verify repair) removes the orphaned placeholder
+  // because the parse never contains it.
+  let pendingPlaceholder = null // { pmPos, rawOffset }
+
   // Rebuild the projection map against the CURRENT kernel revision + a given
   // PM doc. Maps are revision-bound: every kernel.doc advancement must come
   // back through here; an old map is never reused across revisions.
-  const bindMap = (pmDoc) => {
-    kernel.map = pmDoc ? buildProjectionMap(kernel.doc.text, pmDoc) : null
+  // `pending` is passed ONLY by ensureSplitPlaceholder for the map built
+  // immediately after the placeholder dispatch — a stale pending must never
+  // leak into later rebuilds (a real block could have shifted onto its pos).
+  const bindMap = (pmDoc, pending = null) => {
+    kernel.map = pmDoc
+      ? buildProjectionMap(kernel.doc.text, pmDoc, pending ? { pendingPlaceholder: pending } : {})
+      : null
     if (!kernel.map) {
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
     }
@@ -236,6 +255,13 @@ export function createKernelMode({
         }
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
+        // Any successful commit ends a split-placeholder session: either the
+        // commit filled the placeholder (parse now REALLY contains it — the
+        // rebind below aligns without any tolerance) or it edited elsewhere,
+        // in which case the rebind fails against the orphaned empty
+        // paragraph and verifyPlainTextProjection's repair reconcile removes
+        // it (the parse never contains it) and rebinds.
+        pendingPlaceholder = null
         bindMap(newState?.doc || null)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
@@ -259,7 +285,13 @@ export function createKernelMode({
         }
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
+        pendingPlaceholder = null
         bindMap(newState?.doc || null)
+        // A toggle while a split placeholder was pending leaves the orphaned
+        // empty paragraph in the view (the parse never contains it), so the
+        // rebind above fails — run the same parse-diff repair the plain-text
+        // path uses so the map recovers instead of staying null.
+        if (!kernel.map && newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -289,6 +321,50 @@ export function createKernelMode({
     }
   }
 
+  // Materialize the PM representation of "caret parked on a blank line" that
+  // a degenerate splitTextBlock leaves behind (see pendingPlaceholder above):
+  // one empty paragraph right after the textblock the split originated in,
+  // caret inside it, tagged sourceProjection/addToHistory:false so the
+  // gateway passes it through and undo never replays it. The map is rebuilt
+  // WITH the placeholder vouched; if that map cannot be proven, the
+  // placeholder is removed again and the caret simply stays where the
+  // reconcile left it (fail-closed, never a half-tracked node).
+  const ensureSplitPlaceholder = (view, txn, rawOffset) => {
+    const origin = kernel.map?.rawToPmPos?.(txn.from)
+    if (!origin || !Number.isFinite(origin.pos)) return
+    try {
+      const docNode = view.state.doc
+      const $pos = docNode.resolve(Math.max(0, Math.min(origin.pos, docNode.content.size)))
+      let depth = $pos.depth
+      while (depth > 0 && !$pos.node(depth).isTextblock) depth -= 1
+      if (depth === 0 || !$pos.node(depth).isTextblock) return
+      const insertPos = $pos.after(depth)
+      const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
+      if (!paragraph) return
+      const tr = view.state.tr.insert(insertPos, paragraph)
+      tr.setSelection(TextSelection.create(tr.doc, insertPos + 1))
+      tr.setMeta('sourceProjection', true)
+      tr.setMeta('addToHistory', false)
+      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+      view.dispatch(tr)
+      const pending = { pmPos: insertPos, rawOffset }
+      if (bindMap(view.state.doc, pending)) {
+        pendingPlaceholder = pending
+        return
+      }
+      // Could not prove the vouched pairing: remove the placeholder again
+      // and rebind plain.
+      pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
+      const undoTr = view.state.tr.delete(insertPos, insertPos + paragraph.nodeSize)
+      undoTr.setMeta('sourceProjection', true)
+      undoTr.setMeta('addToHistory', false)
+      view.dispatch(undoTr)
+      bindMap(view.state.doc)
+    } catch {
+      pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
+    }
+  }
+
   // Apply one kernel transaction to the doc AND project it into the view:
   // parse-first so a projection failure refuses the whole key with every
   // state (kernel doc, history, PM view) untouched.
@@ -304,18 +380,70 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'structural-parse-failure', intent: txn.intent })
       return false
     }
+    // Any kernel transaction ends a pending split-placeholder session. If
+    // this transaction is the one that fills it (an insert exactly at its
+    // raw anchor), the reconcile below is a no-op there and the rebind
+    // aligns naturally; otherwise the reconcile removes the orphaned empty
+    // paragraph, because `parsed` never contains it.
+    pendingPlaceholder = null
     kernel.doc = result.doc
     if (record) recordHistory(result, txn)
+    // Pre-compute the caret target against the PARSED doc: its content is
+    // exactly what the view will hold after the reconcile, so its positions
+    // transfer 1:1 — and the selection MUST ride on the same transaction
+    // that inserts the new nodes. A separate follow-up selection dispatch
+    // cannot reach content whose node-view DOM (Crepe's Vue list items)
+    // hasn't mounted yet: the DOM caret stays behind and PM's DOM observer
+    // then drags the state selection back to it, which is exactly how a
+    // continuation keystroke after Enter ended up typing into the PREVIOUS
+    // block (Task 11 Bug 3's caret misplacement).
+    const anchor = result.selection?.anchor ?? result.selection?.head
+    let target = null
+    if (Number.isFinite(anchor)) {
+      const nextMap = buildProjectionMap(kernel.doc.text, parsed)
+      const found = nextMap?.rawToPmPos?.(anchor)
+      if (found && Number.isFinite(found.pos)) target = found
+    }
+    let reconciled = false
     try {
-      reconcileProjection({ view, newDoc: parsed })
+      reconciled = reconcileProjection({
+        view,
+        newDoc: parsed,
+        decorateTransaction: target
+          ? (tr) => {
+              try {
+                const clamped = Math.max(0, Math.min(target.pos, tr.doc.content.size))
+                tr.setSelection(TextSelection.near(tr.doc.resolve(clamped), 1))
+                if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+              } catch {
+                pushKernelDiagnostic({ type: 'caret-restore-failed', rawOffset: anchor })
+              }
+            }
+          : null
+      })
     } catch {
       pushKernelDiagnostic({ type: 'projection-repair-failed', intent: txn.intent })
     }
-    // The map must be rebound to the reconciled doc BEFORE the caret restore:
-    // rawToPmPos is only meaningful on a map built for this revision.
+    // The map must be rebound to the reconciled doc BEFORE any further
+    // caret work: rawToPmPos is only meaningful on a map built for this
+    // revision.
     bindMap(view.state.doc)
-    const anchor = result.selection?.anchor ?? result.selection?.head
-    setCaretFromRaw(view, anchor)
+    if (target) {
+      // No content diff (e.g. an undo landing on byte-identical parse
+      // output): the reconcile dispatched nothing, so restore the caret
+      // with a plain selection transaction — the targeted content already
+      // has mounted DOM in this case.
+      if (!reconciled) setCaretFromRaw(view, anchor)
+    } else if (txn.intent === 'split-block' && Number.isFinite(anchor) && kernel.map) {
+      // splitTextBlock's degenerate case: the caret raw offset sits on a
+      // blank line the reparse cannot represent — give it a real, editable
+      // PM home (see ensureSplitPlaceholder above).
+      ensureSplitPlaceholder(view, txn, anchor)
+    } else if (Number.isFinite(anchor)) {
+      // The caret stays wherever the reconcile left it — record why, so a
+      // misplaced continuation keystroke is diagnosable instead of silent.
+      pushKernelDiagnostic({ type: 'caret-unmappable', intent: txn.intent, rawOffset: anchor })
+    }
     onChange?.(kernel.doc.text, false)
     return true
   }
@@ -370,6 +498,10 @@ export function createKernelMode({
   const revertProjection = (code) => {
     const view = getView?.()
     if (!view || disposed) return
+    // A revert reconciles the view straight back to parse(kernel.doc.text),
+    // which removes any pending split placeholder along the way — the
+    // session is over either way.
+    pendingPlaceholder = null
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
       pushKernelDiagnostic({ type: 'composition-revert-parse-failure' })
@@ -621,6 +753,7 @@ export function createKernelMode({
       kernel.doc = createMarkdownDocument(source)
       kernel.history = createSourceHistory()
       redoDepth = 0
+      pendingPlaceholder = null
       bindMap(view.state.doc)
       onStructureChange?.()
       return true
@@ -685,6 +818,7 @@ export function createKernelMode({
   const dispose = () => {
     disposed = true
     kernel.map = null
+    pendingPlaceholder = null
     compositionSession.dispose()
   }
 

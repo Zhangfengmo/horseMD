@@ -401,6 +401,81 @@ console.log('--- kernel projection map ---')
   assert.equal(map.rawToPmPos(0).pos, 1)
 }
 
+// Case 12: empty list item — the byte shape splitListItem's Enter leaves
+// ('- \n'). mdast gives the listItem ZERO children; PM's createAndFill fills
+// the required empty paragraph in. Raw '- 甲\n- \n': -=0 ' '=1 甲=2 \n=3 -=4
+// ' '=5 \n=6, length 7; item 2's contentStart = 6. PM: bullet_list@0, li@1,
+// p@2 (甲), li@6, p@7 (empty), trailing p@11 (content start 12).
+{
+  const md = '- 甲\n- \n'
+  const d = doc(
+    schema.node('bullet_list', null, [
+      schema.node('list_item', null, [p(text('甲'))]),
+      schema.node('list_item', null, [p()])
+    ]),
+    p()
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'empty list item must map')
+  assert.equal(map.blockPairs.length, 6)
+  const emptyItemParagraph = map.blockPairs[4]
+  assert.equal(emptyItemParagraph.virtual, true)
+  assert.equal(emptyItemParagraph.charMap.visibleToRaw(0), 6, 'anchored right after the marker + spacing')
+  assert.deepEqual(map.virtualBlockAt(8), { raw: 6, prefix: '' })
+  assert.equal(map.pmPosToRaw(8), 6)
+  assert.equal(map.rawToPmPos(6).pos, 8)
+  // The trailing placeholder coexists with the empty-item pairing.
+  assert.deepEqual(map.virtualBlockAt(12), { raw: 7, prefix: '\n' })
+}
+
+// Case 12b: a BARE marker with no spacing ('-' alone). Typing at its
+// "content start" would produce '-x' — not a list item at all — so the pair
+// must stay NON-editable (charMap null), while the rest of the doc still
+// maps. Raw '- 甲\n-\n': item 2 = [4,5], spacing ''.
+{
+  const md = '- 甲\n-\n'
+  const d = doc(
+    schema.node('bullet_list', null, [
+      schema.node('list_item', null, [p(text('甲'))]),
+      schema.node('list_item', null, [p()])
+    ]),
+    p()
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'bare-marker empty item must still map the rest of the doc')
+  assert.equal(map.blockPairs[4].charMap, null, 'bare-marker item paragraph must be non-editable')
+  assert.equal(map.virtualBlockAt(8), null)
+  assert.equal(map.pmPosToRaw(8), null)
+}
+
+// Case 13: pending split placeholder (editor-kernel-mode's
+// ensureSplitPlaceholder). Raw 'P1\n\n\n\nP2\n' (the bytes after Enter at
+// the end of 'P1'): P=0 1=1 \n=2 \n=3 \n=4 \n=5 P=6 2=7 \n=8. The caret raw
+// offset 4 sits on a blank line NO reparse can represent; the controller
+// materializes an empty PM paragraph at pos 4 (after p('P1'), nodeSize 4)
+// and vouches for it. WITHOUT the voucher the same doc must reject.
+{
+  const md = 'P1\n\n\n\nP2\n'
+  const d = doc(p(text('P1')), p(), p(text('P2')))
+  assert.equal(buildProjectionMap(md, d), null, 'unvouched mid-doc empty paragraph must reject')
+  const map = buildProjectionMap(md, d, { pendingPlaceholder: { pmPos: 4, rawOffset: 4 } })
+  assert.ok(map, 'vouched split placeholder must map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].virtual, true)
+  assert.deepEqual(map.virtualBlockAt(5), { raw: 4, prefix: '' })
+  assert.equal(map.pmPosToRaw(5), 4)
+  assert.equal(map.rawToPmPos(4).pos, 5)
+  // Surrounding real paragraphs unaffected.
+  assert.equal(map.pmPosToRaw(1), 0)
+  assert.equal(map.pmPosToRaw(7), 6)
+  // A voucher pointing at a NON-empty paragraph is stale bookkeeping — reject.
+  assert.equal(
+    buildProjectionMap(md, d, { pendingPlaceholder: { pmPos: 0, rawOffset: 4 } }),
+    null,
+    'voucher on a non-empty block must reject'
+  )
+}
+
 // Case 14: standalone image-block. Raw '# t\n\n![a](x.png)\n\n尾\n':
 // #=0 ' '=1 t=2 \n=3 \n=4 image [5,16) \n=16 \n=17 尾=18 \n=19. The kernel's
 // plugin-free parse keeps the `paragraph > image` wrapper; Crepe's PM doc

@@ -49,7 +49,10 @@ const FIXTURE_DOCS = {
   '- [ ] 乙\n': () => doc(bl(li(false, p(text('乙'))))),
   // Task 11.5 fixtures: trailing-placeholder typing + split placeholder.
   '- 甲\n': () => doc(bl(li(null, p(text('甲'))))),
-  '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X')))
+  '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X'))),
+  '甲乙\n\n\n': () => doc(p(text('甲乙'))),
+  '甲乙\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  'X甲乙\n\n\n': () => doc(p(text('X甲乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -467,6 +470,67 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.deepEqual(h.changes.at(-1), ['- 甲\n\nX', false])
   assert.ok(h.view.state.doc.eq(doc(bl(li(null, p(text('甲')))), p(text('X')))))
   assert.ok(h.controller.kernel.map, 'map realigns once the paragraph is real')
+}
+
+// Case 13 (Task 11.5, splitTextBlock degenerate split): Enter at the END of
+// a paragraph writes '\n\n' whose reparse shows no new block (CommonMark
+// collapses blank-line runs). The controller must materialize an editable
+// placeholder paragraph, park the caret in it, and route the NEXT keystroke
+// to the blank-line raw offset — this is the exact caret-misplacement bug
+// that made continuation text land in the wrong block (Task 11 Bug 3).
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3))) // end of 甲乙
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n', 'split bytes written at the block end')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p())),
+    'the view shows the new empty paragraph even though the reparse collapses it')
+  assert.equal(h.view.state.selection.head, 5, 'caret parked inside the placeholder')
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(5), { raw: 4, prefix: '' })
+
+  // The continuation keystroke lands at the blank-line offset — the bytes
+  // the pure-kernel oracle derives for "Enter then type".
+  const tr = h.view.state.tr.insertText('丙', 5)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n丙\n',
+    'typed text becomes the new paragraph — never merged into a neighboring block')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))))
+  assert.equal(h.controller.kernel.map.pmPosToRaw(6), 5, 'map realigned to the now-real paragraph')
+
+  // Undo granularity: the typed char and the split are separate groups.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')))),
+    'undo of the fill removes the paragraph from the view (the bytes cannot represent it)')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'undo of the split restores the original bytes')
+}
+
+// Case 14 (Task 11.5): typing ELSEWHERE while a split placeholder is
+// pending ends the placeholder session — the orphaned empty paragraph (the
+// parse never contains it) is removed by the verify repair and the map
+// recovers, instead of staying null.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3)))
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p())), 'placeholder present')
+
+  const tr = h.view.state.tr.insertText('X', 1) // start of 甲乙 — NOT the placeholder
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, 'X甲乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('X甲乙')))),
+    'the orphaned placeholder was reconciled away')
+  assert.ok(h.controller.kernel.map, 'map recovered after the orphan cleanup')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(1), 0)
 }
 
 // Case 15 (Task 11.5): @milkdown/plugin-trailing's own append transaction —
