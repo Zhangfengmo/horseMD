@@ -228,12 +228,36 @@ export function createConfiguredCrepe({
       }
     })
 
+    // Built once so kernel mode can reposition the SAME instance ahead of the
+    // kernel keymaps (see below) without changing anything about the plugin
+    // itself or its non-kernel position/behavior.
+    const slashPlugin = createSlashPlugin(
+      ctx,
+      getT,
+      onSlashCommand,
+      // Source-kernel mode: every slash item is a structural insert the
+      // kernel can't own yet (phase 1 of the blocking matrix) — block all
+      // ids, keep them visible-but-disabled (handled in editor-slash-menu.js).
+      kernelMode ? { isBlocked: () => 'kernelMode.unsupported', notify } : undefined
+    )
+
     ctx.update(prosePluginsCtx, (plugins) => [
+      // Kernel mode ONLY (阻止矩阵, Task 11 finding): the slash menu's own
+      // key handling (Enter/Arrow/Tab/Escape) must win over the kernel's
+      // structural Enter/Tab handlers WHILE THE MENU IS OPEN — otherwise a
+      // blocked slash item's Enter "selection" is preempted by an
+      // uncontrolled kernel structural edit (e.g. a real paragraph split)
+      // instead of the intended "hide the menu + toast, no doc change"
+      // refusal. `SlashMenu.onKey` is a true no-op
+      // (`if (!this.shown()) return false`) whenever the menu isn't open, so
+      // placing it first here has ZERO effect on any other key handling —
+      // this is purely about who wins the race while the menu IS open.
+      ...(kernelMode ? [slashPlugin] : []),
       // Kernel mode: structural (Enter/Tab/Shift-Tab/Backspace/Delete) and
       // history (Mod-z/Mod-y/Shift-Mod-z) keys are routed through the source
-      // kernel FIRST — these keymaps must sit at the very head of the plugin
-      // order, before listBackspaceKeymap and every preset keymap, or PM's
-      // own structural commands would fire and be vetoed after the fact.
+      // kernel next — these keymaps must sit at the head of the REMAINING
+      // plugin order, before listBackspaceKeymap and every preset keymap, or
+      // PM's own structural commands would fire and be vetoed after the fact.
       ...(kernelMode && kernelPlugins
         ? [kernelPlugins.structuralKeymap(), kernelPlugins.historyKeymap()]
         : []),
@@ -260,15 +284,10 @@ export function createConfiguredCrepe({
       createInlineMathEditingPlugin({ getDeleteMode: getInlineMathDeleteMode }),
       createKatexDomPrunePlugin(),
       mathPreviewPlugin(getT),
-      createSlashPlugin(
-        ctx,
-        getT,
-        onSlashCommand,
-        // Source-kernel mode: every slash item is a structural insert the
-        // kernel can't own yet (phase 1 of the blocking matrix) — block all
-        // ids, keep them visible-but-disabled (handled in editor-slash-menu.js).
-        kernelMode ? { isBlocked: () => 'kernelMode.unsupported', notify } : undefined
-      ),
+      // Non-kernel mode: unchanged position (after the preset keymaps),
+      // byte-identical to before this reordering — same `slashPlugin`
+      // instance built once above, just placed earlier for kernel mode only.
+      ...(kernelMode ? [] : [slashPlugin]),
       toolbarAutohidePlugin(),
       createReviewDecorationPlugin({
         getT: (key, fallback) => {
