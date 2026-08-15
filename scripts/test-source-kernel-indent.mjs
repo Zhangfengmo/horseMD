@@ -36,4 +36,35 @@ assert.equal(run('- 甲\n', 2, outdentListItem).code, 'unsupported-structure')
     '- 甲\n- 乙\n  - 丙\n')
 }
 
+// Caret math regression: an item that owns MORE THAN ONE line (a marker
+// line plus a wrapped/continuation line) must shift the caret by the SUM of
+// every edit at-or-before it, not just the one edit on its own line. A flat
+// single delta under-counted every edit before the marker line's own.
+{
+  const src = '- 甲\n- 乙 line one\n  line two continued\n'
+  const offset = src.indexOf('two')
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = indentListItem({ doc, index, offset })
+  assert.equal(r.ok, true)
+  const applied = applySourceTransaction(doc, r.transaction)
+  assert.equal(applied.doc.text, '- 甲\n  - 乙 line one\n    line two continued\n')
+  assert.equal(applied.selection.anchor, applied.doc.text.indexOf('two'))
+  assert.equal(applied.selection.head, applied.doc.text.indexOf('two'))
+}
+{
+  // Symmetric outdent counterpart: outdenting the indented doc above back to
+  // its original form must land the caret on "two" in the OUTDENTED text.
+  const src = '- 甲\n  - 乙 line one\n    line two continued\n'
+  const offset = src.indexOf('two')
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = outdentListItem({ doc, index, offset })
+  assert.equal(r.ok, true)
+  const applied = applySourceTransaction(doc, r.transaction)
+  assert.equal(applied.doc.text, '- 甲\n- 乙 line one\n  line two continued\n')
+  assert.equal(applied.selection.anchor, applied.doc.text.indexOf('two'))
+  assert.equal(applied.selection.head, applied.doc.text.indexOf('two'))
+}
+
 console.log('PASS source-kernel indent')

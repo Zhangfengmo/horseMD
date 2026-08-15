@@ -42,15 +42,43 @@ const ownedLineIndexes = (index, item) => {
   return rows
 }
 
-const multiTxn = (doc, edits, intent, caretDelta, offset) => ({
-  ok: true,
-  transaction: {
-    baseRevision: doc.revision,
-    edits,
-    intent,
-    selection: { anchor: offset + caretDelta, head: offset + caretDelta }
+// A flat single delta is wrong once an item owns more than one line: EVERY
+// edit at or before `offset` shifts it, not just the one on offset's own
+// line (a caret on a continuation/owned line sits after the marker line's
+// edit AND its own line's edit). Sum every edit's effect that lands at or
+// before offset, in original-document coordinates. These edits are always
+// either a pure insert (from === to) or a pure whitespace deletion
+// (insert === ''), never both in one edit, and — being prefix edits placed
+// at a line's own start — offset can only fall inside a deleted range for a
+// deletion, never inside an inserted pad; still clamp defensively.
+const selectionFor = (edits, offset) => {
+  let delta = 0
+  for (const edit of edits) {
+    if (edit.from > offset) break
+    const insertLen = String(edit.insert ?? '').length
+    if (edit.to <= offset) {
+      delta += insertLen - (edit.to - edit.from)
+    } else {
+      // offset lands inside this edit's deleted range: clamp to the edit's
+      // own insertion point plus however much of the deletion precedes it.
+      delta += insertLen - (offset - edit.from)
+    }
   }
-})
+  return offset + delta
+}
+
+const multiTxn = (doc, edits, intent, offset) => {
+  const anchor = selectionFor(edits, offset)
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits,
+      intent,
+      selection: { anchor, head: anchor }
+    }
+  }
+}
 
 // The nearest preceding item at the SAME depth, in the SAME list (same
 // listStart) as `item`. Walked line-by-line (not by raw char offset — a raw
@@ -103,7 +131,7 @@ export function indentListItem({ doc, index, offset }) {
     const at = index.lines[i].start + item.quotePrefix.length
     return { from: at, to: at, insert: pad }
   })
-  return multiTxn(doc, edits, 'indent-list-item', pad.length, offset)
+  return multiTxn(doc, edits, 'indent-list-item', offset)
 }
 
 export function outdentListItem({ doc, index, offset }) {
@@ -123,5 +151,5 @@ export function outdentListItem({ doc, index, offset }) {
     }
     edits.push({ from: at, to: at + width, insert: '' })
   }
-  return multiTxn(doc, edits, 'outdent-list-item', -width, offset)
+  return multiTxn(doc, edits, 'outdent-list-item', offset)
 }
