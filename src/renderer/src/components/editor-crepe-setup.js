@@ -169,7 +169,8 @@ export function createConfiguredCrepe({
               tabAtCursorKeymap,
               ...createKernelCmExtensions({
                 runUndo: () => kernelPlugins?.runHistory?.('undo'),
-                runRedo: () => kernelPlugins?.runHistory?.('redo')
+                runRedo: () => kernelPlugins?.runHistory?.('redo'),
+                isActive: () => !!kernelPlugins?.isActive?.()
               })
             ]
           : [tabAtCursorKeymap]

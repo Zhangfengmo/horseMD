@@ -834,6 +834,13 @@ export function createKernelMode({
     structuralHandlers,
     historyHandlers,
     runHistory,
+    // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
+    // attach / while degraded / after dispose, the kernel is not the source
+    // of truth, so a CM-focused Mod-z must fall through to the nodeview's
+    // own prosemirror-history binding instead of calling into a controller
+    // that has nothing to undo — same delegation convention as
+    // `legacy()`/`attachLegacyApi` above.
+    isActive: () => !inactive(),
     apiOverrides,
     attachLegacyApi,
     refreshProjectionMap,

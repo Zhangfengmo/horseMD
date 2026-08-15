@@ -156,6 +156,13 @@ const MERMAID_BLOCK = (editorExpr) =>
   `[...(${editorExpr})?.querySelectorAll('.milkdown-code-block') || []]
     .find((block) => block.querySelector('.language-button')?.textContent?.trim().toLowerCase() === 'mermaid')`
 
+// Used by the PM->CM projection-sync regression below: the fixture's ONLY
+// other code block, whose content carries the marker text that gets edited
+// out-of-band through the source-mode textarea.
+const JS_BLOCK = (editorExpr) =>
+  `[...(${editorExpr})?.querySelectorAll('.milkdown-code-block') || []]
+    .find((block) => block.querySelector('.language-button')?.textContent?.trim().toLowerCase() === 'js')`
+
 const mounted = (evaluate) => evaluate(`(${VISIBLE_EDITOR})?.textContent`)
 
 const visibleSource = (evaluate) => evaluate(`(
@@ -546,10 +553,17 @@ async function run() {
     // ============================================================
     // 5) Blocked matrix — fenced code block stays read-only
     // ============================================================
+    // scrollIntoView FIRST (Task 1 fix report finding): without it, on this
+    // tall fixture the `js` block's `.cm-line` rect can land off-screen
+    // (observed y:-480 during this task's own investigation), the click
+    // lands nowhere, no keystrokes ever reach CM, and the assertion below
+    // passed vacuously — proving nothing about real read-only enforcement.
+    await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-editor')?.scrollIntoView({ block: 'center' })`)
+    await sleep(400)
     const codePoint = await evaluate(`(() => {
       const line = (${VISIBLE_EDITOR})?.querySelector('.cm-editor .cm-line')
       const rect = line?.getBoundingClientRect()
-      return rect ? { x: rect.left + 4, y: rect.top + rect.height / 2 } : null
+      return rect && rect.width ? { x: rect.left + 4, y: rect.top + rect.height / 2 } : null
     })()`)
     assert.ok(codePoint, 'code block line is not hit-testable')
     const cmTextBefore = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
@@ -671,6 +685,64 @@ async function run() {
       'kernel document bytes do not match the derived expectation after the CM read-only/undo-bridge probe (typing must stay blocked; undo/redo must round-trip back to the pre-probe state)')
     await toggleSourceMode(evaluate)
     await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the read-only/undo-bridge probe')
+    await sleep(200)
+
+    // ============================================================
+    // 5.8) PM -> CM projection sync survives a kernel-owned out-of-band
+    //      edit reaching a code block (review fix: a blanket
+    //      `EditorState.changeFilter.of(() => false)` — an earlier version
+    //      of the bridge — silently ate the CodeMirrorBlock nodeview's OWN
+    //      `update(node)` re-sync dispatch too, not just user keystrokes).
+    // ============================================================
+    // Editing the code block's TEXT through the source-mode textarea and
+    // switching back is a kernel-owned `replaceMarkdown` projection-diff
+    // commit (editor-kernel-mode.js apiOverrides.replaceMarkdown ->
+    // reconcileProjection), never a CM-local edit — exactly the path a
+    // blanket changeFilter broke: kernel.doc.text would be correct but
+    // `.cm-content` would stay stale forever (editor-codeblock-eager.js's
+    // eager-mount convention means the nodeview never tears down/remounts
+    // to pick up a fresh value on its own).
+    const JS_MARKER = 'function greet(name) {'
+    const JS_MARKER_EDITED = 'function greet(name) { // hm-projection-sync-probe'
+    const editSourceMarker = async (from, to) => evaluate(`(() => {
+      const ta = [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)
+      if (!ta) return false
+      const idx = ta.value.indexOf(${JSON.stringify(from)})
+      if (idx < 0) return false
+      ta.setRangeText(${JSON.stringify(to)}, idx, idx + ${JSON.stringify(from)}.length, 'end')
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+
+    await toggleSourceMode(evaluate)
+    const sourceBeforeProjectionEdit = await waitFor(() => visibleSource(evaluate), 'source view did not appear for the projection-sync regression')
+    assert.ok(sourceBeforeProjectionEdit.includes(JS_MARKER), 'js code block marker text missing from source before the projection-sync edit')
+    assert.ok(await editSourceMarker(JS_MARKER, JS_MARKER_EDITED), 'could not apply the projection-sync source edit')
+    const sourceAfterProjectionEdit = await waitFor(() => visibleSource(evaluate), 'source textarea did not update after the projection-sync edit')
+    assert.ok(sourceAfterProjectionEdit.includes(JS_MARKER_EDITED), 'source-mode edit to the code block did not take effect in the textarea')
+
+    await toggleSourceMode(evaluate)
+    await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the projection-sync edit')
+    await waitFor(
+      () => evaluate(`(${JS_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent?.includes(${JSON.stringify('// hm-projection-sync-probe')})`),
+      'CodeMirror did not pick up the kernel-owned source-mode edit after switching back to rich (PM -> CM projection sync regression)'
+    )
+
+    // Revert, so the fixture's derived SAVED/AFTER_TYPING expectations
+    // (computed from the untouched FIXTURE string) stay valid for section 6
+    // below — and prove the sync also works in the other direction.
+    await toggleSourceMode(evaluate)
+    await waitFor(() => visibleSource(evaluate), 'source view did not reappear for the projection-sync revert')
+    assert.ok(await editSourceMarker(JS_MARKER_EDITED, JS_MARKER), 'could not revert the projection-sync source edit')
+    const sourceAfterRevert = await waitFor(() => visibleSource(evaluate), 'source textarea did not update after the projection-sync revert')
+    assert.equal(sourceAfterRevert, SAVED, 'reverting the projection-sync probe did not restore the exact pre-probe source bytes')
+
+    await toggleSourceMode(evaluate)
+    await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the projection-sync revert')
+    await waitFor(
+      () => evaluate(`!(${JS_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent?.includes(${JSON.stringify('// hm-projection-sync-probe')})`),
+      'CodeMirror still showed the projection-sync probe text after the revert reached rich mode'
+    )
     await sleep(200)
 
     // ============================================================
