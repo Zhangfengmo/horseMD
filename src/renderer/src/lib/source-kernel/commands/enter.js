@@ -23,7 +23,10 @@ const bareQuote = (prefix) => prefix.replace(/[ \t]+$/, '')
 // ending exactly at `offset` one position back, WITHOUT letting a blank-line
 // gap (an offset that is not any block's end either) fall through to a
 // preceding block it doesn't belong to.
-const resolveBlock = (index, offset) => {
+// Exported (Task 7): router.js needs the same "block whose end sits exactly
+// at offset" fallback for Delete-at-block-end (blockAt alone is exclusive-end
+// and returns null right at that boundary).
+export const resolveBlock = (index, offset) => {
   const direct = index.blockAt(offset)
   if (direct) return direct
   if (offset > 0) {
