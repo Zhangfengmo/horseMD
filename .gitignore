@@ -42,3 +42,6 @@ skills-lock.json
 # device build (xcodebuild -derivedDataPath)
 ios/App/build-device/
 .vercel
+
+# IDE
+.idea/
