@@ -20,8 +20,9 @@
 // doc is simultaneously a valid match for the "common prefix" scan AND the
 // "common suffix" scan, so `findDiffStart` walks past where `findDiffEnd`
 // already claims the untouched suffix begins. Left unclamped, that overlap
-// produces either an inverted result: to < from (illegal Node.slice / a
-// nonsensical "replace this negative range"). The clamp below is the exact
+// can produce an inverted range (to < from, or insertTo < insertFrom) —
+// an illegal `Node.slice`/`tr.replace` call, not just a wrong-but-valid
+// one. The clamp below is the exact
 // shape prosemirror-view's own `findDiff` uses (domchange.ts / bundled
 // dist/index.js's `findDiff`, minus its caret-`preferredPos` nudging, which
 // only matters for placing the cursor after a live DOM edit and has no
