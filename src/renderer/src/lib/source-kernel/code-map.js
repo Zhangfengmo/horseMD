@@ -62,14 +62,22 @@ function lineIndexAt(lines, offset) {
 // Zero-content code block ('```\n```\n'): the only meaningful raw position is
 // right after the open fence line's own ending — where a closing fence (or a
 // user's first typed line) would begin. No content lines to prefix-check.
-function emptyCodeMap(rawOffset) {
+// `linePrefix`/`lineEnding` are exposed anyway (Plan 3 Task 4): a first
+// multi-line insert into an EMPTY code block still needs to know what to
+// expand each `\n` in the inserted text into, and there is no content line
+// yet to derive them from — the open fence line's own prefix/ending are the
+// only proof available, and are exactly what every content line would have
+// to reproduce byte-for-byte once one exists (see the main branch below).
+function emptyCodeMap(rawOffset, linePrefix, lineEnding) {
   return {
     units: [],
     visibleLength: 0,
     visibleToRaw: (vis) => (vis === 0 ? rawOffset : null),
     rawRangeForVisibleRange: (from, to) => (
       from === 0 && to === 0 ? { from: rawOffset, to: rawOffset } : null
-    )
+    ),
+    linePrefix,
+    lineEnding
   }
 }
 
@@ -90,13 +98,22 @@ export function buildCodeMap(text, codeNode) {
   const prefix = text.slice(openLine.start, start)
 
   if (value.length === 0) {
-    return emptyCodeMap(openLine.end + openLine.ending.length)
+    return emptyCodeMap(openLine.end + openLine.ending.length, prefix, openLine.ending || '\n')
   }
 
   let lineIdx = openIdx + 1
   if (lineIdx >= lines.length) return null
   let line = lines[lineIdx]
   if (!text.startsWith(prefix, line.start)) return null
+  // The first content line's own terminator is the canonical `lineEnding`
+  // this block's newlines use (buildCodeMap already fails closed, below, if
+  // a LATER content line's own ending diverges from what `.value`'s '\n'/
+  // '\r' chars predict for it — so a real, provably-mapped block never
+  // actually has a mixed-ending interior; only ONE ending style ever reaches
+  // the return below). Falls back to the open fence line's own ending for
+  // the degenerate "no terminator at all" case (captured before the walk
+  // below can mutate `line`).
+  const lineEnding = line.ending || openLine.ending || '\n'
   let r = line.start + prefix.length
   let lineContentEnd = line.end
   // True right after this line's '\r' half (of a '\r\n' ending) was consumed
@@ -195,5 +212,11 @@ export function buildCodeMap(text, codeNode) {
     return { from, to }
   }
 
-  return { units, visibleLength, visibleToRaw, rawRangeForVisibleRange }
+  // `linePrefix`/`lineEnding` (Plan 3 Task 4): the exact bytes a NEW `\n`
+  // typed into this block's content must expand into — a bare '\n' inserted
+  // verbatim would break a quoted/indented fence's per-line prefix contract
+  // this whole module exists to prove. Exposed here (not re-derived by
+  // callers) because this function is the only place that has already
+  // proven `prefix` is byte-for-byte consistent across every content line.
+  return { units, visibleLength, visibleToRaw, rawRangeForVisibleRange, linePrefix: prefix, lineEnding }
 }

@@ -5,6 +5,7 @@ import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/charact
 import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/commands/replace-text.js'
 import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands/task-toggle.js'
 import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
+import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
 
 const setup = (text, at) => {
   const doc = createMarkdownDocument(text)
@@ -348,3 +349,119 @@ console.log('PASS source-kernel commands (splitTextBlock polish: paragraph-start
   assert.equal(c.index.lineAt(2).ending, '\r') // scanLines-level: confirms the fixture actually has a lone-CR ending
   assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '甲乙\r\r\r丙\r')
 }
+
+console.log('PASS source-kernel commands (splitTextBlock final-review coverage gaps)')
+
+// ---- Plan 3 Task 4: changeCodeLanguage ----
+//
+// src = '```js\nabc\n```\n'
+// ` 0 ` 1 ` 2 j 3 s 4 \n 5 | a 6 b 7 c 8 \n 9 | ` 10 ` 11 ` 12 \n 13
+// open fence line "```js" [0,5); marker "```" [0,3); info segment "js" [3,5).
+
+// Case A: plain top-level fence, language change with all three selection
+// clamp branches ("before the removed info segment" / "inside it" / "at or
+// after the line's own end").
+{
+  const src = '```js\nabc\n```\n'
+  const c = ctx(src)
+  // (a) offset inside the code CONTENT ('b' at 7) — the common case, past
+  // the whole info segment: shifted by the edit's delta (+4, 'python' vs 'js').
+  {
+    const r = changeCodeLanguage({ ...c, offset: 7, language: 'python' })
+    assert.equal(r.ok, true)
+    assert.equal(r.transaction.from, 3)
+    assert.equal(r.transaction.to, 5)
+    assert.equal(r.transaction.insert, 'python')
+    assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '```python\nabc\n```\n')
+    assert.deepEqual(r.transaction.selection, { anchor: 11, head: 11 })
+  }
+  // (b) offset BEFORE the marker's own end (0, the very start of the fence)
+  // — unaffected by the edit, unchanged.
+  {
+    const r = changeCodeLanguage({ ...c, offset: 0, language: 'python' })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.transaction.selection, { anchor: 0, head: 0 })
+  }
+  // (c) offset INSIDE the removed info segment (4, between 'j' and 's') —
+  // that exact spot no longer exists; clamps to right after the new token.
+  {
+    const r = changeCodeLanguage({ ...c, offset: 4, language: 'python' })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.transaction.selection, { anchor: 3 + 'python'.length, head: 3 + 'python'.length })
+  }
+}
+
+// Case B: blockquote-prefixed fence — the marker/info region sits AFTER the
+// '> ' prefix (remark's own node.position.start.offset convention, same one
+// buildCodeMap relies on); the prefix itself must never be touched.
+// src = '> ```js\n> abc\n> ```\n'
+// '> ' 0-1 '```js' 2-6 \n 7 | '> ' 8-9 'abc' 10-12 \n 13 | '> ' 14-15 '```' 16-18 \n 19
+{
+  const src = '> ```js\n> abc\n> ```\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 10, language: '' }) // remove language
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 5)
+  assert.equal(r.transaction.to, 7)
+  assert.equal(r.transaction.insert, '')
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '> ```\n> abc\n> ```\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 8, head: 8 }) // 10 shifted by delta -2
+}
+
+// Case C: tilde fence.
+// src = '~~~js\nabc\n~~~\n' — identical layout to Case A, tilde marker.
+{
+  const src = '~~~js\nabc\n~~~\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 7, language: 'python' })
+  assert.equal(r.ok, true)
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '~~~python\nabc\n~~~\n')
+}
+
+// Case D: CRLF fence — line boundaries (marker/info-segment end) must land
+// on the CONTENT end, never inside the '\r\n' terminator.
+// src = '```js\r\nabc\r\n```\r\n'
+// ` 0 ` 1 ` 2 j 3 s 4 \r 5 \n 6 | a 7 b 8 c 9 \r 10 \n 11 | ...
+{
+  const src = '```js\r\nabc\r\n```\r\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 7, language: 'jsx' })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 3)
+  assert.equal(r.transaction.to, 5)
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '```jsx\r\nabc\r\n```\r\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 8, head: 8 }) // 7 + delta(+1, 'jsx' vs 'js')
+}
+
+// Case E: bare fence (no language) -> add one. info segment is EMPTY
+// (markerEnd === infoEnd), insert lands there untouched.
+// src = '```\nabc\n```\n' — marker [0,3), info segment [3,3) (empty).
+{
+  const src = '```\nabc\n```\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 4, language: 'js' })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 3)
+  assert.equal(r.transaction.to, 3)
+  assert.equal(r.transaction.insert, 'js')
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '```js\nabc\n```\n')
+}
+
+// Case F: language containing whitespace -> reject (GFM info string can't
+// round-trip a multi-token "language" through a single lang field).
+{
+  const src = '```js\nabc\n```\n'
+  const c = ctx(src)
+  assert.deepEqual(changeCodeLanguage({ ...c, offset: 7, language: 'js ts' }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
+// Case G: offset outside any code block (a plain paragraph) -> reject.
+{
+  const src = '甲乙\n\n```js\nabc\n```\n'
+  const c = ctx(src)
+  assert.deepEqual(changeCodeLanguage({ ...c, offset: 0, language: 'js' }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
+console.log('PASS source-kernel commands (changeCodeLanguage)')

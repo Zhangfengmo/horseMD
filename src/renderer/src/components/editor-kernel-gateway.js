@@ -1,12 +1,16 @@
-// Gateway: pure classification of ProseMirror transactions + plain-text
-// commit into the source kernel (kernel-mode integration Plan 2, Task 3).
+// Gateway: pure classification of ProseMirror transactions + commits (plain
+// text, task-checkbox toggle, code-block language switch) into the source
+// kernel (kernel-mode integration Plan 2 Task 3, extended by Plan 3 Task 4).
 //
-// This module owns exactly two pure functions and imports NOTHING from
-// electron/react/@milkdown — only `../lib/source-kernel` (KERNEL_CODES +
-// applySourceTransaction) and plain ProseMirror step/model objects passed in
-// by the caller. It does not talk to a live EditorView, does not read
-// `crepe.*`, and does not dispatch anything itself; the Editor-side wiring
-// (Task 5) is the only place that calls into a live view.
+// This module imports NOTHING from electron/react/@milkdown — only
+// `../lib/source-kernel` (KERNEL_CODES, applySourceTransaction, the pure
+// command functions), `READONLY_CODE_LANGUAGES` from the sibling
+// `editor-kernel-projection-map.js` (a plain data constant, shared so the
+// two modules' notion of "preview-only code language" can never drift), and
+// plain ProseMirror step/model objects passed in by the caller. It does not
+// talk to a live EditorView, does not read `crepe.*`, and does not dispatch
+// anything itself; the Editor-side wiring (Task 5) is the only place that
+// calls into a live view.
 //
 // classifyTransactions() re-derives the same "is this a plain, unmarked,
 // single-textblock edit" guard that src/renderer/src/lib/source-transaction-sync.js
@@ -17,16 +21,27 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage } from '../lib/source-kernel/index.js'
+import { READONLY_CODE_LANGUAGES } from './editor-kernel-projection-map.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
 // slice boundary) and no line breaks (a hardbreak/newline inside the slice
 // is structural content the raw kernel commands own, not a byte-for-byte
-// text edit). Mirrors source-transaction-sync.js's `plainSliceText`
-// (:22-36) but is redefined here so this module has no dependency on that
-// file's raw-matching helpers.
-const plainSliceText = (slice) => {
+// text edit) — UNLESS the slice targets a `code_block` textblock
+// (`allowNewline`, Plan 3 Task 4): CodeMirror's own `forwardUpdate` (the
+// bridge that mirrors a CM6 edit into the PM `code_block` node) issues plain
+// `ReplaceStep`s whose inserted text carries a bare `'\n'` for a multi-line
+// CM edit — there is no separate hardbreak node inside a code block's `text*`
+// content model, the newline IS the text. `commitPlainText` below is what
+// turns each such `'\n'` into the raw bytes (line ending + the block's own
+// per-line prefix) this actually has to become on disk; a bare '\r' is
+// refused even with `allowNewline` because CM never produces one (its own
+// line-break representation is always '\n') and the expansion below only
+// knows how to translate '\n'. Mirrors source-transaction-sync.js's
+// `plainSliceText` (:22-36) but is redefined here so this module has no
+// dependency on that file's raw-matching helpers.
+const plainSliceText = (slice, { allowNewline = false } = {}) => {
   if (!slice || slice.size === 0 || slice.content?.size === 0) return ''
   if (slice.openStart || slice.openEnd) return null
   let text = ''
@@ -38,7 +53,12 @@ const plainSliceText = (slice) => {
     }
     text += node.text || ''
   })
-  if (!valid || /[\r\n]/.test(text)) return null
+  if (!valid) return null
+  if (allowNewline) {
+    if (/\r/.test(text)) return null
+    return text
+  }
+  if (/[\r\n]/.test(text)) return null
   return text
 }
 
@@ -97,7 +117,8 @@ function extractPlainTextSteps(transactions, oldState) {
         return null
       }
       if (!$from.sameParent($to) || !isPlainTextblock($from.parent)) return null
-      const insertText = plainSliceText(step.slice)
+      const allowNewline = $from.parent.type?.name === 'code_block'
+      const insertText = plainSliceText(step.slice, { allowNewline })
       if (insertText == null) return null
       steps.push({ from: step.from, to: step.to, insertText })
     }
@@ -139,6 +160,43 @@ function extractTaskToggleStep(transactions, oldState) {
   return { pos: step.pos }
 }
 
+// Detects the code-block language-switch AttrStep shape (Plan 3 Task 4): a
+// language picker (the CM toolbar, wired in a later task) dispatches
+// `tr.setNodeAttribute(pos, 'language', v)` on a `code_block` node — exactly
+// like the checkbox click above, never through a keymap and never a
+// `ReplaceStep`, so neither `structuralHandler` nor `extractPlainTextSteps`
+// ever sees it. Proves the same shape `extractTaskToggleStep` proves for its
+// own attribute (ONE transaction, ONE `AttrStep`, the right `attr` name, a
+// PM node of the expected type at `step.pos`) plus one extra guard this
+// attribute needs that `checked` doesn't: a code_block whose CURRENT
+// (pre-switch) language Crepe renders as a preview (mermaid/latex —
+// `READONLY_CODE_LANGUAGES`, shared with editor-kernel-projection-map.js so
+// the two stay in lockstep) never got a `charMap` built for it (see that
+// file's `codeReadOnly` branch), so there is no raw anchor `commitCodeLanguage`
+// could resolve its fence-rewrite offset from — refused here, at
+// classification time, rather than failing later with a less specific code.
+function extractLanguageStep(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'AttrStep' || step.attr !== 'language') return null
+  if (!Number.isFinite(step.pos)) return null
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let node
+  try {
+    node = stepDoc.nodeAt(step.pos)
+  } catch {
+    return null
+  }
+  if (!node || node.type?.name !== 'code_block') return null
+  const currentLanguage = String(node.attrs?.language || '').toLowerCase()
+  if (READONLY_CODE_LANGUAGES.has(currentLanguage)) return null
+  return { pmPos: step.pos, language: String(step.value ?? '') }
+}
+
 // Detects `@milkdown/plugin-trailing`'s own append: ONE transaction whose
 // single ReplaceStep inserts exactly one EMPTY paragraph at the very end of
 // the document (from === to === the step-doc's content size). Crepe ships
@@ -168,7 +226,7 @@ function extractTrailingAppend(transactions) {
   return { at: step.from }
 }
 
-// classifyTransactions: pure triage of a dispatch batch into one of six
+// classifyTransactions: pure triage of a dispatch batch into one of seven
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
 //      FROM a kernel/raw commit (e.g. a projection reconciler replaying the
@@ -197,10 +255,14 @@ function extractTrailingAppend(transactions) {
 //      task-checkbox click shape (see `extractTaskToggleStep` above) — tried
 //      before the plain-text guard since it is never a `ReplaceStep` batch
 //      and would otherwise fall through to `blocked`/`INPUT_TYPE`.
-//   6. The trailing plugin's own empty-paragraph append (see
+//   6. A lone `AttrStep` setting a `code_block`'s `language` attribute is the
+//      language-switch shape (see `extractLanguageStep` above) — same reason
+//      as rule 5, checked right alongside it (both are AttrStep shapes the
+//      plain-text ReplaceStep guard can never match).
+//   7. The trailing plugin's own empty-paragraph append (see
 //      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
 //      be vetoed.
-//   7. Otherwise, try the plain-text step guard; anything it can't prove is
+//   8. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
 //      block reasons for the plain-text path; ProjectionReconciler/dispatch
@@ -221,6 +283,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const taskToggle = extractTaskToggleStep(trs, oldState)
   if (taskToggle) return { kind: 'task-toggle', pos: taskToggle.pos }
+
+  const languageStep = extractLanguageStep(trs, oldState)
+  if (languageStep) return { kind: 'code-language', pmPos: languageStep.pmPos, language: languageStep.language }
 
   const trailingAppend = extractTrailingAppend(trs)
   if (trailingAppend) return { kind: 'trailing-append', at: trailingAppend.at }
@@ -302,14 +367,37 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       // instead of the kernel's generic invalid-range).
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
     }
+    // Code-block newline expansion (Plan 3 Task 4): `step.insertText` can
+    // carry a bare `'\n'` only when its target textblock is a `code_block`
+    // (`extractPlainTextSteps`' `allowNewline` guard) — a raw byte-for-byte
+    // insert of that '\n' would silently break a quoted/indented fence's
+    // per-line prefix contract (`buildCodeMap` requires EVERY content line
+    // to reproduce the same prefix byte-for-byte). Every such '\n' must
+    // instead become `lineEnding + linePrefix` — the exact bytes
+    // `buildCodeMap` already proved every OTHER content line in this block
+    // uses. `pairAt` (never virtual: `virtualBlockAt` above only ever
+    // matches trailing/split placeholders and empty list items, none of
+    // which are `code_block`s) resolves the covering pair by the same
+    // content-position search `pmPosToRaw` uses internally.
+    let insertText = step.insertText
+    if (insertText.includes('\n')) {
+      const pair = typeof map.pairAt === 'function' ? map.pairAt(oldFrom) : null
+      const codeMap = pair?.charMap
+      if (!codeMap || typeof codeMap.lineEnding !== 'string' || typeof codeMap.linePrefix !== 'string') {
+        return { ok: false, code: KERNEL_CODES.UNMAPPED }
+      }
+      insertText = insertText.split('\n').join(codeMap.lineEnding + codeMap.linePrefix)
+    }
     edits.push({
       from: rawFrom,
       to: rawTo,
-      insert: virtualPrefix + step.insertText
+      insert: virtualPrefix + insertText
     })
-    // PM-side delta (never the raw insert with its separator prefix): this
-    // rebases later steps' PM coordinates, which know nothing about raw
-    // separator bytes.
+    // PM-side delta (never the raw insert with its separator prefix, and
+    // never the EXPANDED raw insert either): this rebases later steps' PM
+    // coordinates, which are counted in PM's own un-normalized text units (a
+    // '\n' is exactly ONE PM character, same as any other) and know nothing
+    // about raw separator/expansion bytes.
     cumulativeDelta += step.insertText.length - (step.to - step.from)
   }
 
@@ -346,6 +434,49 @@ export function commitTaskToggle({ kernel, map, pos }) {
 
   const index = buildSyntaxIndex(kernel.doc.text)
   const routed = toggleTaskMarker({ doc: kernel.doc, index, offset: raw })
+  if (!routed.ok) return { ok: false, code: routed.code }
+
+  const result = applySourceTransaction(kernel.doc, routed.transaction)
+  if (!result.ok) return { ok: false, code: result.code }
+  return { ok: true, applied: result, transaction: routed.transaction }
+}
+
+// commitCodeLanguage: turns a `code-language`-classified batch (see
+// `extractLanguageStep` above) into ONE `changeCodeLanguage` kernel
+// transaction and applies it. Re-derives the target block independently
+// rather than trusting a caller-supplied result, same contract as
+// `commitPlainText`/`commitTaskToggle`.
+//
+// `pmPos` is the `code_block` node's own PM position — the `AttrStep`/
+// `nodeAt` convention (matching `extractLanguageStep`'s `step.pos`), NOT a
+// content position, so it is looked up directly against `map.blockPairs`
+// (a plain array search — the brief's "or reuse blockPairs lookup" option)
+// rather than through `pairAt`, which resolves CONTENT positions. The pair
+// carries its `mdBlock` (the mdast `code` node) even when `charMap` is null
+// (`buildProjectionMap` always records `mdBlock`, editable or not — see its
+// `pmType === 'code_block'` branch) — but this function is never reached for
+// a currently-readonly target anyway, because `extractLanguageStep` already
+// refused those at classification time. When the pair DOES carry a charMap
+// (the common, editable case), its own content-start raw offset
+// (`charMap.visibleToRaw(0)`) is passed to `changeCodeLanguage` as the
+// caret-preservation anchor — a reasonable stand-in for "the block's content
+// start" since the gateway has no access to the live view's actual
+// selection here (the original AttrStep transaction, selection untouched,
+// is what the caller lets through to the view on success — see
+// editor-kernel-mode.js's `code-language` case).
+export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
+  if (!kernel?.doc || !map || !Array.isArray(map.blockPairs)) {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  if (!Number.isFinite(pmPos)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  const pair = map.blockPairs.find((candidate) => candidate.pmPos === pmPos)
+  const start = pair?.mdBlock?.position?.start?.offset
+  if (!pair || !Number.isFinite(start)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  const anchor = pair.charMap ? pair.charMap.visibleToRaw(0) : start
+  const offset = Number.isFinite(anchor) ? anchor : start
+
+  const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)
+  const routed = changeCodeLanguage({ doc: kernel.doc, index: syntaxIndex, offset, language })
   if (!routed.ok) return { ok: false, code: routed.code }
 
   const result = applySourceTransaction(kernel.doc, routed.transaction)

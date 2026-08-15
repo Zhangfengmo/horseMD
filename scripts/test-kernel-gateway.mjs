@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
-import { classifyTransactions, commitPlainText, commitTaskToggle } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument } from '../src/renderer/src/lib/source-kernel/index.js'
 
@@ -19,6 +19,15 @@ const schema = new Schema({
     doc: { content: 'block+' },
     paragraph: { content: 'inline*', group: 'block' },
     hard_break: { group: 'inline', inline: true, selectable: false },
+    // Plan 3 Task 4: same shape as scripts/test-kernel-projection-map.mjs's
+    // schema (content 'text*', `attrs.language`) — the gateway relaxation
+    // and the language-switch AttrStep shape both target this node type.
+    code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } },
+    // A markdown blockquote-wrapped fence parses to mdast `blockquote > code`
+    // (verified against the real parser) — buildProjectionMap pairs PM
+    // structure against mdast structure 1:1, so a quoted-fence PM fixture
+    // needs this wrapper node too, not just the bare code_block.
+    blockquote: { content: 'block+', group: 'block' },
     text: { group: 'inline' }
   },
   marks: {
@@ -28,6 +37,8 @@ const schema = new Schema({
 const p = (...c) => schema.node('paragraph', null, c)
 const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
+const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
+const bq = (...c) => schema.node('blockquote', null, c)
 
 console.log('--- kernel gateway ---')
 
@@ -456,6 +467,135 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   ], 'only the FIRST step carries the separator prefix')
   assert.equal(committed.applied.doc.text, '- 甲\n\nab',
     'multi-step typing stays ONE new paragraph, never one paragraph per step')
+}
+
+// ---- Plan 3 Task 4: code-block newline-bearing edits + language switch ----
+
+// Case 22: CM-style multi-line insert landing INSIDE a blockquote-prefixed
+// fence — proves both halves of the relaxation at once: classification
+// allows a `\n`-bearing slice ONLY because the target textblock is a
+// `code_block`, and commitPlainText expands that `\n` into `ending +
+// linePrefix`, never a bare byte (which would break the quote prefix every
+// OTHER content line in this block carries).
+// md = '> ```js\n> ab\n> ```\n' (single content line 'ab') parses to mdast
+// `blockquote > code`, so the PM fixture needs the same wrapper: `doc(bq(cb))`
+// — blockquote opens pos0 (content start1), code_block opens pos1 (content
+// start2): 'a'@2 'b'@3 (content [2,4)).
+// Typing 'X\nY' between 'a' and 'b' (PM pos3, content offset1) must commit
+// 'X' + ('\n' + '> ') + 'Y' at raw offset (buildCodeMap.visibleToRaw(1)),
+// splitting 'ab' into two properly-prefixed lines 'aX' / 'Yb'.
+{
+  const md = '> ```js\n> ab\n> ```\n'
+  const d = doc(bq(cb('js', 'ab')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'quoted single-line fence must map')
+  const tr = state.tr.insertText('X\nY', 3)
+  assert.equal(tr.steps.length, 1, 'fixture sanity: one ReplaceStep')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'plain-text', 'a \\n inside a code_block must classify as plain-text')
+  assert.deepEqual(classified.steps[0], { from: 3, to: 3, insertText: 'X\nY' })
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '> ```js\n> aX\n> Yb\n> ```\n')
+}
+
+// Case 23: deletion SPANNING a visible linebreak inside a quoted, two-line
+// fence — joining the lines must remove the WHOLE raw span (line ending
+// PLUS the next line's quote prefix), never leave a stray '> ' behind. This
+// already worked before Task 4 (P3-3's charMap already proves raw ranges
+// across a code linebreak; the deleted slice is empty, so the newline
+// classification guard never even engages) — locked here as an end-to-end
+// gateway regression, not just a projection-map probe.
+// md = '> ```js\n> ab\n> cd\n> ```\n' (2 content lines, same fixture as
+// scripts/test-source-kernel-codemap.mjs Case 2), PM doc `doc(bq(cb))`:
+// content 'ab\ncd' start pos2 -> 'a'@2 'b'@3 '\n'@4 'c'@5 'd'@6.
+// Deleting PM[4,5) (the visible '\n', content offset [2,3)) maps to raw
+// [12,15) = '\n> ' (per the codemap Case 2 derivation).
+{
+  const md = '> ```js\n> ab\n> cd\n> ```\n'
+  const d = doc(bq(cb('js', 'ab\ncd')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'quoted two-line fence must map')
+  assert.equal(map.pmPosToRaw(4), 12)
+  assert.equal(map.pmPosToRaw(5), 15)
+  const tr = state.tr.delete(4, 5)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'plain-text')
+  assert.deepEqual(classified.steps[0], { from: 4, to: 5, insertText: '' })
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 12, to: 15, insert: '' }])
+  assert.equal(committed.applied.doc.text, '> ```js\n> abcd\n> ```\n',
+    'joining removes the linebreak AND the next line\'s quote prefix, never leaves a stray "> "')
+}
+
+// Case 24: language AttrStep classification + end-to-end commit. markdown
+// '```js\nabc\n```\n' -> switch 'js' -> 'python'. `tr.setNodeAttribute` is
+// the exact shape a language picker dispatches (mirrors the checkbox click's
+// own `setNodeAttribute('checked', …)` shape one AttrStep up).
+{
+  const md = '```js\nabc\n```\n'
+  const d = doc(cb('js', 'abc'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'plain fence must map')
+  const tr = state.tr.setNodeAttribute(0, 'language', 'python')
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, { kind: 'code-language', pmPos: 0, language: 'python' })
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitCodeLanguage({ kernel, map, pmPos: 0, language: 'python' })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '```python\nabc\n```\n')
+}
+
+// Case 25: an AttrStep touching a DIFFERENT attribute on a code_block (not
+// `language`) must not be misread as a language switch — mirrors Case 17's
+// same guard for the task-toggle shape.
+{
+  const md = '```js\nabc\n```\n'
+  const d = doc(cb('js', 'abc'))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.setNodeAttribute(0, 'someOtherAttr', 'x')
+  assert.equal(classifyTransactions([tr], state).kind, 'blocked')
+}
+
+// Case 26: mermaid-target rejection — a code_block whose CURRENT language is
+// one Crepe renders as a preview (READONLY_CODE_LANGUAGES) never got a
+// charMap built for it, so extractLanguageStep refuses it at classification
+// time rather than surfacing a generic UNMAPPED later. Case-insensitive,
+// matching editor-kernel-projection-map.js's own guard.
+{
+  const md = '```mermaid\ngraph TD\n```\n'
+  const d = doc(cb('mermaid', 'graph TD'))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.setNodeAttribute(0, 'language', 'js')
+  assert.equal(classifyTransactions([tr], state).kind, 'blocked',
+    'switching a mermaid block\'s OWN language must be refused, not silently mapped')
+
+  const upper = doc(cb('MERMAID', 'graph TD'))
+  const upperState = EditorState.create({ schema, doc: upper })
+  const upperTr = upperState.tr.setNodeAttribute(0, 'language', 'js')
+  assert.equal(classifyTransactions([upperTr], upperState).kind, 'blocked', 'case-insensitive')
+}
+
+// Case 27: the relaxation is SCOPED to code_block — a \n-bearing slice
+// targeting an ordinary paragraph must still be refused (never silently
+// treated as plain text just because Task 4 loosened the code_block path).
+{
+  const md = '甲乙\n'
+  const dd = doc(p(text('甲乙')))
+  const state = EditorState.create({ schema, doc: dd })
+  const tr = state.tr.insertText('X\nY', 2)
+  assert.equal(tr.steps.length, 1, 'fixture sanity: one ReplaceStep')
+  assert.equal(classifyTransactions([tr], state).kind, 'blocked',
+    'a \\n inside a plain paragraph must stay refused')
 }
 
 console.log('PASS kernel gateway')

@@ -84,7 +84,12 @@ const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 // editing that source through the kernel's character-level machinery isn't
 // wired up (a later Plan 3 task). Matched case-insensitively against the PM
 // node's own `attrs.language` (Milkdown's codeBlockSchema attr).
-const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
+// Exported (Plan 3 Task 4): editor-kernel-gateway.js's `extractLanguageStep`
+// needs the same set to refuse a language switch OUT of a currently
+// preview-only code block — its own charMap is null (never built for these
+// languages, see the branch below), so there is no raw anchor to resolve a
+// fence-rewrite offset from.
+export const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
 
 // PM/mdast types whose subtree is intentionally NOT walked into for
 // pairing purposes: `table` is recorded as ONE opaque pair. A typical PM
@@ -443,15 +448,30 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   // so the in-block PM offset IS the charMap visible offset directly, no
   // separate PM-side walk needed (verified by the content.size check above,
   // which proves the two counts agree for this block).
-  const pmPosToRaw = (pmPos) => {
+  // Locates the editable block pair whose CONTENT range [contentPos,
+  // contentPos + visibleLength] contains `pmPos` — the shared search
+  // `pmPosToRaw` itself uses, factored out (Plan 3 Task 4) so a caller that
+  // needs the PAIR itself (not just the raw offset) can get it without
+  // re-walking `blockPairs` with a hand-rolled copy of this exact range
+  // check. `commitPlainText`'s code-block newline expansion is the first
+  // such caller: it needs the pair's `charMap.linePrefix`/`lineEnding`, not
+  // just where one `\n` maps to.
+  const pairForContentPos = (pmPos) => {
     for (const pair of blockPairs) {
       if (!pair.charMap) continue
       const contentPos = pair.pmPos + 1
       const size = pair.charMap.visibleLength
       if (pmPos < contentPos || pmPos > contentPos + size) continue
-      return pair.charMap.visibleToRaw(pmPos - contentPos)
+      return pair
     }
     return null
+  }
+
+  const pmPosToRaw = (pmPos) => {
+    const pair = pairForContentPos(pmPos)
+    if (!pair) return null
+    const contentPos = pair.pmPos + 1
+    return pair.charMap.visibleToRaw(pmPos - contentPos)
   }
 
   // raw -> pmPos: locate the pair whose charMap raw range contains the
@@ -522,5 +542,5 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return null
   }
 
-  return { blockPairs, pmPosToRaw, rawToPmPos, virtualBlockAt }
+  return { blockPairs, pmPosToRaw, rawToPmPos, virtualBlockAt, pairAt: pairForContentPos }
 }

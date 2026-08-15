@@ -29,7 +29,10 @@ const schema = new Schema({
     list_item: {
       content: 'paragraph block*',
       attrs: { checked: { default: null } }
-    }
+    },
+    // Plan 3 Task 4 — needed for Case 12's code-block text-commit +
+    // language-switch end-to-end path.
+    code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } }
   }
 })
 const p = (...c) => schema.node('paragraph', null, c)
@@ -37,6 +40,7 @@ const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
 const li = (checked, ...c) => schema.node('list_item', { checked }, c)
 const bl = (...c) => schema.node('bullet_list', null, c)
+const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -59,7 +63,12 @@ const FIXTURE_DOCS = {
   // its length, so every one of these still parses to the single paragraph.
   '甲乙\n\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n\n\n\n': () => doc(p(text('甲乙'))),
-  '甲乙\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙')))
+  '甲乙\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  // Plan 3 Task 4 fixtures: a code_block text commit (multi-line CM-style
+  // insert) followed by a language switch, both on the same block.
+  '```js\nab\n```\n': () => doc(cb('js', 'ab')),
+  '```js\naX\nYb\n```\n': () => doc(cb('js', 'aX\nYb')),
+  '```python\naX\nYb\n```\n': () => doc(cb('python', 'aX\nYb'))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -715,6 +724,57 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.ok(
     h.notifications.at(-1).includes('projection-mismatch'),
     `notification must carry the actual KERNEL_CODES.PROJECTION code, got: ${h.notifications.at(-1)}`
+  )
+}
+
+// Case 12 (Plan 3 Task 4): code-block end-to-end — a CM-style multi-line
+// text commit, then a language switch, both landing in `handleTransactions`
+// as pass-through (undefined), never a veto, kernel bytes advancing exactly
+// like a real CodeMirror forwardUpdate + language-picker session would drive
+// them.
+// The live view doc carries an explicit trailing EMPTY paragraph after the
+// code_block — mirroring what `@milkdown/plugin-trailing` really appends
+// after any non-paragraph/heading final block in the live editor (this
+// stub harness has no such plugin, so the test builds it by hand, same
+// convention every other bullet_list/code_block-ending fixture in this file
+// uses). Without it, `safeParse`'s `withTrailingParagraph` (which the
+// verify-diff path always runs) would synthesize one on the PARSED side
+// only, a onesided mismatch that has nothing to do with this task's own
+// logic.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('```js\nab\n```\n', doc(cb('js', 'ab'), p()))
+  assert.equal(h.controller.attachAfterCreate(), true, 'code_block-only doc must map')
+
+  // (a) multi-line insert 'X\nY' between 'a' and 'b' (content offset 1 ->
+  // PM pos 2, code_block is the doc's sole child: open@0, content start@1).
+  const tr1 = h.view.state.tr.insertText('X\nY', 2)
+  const verdict1 = dispatchThrough(h, tr1)
+  await flushMicrotasks()
+  assert.equal(verdict1, undefined, 'code_block newline-bearing insert is allowed (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '```js\naX\nYb\n```\n')
+  assert.equal(h.controller.kernel.doc.revision, 1)
+  assert.deepEqual(h.changes.at(-1), ['```js\naX\nYb\n```\n', false])
+  assert.equal(h.view.state.doc.textContent, 'aX\nYb', 'view content unchanged by the pass-through')
+
+  // (b) language switch 'js' -> 'python' on the same (still sole-child, pos
+  // 0) code_block.
+  const tr2 = h.view.state.tr.setNodeAttribute(0, 'language', 'python')
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined, 'code-language commit is allowed (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '```python\naX\nYb\n```\n')
+  assert.equal(h.controller.kernel.doc.revision, 2)
+  assert.deepEqual(h.changes.at(-1), ['```python\naX\nYb\n```\n', false])
+  assert.equal(h.view.state.doc.firstChild.attrs.language, 'python')
+
+  // No diagnostics from either commit (the verify-diff cheap path found no
+  // mismatch against either fixture, and the map rebound cleanly both times).
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) =>
+      entry.type === 'projection-mismatch' || entry.type === 'map-refresh-failed').length,
+    0,
+    'neither commit should have needed a projection repair'
   )
 }
 

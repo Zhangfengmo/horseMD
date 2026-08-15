@@ -33,7 +33,7 @@ import {
   routeStructuralKey
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -295,6 +295,38 @@ export function createKernelMode({
         // in which case the rebind fails against the orphaned empty
         // paragraph and verifyPlainTextProjection's repair reconcile removes
         // it (the parse never contains it) and rebinds.
+        bindMap(newState?.doc || null)
+        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'code-language': {
+        // The language AttrStep (Plan 3 Task 4) has ALREADY flipped
+        // `attrs.language` on the live PM doc by the time this runs
+        // (classification happens post-hoc, inside `updateState` — same
+        // timing as `task-toggle` above); there is nothing further to project
+        // into the view. Once `commitCodeLanguage` proves the same rewrite
+        // against the raw fence bytes, the original transaction is allowed
+        // through unchanged (`return undefined`) instead of vetoing and
+        // separately reconciling — identical shape to the task-toggle case
+        // right below. The rebind is unconditional (not just on failure, like
+        // task-toggle): a language switch can flip a pair between
+        // editable/preview-only (`READONLY_CODE_LANGUAGES`), so the NEXT
+        // commit into this block must see a freshly evaluated `charMap`, not
+        // a stale one from before the switch.
+        const committed = commitCodeLanguage({
+          kernel,
+          index: buildSyntaxIndex(kernel.doc.text),
+          map: kernel.map,
+          pmPos: classified.pmPos,
+          language: classified.language
+        })
+        if (!committed.ok) {
+          notifyBlocked(committed.code)
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
