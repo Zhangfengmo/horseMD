@@ -49,4 +49,83 @@ assert.equal(history.redo(doc), null)
   assert.equal(h.depth(), 2)
 }
 
+// undo/redo 本身是一个合并边界：撤销/重做之后紧跟在同一位置的输入，
+// 不得与被重做回来的组合并——否则一次 undo 会把 X+Y 连同新输入的 Z 一起撤掉。
+{
+  let d = createMarkdownDocument('ab\n')
+  const h = createSourceHistory()
+  const c = (txn) => { const res = applySourceTransaction(d, txn); h.record(res, txn); d = res.doc; return res }
+  c({ baseRevision: 0, from: 1, to: 1, insert: 'X', intent: 'insert-text' })
+  c({ baseRevision: 1, from: 2, to: 2, insert: 'Y', intent: 'insert-text' })
+  assert.equal(d.text, 'aXYb\n')
+  assert.equal(h.depth(), 1)
+
+  const undone = h.undo(d)
+  d = applySourceTransaction(d, undone).doc
+  assert.equal(d.text, 'ab\n')
+
+  const redone = h.redo(d)
+  d = applySourceTransaction(d, redone).doc
+  assert.equal(d.text, 'aXYb\n')
+
+  // Z 紧接在重做组的插入终点（位置3）打字，若合并逻辑没有被 undo/redo 打断，
+  // 会被错误地并入 X+Y 那一组。
+  c({ baseRevision: d.revision, from: 3, to: 3, insert: 'Z', intent: 'insert-text' })
+  assert.equal(d.text, 'aXYZb\n')
+  assert.equal(h.depth(), 2, 'undo/redo must break coalescing for the next commit')
+
+  const undoZOnly = h.undo(d)
+  d = applySourceTransaction(d, undoZOnly).doc
+  assert.equal(d.text, 'aXYb\n', 'one undo after the boundary must remove only Z')
+}
+
+// 历史与文档失步（外部事务绕过 history.record 直接 apply）时 undo 必须拒绝
+{
+  let d = createMarkdownDocument('ab\n')
+  const h = createSourceHistory()
+  const first = applySourceTransaction(d, { baseRevision: 0, from: 1, to: 1, insert: 'X', intent: 'insert-text' })
+  h.record(first, { baseRevision: 0, from: 1, to: 1, insert: 'X', intent: 'insert-text' })
+  d = first.doc
+  assert.equal(d.text, 'aXb\n')
+
+  // 绕过 history：直接对当前文档再 apply 一次未被记录的事务
+  const external = applySourceTransaction(d, { baseRevision: d.revision, from: 0, to: 0, insert: 'Q', intent: 'insert-text' })
+  assert.equal(external.ok, true)
+  const desynced = external.doc
+  assert.equal(h.undo(desynced), null, 'undo must refuse once doc has drifted from history state')
+
+  // 在正确同步的文档上仍然可用
+  assert.notEqual(h.undo(d), null)
+}
+
+// undo -> undo -> redo -> redo 跨越一个结构命令边界，
+// 校验每次返回事务的 baseRevision 都等于调用时的 doc.revision
+{
+  let d = createMarkdownDocument('ab\n')
+  const h = createSourceHistory()
+  const c = (txn) => { const res = applySourceTransaction(d, txn); h.record(res, txn); d = res.doc; return res }
+  c({ baseRevision: 0, from: 1, to: 1, insert: 'X', intent: 'insert-text' })
+  c({ baseRevision: 1, from: 2, to: 2, insert: 'Y', intent: 'insert-text' })
+  c({ baseRevision: 2, from: 4, to: 4, insert: '\n\n', intent: 'split-block' })
+  assert.equal(h.depth(), 2)
+
+  let txn = h.undo(d)
+  assert.equal(txn.baseRevision, d.revision)
+  d = applySourceTransaction(d, txn).doc
+
+  txn = h.undo(d)
+  assert.equal(txn.baseRevision, d.revision)
+  d = applySourceTransaction(d, txn).doc
+  assert.equal(d.text, 'ab\n')
+
+  txn = h.redo(d)
+  assert.equal(txn.baseRevision, d.revision)
+  d = applySourceTransaction(d, txn).doc
+
+  txn = h.redo(d)
+  assert.equal(txn.baseRevision, d.revision)
+  d = applySourceTransaction(d, txn).doc
+  assert.equal(d.text, 'aXYb\n\n\n')
+}
+
 console.log('PASS source-kernel history')

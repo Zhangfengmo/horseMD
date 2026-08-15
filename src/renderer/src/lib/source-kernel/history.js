@@ -116,6 +116,12 @@ export function createSourceHistory() {
     toStack.push(group)
     const transaction = build(group, doc.revision)
     lastKnownRevision = doc.revision + 1
+    // Undo/redo is itself a coalescing boundary: whatever gets typed next must
+    // start a fresh group, even if its `from` numerically lands on the tail of
+    // the group we just replayed. Without this, a same-position commit right
+    // after an undo/redo silently re-merges into a group that was already
+    // popped off (and re-pushed onto) the opposite stack, corrupting both.
+    coalescing = false
     return transaction
   }
 
