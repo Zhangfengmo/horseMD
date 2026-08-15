@@ -17,7 +17,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -105,7 +105,41 @@ function extractPlainTextSteps(transactions, oldState) {
   return steps
 }
 
-// classifyTransactions: pure triage of a dispatch batch into one of five
+// Detects the task-checkbox click shape: `@milkdown/components`'
+// `listItemBlockView` (list-item-block/view.ts `setAttr`) toggles a task
+// item's checked state with a bare `tr.setNodeAttribute(pos, 'checked', v)`
+// — never through a keymap, so `structuralHandler`'s Enter/Tab/Backspace/
+// Delete routing never sees it, and it is not a `ReplaceStep` so
+// `extractPlainTextSteps` correctly refuses to treat it as plain text. Left
+// unclassified, this batch fell through to `blocked`/`INPUT_TYPE` and the
+// dispatch-veto channel silently discarded every checkbox click in kernel
+// mode (the PM view was reverted, no error, no visible change — see
+// docs/... kernel-mode task-toggle root cause). This function proves the
+// batch is EXACTLY one `AttrStep` on a `checked` attribute of a `list_item`
+// node, nothing else riding along; `commitTaskToggle` (below) re-derives the
+// same shape independently rather than trusting a caller-supplied result,
+// matching this file's other commit functions.
+function extractTaskToggleStep(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'AttrStep' || step.attr !== 'checked') return null
+  if (!Number.isFinite(step.pos)) return null
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let node
+  try {
+    node = stepDoc.nodeAt(step.pos)
+  } catch {
+    return null
+  }
+  if (!node || node.type?.name !== 'list_item') return null
+  return { pos: step.pos }
+}
+
+// classifyTransactions: pure triage of a dispatch batch into one of six
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
 //      FROM a kernel/raw commit (e.g. a projection reconciler replaying the
@@ -130,7 +164,11 @@ function extractPlainTextSteps(transactions, oldState) {
 //      `docChanged: false` for a no-op composition tick).
 //   4. No transaction changed the doc → selection-only (caret/selection
 //      moves, no kernel involvement at all).
-//   5. Otherwise, try the plain-text step guard; anything it can't prove is
+//   5. A lone `AttrStep` flipping a `list_item`'s `checked` attribute is the
+//      task-checkbox click shape (see `extractTaskToggleStep` above) — tried
+//      before the plain-text guard since it is never a `ReplaceStep` batch
+//      and would otherwise fall through to `blocked`/`INPUT_TYPE`.
+//   6. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
 //      block reasons for the plain-text path; ProjectionReconciler/dispatch
@@ -148,6 +186,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const changed = trs.some((tr) => tr && tr.docChanged)
   if (!changed) return { kind: 'selection-only' }
+
+  const taskToggle = extractTaskToggleStep(trs, oldState)
+  if (taskToggle) return { kind: 'task-toggle', pos: taskToggle.pos }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
@@ -210,4 +251,38 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   const result = applySourceTransaction(kernel.doc, transaction)
   if (!result.ok) return { ok: false, code: result.code }
   return { ok: true, applied: result, transaction }
+}
+
+// commitTaskToggle: turns a `task-toggle`-classified batch (see
+// `extractTaskToggleStep` above) into ONE `toggleTaskMarker` kernel
+// transaction and applies it. Re-derives the target position's raw offset
+// independently rather than trusting a caller-supplied result, same
+// contract as `commitPlainText`.
+//
+// `pos` is the `list_item` node's own PM position (right before it, the
+// `AttrStep`/`nodeAt` convention). Its raw counterpart is reached by
+// stepping into the first child's content: `pos + 1` is the first child's
+// own position (a task item's content is always wrapped in one `paragraph`,
+// same schema shape `buildProjectionMap` pairs against), and `pos + 2` is
+// that paragraph's content start, which is exactly the `contentPos` a
+// `blockPairs` entry for it exposes. If the first child is anything other
+// than the expected mapped textblock (a shape `buildProjectionMap` did not
+// pair), `pmPosToRaw` finds no covering block and fails closed with
+// `UNMAPPED` — this function never assumes the schema shape, only checks it
+// through the proven map.
+export function commitTaskToggle({ kernel, map, pos }) {
+  if (!kernel?.doc || !map || typeof map.pmPosToRaw !== 'function') {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  if (!Number.isFinite(pos)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  const raw = map.pmPosToRaw(pos + 2)
+  if (!Number.isFinite(raw)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+
+  const index = buildSyntaxIndex(kernel.doc.text)
+  const routed = toggleTaskMarker({ doc: kernel.doc, index, offset: raw })
+  if (!routed.ok) return { ok: false, code: routed.code }
+
+  const result = applySourceTransaction(kernel.doc, routed.transaction)
+  if (!result.ok) return { ok: false, code: result.code }
+  return { ok: true, applied: result, transaction: routed.transaction }
 }

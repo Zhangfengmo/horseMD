@@ -17,16 +17,26 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
 
+// `bullet_list`/`list_item` (with a `checked` attr, `list_item` content
+// `'paragraph block*'`) mirror @milkdown/preset-commonmark + preset-gfm's
+// real shape — needed for Case 11's task-checkbox dispatch path.
 const schema = new Schema({
   nodes: {
     doc: { content: 'block+' },
     paragraph: { content: 'inline*', group: 'block' },
-    text: { group: 'inline' }
+    text: { group: 'inline' },
+    bullet_list: { content: 'list_item+', group: 'block' },
+    list_item: {
+      content: 'paragraph block*',
+      attrs: { checked: { default: null } }
+    }
   }
 })
 const p = (...c) => schema.node('paragraph', null, c)
 const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
+const li = (checked, ...c) => schema.node('list_item', { checked }, c)
+const bl = (...c) => schema.node('bullet_list', null, c)
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -34,7 +44,9 @@ const FIXTURE_DOCS = {
   '甲乙\n': () => doc(p(text('甲乙'))),
   '甲丙乙\n': () => doc(p(text('甲丙乙'))),
   '甲\n\n乙\n': () => doc(p(text('甲')), p(text('乙'))),
-  '甲\t乙\n': () => doc(p(text('甲\t乙')))
+  '甲\t乙\n': () => doc(p(text('甲\t乙'))),
+  '- [x] 乙\n': () => doc(bl(li(true, p(text('乙'))))),
+  '- [ ] 乙\n': () => doc(bl(li(false, p(text('乙')))))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -393,6 +405,39 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(settledText, '甲丙乙\n', 'flush resolves to the settled (committed) kernel text')
   assert.equal(h.controller.kernel.doc.text, '甲丙乙\n')
   assert.equal(h.controller.composition.isActive(), false)
+}
+
+// Case 11 (Task 9 root-cause fix): the task-checkbox click. Crepe's
+// list-item-block node view toggles a task item with a bare
+// `tr.setNodeAttribute(pos, 'checked', v)` (an AttrStep, never a keymap and
+// never a ReplaceStep) — before the gateway/kernel-mode `task-toggle`
+// classification existed, this fell through to `blocked`/`INPUT_TYPE` and
+// the dispatch-veto protocol silently discarded every checkbox click in
+// kernel mode (found by the Task 9 UI smoke run). Same dispatchThrough
+// protocol a real click goes through: pass-through (undefined verdict),
+// kernel bytes flip the marker, the view's own attr-flip is what lands
+// (no reconcile needed), and the toggle is its own undo group.
+{
+  const h = makeHarness('- [x] 乙\n', doc(bl(li(true, p(text('乙'))))))
+  assert.equal(h.controller.attachAfterCreate(), true, 'task-list map must build')
+  const oldState = h.view.state
+  const pos = 1
+  assert.equal(oldState.doc.nodeAt(pos)?.type.name, 'list_item', 'fixture position sanity check')
+  const tr = oldState.tr.setNodeAttribute(pos, 'checked', false)
+  assert.equal(tr.steps[0].constructor.name, 'AttrStep')
+  const verdict = dispatchThrough(h, tr)
+  assert.equal(verdict, undefined, 'task toggle is allowed through (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '- [ ] 乙\n')
+  assert.equal(h.controller.kernel.doc.revision, 1)
+  assert.deepEqual(h.changes.at(-1), ['- [ ] 乙\n', false])
+  assert.equal(h.view.state.doc.firstChild.firstChild.attrs.checked, false, 'view reflects the flip')
+
+  // Undo restores '- [x] 乙\n' as ONE group — its own history entry (intent
+  // 'toggle-task'), never coalesced with an unrelated insert-text group —
+  // and reconciles via the stub parse fixture above.
+  const undone = h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view)
+  assert.equal(undone, true)
+  assert.equal(h.controller.kernel.doc.text, '- [x] 乙\n', 'undo restores the checked marker exactly')
 }
 
 console.log('PASS kernel mode headless')

@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
-import { classifyTransactions, commitPlainText } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument } from '../src/renderer/src/lib/source-kernel/index.js'
 
@@ -299,6 +299,96 @@ console.log('--- kernel gateway ---')
   const committed = commitPlainText({ kernel: { doc: outOfSyncKernelDoc }, map, transactions: [tr], oldState: state })
   assert.equal(committed.ok, false)
   assert.equal(committed.code, 'invalid-range')
+}
+
+// Cases 15-18: the task-checkbox click shape. `@milkdown/components`'
+// list-item-block node view toggles a task item with a bare
+// `tr.setNodeAttribute(pos, 'checked', v)` — an `AttrStep`, never a
+// `ReplaceStep` — which used to fall through every existing branch straight
+// to `blocked`/`INPUT_TYPE` (root cause of the "checkbox does nothing in
+// kernel mode" bug found in Task 9's UI smoke run). A minimal schema with
+// `list_item`/`bullet_list` (mirroring @milkdown/preset-commonmark +
+// preset-gfm's real shape: `list_item` content is `'paragraph block*'`)
+// stands in for the real one, same hand-built-schema convention as the rest
+// of this file.
+const taskSchema = new Schema({
+  nodes: {
+    doc: { content: 'block+' },
+    paragraph: { content: 'inline*', group: 'block' },
+    text: { group: 'inline' },
+    bullet_list: { content: 'list_item+', group: 'block' },
+    list_item: {
+      content: 'paragraph block*',
+      attrs: { checked: { default: null } }
+    }
+  }
+})
+const tp = (...c) => taskSchema.node('paragraph', null, c)
+const tdoc = (...c) => taskSchema.node('doc', null, c)
+const ttext = (s) => taskSchema.text(s)
+const li = (checked, ...c) => taskSchema.node('list_item', { checked }, c)
+const bl = (...c) => taskSchema.node('bullet_list', null, c)
+
+// Case 15: classifyTransactions recognizes the AttrStep shape as
+// `task-toggle` (checked list_item), ahead of the plain-text guard (an
+// AttrStep is never a ReplaceStep, so it would otherwise fall through to
+// `blocked`/`INPUT_TYPE`).
+{
+  const d = tdoc(bl(li(true, tp(ttext('乙')))))
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  assert.equal(state.doc.nodeAt(1)?.type.name, 'list_item', 'fixture position sanity check')
+  const tr = state.tr.setNodeAttribute(1, 'checked', false)
+  assert.equal(tr.steps[0].constructor.name, 'AttrStep')
+  assert.equal(tr.docChanged, true)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'task-toggle')
+  assert.equal(classified.pos, 1)
+}
+
+// Case 16: end-to-end commit. markdown '- [x] 乙\n' -> click flips it off:
+// '- [ ] 乙\n'.
+{
+  const md = '- [x] 乙\n'
+  const d = tdoc(bl(li(true, tp(ttext('乙')))))
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'projection map must pair list_item/bullet_list against listItem/list')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitTaskToggle({ kernel, map, pos: 1 })
+  assert.equal(committed.ok, true)
+  assert.equal(committed.applied.doc.text, '- [ ] 乙\n')
+  assert.equal(committed.transaction.intent, 'toggle-task')
+}
+
+// Case 17: an AttrStep touching a DIFFERENT attribute (not `checked`) must
+// not be misread as a task toggle — falls through to the plain-text guard,
+// which also refuses an AttrStep, so it ends up `blocked`.
+{
+  const d = tdoc(bl(li(null, tp(ttext('甲')))))
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const tr = state.tr.setNodeAttribute(1, 'checked', true)
+  // Re-labelled as a different attr name to prove the `attr !== 'checked'`
+  // guard, since this schema only declares `checked`; simulate by directly
+  // asserting the guard function's contract via a non-checked-attr AttrStep
+  // built from the same step class.
+  tr.steps[0].attr = 'other'
+  const classified = classifyTransactions([tr], state)
+  assert.notEqual(classified.kind, 'task-toggle')
+}
+
+// Case 18: commitTaskToggle re-derives from `pos` and fails closed
+// (`unsupported-structure`, from `toggleTaskMarker`) when the raw markdown
+// line the mapped position lands on is not actually a task item — proves
+// the fix never trusts the PM attr alone, only the raw bytes.
+{
+  const md = '- 甲\n'
+  const d = tdoc(bl(li(null, tp(ttext('甲')))))
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitTaskToggle({ kernel, map, pos: 1 })
+  assert.equal(committed.ok, false)
+  assert.equal(committed.code, 'unsupported-structure')
 }
 
 console.log('PASS kernel gateway')

@@ -33,7 +33,7 @@ import {
   routeStructuralKey
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -206,6 +206,28 @@ export function createKernelMode({
         recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'task-toggle': {
+        // The task checkbox click (`list-item-block`'s `setAttr('checked', …)`,
+        // a bare `tr.setNodeAttribute`) is never a ReplaceStep batch, so it
+        // cannot go through commitPlainText's step guard, and it never runs
+        // through a keymap, so structuralHandler never sees it either. The
+        // original AttrStep transaction already reflects the same flip
+        // `toggleTaskMarker` computes for the raw bytes (both start from the
+        // same current `checked` state), so — exactly like the plain-text
+        // case — the original transaction is allowed through to the view
+        // (`return undefined`) once the kernel commit is proven, instead of
+        // vetoing and separately reconciling.
+        const committed = commitTaskToggle({ kernel, map: kernel.map, pos: classified.pos })
+        if (!committed.ok) {
+          notifyBlocked(committed.code)
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
+        bindMap(newState?.doc || null)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
