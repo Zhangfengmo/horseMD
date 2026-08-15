@@ -57,41 +57,41 @@ const visibleSource = (evaluate) => evaluate(`(
     .find((node) => node.offsetParent)?.value ?? null
 )`)
 
-// The status-bar source/rich toggle is a `block-switch` popover (Task 8):
-// the trigger only opens/closes the menu, item 1 (index 0) is the existing
-// rich<->source toggle, item 2 (index 1, only present when the tab is
-// kernel-eligible) is the experimental source-kernel toggle. Both helpers
-// below open the popover, then click the item by index — a bare click on the
-// trigger no longer toggles anything by itself.
-async function openSourceMenu(evaluate) {
-  return evaluate(`(() => {
+// The status-bar source/rich toggle is a split button (Task 8's popover
+// design was reverted after it broke ~80 legacy tests' single-click
+// assumption — see StatusBar.jsx SourceSwitch): the main `.status-btn`
+// (matched the same way every legacy `toggleMode` helper already does)
+// calls `onToggleSource` directly on click, byte-identical to the flat
+// pre-Task-8 button. The experimental kernel-mode toggle moved to a
+// SEPARATE small caret button (`.block-switch-caret-btn`, only rendered
+// when the tab is kernel-eligible) whose popover now holds only the
+// kernel-toggle item.
+async function toggleSourceMode(evaluate) {
+  const clicked = await evaluate(`(() => {
     const button = [...document.querySelectorAll('.status-btn')]
-      .find((node) => node.offsetParent && /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
+      .find((node) => node.offsetParent && !node.classList.contains('block-switch-caret-btn') &&
+        /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
     button?.click()
     return !!button
   })()`)
-}
-
-async function clickMenuItem(evaluate, index) {
-  return evaluate(`(() => {
-    const items = [...document.querySelectorAll('.block-switch-menu .block-menu-item')]
-      .filter((node) => node.offsetParent)
-    const item = items[${index}]
-    item?.click()
-    return !!item
-  })()`)
-}
-
-async function toggleSourceMode(evaluate) {
-  assert.ok(await openSourceMenu(evaluate), 'no source-toggle trigger button')
-  await sleep(150)
-  assert.ok(await clickMenuItem(evaluate, 0), 'source-toggle menu item (index 0) missing')
+  assert.ok(clicked, 'no source-toggle trigger button')
 }
 
 async function toggleKernelMode(evaluate) {
-  assert.ok(await openSourceMenu(evaluate), 'no source-toggle trigger button')
+  const opened = await evaluate(`(() => {
+    const button = document.querySelector('.block-switch-caret-btn')
+    button?.click()
+    return !!button
+  })()`)
+  assert.ok(opened, 'no kernel-mode caret button — tab not kernel-eligible?')
   await sleep(150)
-  assert.ok(await clickMenuItem(evaluate, 1), 'kernel-toggle menu item (index 1) missing — tab not kernel-eligible?')
+  const clicked = await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.block-switch-menu .block-menu-item')]
+      .find((node) => node.offsetParent)
+    item?.click()
+    return !!item
+  })()`)
+  assert.ok(clicked, 'kernel-toggle menu item missing')
 }
 
 // The document can be taller than the window; a rect measured off-screen
