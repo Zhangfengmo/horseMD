@@ -1,6 +1,6 @@
 {
   "name": "horse",
-  "version": "0.13.59",
+  "version": "0.13.70",
   "description": "HorseMD Markdown Editor",
   "author": "mini_md",
   "license": "MIT",
@@ -50,6 +50,9 @@
     "test:diverged-ordinary-save-ui": "node scripts/test-diverged-ordinary-save-ui.mjs",
     "test:mode-switch-caret-settle-ui": "node scripts/test-mode-switch-caret-settle-ui.mjs",
     "test:leading-space-entity-ui": "node scripts/test-leading-space-entity-ui.mjs",
+    "test:leading-tab-source-ui": "node scripts/test-leading-tab-source-ui.mjs",
+    "test:heading-edge-whitespace-source-ui": "node scripts/test-heading-edge-tab-source-ui.mjs && cross-env HEADING_EDGE=trailing CDP_PORT=10015 node scripts/test-heading-edge-tab-source-ui.mjs && cross-env HEADING_CHARACTER=space CDP_PORT=10016 node scripts/test-heading-edge-tab-source-ui.mjs && cross-env HEADING_EDGE=trailing HEADING_CHARACTER=space CDP_PORT=10017 node scripts/test-heading-edge-tab-source-ui.mjs",
+    "test:tab-indent-source-ui": "node scripts/test-tab-indent-source-ui.mjs",
     "test:nested-number-list-source-ui": "node scripts/test-nested-number-list-source-ui.mjs",
     "test:diverged-list-structure-ui": "node scripts/test-diverged-list-structure-ui.mjs",
     "test:diverged-partial-delete-ui": "node scripts/test-diverged-partial-delete-ui.mjs",
@@ -129,6 +132,7 @@
     "test:issues-66-67-ui": "node scripts/test-issues-66-67-ui.mjs",
     "test:issues-70-72-ui": "node scripts/test-issues-70-72-ui.mjs",
     "test:task-list-persistence-ui": "node scripts/test-task-list-persistence-ui.mjs",
+    "test:empty-task-list-persistence-ui": "node scripts/test-empty-task-list-persistence-ui.mjs",
     "test:issues-74-75-ui": "node scripts/test-issues-74-75-ui.mjs",
     "test:pdf-latex-ui": "node scripts/test-pdf-latex-ui.mjs",
     "test:pdf-rendered-ui": "node scripts/test-pdf-rendered-formats-ui.mjs",
@@ -194,7 +198,8 @@
     "test:table-click-edit-ui": "node scripts/test-table-click-edit-ui.mjs",
     "test:drop-open-ui": "node scripts/test-drop-open-ui.mjs",
     "test:quoted-block-source-ui": "node scripts/test-quoted-block-source-ui.mjs",
-    "test:trailing-space-source-ui": "node scripts/test-trailing-space-source-ui.mjs"
+    "test:trailing-space-source-ui": "node scripts/test-trailing-space-source-ui.mjs",
+    "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
@@ -220,6 +225,7 @@
     "pdfjs-dist": "^4.10.38",
     "pinyin-pro": "^3.28.1",
     "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "unified": "^11.0.5"
   },
@@ -234,7 +240,6 @@
     "electron-vite": "^3.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "remark-gfm": "^4.0.1",
     "vite": "^6.0.7"
   },
   "build": {
