@@ -25,8 +25,15 @@
 //      see createSourceHistory's asCoalescableEdit — so this is a second,
 //      belt-and-suspenders fence), so the WHOLE composed word must vanish as
 //      one undo unit, not character by character.
-//  (d) save the post-undo state, full quit, cold reopen, assert disk/source
-//      bytes match.
+//  (d) after the undo lands, confirm the Save FAB is (correctly) already
+//      gone — the undo returned the live doc to bytes (b) already saved, see
+//      the AFTER_UNDO/SAVED_AFTER_UNDO derivation below — then make ONE
+//      more small plain-text edit (a single ASCII character, non-IME) to
+//      re-dirty the tab, click Save for real, assert the disk bytes, THEN
+//      full quit + cold reopen against that final state. This is the actual
+//      click-coverage the FAB-absent assertion alone does not exercise:
+//      clicking Save on a kernel-mode tab whose most recent history entry is
+//      an IME-composition commit that was subsequently undone.
 //
 // Every expected byte string below is DERIVED from the same primitives the
 // live UI wiring calls (kernel.doc text after commitPlainText/commitReplace
@@ -42,7 +49,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
-import { pressKey } from './lib/human-input.mjs'
+import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const root = `/tmp/horsemd-kernel-ime-${process.pid}`
 const file = join(root, 'ime.md')
@@ -67,7 +74,16 @@ const AFTER_C_COMMIT = '段落甲测试测试\n'
 // One Undo reverts the whole ime-commit group (see module header) back to
 // the state just before that second composition started, i.e. AFTER_A.
 const AFTER_UNDO = AFTER_A
-const SAVED = AFTER_UNDO
+// (d) part 1: the undo landed exactly on the bytes (b)'s mid-composition
+// save already wrote to disk — nothing new to persist yet.
+const SAVED_AFTER_UNDO = AFTER_UNDO
+// (d) part 2: ONE plain-text ASCII character typed at the end of the
+// now-undone paragraph ('段落甲测试') is a fresh 'insert-text' kernel commit
+// (commitPlainText, not composition — plain Input.insertText/typeTextLikeUser
+// never opens a DOM composition), independent of the ime-commit history
+// entry it follows. Appended at the very end, byte for byte.
+const AFTER_D_EDIT = '段落甲测试!\n'
+const SAVED = AFTER_D_EDIT
 
 async function waitFor(check, message, attempts = 80, intervalMs = 100) {
   for (let index = 0; index < attempts; index += 1) {
@@ -261,33 +277,54 @@ async function run() {
     await toggleSourceMode(evaluate)
     await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after undo verification')
 
-    // --- (d) save, full quit, cold reopen, byte-exact -----------------------
+    // --- (d) part 1: the undo landed on already-saved bytes -----------------
     // The undo in (c) returned the document to EXACTLY the bytes (b)'s
     // mid-composition save already wrote to disk (AFTER_UNDO === AFTER_B ===
-    // SAVED) — kernel mode's onChange keeps tab.content live, and dirty
-    // tracking (`isTabDirty`, lib/tab-state.js) is a pure content ===
-    // savedContent comparison, so the save FAB has ALREADY gone (no new
-    // save is needed, matching what a real user would see: undo landed back
-    // on the last-saved text). Assert that directly instead of clicking Save
-    // again — a positive regression lock on kernel-mode dirty tracking
-    // recognizing "undo returned to the saved state", not a shortcut.
+    // SAVED_AFTER_UNDO) — kernel mode's onChange keeps tab.content live, and
+    // dirty tracking (`isTabDirty`, lib/tab-state.js) is a pure content ===
+    // savedContent comparison, so the save FAB has ALREADY gone here (no new
+    // save is needed for THIS byte string, matching what a real user would
+    // see: undo landed back on the last-saved text). This assertion is a
+    // real, valid regression lock on kernel-mode dirty tracking recognizing
+    // "undo returned to the saved state" — but by itself it is not a
+    // substitute for an actual Save click: nothing in this script (or in
+    // test-kernel-mode-ui.mjs, whose save clicks only ever follow plain-text
+    // edits) exercises clicking Save on a kernel-mode tab whose most recent
+    // history entry is an IME-composition commit that was then undone. Part
+    // 2 below closes that gap with a real click.
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save FAB still visible — undo did not return to the already-saved bytes')
-    assert.equal(await readFile(file, 'utf8'), SAVED, 'disk bytes must already match the post-undo kernel state from (b)\'s save')
+    assert.equal(await readFile(file, 'utf8'), SAVED_AFTER_UNDO, 'disk bytes must already match the post-undo kernel state from (b)\'s save')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear')
 
+    // --- (d) part 2: a real Save click on top of the post-undo state --------
+    // One plain ASCII character (non-IME, Input.insertText — never opens a
+    // DOM composition) re-dirties the tab on top of a history whose latest
+    // entry is the now-undone ime-commit group, then Save is actually
+    // clicked and its result verified on disk — the click coverage the
+    // FAB-absent assertion above cannot provide by itself.
+    await clickTextEnd(evaluate, send, '段落甲测试')
+    await typeTextLikeUser(send, '!', { delayMs: step })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('段落甲测试!'), 'plain-text edit after the undo never reached the kernel-mode editor')
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save FAB did not appear for the post-undo plain-text edit')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save after the post-undo edit never completed (FAB still visible)')
+    assert.equal(await readFile(file, 'utf8'), SAVED, 'disk bytes must match the post-undo-plus-new-edit kernel state exactly')
+    assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on the post-undo save')
+
+    // --- full quit, cold reopen, byte-exact ---------------------------------
     await stopBuiltElectron(app, { removeProfile: false })
     app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, cleanProfile: false, appArgs: [file] })
     ;({ evaluate, send } = app)
     await waitFor(async () => {
       const text = await mounted(evaluate)
-      return text && text.includes('段落甲测试') ? text : null
+      return text && text.includes('段落甲测试!') ? text : null
     }, 'reopened document did not mount with the saved content')
     await toggleSourceMode(evaluate)
     shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
     assert.equal(shown, SAVED, 'cold reopen must reproduce the saved bytes exactly')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode IME UI: full composition, mid-composition save rollback, undo-as-one-unit and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode IME UI: full composition, mid-composition save rollback, undo-as-one-unit, a real save click on the post-undo state, and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
