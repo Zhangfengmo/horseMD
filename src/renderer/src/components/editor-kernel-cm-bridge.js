@@ -102,6 +102,17 @@ export function classifyBlockedCmKeydown(event) {
   if (event.isComposing || event.keyCode === 229) return 'pass' // IME: inputHandler backstops
   const key = String(event.key ?? '')
   if (MODIFIER_KEYS.has(key)) return 'pass'
+  // Alt-ArrowUp/Down are NOT navigation in the defaultKeymap: they bind
+  // moveLineUp/Down (and with Shift, copyLineUp/Down) — doc-mutating
+  // commands whose only guard was the removed `state.readOnly`. Left
+  // passing, they reorder/duplicate the blocked block's CM lines while the
+  // kernel vetoes the bytes — the screen lies about the file. Mod-Alt-Arrow
+  // stays allowed (addCursor — selection-only), as do Alt-ArrowLeft/Right
+  // (cursorSyntaxLeft/Right — pure navigation).
+  if ((key === 'ArrowUp' || key === 'ArrowDown') &&
+      event.altKey && !event.ctrlKey && !event.metaKey) {
+    return 'block'
+  }
   if (NAV_KEYS.has(key)) return 'pass'
   if (/^F\d{1,2}$/.test(key)) return 'pass' // function keys: never text-mutating here
   if (event.ctrlKey || event.metaKey) {

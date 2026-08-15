@@ -854,6 +854,16 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   block({ key: '/', ctrlKey: true }) // toggleComment
   block({ key: '[', metaKey: true }) // indentLess
   block({ key: 'k', metaKey: true, shiftKey: true }) // deleteLine
+  // Alt-Arrow vertical chords are doc-mutating in the defaultKeymap
+  // (moveLineUp/Down; +Shift copyLineUp/Down) — reviewer-proved leak: left
+  // passing they reorder/duplicate a blocked block's CM lines while the
+  // kernel vetoes the bytes.
+  block({ key: 'ArrowUp', altKey: true }) // moveLineUp
+  block({ key: 'ArrowDown', altKey: true }) // moveLineDown
+  block({ key: 'ArrowUp', altKey: true, shiftKey: true }) // copyLineUp
+  block({ key: 'ArrowDown', altKey: true, shiftKey: true }) // copyLineDown
+  pass({ key: 'ArrowUp', altKey: true, metaKey: true }) // addCursor — selection-only
+  pass({ key: 'ArrowLeft', altKey: true }) // cursorSyntaxLeft — pure navigation
   pass({ key: 'ArrowLeft' })
   pass({ key: 'ArrowDown', shiftKey: true }) // selection extension
   pass({ key: 'Home' })
@@ -948,6 +958,19 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   assert.equal(verdict, undefined)
   assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\nX\n\n甲\n')
   assert.ok(h.view.state.doc.eq(doc(cb('js', 'ab'), p(text('X')), p(text('甲')))))
+  // Undo grouping (reviewer ride-along): the exit is ONE kernel history
+  // group and the placeholder tr rode addToHistory:false — so undo #1 pops
+  // only the typed char (back to the post-exit bytes) and undo #2 pops the
+  // WHOLE exit in one step (back to the exact pre-exit bytes), never
+  // replaying the placeholder as its own undo unit.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n\n\n甲\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n甲\n')
+  assert.ok(
+    h.view.state.doc.eq(doc(cb('js', 'ab'), p(text('甲')))),
+    'undoing the exit reconciles the placeholder away (parse never contains it)'
+  )
 }
 
 // Case T5e: runExitCode refusals — an unmapped CM instance notifies and
