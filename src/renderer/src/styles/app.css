@@ -3331,6 +3331,17 @@ body.dark .hm-hl-swatch.hm-hl-blue { background: #4a78b8; }
   font-size: 9px;
   opacity: 0.7;
 }
+/* Split-button caret for SourceSwitch's kernel-mode popover: a narrow,
+   visually-attached second button next to the main (single-click) toggle —
+   see StatusBar.jsx SourceSwitch for why this is a separate button rather
+   than folded into the main one's own menu. */
+.block-switch-caret-btn {
+  padding: 3px 5px;
+  margin-left: 1px;
+}
+.block-switch-caret-btn .block-switch-caret {
+  margin-left: 0;
+}
 .block-switch-menu {
   position: absolute;
   bottom: calc(100% + 8px);

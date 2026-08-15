@@ -63,28 +63,12 @@ const visibleSource = (evaluate) => evaluate(`(
   [...document.querySelectorAll('textarea.source-editor')]
     .find((node) => node.offsetParent)?.value ?? null
 )`)
-// The status-bar source/rich toggle became a `block-switch` popover
-// (source-kernel integration Task 8, already merged): the trigger button
-// only opens/closes the menu now, item 1 (`.block-switch-menu
-// .block-menu-item`, index 0) is what actually calls the rich<->source
-// toggle. A bare click on the trigger — this helper's old, pre-Task-8
-// behavior — no longer switches modes by itself; open then click item 1.
-const toggleMode = async (evaluate) => {
-  const opened = await evaluate(`(() => {
-    const button = [...document.querySelectorAll('.status-btn')]
-      .find((node) => node.offsetParent && /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
-    button?.click()
-    return !!button
-  })()`)
-  if (!opened) return false
-  await sleep(150)
-  return evaluate(`(() => {
-    const item = [...document.querySelectorAll('.block-switch-menu .block-menu-item')]
-      .find((node) => node.offsetParent)
-    item?.click()
-    return !!item
-  })()`)
-}
+const toggleMode = (evaluate) => evaluate(`(() => {
+  const button = [...document.querySelectorAll('.status-btn')]
+    .find((node) => node.offsetParent && /源码|Source|富文本|Rich|Ctrl\\+\\/|⌘\\//.test(node.title || node.textContent || ''))
+  button?.click()
+  return !!button
+})()`)
 
 // The document is taller than the window, and a rect measured off-screen makes
 // the synthetic click miss — which silently turns an edit test into a no-op.
@@ -135,11 +119,10 @@ async function run() {
 
     assert.equal(await toggleMode(evaluate), true, 'could not return to rich')
 
-    // Empty a quoted TASK item. A bare `> * [ ]` is ordinary GFM list text,
-    // which is the deliberate source-first fallback; no entity is written to
-    // simulate a checkbox. The deletion's start also falls inside block
-    // syntax, where it used to be resolved to the previous row's text end and
-    // swallow the row.
+    // Empty a quoted TASK item. GFM cannot spell an empty task item, so the
+    // checkbox is non-durable while the row itself persists as `> * `; the
+    // deletion's start also falls inside block syntax, where it used to be
+    // resolved to the previous row's text end and swallow the row.
     await clickTextEnd(evaluate, send, '任务三')
     for (let index = 0; index < 3; index += 1) {
       await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay })
@@ -148,7 +131,7 @@ async function run() {
       ...[...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
         .querySelectorAll('li')
     ].some((item) => item.textContent.trim() === '任务三')`), 'the task item was never emptied')
-    expected = expected.replace('> * [ ] 任务三', '> * [ ]')
+    expected = expected.replace('> * [ ] 任务三', '> * ')
 
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)

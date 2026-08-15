@@ -150,14 +150,19 @@ function ThemePicker({
   )
 }
 
-// Source/rich view switch, now a `block-switch` popover (same structure as
-// ThemePicker above) rather than a flat toggle button, so it can also host
-// the per-tab experimental source-kernel opt-in without a second status-bar
-// button. The trigger's outer look (icon + current-mode label + caret) and
-// item 1's behavior (calls the existing `onToggleSource`) are unchanged from
-// the flat button this replaces — a tab with no kernel eligibility (or while
-// `kernelModeIds` is empty for every tab) sees byte-identical rich/source
-// toggle behavior, just reached through one extra click to open the menu.
+// Source/rich view switch: a split button. The main `status-btn` is
+// byte-identical to the pre-Task-8 flat toggle (same icon, current-mode
+// label, `labelWithShortcut` title) and calls `onToggleSource` directly on
+// click — one click toggles rich/source, exactly like every legacy UI test's
+// `toggleMode` helper already assumes. Task 8's popover briefly folded this
+// into a `block-switch` menu (item 1 duplicating this button, item 2 the
+// kernel toggle) to host the per-tab experimental source-kernel opt-in
+// without a second status-bar button — that redirected the main button
+// through an extra click and broke ~80 existing UI tests' single-click
+// assumption, so it was reverted: the popover now lives on a SEPARATE small
+// caret button (`block-switch-caret-btn`), rendered only when
+// `kernelEligible`, and its menu holds ONLY the kernel toggle (no redundant
+// rich/source item).
 function SourceSwitch({
   sourceMode,
   onToggleSource,
@@ -172,40 +177,32 @@ function SourceSwitch({
     <div className="block-switch" ref={ref}>
       <button
         className="status-btn"
-        onClick={() => setOpen((v) => !v)}
+        onClick={onToggleSource}
         title={labelWithShortcut(t('tip.toggleSource'), 'view.toggleSource', effectiveKeybindings)}
       >
         <Icon name="code" size={14} /> {sourceMode ? t('status.source') : t('status.rich')}
-        <span className="block-switch-caret">▾</span>
       </button>
-      {open && (
+      {kernelEligible && (
+        <button
+          className="status-btn block-switch-caret-btn"
+          onClick={() => setOpen((v) => !v)}
+          aria-label={t('status.kernelMode')}
+          title={t('status.kernelMode')}
+        >
+          <span className="block-switch-caret">▾</span>
+        </button>
+      )}
+      {open && kernelEligible && (
         <div className="block-switch-menu">
           <button
-            className="block-menu-item"
+            className={`block-menu-item${kernelMode ? ' active' : ''}`}
             onClick={() => {
-              onToggleSource()
+              onToggleKernelMode?.()
               setOpen(false)
             }}
           >
-            <Icon name="code" size={13} />
-            <span className="block-menu-name">
-              {sourceMode ? t('status.source') : t('status.rich')}
-            </span>
+            <span className="block-menu-name">{t('status.kernelMode')}</span>
           </button>
-          {kernelEligible && (
-            <>
-              <div className="theme-menu-sep" />
-              <button
-                className={`block-menu-item${kernelMode ? ' active' : ''}`}
-                onClick={() => {
-                  onToggleKernelMode?.()
-                  setOpen(false)
-                }}
-              >
-                <span className="block-menu-name">{t('status.kernelMode')}</span>
-              </button>
-            </>
-          )}
         </div>
       )}
     </div>
