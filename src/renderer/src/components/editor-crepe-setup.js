@@ -11,6 +11,11 @@ import { inlineImageConfig } from '@milkdown/kit/component/image-inline'
 import { codeBlockConfig } from '@milkdown/kit/component/code-block'
 import { inlineCodeSchema } from '@milkdown/kit/preset/commonmark'
 import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language'
+// Direct @codemirror/state import (same channel as @codemirror/language
+// above): kernel mode makes fenced code blocks read-only via the CM6
+// EditorState.readOnly facet — the supported extensions channel, no prototype
+// mod and no editorViewOptionsCtx/nodeView override.
+import { EditorState as CmEditorState } from '@codemirror/state'
 import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
 import {
@@ -18,8 +23,9 @@ import {
   listStyleStringifyHandler,
   orderedListStyleSchema,
   remarkCaptureListStyle,
-  trailingSpaceTextHandler
+  terminalTabTextHandler
 } from './editor-list-style.js'
+import { createSourceFirstOrderedListPlugin } from './editor-ordered-list-source.js'
 import { renderHtmlNodeView, remarkMergeInlineHtml } from './editor-html.js'
 import { remarkUnwrapNonAsciiAutolinks } from './editor-autolink.js'
 import { remarkNormalizeCodeOnlyLinkLabels } from './editor-link-labels.js'
@@ -51,7 +57,6 @@ import { createReviewDecorationPlugin } from './editor-review.js'
 import { normalizeWebPasteHtml } from './editor-web-paste.js'
 import { imageBlockMarkdownSchema } from './editor-image-markdown.js'
 import { remarkNormalizeRaggedGfmTables } from './editor-table-normalization.js'
-import { remarkStripLeadingSpaceSentinel } from '../lib/markdown-leading-space.js'
 import {
   createStrikeGuardPlugin,
   createSubstitutionLiveReconstructPlugin,
@@ -103,7 +108,13 @@ export function createConfiguredCrepe({
   onFrontmatterValueChange,
   onInlineCodeValueChange,
   onSlashCommand,
-  onSourceTransactions
+  onSourceTransactions,
+  // Source-kernel mode (Plan 2 Task 5). `kernelPlugins` is the KernelMode
+  // controller (editor-kernel-mode.js) whose structural/history keymaps must
+  // outrank every other keymap. Both default off; non-kernel callers get a
+  // byte-identical configuration.
+  kernelMode = false,
+  kernelPlugins = null
 }) {
   const t = getT
   const platform = window.api?.platform
@@ -116,6 +127,10 @@ export function createConfiguredCrepe({
       // toolbar at the same time creates two overlapping action surfaces and can
       // cover the selected text, so mobile keeps the native menu only.
       [Feature.SelectionTooltip]: !isMobile,
+      // Kernel mode: the selection toolbar's formatting commands produce
+      // structural transactions the kernel cannot own yet — they would all be
+      // vetoed, so the toolbar is disabled at the feature level instead.
+      [Feature.Toolbar]: !kernelMode,
       [Feature.SlashCommand]: true,
       [Feature.BlockEdit]: true,
       [Feature.CodeMirror]: true,
@@ -139,7 +154,12 @@ export function createConfiguredCrepe({
         copyText: t('code.copy'),
         previewToggleText: (previewOnly) =>
           previewOnly ? t('mermaid.editCode') : t('mermaid.hideCode'),
-        extensions: [tabAtCursorKeymap]
+        // Kernel mode: code blocks are non-editable pairs in the projection
+        // map (no character-level decode contract), so their CodeMirror
+        // editors are read-only until the kernel owns fenced-code edits.
+        extensions: kernelMode
+          ? [tabAtCursorKeymap, CmEditorState.readOnly.of(true)]
+          : [tabAtCursorKeymap]
       },
       [Feature.Latex]: {
         katexOptions: {
@@ -203,6 +223,18 @@ export function createConfiguredCrepe({
     })
 
     ctx.update(prosePluginsCtx, (plugins) => [
+      // Kernel mode: structural (Enter/Tab/Shift-Tab/Backspace/Delete) and
+      // history (Mod-z/Mod-y/Shift-Mod-z) keys are routed through the source
+      // kernel FIRST — these keymaps must sit at the very head of the plugin
+      // order, before listBackspaceKeymap and every preset keymap, or PM's
+      // own structural commands would fire and be vetoed after the fact.
+      ...(kernelMode && kernelPlugins
+        ? [kernelPlugins.structuralKeymap(), kernelPlugins.historyKeymap()]
+        : []),
+      // Markdown, not a rich-only list boundary, is the durable authority.
+      // Merge an internally-created adjacent ordered list before downstream
+      // source observers see a serializer-forced `1)` delimiter.
+      createSourceFirstOrderedListPlugin(),
       // Must run BEFORE the preset keymaps in `plugins`: the CommonMark preset
       // binds Backspace to a generic joinBackward that merges an empty list
       // item into the previous item instead of exiting the list.
@@ -242,7 +274,7 @@ export function createConfiguredCrepe({
         break: tableCellBreakHandler,
         highlight: highlightStringifyHandler,
         list: listStyleStringifyHandler,
-        text: trailingSpaceTextHandler
+        text: terminalTabTextHandler
       }
     }))
 
@@ -250,7 +282,6 @@ export function createConfiguredCrepe({
       ...plugins,
       { plugin: remarkCaptureListStyle, options: undefined },
       { plugin: remarkNormalizeRaggedGfmTables, options: undefined },
-      { plugin: remarkStripLeadingSpaceSentinel, options: undefined },
       { plugin: remarkNormalizeCodeOnlyLinkLabels, options: undefined },
       { plugin: remarkUnwrapNonAsciiAutolinks, options: undefined },
       { plugin: remarkFrontmatter, options: undefined },

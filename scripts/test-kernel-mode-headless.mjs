@@ -1,0 +1,267 @@
+// TDD evidence + regression lock for editor-kernel-mode.js
+// (source-kernel integration Plan 2, Task 5).
+//
+// Drives createKernelMode() directly with a hand-built @milkdown/prose Schema,
+// a real EditorState behind a stub view (dispatch applies the tr, updateState
+// swaps the state — the same two-phase protocol editor-source-transactions.js
+// uses), and a STUB parse that maps kernel markdown bytes to hand-built PM
+// docs. Every raw offset / PM position below is derived by hand, same
+// convention as scripts/test-kernel-gateway.mjs.
+//
+// The Editor.jsx wiring itself (props, crepe options, markdownUpdated gate) is
+// covered by the Task 9 UI regression; this file locks the DECISIONS:
+// pass-through vs veto, kernel byte advancement, structural/history keymap
+// handling, caret restore, and full degradation on an unmappable document.
+import assert from 'node:assert/strict'
+import { Schema } from '@milkdown/prose/model'
+import { EditorState, TextSelection } from '@milkdown/prose/state'
+import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
+
+const schema = new Schema({
+  nodes: {
+    doc: { content: 'block+' },
+    paragraph: { content: 'inline*', group: 'block' },
+    text: { group: 'inline' }
+  }
+})
+const p = (...c) => schema.node('paragraph', null, c)
+const doc = (...c) => schema.node('doc', null, c)
+const text = (s) => schema.text(s)
+
+// Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
+// throw, exactly like a parser failure would.
+const FIXTURE_DOCS = {
+  '甲乙\n': () => doc(p(text('甲乙'))),
+  '甲丙乙\n': () => doc(p(text('甲丙乙'))),
+  '甲\n\n乙\n': () => doc(p(text('甲')), p(text('乙'))),
+  '甲\t乙\n': () => doc(p(text('甲\t乙')))
+}
+const stubParse = (markdown) => {
+  const build = FIXTURE_DOCS[markdown]
+  if (!build) throw new Error('stub parse has no fixture for: ' + JSON.stringify(markdown))
+  return build()
+}
+
+// Stub view implementing the dispatch protocol handleTransactions relies on:
+// a real EditorState, dispatch applies the tr in place (so reconcileProjection
+// and caret-restore work), updateState swaps in a pre-applied state.
+const makeView = (initialDoc) => {
+  let state = EditorState.create({ schema, doc: initialDoc })
+  return {
+    get state() { return state },
+    dispatch(tr) { state = state.apply(tr) },
+    updateState(next) { state = next },
+    composing: false,
+    focus() {}
+  }
+}
+
+const makeHarness = (initialContent, initialDoc) => {
+  const notifications = []
+  const changes = []
+  const view = makeView(initialDoc)
+  const controller = createKernelMode({
+    initialContent,
+    getView: () => view,
+    parse: stubParse,
+    notify: (message) => notifications.push(message),
+    getT: (key) => key,
+    onChange: (markdown, flag) => changes.push([markdown, flag])
+  })
+  return { view, controller, notifications, changes }
+}
+
+// Emulate createSourceTransactionDispatch: classify first, updateState only
+// when not vetoed.
+const dispatchThrough = (harness, tr) => {
+  const oldState = harness.view.state
+  const applied = oldState.apply(tr)
+  const verdict = harness.controller.handleTransactions([tr], oldState, {
+    ...applied,
+    doc: applied.doc,
+    tr: applied.tr
+  })
+  if (!verdict?.veto) harness.view.updateState(applied)
+  return verdict
+}
+
+const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+console.log('--- kernel mode headless ---')
+
+// Shared harness for cases 1 / 2 / 5 (they form one editing session).
+const session = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+assert.equal(session.controller.attachAfterCreate(), true, 'initial map must build')
+assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
+
+// Case 1: plain-text insert flows through commitPlainText — pass-through
+// (undefined), kernel bytes advance, onChange publishes the kernel text.
+{
+  const oldState = session.view.state
+  const tr = oldState.tr.insertText('丙', 2) // between 甲 and 乙 -> raw offset 1
+  const verdict = dispatchThrough(session, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'plain-text is allowed (no veto)')
+  assert.equal(session.controller.kernel.doc.text, '甲丙乙\n')
+  assert.equal(session.controller.kernel.doc.revision, 1)
+  assert.deepEqual(session.changes.at(-1), ['甲丙乙\n', false])
+  assert.equal(session.view.state.doc.textContent, '甲丙乙')
+  // Map was rebound to the new revision/doc: raw 1 (after 甲) -> PM pos 2.
+  assert.equal(session.controller.kernel.map.pmPosToRaw(2), 1)
+}
+
+// Case 2: a drop transaction is blocked -> {veto:true}, kernel unchanged,
+// notify fired; the view keeps its pre-drop state (dispatch protocol skips
+// updateState on veto).
+{
+  const before = session.notifications.length
+  const oldState = session.view.state
+  const tr = oldState.tr.insertText('X', 1)
+  tr.setMeta('uiEvent', 'drop')
+  const verdict = dispatchThrough(session, tr)
+  assert.deepEqual(verdict, { veto: true })
+  assert.equal(session.controller.kernel.doc.text, '甲丙乙\n', 'kernel bytes untouched')
+  assert.equal(session.view.state.doc.textContent, '甲丙乙', 'view untouched after veto')
+  assert.ok(session.notifications.length > before, 'blocked edit notifies the user')
+}
+
+// Case 3: structural Enter mid-paragraph. Fresh session '甲乙\n', caret at PM
+// pos 2 (raw offset 1). splitTextBlock inserts '\n\n' at raw 1 ->
+// '甲\n\n乙\n'; the view is reconciled to the parsed two-paragraph doc and the
+// caret lands in the second paragraph (raw 3 -> PM pos 4).
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(text('乙')))), 'view reconciled to parse output')
+  assert.equal(h.view.state.selection.head, 4, 'caret restored into the new block')
+  assert.deepEqual(h.changes.at(-1), ['甲\n\n乙\n', false])
+}
+
+// Case 4: Tab in a paragraph is not-structural -> replaceVisibleText inserts
+// a literal '\t' through the kernel (source-first), swallowing the key.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const handled = h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '甲\t乙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲\t乙')))))
+  assert.equal(h.view.state.selection.head, 3, 'caret sits right after the inserted tab')
+}
+
+// Case 5: history — undo restores the pre-Case-1 bytes exactly; redo
+// reapplies them. Both reconcile the view and both suppress PM history
+// (handler returns true even when there is nothing to undo).
+{
+  const undone = session.controller.historyHandlers.undo(
+    session.view.state, session.view.dispatch, session.view
+  )
+  assert.equal(undone, true)
+  assert.equal(session.controller.kernel.doc.text, '甲乙\n', 'undo restores bytes exactly')
+  assert.ok(session.view.state.doc.eq(doc(p(text('甲')))) === false)
+  assert.ok(session.view.state.doc.eq(doc(p(text('甲乙')))))
+  assert.equal(session.view.state.selection.head, 2, 'undo caret at the removed span')
+
+  const redone = session.controller.historyHandlers.redo(
+    session.view.state, session.view.dispatch, session.view
+  )
+  assert.equal(redone, true)
+  assert.equal(session.controller.kernel.doc.text, '甲丙乙\n', 'redo reapplies bytes exactly')
+  assert.ok(session.view.state.doc.eq(doc(p(text('甲丙乙')))))
+  assert.equal(session.view.state.selection.head, 3)
+
+  // Empty redo stack: still true (suppresses PM history), no state change.
+  const emptyRedo = session.controller.historyHandlers.redo(
+    session.view.state, session.view.dispatch, session.view
+  )
+  assert.equal(emptyRedo, true)
+  assert.equal(session.controller.kernel.doc.text, '甲丙乙\n')
+}
+
+// Case 6: degraded mode. The initial map cannot be proven (kernel text has
+// ONE paragraph, the PM doc has TWO) -> attachAfterCreate degrades with a
+// notification; from then on handleTransactions passes EVERYTHING through
+// (legacy behavior — even a drop) and every keymap handler returns false.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), false)
+  assert.ok(h.notifications.length >= 1, 'degradation is announced, never silent')
+  assert.equal(h.controller.kernel.map, null)
+
+  const oldState = h.view.state
+  const drop = oldState.tr.insertText('X', 1)
+  drop.setMeta('uiEvent', 'drop')
+  assert.equal(h.controller.handleTransactions([drop], oldState, oldState.apply(drop)), undefined)
+
+  const plain = h.view.state.tr.insertText('Y', 1)
+  assert.equal(
+    h.controller.handleTransactions([plain], h.view.state, h.view.state.apply(plain)),
+    undefined
+  )
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'degraded kernel never advances')
+  assert.equal(h.changes.length, 0, 'degraded mode publishes nothing')
+
+  for (const key of ['Enter', 'Tab', 'Shift-Tab', 'Backspace', 'Delete']) {
+    assert.equal(
+      h.controller.structuralHandlers[key](h.view.state, h.view.dispatch, h.view),
+      false,
+      key + ' falls back to legacy keymaps in degraded mode'
+    )
+  }
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), false)
+  assert.equal(h.controller.historyHandlers.redo(h.view.state, h.view.dispatch, h.view), false)
+}
+
+// Case 7 (wiring guard): before attachAfterCreate has run (Crepe still
+// creating / chunks still appending), everything passes through and no key is
+// intercepted — otherwise the kernel would veto the editor's own init
+// transactions.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  const oldState = h.view.state
+  const tr = oldState.tr.insertText('Z', 1)
+  assert.equal(h.controller.handleTransactions([tr], oldState, oldState.apply(tr)), undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n')
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), false)
+}
+
+// Case 8: apiOverrides surface. flushMarkdown returns the kernel bytes
+// directly; sync status reports kernel authority; offset APIs run on the
+// projection map (never the ordinal editor-source-map path); unsupported
+// rich formatting APIs refuse with a notification.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const api = h.controller.apiOverrides
+  assert.equal(api.flushMarkdown(), '甲乙\n')
+  assert.equal(await api.flushMarkdownSettled(), '甲乙\n')
+  assert.deepEqual(api.getVerifiedSyncStatus(), { status: 'kernel-authoritative' })
+  assert.equal(api.getRecoveryMarkdown(), '甲乙\n')
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  assert.equal(api.markdownOffsetFromSelection(), 1)
+  assert.equal(api.restoreMarkdownOffset(2), true)
+  assert.equal(h.view.state.selection.head, 3)
+  const before = h.notifications.length
+  assert.equal(api.applyTextFormat('bold'), false)
+  assert.equal(api.toggleHighlight(), false)
+  assert.equal(api.applyReviewMarkup('insert'), false)
+  assert.equal(h.notifications.length, before + 3, 'unsupported APIs notify, never silently no-op')
+
+  // replaceMarkdown resets the kernel + history and reconciles the view.
+  assert.equal(api.replaceMarkdown('甲\n\n乙\n'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+  assert.equal(h.controller.kernel.doc.revision, 0, 'replace resets the revision line')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(text('乙')))))
+  assert.equal(
+    h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view),
+    true, 'undo after replace is suppressed (history cleared)'
+  )
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+}
+
+console.log('PASS kernel mode headless')

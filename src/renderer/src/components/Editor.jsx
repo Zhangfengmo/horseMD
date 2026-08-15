@@ -32,6 +32,7 @@ import { convertListAtSelection, getListConversionContext } from './editor-list-
 import { normalizeReviewMarkupMarkdown } from '../reviewMarkup.js'
 import { REVIEW_KINDS } from './editor-review.js'
 import { createEditorApi } from './editor-api.js'
+import { createKernelMode, pushKernelDiagnostic } from './editor-kernel-mode.js'
 import { useEditorLightboxControls } from './editor-lightbox.js'
 import { applyImageText, createConfiguredCrepe } from './editor-crepe-setup.js'
 import { mountEditorDomBindings } from './editor-dom-bindings.js'
@@ -97,6 +98,11 @@ export default function Editor({
   selectionToolbar,
   onToggleSourceRichSplit,
   readOnly = false,
+  // Source-kernel mode (Plan 2): kernel.doc.text becomes the transaction-first
+  // source authority for this editor instance. Fixed at create time; every
+  // wiring difference below is gated on it so non-kernel tabs keep
+  // byte-identical legacy behavior.
+  sourceKernelMode = false,
   effectiveKeybindings,
   onChange,
   onRichEditPending,
@@ -358,6 +364,21 @@ export default function Editor({
       if (!crepe) return null
       return crepe.editor.ctx.get(parserCtx)
     })
+    // Kernel mode is fixed for the lifetime of this editor instance (the
+    // create effect runs once): the Crepe feature set and keymap order below
+    // are established at create() and cannot flip afterwards.
+    const kernelModeEnabled = sourceKernelMode === true
+    const kernelController = kernelModeEnabled
+      ? createKernelMode({
+          initialContent: initialContent || '',
+          getView: () => viewRef.current,
+          parse: (md) => parseAdapter.parse(md),
+          notify: fireToast,
+          getT: (key) => tRef.current(key),
+          onChange: (markdown, opts) => onChange?.(markdown, opts)
+        })
+      : null
+    if (kernelController) cleanups.push(() => kernelController.dispose())
     let scratchSpaciousMarkdown = null
     let latestVerifiedCapture = null
     let verifiedState = null
@@ -771,6 +792,12 @@ export default function Editor({
     }
 
     const handleSourceTransactions = (transactions, oldState, newState) => {
+      // Kernel mode owns the complete dispatch verdict (pass-through, commit
+      // into kernel.doc, or veto). The legacy shadow/primary path below must
+      // not run alongside it — two source authorities would race.
+      if (kernelController) {
+        return kernelController.handleTransactions(transactions, oldState, newState)
+      }
       if (pendingSlashBlockIntent?.id === 'table') {
         // Milkdown clears the slash query and inserts the table in separate
         // dispatch batches. Accumulate one intent-wide proof; an invalid batch
@@ -931,7 +958,9 @@ export default function Editor({
       onFrontmatterValueChange: handleFrontmatterValueChange,
       onInlineCodeValueChange: handleInlineCodeValueChange,
       onSlashCommand: handleSlashCommand,
-      onSourceTransactions: handleSourceTransactions
+      onSourceTransactions: handleSourceTransactions,
+      kernelMode: kernelModeEnabled,
+      kernelPlugins: kernelController
     })
     crepeRef.current = crepe
 
@@ -1208,6 +1237,16 @@ export default function Editor({
     // docs. Only real user edits propagate.
     crepe.on((api) => {
       api.markdownUpdated((_ctx, md) => {
+        // Kernel mode: the serializer callback is diagnostics-only. It must
+        // never advance lastMarkdownRef/canonicalMarkdownRef or publish —
+        // kernel.doc.text is the sole source authority for this tab.
+        if (kernelModeEnabled) {
+          pushKernelDiagnostic({
+            type: 'markdown-updated',
+            length: typeof md === 'string' ? md.length : null
+          })
+          return
+        }
         const canonical = canonicalForSource(md)
         if (programmaticReplaceRef.current) {
           // replaceAll can publish more than one Markdown transaction. Keep all
@@ -1373,7 +1412,14 @@ export default function Editor({
               const inputStartedFromEmptyDocument =
                 !pendingMarkdownInputIntent.source &&
                 !pendingMarkdownInputIntent.canonical
-              const inputRuleMarkdown = inputStartedFromEmptyDocument
+              // A middle empty paragraph already owns its physical source
+              // slot. Once preserveMiddleEmptyBlock has filled that slot with
+              // the new list, replaying the input-rule reconstruction inserts
+              // the same list a second time and leaves an extra blank line.
+              // Keep the later marker-restoration pass, which still changes
+              // Crepe's `*` back to the key the writer actually typed.
+              const mappedMiddleListSlot = preserved.reason === 'middle-empty-block-list-filled'
+              const inputRuleMarkdown = inputStartedFromEmptyDocument || mappedMiddleListSlot
                 ? null
                 : preserveTypedBulletInputRule({
                     source: pendingMarkdownInputIntent.source,
@@ -1390,7 +1436,6 @@ export default function Editor({
                     canonicalOffset,
                     marker: pendingMarkdownInputIntent.marker
                   })
-              const mappedMiddleListSlot = preserved.reason === 'middle-empty-block-list-filled'
               if (Array.isArray(globalThis.__hmListIntentTrace)) {
                 globalThis.__hmListIntentTrace.push({
                   phase: 'apply',
@@ -1734,6 +1779,10 @@ export default function Editor({
         })
         api.convertList = convertList
         api.convertBlockToList = convertBlockToList
+        // Kernel mode: kernel.doc.text replaces the serializer/preservation
+        // pipeline as the flush/save/offset authority. Applied BEFORE the
+        // destructure below so onReady and the DEV hook see the overrides.
+        if (kernelController) Object.assign(api, kernelController.apiOverrides)
         const {
           getPdfSource,
           getMarkdown,
@@ -1857,6 +1906,11 @@ export default function Editor({
             canonical,
             expectedDoc: view.state.doc
           })
+          // Kernel mode: prove the initial projection map only once the FULL
+          // document is in the view (after chunk append for huge docs). An
+          // unprovable document degrades this tab to complete legacy behavior
+          // with a visible notification — never a silent half-takeover.
+          kernelController?.attachAfterCreate()
           ready = true
           interactionReadyRef.current = true
           try { view.setProps({ editable: () => !readOnlyRef.current }) } catch { /* editor teardown */ }
