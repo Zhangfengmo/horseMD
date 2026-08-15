@@ -200,7 +200,8 @@
     "test:drop-open-ui": "node scripts/test-drop-open-ui.mjs",
     "test:quoted-block-source-ui": "node scripts/test-quoted-block-source-ui.mjs",
     "test:trailing-space-source-ui": "node scripts/test-trailing-space-source-ui.mjs",
-    "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs"
+    "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs",
+    "test:kernel-mode-ui": "node scripts/test-kernel-mode-ui.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
