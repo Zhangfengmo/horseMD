@@ -656,4 +656,66 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'four undos fully unwind back to the original bytes')
 }
 
+// Case 18 (review fix): extendTrailingPlaceholder's atomic rollback. Forces
+// bindMap's buildProjectionMap call to fail AFTER kernel.doc has already
+// advanced and the new placeholder node has already been inserted into the
+// view, and proves BOTH sides roll back together — never just one.
+//
+// The failure is forced the same way Case 9 forces a history desync: by
+// directly corrupting `kernel.doc` on the live controller (an accepted
+// technique in this file for exercising a defensive path with no other
+// entry point). After the first Enter (`kernel.doc.text === '甲乙\n\n\n'`,
+// view `doc(p(甲乙), p())`), `kernel.doc` is replaced with a SAME-WIDTH but
+// different-character real paragraph ('丁\n\n\n' — 1 char, not 2) while the
+// VIEW keeps showing the original 2-char '甲乙'. This is invisible to the
+// pure-kernel Enter derivation (routeStructuralKey only cares about the
+// trailing-gap OFFSET, which is structurally identical either way) and
+// invisible to the CONTROLLER's own map (unchanged, still built against the
+// real '甲乙'), so the second Enter is accepted and proceeds exactly like
+// Case 17's — right up until the extended chain's bindMap call, which DOES
+// notice: the corrupted kernel text's real paragraph is now only 1 char
+// wide while the view's real paragraph is still 2 (`buildCharacterMap`'s
+// `visibleLength` vs `pm.node.content.size`), so buildProjectionMap rejects
+// the WHOLE map.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3))) // end of 甲乙
+
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p())))
+  assert.equal(h.view.state.selection.head, 5)
+
+  // Corrupt: same trailing-blank structure (so the pure Enter derivation and
+  // the EXISTING map's pmPosToRaw both still resolve identically), but the
+  // real paragraph is now width-mismatched against what the view shows.
+  const beforeCorruption = h.controller.kernel.doc
+  h.controller.kernel.doc = { text: '丁\n\n\n', revision: beforeCorruption.revision }
+  const notifBefore = h.notifications.length
+
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true, 'the key is swallowed either way, success or refusal')
+
+  // kernel.doc must be back to EXACTLY the corrupted pre-attempt value —
+  // never the extended '丁\n\n\n\n' the failed attempt computed internally.
+  assert.equal(h.controller.kernel.doc.text, '丁\n\n\n',
+    'kernel.doc must roll back to its pre-extend value on a failed chain extension')
+  // The view must be back to exactly ONE placeholder — the second (failed)
+  // insert removed, not left orphaned.
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p())),
+    'the view must roll back to the pre-extend shape (one placeholder), not two')
+
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.some((entry) => entry.type === 'split-placeholder-unprovable'),
+    'the failed extension must be diagnosed'
+  )
+  assert.ok(h.notifications.length > notifBefore, 'the failed extension must notify the user')
+  assert.ok(
+    h.notifications.at(-1).includes('projection-mismatch'),
+    `notification must carry the actual KERNEL_CODES.PROJECTION code, got: ${h.notifications.at(-1)}`
+  )
+}
+
 console.log('PASS kernel mode headless')

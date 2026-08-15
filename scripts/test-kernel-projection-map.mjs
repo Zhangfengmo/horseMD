@@ -538,6 +538,31 @@ console.log('--- kernel projection map ---')
   )
 }
 
+// Case 15b (review fix): the `pendingPlaceholders` CHAIN form must reject a
+// voucher positioned BEFORE real trailing content, even though every
+// per-item check (empty paragraph, all entries matched) would otherwise
+// pass. Reuses Case 13's exact fixture and numbers ('P1\n\n\n\nP2\n', voucher
+// at pmPos 4 / rawOffset 4 — a blank-line gap that sits BETWEEN P1 and P2,
+// not after all real content) to prove the distinction is deliberate: the
+// SAME shape is accepted via the single-object `pendingPlaceholder` (Case
+// 13, `ensureSplitPlaceholder`'s own legitimate mid-document case) but
+// rejected via the plural `pendingPlaceholders` chain (only ever meant for
+// `extendTrailingPlaceholder`'s trailing-blank chain, which must never
+// vouch anything before the document's real content actually ends).
+{
+  const md = 'P1\n\n\n\nP2\n'
+  const d = doc(p(text('P1')), p(), p(text('P2')))
+  assert.ok(
+    buildProjectionMap(md, d, { pendingPlaceholder: { pmPos: 4, rawOffset: 4 } }),
+    'sanity: the singular form still accepts this exact mid-document shape (Case 13)'
+  )
+  assert.equal(
+    buildProjectionMap(md, d, { pendingPlaceholders: [{ pmPos: 4, rawOffset: 4 }] }),
+    null,
+    'the chain form must reject a voucher positioned before real trailing content (P2)'
+  )
+}
+
 // Case 14: standalone image-block. Raw '# t\n\n![a](x.png)\n\n尾\n':
 // #=0 ' '=1 t=2 \n=3 \n=4 image [5,16) \n=16 \n=17 尾=18 \n=19. The kernel's
 // plugin-free parse keeps the `paragraph > image` wrapper; Crepe's PM doc

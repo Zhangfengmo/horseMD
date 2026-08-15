@@ -204,13 +204,37 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   // empty paragraph still rejects the whole map below, and every vouched
   // entry MUST be consumed by a real PM node or the whole map rejects too
   // (stale bookkeeping is a caller bug, not a best-effort map).
-  const pendingList = Array.isArray(options.pendingPlaceholders)
+  const pendingIsChain = Array.isArray(options.pendingPlaceholders)
+  const pendingList = pendingIsChain
     ? options.pendingPlaceholders.filter((p) => Number.isFinite(p?.pmPos) && Number.isFinite(p?.rawOffset))
     : options.pendingPlaceholder &&
         Number.isFinite(options.pendingPlaceholder.pmPos) &&
         Number.isFinite(options.pendingPlaceholder.rawOffset)
       ? [options.pendingPlaceholder]
       : []
+  // Chain-only self-check (review finding, Task 2 plan 3): the `pendingPlaceholders`
+  // LIST form exists for exactly one caller shape — extendTrailingPlaceholder's
+  // trailing-blank chain, where every entry's rawOffset must sit at/after the
+  // TRUE end of the document's real content (enter.js's own `isTrailingGap`
+  // floor). Without this, a voucher could sit BEFORE real trailing content
+  // that keeps flowing normally elsewhere in the pm/md sequences — the per-item
+  // "empty paragraph" check alone can't catch that, because an empty PM node
+  // with no mdast counterpart looks identical whether it is genuinely trailing
+  // or a mid-document placeholder. The single-object `pendingPlaceholder` form
+  // is NOT covered by this floor: that shape is `ensureSplitPlaceholder`'s own,
+  // long-standing "Enter at the end of a paragraph that still has more content
+  // AFTER it elsewhere in the document" case (see Case 13 in
+  // scripts/test-kernel-projection-map.mjs) — a legitimately mid-document
+  // placeholder, not a trailing one, and must keep working unchanged.
+  if (pendingIsChain && pendingList.length) {
+    const topLevel = index.tree.children || []
+    const trailingFloor = topLevel.length
+      ? topLevel[topLevel.length - 1].position?.end?.offset
+      : 0
+    if (!Number.isFinite(trailingFloor) || pendingList.some((p) => p.rawOffset < trailingFloor)) {
+      return null
+    }
+  }
   const matchedPending = new Set()
 
   const blockPairs = []

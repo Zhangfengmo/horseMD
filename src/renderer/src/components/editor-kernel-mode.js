@@ -168,11 +168,29 @@ export function createKernelMode({
   // record of the CURRENT chain — is resynced to exactly what got vouched
   // here, so any caller that omits `pending` correctly ends the session.
   const bindMap = (pmDoc, pending = null) => {
-    const list = Array.isArray(pending) ? pending : (pending ? [pending] : [])
+    const isChain = Array.isArray(pending)
+    const list = isChain ? pending : (pending ? [pending] : [])
     splitPlaceholders = list
-    kernel.map = pmDoc
-      ? buildProjectionMap(kernel.doc.text, pmDoc, list.length ? { pendingPlaceholders: list } : {})
-      : null
+    // Preserve the CALLER's shape when forwarding to buildProjectionMap — do
+    // NOT normalize a single object into a one-element `pendingPlaceholders`
+    // array here. buildProjectionMap's chain-only trailing-floor self-check
+    // (review finding, Task 2 plan 3) keys off which OPTION NAME was used
+    // (`pendingPlaceholders` vs `pendingPlaceholder`) to tell
+    // extendTrailingPlaceholder's genuine trailing chain apart from
+    // ensureSplitPlaceholder's long-standing single-placeholder MID-document
+    // case (Enter at the end of a paragraph that still has more real content
+    // after it elsewhere in the doc — see Case 13 / Case 15b in
+    // scripts/test-kernel-projection-map.mjs). Funneling both shapes through
+    // the plural key here would silently apply the trailing floor to
+    // ensureSplitPlaceholder's mid-document placeholders too and reject
+    // perfectly ordinary "Enter at paragraph end, more content follows"
+    // splits — this exact regression was caught by the live UI suite, not
+    // by the unit tests (which call buildProjectionMap directly with the
+    // literal option name and never exercised bindMap's own forwarding).
+    const options = isChain
+      ? (list.length ? { pendingPlaceholders: list } : {})
+      : (pending ? { pendingPlaceholder: pending } : {})
+    kernel.map = pmDoc ? buildProjectionMap(kernel.doc.text, pmDoc, options) : null
     if (!kernel.map) {
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
       splitPlaceholders = []
