@@ -551,13 +551,19 @@ async function run() {
     assert.equal(app.dialogs.length, 0, 'no dialog appeared from the right-click blocked-matrix check')
 
     // ============================================================
-    // 5) Blocked matrix — fenced code block stays read-only
+    // 5) Kernel-owned code editing — the LF `js` block is EDITABLE
+    //    (source-kernel Plan 3 Task 5: the blanket read-only became a
+    //    per-block dynamic gate; a proven-charMap LF block edits natively,
+    //    CM -> forwardUpdate -> gateway commit), and a CM-focused Mod-z
+    //    undoes the typed character through KERNEL history, restoring the
+    //    pre-edit bytes exactly (which keeps the derived SAVED expectation
+    //    below valid).
     // ============================================================
     // scrollIntoView FIRST (Task 1 fix report finding): without it, on this
     // tall fixture the `js` block's `.cm-line` rect can land off-screen
     // (observed y:-480 during this task's own investigation), the click
-    // lands nowhere, no keystrokes ever reach CM, and the assertion below
-    // passed vacuously — proving nothing about real read-only enforcement.
+    // lands nowhere, no keystrokes ever reach CM, and the assertions below
+    // pass vacuously.
     await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-editor')?.scrollIntoView({ block: 'center' })`)
     await sleep(400)
     const codePoint = await evaluate(`(() => {
@@ -570,10 +576,20 @@ async function run() {
     await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...codePoint, button: 'left', clickCount: 1 })
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...codePoint, button: 'left', clickCount: 1 })
     await sleep(200)
-    await typeTextLikeUser(send, 'BLOCKED', { delayMs: delay })
+    await typeTextLikeUser(send, 'K', { delayMs: delay })
     await sleep(300)
-    const cmTextAfter = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
-    assert.equal(cmTextAfter, cmTextBefore, 'typing into the fenced code block changed its content (must be read-only in kernel mode)')
+    const cmTextTyped = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
+    assert.ok(
+      cmTextTyped !== cmTextBefore && cmTextTyped.includes('K'),
+      `typing into the LF js code block did not land (kernel-owned CM editing broken): ${JSON.stringify(cmTextTyped)}`
+    )
+    // The typed character must have reached the KERNEL bytes, not just the
+    // CM DOM: a CM-focused Mod-z routes through kernel history and must
+    // restore the exact pre-edit content (a CM-local undo, or a swallowed
+    // no-op, would leave the char behind).
+    await pressUndo(send)
+    await waitFor(async () => (await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)) === cmTextBefore,
+      'CM-focused Mod-z did not undo the typed code-block character through kernel history')
 
     // ============================================================
     // 5.5) Real CodeMirror read-only + undo bridge (source-kernel

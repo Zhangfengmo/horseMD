@@ -29,6 +29,7 @@ import {
   buildSyntaxIndex,
   createMarkdownDocument,
   createSourceHistory,
+  exitCodeBlock,
   replaceVisibleText,
   routeStructuralKey
 } from '../lib/source-kernel/index.js'
@@ -385,14 +386,45 @@ export function createKernelMode({
     }
   }
 
-  // Materialize the PM representation of "caret parked on a blank line" that
-  // a degenerate splitTextBlock leaves behind (see the session note above):
-  // one empty paragraph right after the textblock the split originated in,
-  // caret inside it, tagged sourceProjection/addToHistory:false so the
-  // gateway passes it through and undo never replays it. The map is rebuilt
-  // WITH the placeholder vouched; if that map cannot be proven, the
-  // placeholder is removed again and the caret simply stays where the
-  // reconcile left it (fail-closed, never a half-tracked node).
+  // Materialize ONE vouched empty PM paragraph at `insertPos` representing a
+  // caret parked on a blank line the reparse cannot show (CommonMark
+  // collapses blank-line runs), caret inside it, tagged
+  // sourceProjection/addToHistory:false so the gateway passes it through and
+  // undo never replays it. The map is rebuilt WITH the placeholder vouched;
+  // if that map cannot be proven, the placeholder is removed again
+  // (fail-closed, never a half-tracked node). Shared by
+  // `ensureSplitPlaceholder` (Enter's degenerate split, insert after the
+  // ORIGIN textblock) and `runExitCode` (Mod-Enter code-block exit, insert
+  // after the CODE BLOCK node).
+  const materializePlaceholder = (view, insertPos, rawOffset) => {
+    try {
+      const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
+      if (!paragraph) return false
+      const tr = view.state.tr.insert(insertPos, paragraph)
+      tr.setSelection(TextSelection.create(tr.doc, insertPos + 1))
+      tr.setMeta('sourceProjection', true)
+      tr.setMeta('addToHistory', false)
+      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+      view.dispatch(tr)
+      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset })) return true
+      // Could not prove the vouched pairing: remove the placeholder again
+      // and rebind plain.
+      pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
+      const undoTr = view.state.tr.delete(insertPos, insertPos + paragraph.nodeSize)
+      undoTr.setMeta('sourceProjection', true)
+      undoTr.setMeta('addToHistory', false)
+      view.dispatch(undoTr)
+      bindMap(view.state.doc)
+      return false
+    } catch {
+      pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
+      return false
+    }
+  }
+
+  // The degenerate-splitTextBlock caller (see the session note above): the
+  // placeholder goes right after the textblock the split originated in
+  // (resolved from the transaction's own `from` on the CURRENT map).
   const ensureSplitPlaceholder = (view, txn, rawOffset) => {
     const origin = kernel.map?.rawToPmPos?.(txn.from)
     if (!origin || !Number.isFinite(origin.pos)) return
@@ -402,24 +434,7 @@ export function createKernelMode({
       let depth = $pos.depth
       while (depth > 0 && !$pos.node(depth).isTextblock) depth -= 1
       if (depth === 0 || !$pos.node(depth).isTextblock) return
-      const insertPos = $pos.after(depth)
-      const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
-      if (!paragraph) return
-      const tr = view.state.tr.insert(insertPos, paragraph)
-      tr.setSelection(TextSelection.create(tr.doc, insertPos + 1))
-      tr.setMeta('sourceProjection', true)
-      tr.setMeta('addToHistory', false)
-      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
-      view.dispatch(tr)
-      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset })) return
-      // Could not prove the vouched pairing: remove the placeholder again
-      // and rebind plain.
-      pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
-      const undoTr = view.state.tr.delete(insertPos, insertPos + paragraph.nodeSize)
-      undoTr.setMeta('sourceProjection', true)
-      undoTr.setMeta('addToHistory', false)
-      view.dispatch(undoTr)
-      bindMap(view.state.doc)
+      materializePlaceholder(view, $pos.after(depth), rawOffset)
     } catch {
       pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
     }
@@ -836,6 +851,101 @@ export function createKernelMode({
   // featureConfig extensions.
   const runHistory = (direction) => runHistoryCore(direction)
 
+  // CM instance -> its code_block pair in the CURRENT projection map (Plan 3
+  // Task 5). The CM extensions are one shared static array, so the only
+  // per-instance identity available at event time is the CM editor's own
+  // DOM: `posAtDOM` resolves any node inside a nodeview's dom to a PM
+  // position strictly inside that node (prosemirror-view
+  // `localPosFromDOM`'s non-contentDOM branch returns posAtStart/posAtEnd,
+  // both interior), which the strict range check below matches to exactly
+  // one pair — a boundary-ambiguous position between two adjacent code
+  // blocks matches neither and fails closed. Any failure (detached DOM, no
+  // map, unmapped revision) returns null => treated as non-editable.
+  const codePairFromCm = (cmView) => {
+    const view = getView?.()
+    const dom = cmView?.dom
+    if (!view || !kernel.map || !dom) return null
+    let pos = null
+    try {
+      pos = view.posAtDOM(dom, 0)
+    } catch {
+      return null
+    }
+    if (!Number.isFinite(pos)) return null
+    for (const pair of kernel.map.blockPairs) {
+      const node = pair.pmNode
+      if (node?.type?.name !== 'code_block') continue
+      if (pos > pair.pmPos && pos < pair.pmPos + node.nodeSize) return pair
+    }
+    return null
+  }
+
+  // Per-block dynamic editability gate consumed by
+  // editor-kernel-cm-bridge.js at EVERY CM input event: a code block is
+  // editable exactly when its pair carries a charMap (LF-only, non-mermaid/
+  // latex/math — editor-kernel-projection-map.js's own criteria), evaluated
+  // against the CURRENT map so a language switch or degrade flips it with
+  // zero staleness. Inactive (pre-attach/degraded/disposed) reports
+  // editable: the bridge's own `isActive()` gate is off then and legacy
+  // behavior owns the block.
+  const isCmBlockEditable = (cmView) => {
+    if (inactive()) return true
+    return !!codePairFromCm(cmView)?.charMap
+  }
+
+  // CM-focused Mod-Enter (Plan 3 Task 5): exit the code block by writing the
+  // exit bytes source-first (commands/code-exit.js) — never PM's exitCode
+  // (a structural transaction the gateway would veto). Returns true when the
+  // key was handled kernel-side (including refusals, which notify); the
+  // bridge swallows it either way while active.
+  const runExitCode = (cmView) => {
+    if (inactive()) return false
+    const view = getView?.()
+    if (!view) return false
+    const pair = codePairFromCm(cmView)
+    const start = pair?.mdBlock?.position?.start?.offset
+    if (!Number.isFinite(start)) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const routed = exitCodeBlock({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: start
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    if (!applyKernelTransaction(routed.transaction, view)) return true
+    // Mid-document exit: the caret anchor sits on a blank line the reparse
+    // cannot represent — give it a real PM home right AFTER the code block
+    // (the doc-end case never gets here: its anchor is the new document
+    // end, which the trailing-virtual pair in the freshly bound map already
+    // resolves). The pair is re-located in the REBOUND map by its mdast
+    // start offset, which the exit edit (an insert strictly after the
+    // block) never moves.
+    const anchor = routed.transaction.selection?.anchor
+    if (Number.isFinite(anchor) && kernel.map && !kernel.map.rawToPmPos(anchor)) {
+      const exited = kernel.map.blockPairs.find((candidate) =>
+        candidate.pmNode?.type?.name === 'code_block' &&
+        candidate.mdBlock?.position?.start?.offset === start)
+      if (exited) {
+        materializePlaceholder(view, exited.pmPos + exited.pmNode.nodeSize, anchor)
+      } else {
+        pushKernelDiagnostic({ type: 'caret-unmappable', intent: 'exit-code-block', rawOffset: anchor })
+      }
+    }
+    // Mirror the nodeview's own Mod-Enter: move focus from the CM editor
+    // back onto the PM view so the restored caret is the live one.
+    try {
+      view.focus?.()
+    } catch {
+      /* focus is best-effort */
+    }
+    return true
+  }
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -1010,6 +1120,11 @@ export function createKernelMode({
     structuralHandlers,
     historyHandlers,
     runHistory,
+    // CM-bridge per-block gate + Mod-Enter exit (Plan 3 Task 5): consumed by
+    // editor-crepe-setup.js's CodeMirror featureConfig via
+    // createKernelCmExtensions' `isEditable`/`runExitCode` callbacks.
+    isCmBlockEditable,
+    runExitCode,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's

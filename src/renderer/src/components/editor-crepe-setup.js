@@ -156,21 +156,26 @@ export function createConfiguredCrepe({
         copyText: t('code.copy'),
         previewToggleText: (previewOnly) =>
           previewOnly ? t('mermaid.editCode') : t('mermaid.hideCode'),
-        // Kernel mode: code blocks are non-editable pairs in the projection
-        // map (no character-level decode contract), so their CodeMirror
-        // editors are read-only until the kernel owns fenced-code edits —
-        // and a CM-focused undo/redo must reach the SAME kernel history
-        // `runHistory` entry point PM-focused Mod-z uses, never
-        // prosemirror-history (see editor-kernel-cm-bridge.js header for
-        // both defects and why a bare `CmEditorState.readOnly.of(true)`
-        // here was silently overridden by the nodeview's own extension).
+        // Kernel mode (Plan 3 Task 5): code blocks are editable per-block —
+        // the bridge consults `isCmBlockEditable(cmView)` at EVERY input
+        // event (typing/IME/paste/drop/cut/keydown), so LF blocks with a
+        // proven charMap edit natively (CM -> forwardUpdate -> gateway
+        // commit) while mermaid/latex/math and non-LF blocks stay blocked
+        // with zero staleness. A CM-focused undo/redo must reach the SAME
+        // kernel history `runHistory` entry point PM-focused Mod-z uses,
+        // never prosemirror-history, and Mod-Enter routes to the kernel's
+        // own exit-code command instead of PM's exitCode (see
+        // editor-kernel-cm-bridge.js header for the full input-path
+        // coverage matrix).
         extensions: kernelMode
           ? [
               tabAtCursorKeymap,
               ...createKernelCmExtensions({
                 runUndo: () => kernelPlugins?.runHistory?.('undo'),
                 runRedo: () => kernelPlugins?.runHistory?.('redo'),
-                isActive: () => !!kernelPlugins?.isActive?.()
+                runExitCode: (cmView) => kernelPlugins?.runExitCode?.(cmView),
+                isActive: () => !!kernelPlugins?.isActive?.(),
+                isEditable: (cmView) => !!kernelPlugins?.isCmBlockEditable?.(cmView)
               })
             ]
           : [tabAtCursorKeymap]

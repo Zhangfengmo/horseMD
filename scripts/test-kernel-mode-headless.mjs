@@ -73,7 +73,14 @@ const FIXTURE_DOCS = {
   // a plain LF paragraph — Case 13 edits the paragraph AFTER the code block
   // edit is refused, to prove no global lockout.
   '```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))),
-  '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲丙乙')))
+  '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲丙乙'))),
+  // Plan 3 Task 5 fixtures: Mod-Enter code-block exit (doc-end + mid-doc)
+  // — CommonMark collapses the exit's blank lines, so the post-exit texts
+  // parse back to the same block sequences.
+  '```js\nab\n```\n\n\n': () => doc(cb('js', 'ab')),
+  '```js\nab\n```\n甲\n': () => doc(cb('js', 'ab'), p(text('甲'))),
+  '```js\nab\n```\n\n\n甲\n': () => doc(cb('js', 'ab'), p(text('甲'))),
+  '```js\nab\n```\nX\n\n甲\n': () => doc(cb('js', 'ab'), p(text('X')), p(text('甲')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -824,6 +831,135 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     0,
     'the follow-up commit must also pass cheap-path verify cleanly'
   )
+}
+
+// ---- Plan 3 Task 5: per-block CM editability gate + Mod-Enter exit ----
+import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-kernel-cm-bridge.js'
+
+// Case T5a: the pure keydown allowlist for a BLOCKED code block. Mutating
+// keys (printables, Enter/Backspace/Delete/Tab, paste/cut combos, the
+// defaultKeymap's editing chords) block; navigation/selection/copy/IME/the
+// kernel-owned combos pass.
+{
+  const block = (event) => assert.equal(classifyBlockedCmKeydown(event), 'block', JSON.stringify(event))
+  const pass = (event) => assert.equal(classifyBlockedCmKeydown(event), 'pass', JSON.stringify(event))
+  block({ key: 'a' })
+  block({ key: 'A', shiftKey: true })
+  block({ key: 'Enter' })
+  block({ key: 'Backspace' })
+  block({ key: 'Delete' })
+  block({ key: 'Tab' })
+  block({ key: 'v', metaKey: true }) // paste
+  block({ key: 'x', ctrlKey: true }) // cut
+  block({ key: '/', ctrlKey: true }) // toggleComment
+  block({ key: '[', metaKey: true }) // indentLess
+  block({ key: 'k', metaKey: true, shiftKey: true }) // deleteLine
+  pass({ key: 'ArrowLeft' })
+  pass({ key: 'ArrowDown', shiftKey: true }) // selection extension
+  pass({ key: 'Home' })
+  pass({ key: 'End' })
+  pass({ key: 'PageDown' })
+  pass({ key: 'Escape' })
+  pass({ key: 'Shift' }) // bare modifier — must never be eaten
+  pass({ key: 'Meta' })
+  pass({ key: 'F5' })
+  pass({ key: 'c', metaKey: true }) // copy
+  pass({ key: 'a', ctrlKey: true }) // select-all
+  pass({ key: 'z', metaKey: true }) // kernel undo (bridge keymap owns it)
+  pass({ key: 'z', metaKey: true, shiftKey: true }) // kernel redo
+  pass({ key: 'y', ctrlKey: true }) // kernel redo (win)
+  pass({ key: 'Enter', metaKey: true }) // kernel exit-code (bridge keymap owns it)
+  pass({ key: 'Process', keyCode: 229 }) // IME — inputHandler backstops
+  pass({ key: 'a', isComposing: true })
+  block(null) // no event info -> fail closed
+}
+
+// Case T5b: isCmBlockEditable — the per-instance identity is the CM
+// editor's DOM resolved through view.posAtDOM into the CURRENT map's
+// blockPairs. An LF js block (charMap proven) reports editable; a CRLF
+// block (charMap null by the P3-4 ADR) and a failed DOM resolution report
+// non-editable (fail-closed).
+{
+  const h = makeHarness('```js\nab\n```\n甲\n', doc(cb('js', 'ab'), p(text('甲'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const cmDom = {}
+  h.view.posAtDOM = (dom) => {
+    assert.equal(dom, cmDom, 'identity resolution must use the CM instance dom')
+    return 1 // interior of the code_block node [0,4)
+  }
+  assert.equal(h.controller.isCmBlockEditable({ dom: cmDom }), true, 'LF js block must be editable')
+  // A position outside every code_block pair (the paragraph) fails closed.
+  h.view.posAtDOM = () => 6
+  assert.equal(h.controller.isCmBlockEditable({ dom: cmDom }), false)
+  // posAtDOM throwing (detached DOM) fails closed.
+  h.view.posAtDOM = () => { throw new Error('not inside the editor') }
+  assert.equal(h.controller.isCmBlockEditable({ dom: cmDom }), false)
+
+  const crlf = makeHarness('```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n', doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))))
+  assert.equal(crlf.controller.attachAfterCreate(), true)
+  crlf.view.posAtDOM = () => 1
+  assert.equal(crlf.controller.isCmBlockEditable({ dom: {} }), false, 'CRLF block must stay non-editable')
+}
+
+// Case T5c: runExitCode at document end — exit bytes are written
+// source-first, the view gains the trailing paragraph, and the caret lands
+// in it via the trailing-virtual pair (no voucher needed).
+{
+  const h = makeHarness('```js\nab\n```\n', doc(cb('js', 'ab')))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.posAtDOM = () => 1
+  const handled = h.controller.runExitCode({ dom: {} })
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(cb('js', 'ab'), p())), 'view gains the trailing empty paragraph')
+  assert.equal(h.view.state.selection.head, 5, 'caret parked inside the new trailing paragraph')
+  assert.deepEqual(h.changes.at(-1), ['```js\nab\n```\n\n\n', false])
+  // The next keystroke lands in the paragraph, not the code block: typing
+  // at the caret commits with the trailing-virtual separator semantics.
+  const tr = h.view.state.tr.insertText('X', 5)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n\n\nX')
+}
+
+// Case T5d: runExitCode mid-document — the caret anchor sits on a blank
+// line the reparse cannot show, so the controller materializes a vouched
+// placeholder right after the code block; the first typed character fills
+// it and becomes its own paragraph between the code block and the
+// following content.
+{
+  const h = makeHarness('```js\nab\n```\n甲\n', doc(cb('js', 'ab'), p(text('甲'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.posAtDOM = () => 1
+  const handled = h.controller.runExitCode({ dom: {} })
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n\n\n甲\n')
+  assert.ok(
+    h.view.state.doc.eq(doc(cb('js', 'ab'), p(), p(text('甲')))),
+    'placeholder paragraph materialized between the code block and the following paragraph'
+  )
+  assert.equal(h.view.state.selection.head, 5, 'caret parked inside the placeholder')
+  // Typing into the placeholder commits at the vouched raw anchor and the
+  // typed text parses as its OWN paragraph (blank line before `甲` kept).
+  const tr = h.view.state.tr.insertText('X', 5)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\nX\n\n甲\n')
+  assert.ok(h.view.state.doc.eq(doc(cb('js', 'ab'), p(text('X')), p(text('甲')))))
+}
+
+// Case T5e: runExitCode refusals — an unmapped CM instance notifies and
+// swallows; kernel state never moves.
+{
+  const h = makeHarness('```js\nab\n```\n', doc(cb('js', 'ab')))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.posAtDOM = () => { throw new Error('detached') }
+  const before = h.notifications.length
+  assert.equal(h.controller.runExitCode({ dom: {} }), true, 'refusal still swallows the key')
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n')
+  assert.ok(h.notifications.length > before, 'refusal notifies')
 }
 
 console.log('PASS kernel mode headless')
