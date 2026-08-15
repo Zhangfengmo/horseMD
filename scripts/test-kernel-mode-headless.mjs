@@ -53,7 +53,13 @@ const FIXTURE_DOCS = {
   '- 甲\n\nab': () => doc(bl(li(null, p(text('甲')))), p(text('ab'))),
   '甲乙\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
-  'X甲乙\n\n\n': () => doc(p(text('X甲乙')))
+  'X甲乙\n\n\n': () => doc(p(text('X甲乙'))),
+  // Task 2 (plan 3) fixtures: repeated Enter inside the trailing placeholder
+  // chain — mdast always collapses the blank run to nothing regardless of
+  // its length, so every one of these still parses to the single paragraph.
+  '甲乙\n\n\n\n': () => doc(p(text('甲乙'))),
+  '甲乙\n\n\n\n\n': () => doc(p(text('甲乙'))),
+  '甲乙\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -576,6 +582,78 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     0,
     'cheap-path verify passes: no repair churn'
   )
+}
+
+// Case 17 (Task 2, plan 3: 块尾连续 Enter): repeated Enter INSIDE the
+// split-placeholder chain must extend it — a SECOND (and THIRD) Enter at the
+// placeholder's own raw anchor used to be refused (`resolveBlock` finds no
+// block on a blank-line-run offset). Byte states below are the pure-kernel
+// oracle's own output (routeStructuralKey chained three times from '甲乙\n'
+// at raw offset 2, the block end — see the task's derivation transcript):
+// '甲乙\n\n\n' -> '甲乙\n\n\n\n' -> '甲乙\n\n\n\n\n', then typing '丙' into the
+// LAST placeholder yields '甲乙\n\n\n\n丙\n' (4 separator newlines: the K
+// Enters pressed = the separator's `K+1` newline-byte count once real
+// content replaces the last placeholder — same K=1 shape Case 13 already
+// locks with its own '甲乙\n\n丙\n' single-Enter continuation).
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3))) // end of 甲乙
+
+  // Enter #1: unchanged existing degenerate-split behavior (same as Case 13).
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p())))
+  assert.equal(h.view.state.selection.head, 5)
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(5), { raw: 4, prefix: '' })
+
+  // Enter #2: NEW — extends the chain instead of being refused. A second
+  // empty placeholder appears, the kernel byte gains exactly one more
+  // `ending`, and the caret follows into the new (now last) placeholder.
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n', 'one more ending extends the run')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p())),
+    'a SECOND empty placeholder is materialized, the first one is NOT discarded')
+  assert.equal(h.view.state.selection.head, 7, 'caret follows into the new (last) placeholder')
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(7), { raw: 5, prefix: '' })
+  // The FIRST placeholder is still vouched too — the whole chain, not just
+  // the newest link.
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(5), { raw: 4, prefix: '' })
+
+  // Enter #3: the chain keeps extending — proves this isn't a one-shot
+  // special case hardcoded for exactly two placeholders.
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p(), p())))
+  assert.equal(h.view.state.selection.head, 9)
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(9), { raw: 6, prefix: '' })
+
+  // Typing into the LAST placeholder collapses the WHOLE chain into one real
+  // paragraph — every placeholder before it was purely a PM-view convenience
+  // (mdast can never distinguish "3 blank lines" from "5 blank lines", only
+  // the raw bytes carry that), so the reconcile correctly discards them all
+  // once real content exists.
+  const tr = h.view.state.tr.insertText('丙', 9)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n丙\n',
+    'typed text becomes a new paragraph, all three Enters preserved as separator bytes')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))),
+    'every placeholder in the chain collapses once real content lands')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(5), 6, 'map realigned to the now-real paragraph (before 丙)')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(6), 7, 'map realigned to the now-real paragraph (after 丙)')
+
+  // Undo granularity: each Enter (create + 2 extends) and the typed char are
+  // FOUR separate undo groups, unwound one at a time.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n\n')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'four undos fully unwind back to the original bytes')
 }
 
 console.log('PASS kernel mode headless')

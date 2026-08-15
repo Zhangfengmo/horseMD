@@ -76,6 +76,13 @@ export function createKernelMode({
   // flush/save/recovery would silently discard every edit the legacy pipeline
   // owns).
   let legacyApi = null
+  // Current trailing split-placeholder CHAIN (Task 2, plan 3 — generalizes
+  // the single-placeholder session note below to N): oldest-first list of
+  // `{ pmPos, rawOffset }` vouched to the CURRENT map via bindMap's `pending`
+  // argument. Always kept in sync BY bindMap itself (see below) — any bindMap
+  // call that doesn't explicitly continue the chain ends the session, exactly
+  // like the old single-placeholder's implicit orphaning.
+  let splitPlaceholders = []
 
   const inactive = () => disposed || degraded || !attached
 
@@ -152,15 +159,23 @@ export function createKernelMode({
   // Rebuild the projection map against the CURRENT kernel revision + a given
   // PM doc. Maps are revision-bound: every kernel.doc advancement must come
   // back through here; an old map is never reused across revisions.
-  // `pending` is passed ONLY by ensureSplitPlaceholder for the map built
-  // immediately after the placeholder dispatch — a stale voucher must never
-  // leak into later rebuilds (a real block could have shifted onto its pos).
+  // `pending` is passed ONLY by ensureSplitPlaceholder/extendTrailingPlaceholder
+  // for the map built immediately after a placeholder dispatch — a stale
+  // voucher must never leak into later rebuilds (a real block could have
+  // shifted onto its pos). `pending` may be a single `{pmPos,rawOffset}`
+  // object (the common one-placeholder case) or an array (the N-placeholder
+  // trailing chain); either way `splitPlaceholders` — this module's own
+  // record of the CURRENT chain — is resynced to exactly what got vouched
+  // here, so any caller that omits `pending` correctly ends the session.
   const bindMap = (pmDoc, pending = null) => {
+    const list = Array.isArray(pending) ? pending : (pending ? [pending] : [])
+    splitPlaceholders = list
     kernel.map = pmDoc
-      ? buildProjectionMap(kernel.doc.text, pmDoc, pending ? { pendingPlaceholder: pending } : {})
+      ? buildProjectionMap(kernel.doc.text, pmDoc, list.length ? { pendingPlaceholders: list } : {})
       : null
     if (!kernel.map) {
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
+      splitPlaceholders = []
     }
     return kernel.map
   }
@@ -357,6 +372,100 @@ export function createKernelMode({
       bindMap(view.state.doc)
     } catch {
       pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
+    }
+  }
+
+  // Enter pressed AGAIN while the caret sits in the LAST vouched trailing
+  // placeholder (Task 2, plan 3 — "块尾连续 Enter"): routeStructuralKey at
+  // that exact raw offset produces the SAME pure kernel transaction
+  // splitTextBlock's own trailing-gap fallback derives (enter.js
+  // `isTrailingGap`) — one more `ending` extending the blank-line run.
+  // Unlike the generic applyKernelTransaction path, this must NOT reconcile
+  // the view against a fresh parse first: that reconcile would immediately
+  // delete the EXISTING placeholder(s) (mdast still shows nothing there —
+  // blank-line runs collapse regardless of count, so the parse is identical
+  // before and after), losing the chain before a new node could even be
+  // added. Instead this inserts the new empty paragraph directly after the
+  // CURRENT last placeholder and vouches for the WHOLE extended chain in one
+  // bindMap call. `kernel.doc`/history are only committed once that chain is
+  // PROVEN (bindMap succeeds) — a failure rolls both the view insert AND the
+  // kernel doc back together, so the two never drift out of sync (unlike a
+  // partial rollback, which would leave kernel.doc one byte ahead of what
+  // the view — now showing the OLD, still-valid-looking chain — displays).
+  // Scoped to the LAST placeholder only — the natural "keep pressing Enter"
+  // flow. A caret that navigated INTO an earlier placeholder in the chain is
+  // not something this session ever vouches an extension for; it falls
+  // through to routeStructuralKey's normal (refusing) path instead of
+  // guessing at a mid-chain insert.
+  const extendTrailingPlaceholder = (view, rawOffset) => {
+    const last = splitPlaceholders[splitPlaceholders.length - 1]
+    if (!last || last.rawOffset !== rawOffset) return false
+    const routed = routeStructuralKey('Enter', {
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: rawOffset,
+      empty: true
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return false
+    }
+    const result = applySourceTransaction(kernel.doc, routed.transaction)
+    if (!result.ok) {
+      notifyBlocked(result.code)
+      return false
+    }
+    // Set BEFORE the try so the catch below can always roll it back — a
+    // thrown exception at ANY point after `kernel.doc` advances (the view
+    // insert, bindMap, even the rollback path itself) must never leave
+    // `kernel.doc` ahead of what the view displays.
+    const previousDoc = kernel.doc
+    let advanced = false
+    try {
+      const docNode = view.state.doc
+      const lastNode = docNode.nodeAt(last.pmPos)
+      if (!lastNode) {
+        notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+        return false
+      }
+      const insertPos = last.pmPos + lastNode.nodeSize
+      const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
+      if (!paragraph) {
+        notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+        return false
+      }
+      kernel.doc = result.doc
+      advanced = true
+      const tr = view.state.tr.insert(insertPos, paragraph)
+      tr.setSelection(TextSelection.create(tr.doc, insertPos + 1))
+      tr.setMeta('sourceProjection', true)
+      tr.setMeta('addToHistory', false)
+      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+      view.dispatch(tr)
+      const newRawOffset = routed.transaction.selection.anchor
+      const nextChain = [...splitPlaceholders, { pmPos: insertPos, rawOffset: newRawOffset }]
+      if (bindMap(view.state.doc, nextChain)) {
+        recordHistory(result, routed.transaction)
+        onChange?.(kernel.doc.text, false)
+        return true
+      }
+      // Could not prove the extended chain: roll BOTH the view insert and
+      // the kernel doc back together (never just one side).
+      pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset: newRawOffset })
+      kernel.doc = previousDoc
+      advanced = false
+      const undoTr = view.state.tr.delete(insertPos, insertPos + paragraph.nodeSize)
+      undoTr.setMeta('sourceProjection', true)
+      undoTr.setMeta('addToHistory', false)
+      view.dispatch(undoTr)
+      bindMap(view.state.doc)
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      return false
+    } catch {
+      if (advanced) kernel.doc = previousDoc
+      pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      return false
     }
   }
 
@@ -579,6 +688,23 @@ export function createKernelMode({
       // commands (their output would be an unowned structural transaction).
       notifyBlocked(KERNEL_CODES.UNMAPPED)
       return true
+    }
+    // 块尾连续 Enter (Task 2, plan 3): the caret sits exactly at the LAST
+    // vouched trailing placeholder's raw anchor — extend the chain instead
+    // of routing through the generic split path (whose reconcile-against-
+    // fresh-parse step would delete the existing placeholder(s); see
+    // extendTrailingPlaceholder's own comment for why).
+    if (key === 'Enter' && splitPlaceholders.length) {
+      const last = splitPlaceholders[splitPlaceholders.length - 1]
+      if (offset === last.rawOffset) {
+        // extendTrailingPlaceholder notifies on every one of its own failure
+        // paths (specific KERNEL_CODES per cause) — the key is always
+        // swallowed here either way, never falling through to
+        // routeStructuralKey's generic (and, for this exact raw offset,
+        // wrong) split path.
+        extendTrailingPlaceholder(view, offset)
+        return true
+      }
     }
     const routed = routeStructuralKey(key, {
       doc: kernel.doc,

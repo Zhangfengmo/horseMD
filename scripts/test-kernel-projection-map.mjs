@@ -476,6 +476,68 @@ console.log('--- kernel projection map ---')
   )
 }
 
+// Case 15 (Task 2, plan 3): N trailing empty placeholders, one for each
+// repeated Enter inside the split-placeholder chain (editor-kernel-mode's
+// `extendTrailingPlaceholder`). Raw 'P1\n\n\n\n\n' (P1 followed by the
+// blank-line run TWO Enters-in-a-row write, nothing after): P=0 1=1 \n=2
+// \n=3 \n=4 \n=5 \n=6, length 7. PM: p('P1')@0 (nodeSize 4) -> placeholder1
+// p()@4 (nodeSize 2) -> placeholder2 p()@6. Each placeholder maps to one
+// more trailing raw offset (4, then 5) — "one PM paragraph per trailing
+// newline byte" per the plan.
+{
+  const md = 'P1\n\n\n\n\n'
+  const chain = () => doc(p(text('P1')), p(), p())
+  const pendingPlaceholders = [{ pmPos: 4, rawOffset: 4 }, { pmPos: 6, rawOffset: 5 }]
+  assert.equal(buildProjectionMap(md, chain()), null, 'unvouched N-trailing chain must reject')
+  const map = buildProjectionMap(md, chain(), { pendingPlaceholders })
+  assert.ok(map, 'a fully vouched N-trailing chain must map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].virtual, true)
+  assert.equal(map.blockPairs[1].charMap.visibleToRaw(0), 4)
+  assert.equal(map.blockPairs[2].virtual, true)
+  assert.equal(map.blockPairs[2].charMap.visibleToRaw(0), 5)
+  assert.deepEqual(map.virtualBlockAt(5), { raw: 4, prefix: '' }, 'first placeholder')
+  assert.deepEqual(map.virtualBlockAt(7), { raw: 5, prefix: '' }, 'second (last) placeholder')
+  assert.equal(map.pmPosToRaw(5), 4)
+  assert.equal(map.pmPosToRaw(7), 5)
+  assert.equal(map.rawToPmPos(4).pos, 5)
+  assert.equal(map.rawToPmPos(5).pos, 7)
+  // The real block is unaffected by the chain.
+  assert.equal(map.pmPosToRaw(1), 0)
+
+  // Fail-closed: a NON-EMPTY node at one of the vouched positions rejects
+  // the WHOLE map, not just that one pair.
+  const nonEmptyMiddle = doc(p(text('P1')), p(text('x')), p())
+  assert.equal(
+    buildProjectionMap(md, nonEmptyMiddle, { pendingPlaceholders }),
+    null,
+    'a non-empty node at a vouched trailing position must reject'
+  )
+
+  // Fail-closed: a NON-PARAGRAPH node at one of the vouched positions
+  // rejects the whole map too (a `paragraph` is the only type the chain's
+  // virtual pairing ever represents).
+  const nonParagraph = doc(p(text('P1')), schema.node('code_block', null, []), p())
+  assert.equal(
+    buildProjectionMap(md, nonParagraph, { pendingPlaceholders }),
+    null,
+    'a non-paragraph node at a vouched trailing position must reject'
+  )
+
+  // Fail-closed: a voucher entry that never matches ANY real PM node (stale
+  // bookkeeping — e.g. a pmPos left over from a prior revision) rejects the
+  // whole map, even though the FIRST entry would have matched fine on its
+  // own.
+  const onlyOnePlaceholder = doc(p(text('P1')), p())
+  assert.equal(
+    buildProjectionMap(md, onlyOnePlaceholder, {
+      pendingPlaceholders: [{ pmPos: 4, rawOffset: 4 }, { pmPos: 999, rawOffset: 5 }]
+    }),
+    null,
+    'an unmatched voucher entry must reject the whole map'
+  )
+}
+
 // Case 14: standalone image-block. Raw '# t\n\n![a](x.png)\n\n尾\n':
 // #=0 ' '=1 t=2 \n=3 \n=4 image [5,16) \n=16 \n=17 尾=18 \n=19. The kernel's
 // plugin-free parse keeps the `paragraph > image` wrapper; Crepe's PM doc

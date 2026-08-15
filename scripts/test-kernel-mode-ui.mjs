@@ -114,6 +114,26 @@ async function clickTextEnd(evaluate, send, text) {
   await pressKey(send, { key: 'End', code: 'End', delayMs: delay })
 }
 
+// Mirror of clickTextEnd for the 段首 Enter (Task 2, plan 3) UI check: click
+// near the block's start and press Home to land exactly at its content
+// start regardless of where the synthetic click actually lands.
+async function clickTextStart(evaluate, send, text) {
+  const point = await evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+    const node = [...(editor?.querySelectorAll('p, h1, h2, h3, h4, h5, h6, td, th') || [])]
+      .find((candidate) => candidate.textContent === ${JSON.stringify(text)})
+    if (!node) return null
+    node.scrollIntoView({ block: 'center' })
+    const rect = node.getBoundingClientRect()
+    return { x: rect.left + 8, y: rect.top + Math.min(12, rect.height / 2) }
+  })()`)
+  assert.ok(point, `missing editable block: ${text}`)
+  await sleep(400)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+  await pressKey(send, { key: 'Home', code: 'Home', delayMs: delay })
+}
+
 // Task checkbox DOM (discovered at runtime, see task-9-report.md): Crepe's
 // `@milkdown/components` list-item-block node view wraps EVERY list item
 // (task or not) in `<div class="milkdown-list-item-block"><li
@@ -284,7 +304,103 @@ async function run() {
   }
 }
 
-run().catch((error) => {
+// Task 2 (plan 3) UI segment: splitTextBlock's 段首 Enter · 连续 Enter
+// polish, on a dedicated small fixture (a plain paragraph followed by
+// another plain paragraph — nothing else — so the LAST block is a genuine
+// paragraph the trailing-Enter chain can land on; the main fixture above
+// deliberately ends in a list, which is a different, unrelated code path).
+// Bytes below are the pure-kernel oracle's own output (routeStructuralKey
+// chained through the exact same keystrokes — see the task's derivation
+// transcript in task-2-report.md), applied in this exact order: three
+// trailing Enters + typed text FIRST, then two paragraph-start Enters on
+// the now-modified document — both segments verified against the SAME
+// running kernel-mode tab.
+async function runSplitPolishSegment() {
+  const segRoot = `/tmp/horsemd-kernel-splitpolish-${process.pid}`
+  const file = join(segRoot, 'polish.md')
+  const initial = '标题\n\n段落\n'
+  const AFTER_TRAILING_CHAIN = '标题\n\n段落\n\n\n\n尾\n'
+  const AFTER_PARAGRAPH_START = '\n\n标题\n\n段落\n\n\n\n尾\n'
+
+  await rm(segRoot, { recursive: true, force: true })
+  await mkdir(segRoot, { recursive: true })
+  await writeFile(file, initial)
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(segRoot, 'profile'), port, appArgs: [file] })
+    let { evaluate, send } = app
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('标题') && text.includes('段落') ? text : null
+    }, 'split-polish document did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on plain mount (split-polish)')
+
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'kernel mode did not remount the split-polish tab')
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('标题') && text.includes('段落') ? text : null
+    }, 'split-polish document did not remount after enabling kernel mode')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy for the split-polish fixture: ${attachDiagnostics}`
+    )
+
+    // 块尾连续 Enter: end of the LAST block (段落) -> Enter x3 -> type text.
+    // The first Enter is the existing degenerate-split (virtual paragraph);
+    // the second and third used to be REFUSED (Task 2's fix) — each must
+    // extend the trailing blank-line chain instead, and the typed text must
+    // land in the LAST placeholder, becoming a real new paragraph.
+    await clickTextEnd(evaluate, send, '段落')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await typeTextLikeUser(send, '尾', { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('尾'),
+      'typed 尾 never reached the kernel-mode editor after the trailing-Enter chain')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    let shown = await waitFor(() => visibleSource(evaluate),
+      'source view did not appear after the trailing-Enter chain')
+    assert.equal(shown, AFTER_TRAILING_CHAIN,
+      'three trailing Enters + typed text must match the kernel-derived bytes byte-for-byte')
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'rich view did not return after the trailing-Enter verification')
+
+    // 段首 Enter x2: caret at 标题's very content start -> Enter twice. Each
+    // press must add exactly one MORE blank line above the block (never
+    // accumulate inline at the caret), and the caret must stay anchored on
+    // 标题's own text both times (provable end-to-end only by the fact that
+    // 标题/段落/尾's text below is byte-for-byte unchanged in the final
+    // source, with only two new blank lines prepended).
+    await clickTextStart(evaluate, send, '标题')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    shown = await waitFor(() => visibleSource(evaluate),
+      'source view did not appear after paragraph-start Enter x2')
+    assert.equal(shown, AFTER_PARAGRAPH_START,
+      'two paragraph-start Enters must add two blank lines above, with 标题/段落/尾 byte-intact below')
+
+    console.log('PASS kernel-mode UI split-polish segment: paragraph-start Enter x2 and trailing Enter x3 + type both match the kernel-derived byte strings')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+  }
+}
+
+async function main() {
+  await run()
+  await runSplitPolishSegment()
+}
+
+main().catch((error) => {
   console.error(error)
   process.exit(1)
 })

@@ -189,20 +189,29 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   const index = buildSyntaxIndex(markdown)
   const pmBlocks = flattenPm(pmDoc)
   const mdBlocks = flattenMd(index.tree, index)
-  // A split-block placeholder the kernel-mode controller itself just created
-  // (editor-kernel-mode.js `ensureSplitPlaceholder`): ONE empty PM paragraph
-  // at exactly `pmPos`, representing a caret parked on a blank line the
-  // reparse cannot show (CommonMark collapses any run of blank lines to one
-  // block boundary, so an Enter at the end of a paragraph writes real bytes
-  // — '\n\n' — that parse back to NO new block). The controller vouches for
-  // it explicitly per map build; this is NOT a general mid-document
-  // tolerance — without the option, an extra mid-doc empty paragraph still
-  // rejects the whole map below.
-  const pending = options.pendingPlaceholder &&
-    Number.isFinite(options.pendingPlaceholder.pmPos) &&
-    Number.isFinite(options.pendingPlaceholder.rawOffset)
-    ? options.pendingPlaceholder
-    : null
+  // Split-block placeholder(s) the kernel-mode controller itself just
+  // created (editor-kernel-mode.js `ensureSplitPlaceholder` /
+  // `extendTrailingPlaceholder`): empty PM paragraphs at exactly the vouched
+  // `pmPos`s, representing a caret parked on a blank line the reparse cannot
+  // show (CommonMark collapses any run of blank lines to one block boundary,
+  // so an Enter at the end of a paragraph — or another Enter inside the
+  // resulting placeholder — writes real bytes that parse back to NO new
+  // block, regardless of how many). The controller vouches for each
+  // explicitly per map build (`pendingPlaceholders`, a list — one entry per
+  // Enter in the trailing-blank chain; a single-object `pendingPlaceholder`
+  // is still accepted for the common one-placeholder case). This is NOT a
+  // general mid-document tolerance — without the option, an extra mid-doc
+  // empty paragraph still rejects the whole map below, and every vouched
+  // entry MUST be consumed by a real PM node or the whole map rejects too
+  // (stale bookkeeping is a caller bug, not a best-effort map).
+  const pendingList = Array.isArray(options.pendingPlaceholders)
+    ? options.pendingPlaceholders.filter((p) => Number.isFinite(p?.pmPos) && Number.isFinite(p?.rawOffset))
+    : options.pendingPlaceholder &&
+        Number.isFinite(options.pendingPlaceholder.pmPos) &&
+        Number.isFinite(options.pendingPlaceholder.rawOffset)
+      ? [options.pendingPlaceholder]
+      : []
+  const matchedPending = new Set()
 
   const blockPairs = []
   let mdIndex = 0
@@ -215,13 +224,15 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     // Anything other than an empty paragraph at that exact position means
     // the caller's bookkeeping is stale — reject the whole map (the caller
     // fails closed and removes the placeholder again).
-    if (pending && pm.pos === pending.pmPos) {
+    const pendingMatch = pendingList.find((p) => p.pmPos === pm.pos)
+    if (pendingMatch) {
       if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
+      matchedPending.add(pendingMatch)
       blockPairs.push({
         mdBlock: null,
         pmNode: pm.node,
         pmPos: pm.pos,
-        charMap: virtualCharMap(pending.rawOffset),
+        charMap: virtualCharMap(pendingMatch.rawOffset),
         virtual: true,
         insertPrefix: ''
       })
@@ -346,6 +357,13 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   // its counterpart) rejects the whole map, exactly like the old length
   // check did.
   if (mdIndex !== mdBlocks.length) return null
+  // Every vouched placeholder must have been consumed by a real PM node at
+  // its exact pmPos — an entry that never matched means the caller's
+  // bookkeeping (a stale pmPos from a prior revision, a placeholder the view
+  // no longer has) has drifted from reality, and that must reject the WHOLE
+  // map rather than silently map only the placeholders that happened to
+  // still line up.
+  if (matchedPending.size !== pendingList.length) return null
 
   // pmPos -> raw: locate the textblock pair whose content range
   // [contentPos, contentPos + visibleLength] contains pmPos (both ends
