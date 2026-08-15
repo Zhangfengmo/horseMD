@@ -204,7 +204,8 @@
     "test:kernel-mode-ui": "node scripts/test-kernel-mode-ui.mjs",
     "test:kernel-ime-ui": "node scripts/test-kernel-ime-ui.mjs",
     "test:kernel-nodeview-ui": "node scripts/test-kernel-nodeview-ui.mjs",
-    "test:kernel-ui": "npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui",
+    "test:kernel-codeblock-ui": "node scripts/test-kernel-codeblock-ui.mjs",
+    "test:kernel-ui": "npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui",
     "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs"
   },
   "dependencies": {
