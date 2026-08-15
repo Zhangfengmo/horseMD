@@ -261,6 +261,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
 
   const edits = []
   let cumulativeDelta = 0
+  const prefixedVirtualBlocks = new Set()
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
     const oldTo = step.to - cumulativeDelta
@@ -275,6 +276,18 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     const virtualBlock = typeof map.virtualBlockAt === 'function' && oldFrom === oldTo
       ? map.virtualBlockAt(oldFrom)
       : null
+    // The separator prefix is latched to the FIRST qualifying insert per
+    // virtual pair within this batch: a multi-step transaction typing 'ab'
+    // into the trailing paragraph rebases BOTH steps to the pair's content
+    // position (the unwind subtracts each step's own delta), so an
+    // unlatched prefix would emit '\na' + '\nb' — two source paragraphs
+    // for what PM shows as one — and force a verify repair that
+    // restructures the user's typing. Latched, the batch commits
+    // '\na' + 'b': one paragraph, cheap-path verify passes.
+    const virtualPrefix = virtualBlock && !prefixedVirtualBlocks.has(oldFrom)
+      ? virtualBlock.prefix
+      : ''
+    if (virtualBlock) prefixedVirtualBlocks.add(oldFrom)
     const rawFrom = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldFrom)
     const rawTo = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldTo)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
@@ -292,7 +305,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     edits.push({
       from: rawFrom,
       to: rawTo,
-      insert: virtualBlock ? virtualBlock.prefix + step.insertText : step.insertText
+      insert: virtualPrefix + step.insertText
     })
     // PM-side delta (never the raw insert with its separator prefix): this
     // rebases later steps' PM coordinates, which know nothing about raw

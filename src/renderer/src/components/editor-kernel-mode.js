@@ -140,19 +140,20 @@ export function createKernelMode({
   // collapses blank-line runs — so the transaction's caret raw offset lands
   // in an inter-block gap no PM position can represent. The controller then
   // materializes ONE empty PM paragraph (the visual "caret on a blank line")
-  // right after the split block, vouches for it to buildProjectionMap via
-  // `pendingPlaceholder`, and the next plain-text/IME commit into it lands at
-  // exactly that raw offset — making the placeholder real on both sides at
-  // once. Any OTHER kernel commit ends the session; the reconcile that
-  // commit performs (or the verify repair) removes the orphaned placeholder
-  // because the parse never contains it.
-  let pendingPlaceholder = null // { pmPos, rawOffset }
+  // right after the split block and vouches for it to buildProjectionMap
+  // (see ensureSplitPlaceholder); the next plain-text/IME commit into it
+  // lands at exactly that raw offset — making the placeholder real on both
+  // sides at once. The session's ENTIRE state is the map's virtual pair
+  // plus the placeholder node itself — no separate bookkeeping: any OTHER
+  // kernel commit's reconcile (or the verify repair) removes the orphaned
+  // placeholder because the parse never contains it, and the next rebind
+  // (built WITHOUT the voucher) realigns.
 
   // Rebuild the projection map against the CURRENT kernel revision + a given
   // PM doc. Maps are revision-bound: every kernel.doc advancement must come
   // back through here; an old map is never reused across revisions.
   // `pending` is passed ONLY by ensureSplitPlaceholder for the map built
-  // immediately after the placeholder dispatch — a stale pending must never
+  // immediately after the placeholder dispatch — a stale voucher must never
   // leak into later rebuilds (a real block could have shifted onto its pos).
   const bindMap = (pmDoc, pending = null) => {
     kernel.map = pmDoc
@@ -261,7 +262,6 @@ export function createKernelMode({
         // in which case the rebind fails against the orphaned empty
         // paragraph and verifyPlainTextProjection's repair reconcile removes
         // it (the parse never contains it) and rebinds.
-        pendingPlaceholder = null
         bindMap(newState?.doc || null)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
@@ -285,7 +285,6 @@ export function createKernelMode({
         }
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
-        pendingPlaceholder = null
         bindMap(newState?.doc || null)
         // A toggle while a split placeholder was pending leaves the orphaned
         // empty paragraph in the view (the parse never contains it), so the
@@ -322,7 +321,7 @@ export function createKernelMode({
   }
 
   // Materialize the PM representation of "caret parked on a blank line" that
-  // a degenerate splitTextBlock leaves behind (see pendingPlaceholder above):
+  // a degenerate splitTextBlock leaves behind (see the session note above):
   // one empty paragraph right after the textblock the split originated in,
   // caret inside it, tagged sourceProjection/addToHistory:false so the
   // gateway passes it through and undo never replays it. The map is rebuilt
@@ -347,11 +346,7 @@ export function createKernelMode({
       tr.setMeta('addToHistory', false)
       if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
       view.dispatch(tr)
-      const pending = { pmPos: insertPos, rawOffset }
-      if (bindMap(view.state.doc, pending)) {
-        pendingPlaceholder = pending
-        return
-      }
+      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset })) return
       // Could not prove the vouched pairing: remove the placeholder again
       // and rebind plain.
       pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
@@ -380,12 +375,11 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'structural-parse-failure', intent: txn.intent })
       return false
     }
-    // Any kernel transaction ends a pending split-placeholder session. If
-    // this transaction is the one that fills it (an insert exactly at its
-    // raw anchor), the reconcile below is a no-op there and the rebind
-    // aligns naturally; otherwise the reconcile removes the orphaned empty
-    // paragraph, because `parsed` never contains it.
-    pendingPlaceholder = null
+    // Any kernel transaction ends a split-placeholder session. If this
+    // transaction is the one that fills the placeholder (an insert exactly
+    // at its raw anchor), the reconcile below is a no-op there and the
+    // rebind aligns naturally; otherwise the reconcile removes the orphaned
+    // empty paragraph, because `parsed` never contains it.
     kernel.doc = result.doc
     if (record) recordHistory(result, txn)
     // Pre-compute the caret target against the PARSED doc: its content is
@@ -499,9 +493,7 @@ export function createKernelMode({
     const view = getView?.()
     if (!view || disposed) return
     // A revert reconciles the view straight back to parse(kernel.doc.text),
-    // which removes any pending split placeholder along the way — the
-    // session is over either way.
-    pendingPlaceholder = null
+    // which removes any orphaned split placeholder along the way.
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
       pushKernelDiagnostic({ type: 'composition-revert-parse-failure' })
@@ -753,7 +745,6 @@ export function createKernelMode({
       kernel.doc = createMarkdownDocument(source)
       kernel.history = createSourceHistory()
       redoDepth = 0
-      pendingPlaceholder = null
       bindMap(view.state.doc)
       onStructureChange?.()
       return true
@@ -818,7 +809,6 @@ export function createKernelMode({
   const dispose = () => {
     disposed = true
     kernel.map = null
-    pendingPlaceholder = null
     compositionSession.dispose()
   }
 

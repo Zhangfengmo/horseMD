@@ -430,4 +430,32 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   assert.equal(committed.applied.doc.text, '- 甲\n\n新')
 }
 
+// Case 21 (Task 11.5 review fix): the separator prefix is latched ONCE per
+// virtual pair per batch. A single transaction with TWO insert steps into
+// the trailing paragraph rebases both steps to the pair's content position
+// (the coordinate unwind subtracts each step's own delta), so an unlatched
+// prefix would emit '\na' + '\nb' — bytes '- 甲\n\na\nb', TWO source
+// paragraphs for what PM shows as ONE ('ab'), forcing a verify repair that
+// restructures the user's typing. Latched, the batch commits '\na' + 'b':
+// bytes '- 甲\n\nab', one paragraph, cheap-path verify passes (the no-churn
+// half is locked end-to-end in test-kernel-mode-headless.mjs Case 16).
+{
+  const md = '- 甲\n'
+  const d = tdoc(bl(li(null, tp(ttext('甲')))), taskSchema.nodes.paragraph.createAndFill())
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const tr = state.tr.insertText('a', 8).insertText('b', 9)
+  assert.equal(tr.steps.length, 2, 'fixture sanity: one transaction, two ReplaceSteps')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true)
+  assert.deepEqual(committed.transaction.edits, [
+    { from: 4, to: 4, insert: '\na' },
+    { from: 4, to: 4, insert: 'b' }
+  ], 'only the FIRST step carries the separator prefix')
+  assert.equal(committed.applied.doc.text, '- 甲\n\nab',
+    'multi-step typing stays ONE new paragraph, never one paragraph per step')
+}
+
 console.log('PASS kernel gateway')

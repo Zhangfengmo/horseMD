@@ -50,6 +50,7 @@ const FIXTURE_DOCS = {
   // Task 11.5 fixtures: trailing-placeholder typing + split placeholder.
   '- 甲\n': () => doc(bl(li(null, p(text('甲'))))),
   '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X'))),
+  '- 甲\n\nab': () => doc(bl(li(null, p(text('甲')))), p(text('ab'))),
   '甲乙\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
   'X甲乙\n\n\n': () => doc(p(text('X甲乙')))
@@ -548,6 +549,33 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(h.controller.kernel.doc.text, '- [x] 乙\n', 'no kernel bytes for a view-only node')
   assert.equal(h.changes.length, 0, 'nothing published for the trailing append')
   assert.deepEqual(h.controller.kernel.map.virtualBlockAt(end + 1), { raw: 8, prefix: '\n' })
+}
+
+// Case 16 (Task 11.5 review fix, prefix latching end-to-end): ONE
+// transaction carrying TWO insert steps into the trailing paragraph must
+// commit as ONE new source paragraph ('- 甲\n\nab') with the cheap-path
+// verify passing — no projection-mismatch, no repair reconcile
+// restructuring the user's typing (the unlatched bug produced
+// '- 甲\n\na\nb': two source paragraphs for PM's one).
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('- 甲\n', doc(bl(li(null, p(text('甲')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const oldState = h.view.state
+  const tr = oldState.tr.insertText('a', 8).insertText('b', 9)
+  assert.equal(tr.steps.length, 2)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '- 甲\n\nab',
+    'two-step batch commits one paragraph, prefix latched to the first step')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(null, p(text('甲')))), p(text('ab')))),
+    'the view keeps the user typing as ONE paragraph — no repair restructuring')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
+    0,
+    'cheap-path verify passes: no repair churn'
+  )
 }
 
 console.log('PASS kernel mode headless')
