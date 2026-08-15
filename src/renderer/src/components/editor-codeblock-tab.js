@@ -26,7 +26,12 @@ import { Prec } from '@codemirror/state'
 // like typing). Returns true so the key is consumed (no fall-through to
 // indentWithTab / defaultKeymap).
 const insertTabAtCursor = (view) => {
-  if (view.readOnly) return false
+  // `EditorView` has no `readOnly` getter (that lives on `EditorState`) —
+  // `view.readOnly` was always `undefined`/falsy, so this guard never
+  // actually fired. Kernel mode's read-only code blocks (Task 1,
+  // editor-kernel-cm-bridge.js) make this the first real caller: Tab must
+  // not insert a literal tab character into a read-only CM editor.
+  if (view.state.readOnly) return false
   view.dispatch(view.state.replaceSelection('\t'))
   return true
 }

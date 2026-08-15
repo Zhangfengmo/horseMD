@@ -11,13 +11,9 @@ import { inlineImageConfig } from '@milkdown/kit/component/image-inline'
 import { codeBlockConfig } from '@milkdown/kit/component/code-block'
 import { inlineCodeSchema } from '@milkdown/kit/preset/commonmark'
 import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language'
-// Direct @codemirror/state import (same channel as @codemirror/language
-// above): kernel mode makes fenced code blocks read-only via the CM6
-// EditorState.readOnly facet — the supported extensions channel, no prototype
-// mod and no editorViewOptionsCtx/nodeView override.
-import { EditorState as CmEditorState } from '@codemirror/state'
 import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
+import { createKernelCmExtensions } from './editor-kernel-cm-bridge.js'
 import {
   bulletListStyleSchema,
   listStyleStringifyHandler,
@@ -162,9 +158,20 @@ export function createConfiguredCrepe({
           previewOnly ? t('mermaid.editCode') : t('mermaid.hideCode'),
         // Kernel mode: code blocks are non-editable pairs in the projection
         // map (no character-level decode contract), so their CodeMirror
-        // editors are read-only until the kernel owns fenced-code edits.
+        // editors are read-only until the kernel owns fenced-code edits —
+        // and a CM-focused undo/redo must reach the SAME kernel history
+        // `runHistory` entry point PM-focused Mod-z uses, never
+        // prosemirror-history (see editor-kernel-cm-bridge.js header for
+        // both defects and why a bare `CmEditorState.readOnly.of(true)`
+        // here was silently overridden by the nodeview's own extension).
         extensions: kernelMode
-          ? [tabAtCursorKeymap, CmEditorState.readOnly.of(true)]
+          ? [
+              tabAtCursorKeymap,
+              ...createKernelCmExtensions({
+                runUndo: () => kernelPlugins?.runHistory?.('undo'),
+                runRedo: () => kernelPlugins?.runHistory?.('redo')
+              })
+            ]
           : [tabAtCursorKeymap]
       },
       [Feature.Latex]: {

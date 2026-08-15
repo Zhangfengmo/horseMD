@@ -621,13 +621,21 @@ export function createKernelMode({
     kernel.history.record(applyResult, txn)
     redoDepth = 0
   }
-  const historyHandler = (direction) => (state, dispatch, viewArg) => {
+  // Shared undo/redo body: both the PM keymap handler below AND the
+  // CM-bridge entry point (editor-kernel-cm-bridge.js, Task 1 — a
+  // CM-focused Mod-z must reach this SAME kernel history, never
+  // prosemirror-history) execute exactly this, so a CM-originated undo can
+  // never diverge from a PM-originated one. `viewArg` lets the PM keymap
+  // pass the view it was invoked with; the CM bridge has no such view and
+  // falls back to `getView()`.
+  const runHistoryCore = (direction, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
     if (!view) return false
     const txn = kernel.history[direction](kernel.doc)
     // Nothing to undo/redo: STILL swallow the key. PM's own history plugin
-    // must never replay a structural step in kernel mode.
+    // (and, via the CM bridge, prosemirror-history's CM-local binding) must
+    // never replay a structural step in kernel mode.
     if (!txn) {
       const stackHadEntries = direction === 'undo'
         ? kernel.history.depth() > 0
@@ -645,6 +653,12 @@ export function createKernelMode({
     applyKernelTransaction(txn, view, { record: false })
     return true
   }
+  const historyHandler = (direction) => (state, dispatch, viewArg) =>
+    runHistoryCore(direction, viewArg)
+  // CM-bridge entry point (Task 1): same signature Editor.jsx wires into
+  // `kernelPlugins.runHistory` for editor-crepe-setup.js's CodeMirror
+  // featureConfig extensions.
+  const runHistory = (direction) => runHistoryCore(direction)
 
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
@@ -819,6 +833,7 @@ export function createKernelMode({
     historyKeymap,
     structuralHandlers,
     historyHandlers,
+    runHistory,
     apiOverrides,
     attachLegacyApi,
     refreshProjectionMap,

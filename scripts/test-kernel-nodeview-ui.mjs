@@ -147,6 +147,15 @@ const MERMAID_PREVIEW_SVG = (editorExpr) =>
     .find((block) => block.querySelector('.language-button')?.textContent?.trim().toLowerCase() === 'mermaid')
     ?.querySelector('.preview svg')`
 
+// Same block, without descending into the preview svg — used by the
+// real-read-only/undo-bridge section below to reach the toolbar's
+// `.preview-toggle-button` (only rendered when `renderPreview` produces
+// something, i.e. only for this mermaid block, not the always-editor-visible
+// `js` block section 5 already probes).
+const MERMAID_BLOCK = (editorExpr) =>
+  `[...(${editorExpr})?.querySelectorAll('.milkdown-code-block') || []]
+    .find((block) => block.querySelector('.language-button')?.textContent?.trim().toLowerCase() === 'mermaid')`
+
 const mounted = (evaluate) => evaluate(`(${VISIBLE_EDITOR})?.textContent`)
 
 const visibleSource = (evaluate) => evaluate(`(
@@ -238,6 +247,15 @@ async function click(send, point) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point })
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point })
+}
+
+// `Mod-z` resolves to Meta (Cmd) on darwin — the prosemirror-keymap `mac`
+// detection this test's environment (Darwin) hits — same convention
+// test-kernel-mode-ui.mjs's pressUndo() and modifiers:4 use.
+async function pressUndo(send) {
+  const params = { key: 'z', code: 'KeyZ', modifiers: 4, windowsVirtualKeyCode: 90, nativeVirtualKeyCode: 90 }
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
 }
 
 async function run() {
@@ -542,6 +560,118 @@ async function run() {
     await sleep(300)
     const cmTextAfter = await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)
     assert.equal(cmTextAfter, cmTextBefore, 'typing into the fenced code block changed its content (must be read-only in kernel mode)')
+
+    // ============================================================
+    // 5.5) Real CodeMirror read-only + undo bridge (source-kernel
+    //      integration Plan 3 Task 1 — two LIVE defects, both reachable
+    //      here even though section 5 above (same fixture, `js` block)
+    //      happens to click a point that is off-screen at that point in the
+    //      script and so never actually proves anything).
+    // ============================================================
+    // Reached via the toolbar's Hide/Edit toggle rather than the always-
+    // editor-visible `js` block: `.preview-toggle-button` only renders when
+    // `renderPreview` produces content (see @milkdown/components code-block
+    // `setup()`, `preview.value ? h('button', {class:'preview-toggle-button'}...) : null`),
+    // which is true only for this fixture's mermaid block
+    // (editor-mermaid.js's renderer). previewOnlyByDefault starts it in
+    // preview mode (`.codemirror-host` carries a `hidden` class); clicking
+    // the toggle flips `previewOnlyMode` and reveals the real `.cm-editor`
+    // underneath — the exact path the task brief calls out.
+    const mermaidToggle = await evaluate(`(() => {
+      const block = (${MERMAID_BLOCK(VISIBLE_EDITOR)})
+      block?.scrollIntoView({ block: 'center' })
+      return !!block
+    })()`)
+    assert.ok(mermaidToggle, 'mermaid code block not found for the read-only/undo-bridge probe')
+    await sleep(400)
+    const togglePoint = await evaluate(`(() => {
+      const block = (${MERMAID_BLOCK(VISIBLE_EDITOR)})
+      const button = block?.querySelector('.preview-toggle-button')
+      const rect = button?.getBoundingClientRect()
+      return rect && rect.width ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null
+    })()`)
+    assert.ok(togglePoint, 'mermaid code block preview-toggle button is not hit-testable')
+    await click(send, togglePoint)
+    await waitFor(() => evaluate(`!(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.codemirror-host')?.classList.contains('hidden')`),
+      "clicking Edit did not reveal the mermaid code block's CodeMirror editor")
+    await sleep(150)
+
+    const mermaidLinePoint = await evaluate(`(() => {
+      const block = (${MERMAID_BLOCK(VISIBLE_EDITOR)})
+      block?.scrollIntoView({ block: 'center' })
+      const line = block?.querySelector('.cm-editor .cm-line')
+      const rect = line?.getBoundingClientRect()
+      return rect && rect.width ? { x: rect.left + 4, y: rect.top + rect.height / 2 } : null
+    })()`)
+    assert.ok(mermaidLinePoint, 'mermaid code block CM line is not hit-testable after the Edit toggle')
+    await sleep(400)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...mermaidLinePoint, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...mermaidLinePoint, button: 'left', clickCount: 1 })
+    await sleep(200)
+    const mermaidCmFocused = await evaluate(`document.activeElement?.className || ''`)
+    assert.ok(mermaidCmFocused.includes('cm-content'), `click did not focus the mermaid CodeMirror editor (activeElement: ${mermaidCmFocused})`)
+
+    // Defect 1: `EditorState.readOnly`'s combine takes only the HIGHEST-
+    // precedence value, and Milkdown's CodeMirrorBlock nodeview registers
+    // its own same-precedence, earlier-in-source-order readOnly extension —
+    // so a bare (unwrapped) `CmEditorState.readOnly.of(true)` appended to
+    // the feature's `extensions` array loses and CodeMirror stays genuinely
+    // editable. This assertion fails on the pre-fix build (RED).
+    const mermaidCmBeforeType = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
+    await typeTextLikeUser(send, 'BLOCKED', { delayMs: delay })
+    await sleep(300)
+    const mermaidCmAfterType = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
+    assert.equal(mermaidCmAfterType, mermaidCmBeforeType,
+      'typing into the mermaid code block via the Edit toggle changed its content — CodeMirror is not really read-only in kernel mode')
+
+    // Defect 2: the nodeview's own `codeMirrorKeymap()` binds Mod-z/Mod-y/
+    // Shift-Mod-z directly to `@milkdown/prose/history`'s undo/redo at
+    // default precedence, and `stopEvent()` on a CM-originated event
+    // returns true, so a PM-level keymap (the kernel's own historyKeymap)
+    // never sees a CM-focused Mod-z. In kernel mode the source kernel is
+    // the SOLE undo authority: a CM-focused Mod-z must reach the SAME
+    // `runHistory('undo')` entry point PM-focused Mod-z uses, never
+    // prosemirror-history.
+    //
+    // By this point in the script kernel history is NOT empty — sections 1
+    // and 2 already recorded two real kernel commits (the far-paragraph
+    // typing, then the 'z' -> '/' slash replace) — so a correctly wired
+    // bridge's Mod-z must perform a REAL kernel-level undo of the most
+    // recent one (the slash replace, reverting '/' back to 'z'), not a
+    // silent no-op: a handler that merely swallows the key WITHOUT calling
+    // into the kernel would leave the document unchanged and this
+    // assertion would pass vacuously, proving nothing. Checking the
+    // paragraph text (not just this code block's own content) also rules
+    // out prosemirror-history quietly acting on some other tracked step.
+    const beforeUndo = await paragraphTexts(evaluate)
+    assert.ok(beforeUndo.includes('/'), `expected the slash-replaced paragraph before undo: ${JSON.stringify(beforeUndo)}`)
+    await pressUndo(send)
+    await waitFor(async () => (await paragraphTexts(evaluate)).includes('z'),
+      'Mod-z inside the mermaid code block did not reach kernel history (slash replace was not undone)')
+    const mermaidCmAfterUndo = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
+    assert.equal(mermaidCmAfterUndo, mermaidCmBeforeType,
+      "Mod-z inside the mermaid code block changed its OWN CodeMirror content (must route through the kernel, not CodeMirror's/prosemirror-history's own undo)")
+
+    // Redo (Shift-Mod-z) must symmetrically reach `runHistory('redo')` and
+    // restore the slash replace — completing the round trip through the
+    // SAME kernel history the PM-focused undo/redo keymap uses, entirely
+    // from a CM-focused keystroke.
+    const redoParams = { key: 'z', code: 'KeyZ', modifiers: 12, windowsVirtualKeyCode: 90, nativeVirtualKeyCode: 90 } // Shift+Meta
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...redoParams })
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', ...redoParams })
+    await waitFor(async () => (await paragraphTexts(evaluate)).includes('/'),
+      'Shift-Mod-z inside the mermaid code block did not redo through kernel history (slash replace was not restored)')
+    const mermaidCmAfterRedo = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
+    assert.equal(mermaidCmAfterRedo, mermaidCmBeforeType,
+      "Shift-Mod-z inside the mermaid code block changed its OWN CodeMirror content (must route through the kernel)")
+
+    await toggleSourceMode(evaluate)
+    const sourceAfterCmProbe = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the read-only/undo-bridge probe')
+    assert.equal(sourceAfterCmProbe, SAVED,
+      'kernel document bytes do not match the derived expectation after the CM read-only/undo-bridge probe (typing must stay blocked; undo/redo must round-trip back to the pre-probe state)')
+    await toggleSourceMode(evaluate)
+    await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the read-only/undo-bridge probe')
+    await sleep(200)
 
     // ============================================================
     // 6) Save and assert byte-exact kernel output; cold reopen
