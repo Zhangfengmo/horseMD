@@ -74,6 +74,19 @@ console.log('--- kernel gateway ---')
   assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
 }
 
+// Case 4b: drop meta outranks a stale/lingering composing flag — a drop is
+// never a legitimate part of an IME composition, so `isComposing: true`
+// must NOT let it pass through as a no-op composition tick.
+{
+  const d = doc(p(text('hello')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.insertText('X', 1)
+  tr.setMeta('uiEvent', 'drop')
+  const result = classifyTransactions([tr], state, { isComposing: true })
+  assert.equal(result.kind, 'blocked')
+  assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
 // Case 5: cross-block ReplaceStep (delete spanning a paragraph boundary,
 // joining 'abc'+'def' into one paragraph) -> blocked. doc(p('abc'), p('def')):
 // p1 spans PM [0,5) content [1,4); p2 spans [5,10) content [6,9). Deleting
@@ -178,6 +191,32 @@ console.log('--- kernel gateway ---')
   const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
   assert.equal(committed.ok, true)
   assert.equal(committed.applied.doc.text, 'a\\*xb\n')
+}
+
+// Case 10b: deletion SPANNING an escape unit. Same 'a\*b\n' fixture as Case
+// 10 (JS source 'a\\*b\n': a=0 \=1 *=2 b=3 \n=4, decodes to PM text 'a*b').
+// Deleting the single visible '*' character in PM (pos 2 to pos 3) must
+// remove the WHOLE 2-raw-byte escape unit, not just the asterisk byte: per
+// test-kernel-projection-map.mjs Case 2, pmPosToRaw(2) === 1 (right after
+// 'a', before the escape run) and pmPosToRaw(3) === 3 (right after the
+// escape, before 'b') — so a 1-visible-char PM deletion maps to a 2-raw-char
+// deletion (raw [1,3), the full '\*'). Named risk: a naive "PM delta ==
+// raw delta" assumption would only remove 1 raw byte and corrupt the escape.
+{
+  const md = 'a\\*b\n'
+  const d = doc(p(text('a*b')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const tr = state.tr.delete(2, 3)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'plain-text')
+  assert.deepEqual(classified.steps[0], { from: 2, to: 3, insertText: '' })
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true)
+  assert.deepEqual(committed.transaction.edits, [{ from: 1, to: 3, insert: '' }])
+  assert.equal(committed.applied.doc.text, 'ab\n')
 }
 
 // Case 11: multi-step transaction (two sequential ReplaceSteps in ONE tr).

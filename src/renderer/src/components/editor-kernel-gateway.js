@@ -110,18 +110,26 @@ function extractPlainTextSteps(transactions, oldState) {
 //   1. `sourceProjection` meta marks a transaction the caller itself built
 //      FROM a kernel/raw commit (e.g. a projection reconciler replaying the
 //      kernel's text into the PM doc) — that provenance is authoritative
-//      regardless of whether the batch also happens to look like plain text
-//      or carries no doc change at all.
-//   2. `isComposing` is a caller-supplied label (IME mid-composition); the
+//      regardless of whether the batch also happens to look like plain text,
+//      is mid-composition, or carries no doc change at all. Reconciler-
+//      generated transactions are self-authored and can never carry drop
+//      meta, so this stays first without conflicting with rule 2.
+//   2. `uiEvent === 'drop'` is an explicit, unconditional block — checked
+//      BEFORE the composition label. A drop is never a legitimate part of
+//      an IME composition; if it ran after the composition check, a stale
+//      `isComposing: true` flag (e.g. a composition that never received its
+//      compositionend before a drop landed) could let a drop through as a
+//      no-op pass-through instead of being refused, mutating the view
+//      without any kernel bookkeeping. Drag-drop content is never treated
+//      as plain text either, even if its slice would otherwise qualify —
+//      spec'd explicitly in the Task 3 brief.
+//   3. `isComposing` is a caller-supplied label (IME mid-composition); the
 //      gateway does not try to infer composition state itself, so once the
-//      caller says so, that's final too, ahead of the docChanged gate below
-//      (a composition update can legitimately have `docChanged: false` for
-//      a no-op composition tick).
-//   3. No transaction changed the doc → selection-only (caret/selection
+//      caller says so (and it isn't a drop), that's final, ahead of the
+//      docChanged gate below (a composition update can legitimately have
+//      `docChanged: false` for a no-op composition tick).
+//   4. No transaction changed the doc → selection-only (caret/selection
 //      moves, no kernel involvement at all).
-//   4. `uiEvent === 'drop'` is an explicit, unconditional block (drag-drop
-//      content is never treated as plain text, even if its slice happens to
-//      qualify) — spec'd explicitly in the Task 3 brief.
 //   5. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
@@ -133,14 +141,13 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   if (trs.some((tr) => tr && typeof tr.getMeta === 'function' && tr.getMeta('sourceProjection'))) {
     return { kind: 'projection' }
   }
+  if (trs.some((tr) => tr && typeof tr.getMeta === 'function' && tr.getMeta('uiEvent') === 'drop')) {
+    return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
+  }
   if (isComposing) return { kind: 'composition' }
 
   const changed = trs.some((tr) => tr && tr.docChanged)
   if (!changed) return { kind: 'selection-only' }
-
-  if (trs.some((tr) => tr && typeof tr.getMeta === 'function' && tr.getMeta('uiEvent') === 'drop')) {
-    return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
-  }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
