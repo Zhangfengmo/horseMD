@@ -39,7 +39,18 @@ const PM_TO_MD = {
   code_block: ['code', 'math'],
   table: ['table'],
   hr: ['thematicBreak'],
-  html: ['html']
+  html: ['html'],
+  // Crepe's `@milkdown/components` image-block: a standalone (own-line) image
+  // is rendered as a block-level `image-block` ATOM, not a paragraph wrapping
+  // an inline image — its remark plugin REPLACES any mdast paragraph whose
+  // single child is an `image` with a custom `image-block` mdast node before
+  // the PM parse. The kernel's own parse (buildSyntaxIndex) runs WITHOUT that
+  // plugin, so on the kernel side the block is still the plain mdast
+  // `paragraph > image` wrapper — hence this pairing. The pairing loop below
+  // additionally verifies the paragraph really is a single-image wrapper
+  // (fail-closed), and the pair is never editable (`isTextblock` is false for
+  // an atom, so it can't claim a charMap): image editing is a later phase.
+  'image-block': ['paragraph']
 }
 
 const MD_BLOCK_TYPES = new Set(Object.values(PM_TO_MD).flat())
@@ -208,6 +219,13 @@ export function buildProjectionMap(markdown, pmDoc) {
 
     const allowed = PM_TO_MD[pmType] || []
     if (!allowed.includes(md.type)) return null
+    // image-block only ever replaces a paragraph whose SINGLE child is an
+    // `image` (its remark plugin's exact condition) — pairing it against any
+    // other paragraph shape means the two trees have diverged structurally.
+    if (pmType === 'image-block') {
+      const children = md.children || []
+      if (children.length !== 1 || children[0].type !== 'image') return null
+    }
 
     // `bullet_list`/`ordered_list` both structurally pair with mdast
     // `list`, but the ordered flag itself is part of the structure (a

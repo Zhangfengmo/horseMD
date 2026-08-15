@@ -41,6 +41,10 @@ const schema = new Schema({
     table_row: { content: 'table_cell+' },
     table_cell: { content: 'paragraph+' },
     image: { group: 'inline', inline: true, atom: true, attrs: { src: { default: '' } } },
+    // Crepe's standalone-image block (@milkdown/components image-block): a
+    // block-level ATOM whose mdast counterpart (in the kernel's plugin-free
+    // parse) is the plain `paragraph > image` wrapper.
+    'image-block': { group: 'block', atom: true, attrs: { src: { default: '' } } },
     text: { group: 'inline' }
   },
   marks: {}
@@ -395,6 +399,54 @@ console.log('--- kernel projection map ---')
   assert.equal(map.blockPairs[0].virtual, true)
   assert.deepEqual(map.virtualBlockAt(1), { raw: 0, prefix: '' })
   assert.equal(map.rawToPmPos(0).pos, 1)
+}
+
+// Case 14: standalone image-block. Raw '# t\n\n![a](x.png)\n\n尾\n':
+// #=0 ' '=1 t=2 \n=3 \n=4 image [5,16) \n=16 \n=17 尾=18 \n=19. The kernel's
+// plugin-free parse keeps the `paragraph > image` wrapper; Crepe's PM doc
+// holds a block-level `image-block` atom instead. PM: heading@0 (content
+// start 1, 't'), image-block@3 (nodeSize 1), p@4 (content start 5, '尾').
+{
+  const md = '# t\n\n![a](x.png)\n\n尾\n'
+  const d = doc(
+    schema.node('heading', { level: 1 }, [text('t')]),
+    schema.node('image-block', { src: 'x.png' }),
+    p(text('尾'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'standalone image-block must map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].charMap, null, 'image-block pair must be non-editable')
+  assert.equal(map.blockPairs[1].mdBlock.type, 'paragraph', 'pairs the mdast image wrapper paragraph')
+  assert.equal(map.pmPosToRaw(1), 2) // before 't'
+  assert.equal(map.pmPosToRaw(2), 3) // after 't'
+  assert.equal(map.pmPosToRaw(5), 18) // before 尾
+  assert.equal(map.pmPosToRaw(6), 19) // after 尾
+  assert.equal(map.rawToPmPos(8), null, 'offsets inside the image markdown stay unmappable')
+}
+
+// Case 14b: image-block fail-closed — it only ever replaces a paragraph
+// whose SINGLE child is an image.
+{
+  const textMd = '甲乙\n'
+  const dImg = doc(schema.node('image-block', { src: 'x.png' }))
+  assert.equal(buildProjectionMap(textMd, dImg), null, 'image-block vs text paragraph must reject')
+  const mixedMd = '前![a](x.png)后\n'
+  assert.equal(buildProjectionMap(mixedMd, dImg), null, 'image-block vs mixed paragraph must reject')
+}
+
+// Case 14c: a document ENDING in a standalone image gets the trailing
+// placeholder too (image-block is not paragraph/heading) — both fixes
+// compose. Raw '![a](x.png)\n' length 12.
+{
+  const md = '![a](x.png)\n'
+  const d = doc(schema.node('image-block', { src: 'x.png' }), p())
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'image-ending doc must map with its trailing placeholder')
+  assert.equal(map.blockPairs.length, 2)
+  assert.equal(map.blockPairs[1].virtual, true)
+  // image-block@0 has nodeSize 1 (atom) -> trailing p@1, content start 2.
+  assert.deepEqual(map.virtualBlockAt(2), { raw: 12, prefix: '\n' })
 }
 
 console.log('PASS kernel projection map')
