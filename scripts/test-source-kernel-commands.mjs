@@ -136,4 +136,48 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
   assert.equal(apply(c.doc, exitEmptyListItem({ ...c, offset: 10 })), '> * 甲\n> \n')
 }
 
+// ---- Task 5 fix-review regressions ----
+
+// splitListItem must fail-closed when offset sits inside the marker/spacing
+// region (before item.contentStart) — inserting a new marker there would
+// tear the existing marker apart instead of producing a well-defined split.
+// For '* 甲乙\n' ('*'=0,' '=1,'甲'=2,'乙'=3,'\n'=4) contentStart is 2.
+{
+  const src = '* 甲乙\n'
+  const c = ctx(src)
+  assert.deepEqual(splitListItem({ ...c, offset: 0 }),
+    { ok: false, code: 'unsupported-structure' })   // offset 0: before the marker itself
+  assert.deepEqual(splitListItem({ ...c, offset: 1 }),
+    { ok: false, code: 'unsupported-structure' })   // offset 1: inside 'marker+spacing', still before content
+}
+
+// splitTextBlock must succeed when offset sits exactly at block.end (right
+// after the last character, before the line terminator) — the ordinary
+// "press Enter at end of line" position. index.blockAt is exclusive-end so
+// a naive blockAt(offset) call would wrongly reject this as unsupported.
+{
+  // '甲乙\n': block.end === 2 (offset right after '乙', before '\n').
+  // Splitting there yields an empty second paragraph: '甲乙' + blank line +
+  // the original line terminator = '甲乙\n\n\n'.
+  const src = '甲乙\n'
+  const c = ctx(src)
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '甲乙\n\n\n')
+}
+{
+  // '# 头\n': block.end === 3 (offset right after '头'). Same shape as above,
+  // an empty paragraph after the heading: '# 头\n\n\n'.
+  const src = '# 头\n'
+  const c = ctx(src)
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 3 })), '# 头\n\n\n')
+}
+// A blank-line GAP between two paragraphs must stay rejected: it is not any
+// block's end (block1 '甲乙' ends at 2, block2 '丙' starts at 4), so the
+// end-boundary recovery must not let it fall through to block1.
+{
+  const src = '甲乙\n\n丙\n'
+  const c = ctx(src)
+  assert.deepEqual(splitTextBlock({ ...c, offset: 3 }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
 console.log('PASS source-kernel commands (enter)')

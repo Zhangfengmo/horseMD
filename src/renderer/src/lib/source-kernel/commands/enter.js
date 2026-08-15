@@ -17,6 +17,22 @@ const quotePrefixAt = (index, offset) => {
 
 const bareQuote = (prefix) => prefix.replace(/[ \t]+$/, '')
 
+// index.blockAt uses exclusive-end containment, so the caret position right
+// after a block's last char (before its line terminator) — the single most
+// common Enter position — resolves to null. Recover it by trying the block
+// ending exactly at `offset` one position back, WITHOUT letting a blank-line
+// gap (an offset that is not any block's end either) fall through to a
+// preceding block it doesn't belong to.
+const resolveBlock = (index, offset) => {
+  const direct = index.blockAt(offset)
+  if (direct) return direct
+  if (offset > 0) {
+    const before = index.blockAt(offset - 1)
+    if (before && offset === before.end) return before
+  }
+  return null
+}
+
 const txn = (doc, from, to, insert, intent, caret) => ({
   ok: true,
   transaction: {
@@ -32,7 +48,7 @@ const txn = (doc, from, to, insert, intent, caret) => ({
 // 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
 // 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
 export function splitTextBlock({ doc, index, offset }) {
-  const block = index.blockAt(offset)
+  const block = resolveBlock(index, offset)
   if (!block || (block.type !== 'paragraph' && block.type !== 'heading')) {
     return { ok: false, code: 'unsupported-structure' }
   }
@@ -49,7 +65,14 @@ export function splitTextBlock({ doc, index, offset }) {
 // 重排既有兄弟项的编号；任务项新项恒为未勾选，spacing 逐字沿用原项。
 export function splitListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
-  if (!item || item.empty) return { ok: false, code: 'unsupported-structure' }
+  // Fail-closed: offset must sit at-or-after the item's content start. A
+  // caret still inside the indent/marker/spacing (or task-checkbox) region
+  // has no well-defined "text before/after the split", and inserting a new
+  // marker there would tear the existing marker in two (e.g. '*' + '\n* ' +
+  // ' 甲乙' from an offset of 1 in '* 甲乙\n').
+  if (!item || item.empty || offset < item.contentStart) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
   const ending = endingAt(index, offset)
   const marker = item.ordered
     ? String(item.ordered.number + 1) + item.ordered.delimiter
