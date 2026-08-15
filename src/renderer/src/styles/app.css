@@ -3002,6 +3002,27 @@ body.hm-table-auto-wrap .milkdown .ProseMirror .hm-html-table-block td {
 .milkdown .milkdown-slash-menu .menu-groups .menu-group li.hm-slash-item.hover > svg {
   color: var(--accent);
 }
+/* Source-kernel mode (Task 7 blocking matrix): a blocked slash item
+   (editor-slash-menu.js itemLi adds `.disabled` when options.isBlocked(id)
+   is truthy) stays in the list — muted + not-allowed cursor is the visual
+   cue the item won't run. pointer-events is intentionally left enabled:
+   the pointerup/Enter refusal path (hide menu + toast, see runSelected())
+   must still fire on click, which is why this is NOT `pointer-events: none`.
+   Keyboard nav (arrow keys) can still land `.hover` on a disabled row, so
+   that combination is reset to the resting look instead of the selected
+   highlight — a disabled row must never look pickable. */
+.milkdown .milkdown-slash-menu .menu-groups .menu-group li.hm-slash-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.milkdown .milkdown-slash-menu .menu-groups .menu-group li.hm-slash-item.disabled.hover,
+.milkdown .milkdown-slash-menu .menu-groups .menu-group li.hm-slash-item.disabled:hover {
+  background: transparent;
+  color: var(--text);
+}
+.milkdown .milkdown-slash-menu .menu-groups .menu-group li.hm-slash-item.disabled.hover > svg {
+  color: var(--muted);
+}
 .milkdown .milkdown-slash-menu .hm-slash-empty {
   padding: 18px 12px;
   color: var(--faint);
