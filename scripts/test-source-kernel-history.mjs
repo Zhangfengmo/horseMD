@@ -128,4 +128,30 @@ assert.equal(history.redo(doc), null)
   assert.equal(d.text, 'aXYb\n\n\n')
 }
 
+// undo(doc) 返回的事务的 selection 必须落在撤销后文档的范围内 —— 不能是
+// 正向事务那个（可能更长的）文档坐标系下的残留 selection。
+{
+  let d = createMarkdownDocument('ab\n')
+  const h = createSourceHistory()
+  const c = (txn) => { const res = applySourceTransaction(d, txn); h.record(res, txn); d = res.doc; return res }
+  c({
+    baseRevision: 0, from: 1, to: 1, insert: 'XYZ', intent: 'insert-text',
+    selection: { anchor: 4, head: 4 }
+  })
+  assert.equal(d.text, 'aXYZb\n')
+
+  const undoTxn = h.undo(d)
+  // 单步组直接复用 applySourceTransaction 产出的 inverse，selection 应为其
+  // 自身推导出的 caret（1），而不是正向 selection 的 4。
+  assert.deepEqual(undoTxn.selection, { anchor: 1, head: 1 })
+
+  const applied = applySourceTransaction(d, undoTxn)
+  assert.equal(applied.ok, true)
+  d = applied.doc
+  assert.equal(d.text, 'ab\n')
+  assert.ok(applied.selection.anchor <= d.text.length && applied.selection.head <= d.text.length,
+    'undo selection must stay within the restored document bounds')
+  assert.deepEqual(applied.selection, { anchor: 1, head: 1 })
+}
+
 console.log('PASS source-kernel history')

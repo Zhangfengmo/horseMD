@@ -180,4 +180,47 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
     { ok: false, code: 'unsupported-structure' })
 }
 
+// splitTextBlock must fail-closed inside a heading's `#{n} ` marker/spacing
+// region — inserting the block-separator there tears the marker in two
+// (offset 1 in '# 头\n' previously produced the mangled '#\n\n 头\n').
+// contentStart for '# 头\n' is 2 (right after '# ', before '头').
+{
+  const src = '# 头\n'
+  const c = ctx(src)
+  assert.deepEqual(splitTextBlock({ ...c, offset: 0 }),
+    { ok: false, code: 'unsupported-structure' })   // offset 0: before the '#' itself
+  assert.deepEqual(splitTextBlock({ ...c, offset: 1 }),
+    { ok: false, code: 'unsupported-structure' })   // offset 1: inside 'marker+spacing', still before content
+  // A valid split right at contentStart (and further into the content) must
+  // still work — regression guard for the guard above.
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '# \n\n头\n')
+}
+
 console.log('PASS source-kernel commands (enter)')
+
+// ---- Task: final-review coverage gaps (`+` marker, lone-CR ending) ----
+
+// (a) '+' bullet marker was never exercised by any suite. Same mid-content
+// split shape as the '*'/'-' cases above.
+{
+  const src = '+ 甲乙\n'
+  const c = ctx(src)
+  // '+'=0,' '=1,'甲'=2,'乙'=3,'\n'=4 — offset 3 splits between '甲' and '乙'.
+  assert.equal(apply(c.doc, splitListItem({ ...c, offset: 3 })), '+ 甲\n+ 乙\n')
+}
+
+// (b) lone-CR ('\r', no '\n') line ending. remark treats a lone '\r' the same
+// as any other line ending for a *soft break inside a paragraph*: '甲乙\r丙\r'
+// parses as ONE paragraph block spanning both physical lines (verified with a
+// direct probe against buildSyntaxIndex — the tree has a single top-level
+// paragraph node covering the whole '甲乙\r丙' text), not two separate
+// blocks. So this fixture exercises splitTextBlock's line-ending lookup
+// (`endingAt` → `index.lineAt(offset).ending`) rather than block boundaries:
+// splitting mid-paragraph, right at the lone-CR line break, must reuse '\r'
+// (not '\n') as the inserted block separator.
+{
+  const src = '甲乙\r丙\r'
+  const c = ctx(src)
+  assert.equal(c.index.lineAt(2).ending, '\r') // scanLines-level: confirms the fixture actually has a lone-CR ending
+  assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 2 })), '甲乙\r\r\r丙\r')
+}

@@ -48,11 +48,27 @@ const txn = (doc, from, to, insert, intent, caret) => ({
   }
 })
 
+// A heading has no separate "marker region" record like list items do, so
+// derive its content start straight from the mdast node: the first child's
+// start offset, or — for an empty heading with no children (e.g. '#\n' /
+// '# \n', where the marker consumes the whole block) — the block's own end.
+const headingContentStart = (block) => {
+  const first = block.node.children?.[0]
+  return first ? first.position.start.offset : block.end
+}
+
 // 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
 // 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
 export function splitTextBlock({ doc, index, offset }) {
   const block = resolveBlock(index, offset)
   if (!block || (block.type !== 'paragraph' && block.type !== 'heading')) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  // Fail-closed: a caret still inside the heading's `#{n} ` marker/spacing
+  // region has no well-defined "text before/after the split" — splitting
+  // there would tear the marker in two (e.g. offset 1 in '# 头\n' produces
+  // '#\n\n 头\n'). Paragraphs have no marker, so they need no guard.
+  if (block.type === 'heading' && offset < headingContentStart(block)) {
     return { ok: false, code: 'unsupported-structure' }
   }
   const ending = endingAt(index, offset)

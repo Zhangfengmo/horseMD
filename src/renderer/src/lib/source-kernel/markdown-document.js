@@ -14,6 +14,21 @@ const validEdit = (edit, max) =>
   Number.isInteger(edit.from) && Number.isInteger(edit.to) &&
   edit.from >= 0 && edit.to <= max && edit.from <= edit.to
 
+// Trailing caret after sequentially applying `edits` to whatever text they
+// target: the last edit's old-coordinate end (`to`), shifted by the total
+// delta (insert.length - removed length) accumulated across ALL edits —
+// every earlier edit sits entirely before `last.to` (edits are validated
+// non-overlapping and ascending), so its delta always applies.
+const trailingCaret = (edits) => {
+  let delta = 0
+  let last = null
+  for (const edit of edits) {
+    delta += String(edit.insert ?? '').length - (edit.to - edit.from)
+    last = edit
+  }
+  return last.to + delta
+}
+
 export function applySourceTransaction(doc, txn) {
   if (txn.baseRevision !== doc.revision) return { ok: false, code: 'stale-revision' }
   const edits = normalizeEdits(txn)
@@ -42,11 +57,17 @@ export function applySourceTransaction(doc, txn) {
     cursor = edit.to
   }
   parts.push(doc.text.slice(cursor))
-  const last = edits[edits.length - 1]
   // Caret positioned after the last inserted text in new coordinates, accounting for preceding edits' deltas
-  const caret = last.from + String(last.insert ?? '').length +
-    (delta - (String(last.insert ?? '').length - (last.to - last.from)))
+  const caret = trailingCaret(edits)
   const next = { text: parts.join(''), revision: doc.revision + 1 }
+  // The inverse's selection is the inverse's OWN caret, computed against the
+  // restored (post-inverse) document — NOT the forward transaction's
+  // selection, which is a coordinate for the post-forward document and is
+  // out of bounds once the inverse is applied (e.g. inserting 'XYZ' at 1 in
+  // 'ab\n' puts the forward caret at 4, valid in the 6-char post-insert text;
+  // reusing that for the inverse would carry anchor:4 into the restored
+  // 3-char 'ab\n').
+  const inverseCaret = trailingCaret(inverseEdits)
   return {
     ok: true,
     doc: next,
@@ -55,7 +76,7 @@ export function applySourceTransaction(doc, txn) {
       baseRevision: next.revision,
       edits: inverseEdits,
       intent: 'history-invert',
-      selection: txn.selection ?? null
+      selection: { anchor: inverseCaret, head: inverseCaret }
     },
     selection: txn.selection ?? { anchor: caret, head: caret }
   }
