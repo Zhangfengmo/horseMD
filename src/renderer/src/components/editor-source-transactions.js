@@ -15,6 +15,7 @@ export function createSourceTransactionDispatch(onTransactions) {
 
     // Explicit test-only trace. Production never initializes this array, so
     // document content is neither retained nor logged during normal use.
+    // Vetoed transactions are still traced (deliberate, for diagnostics).
     if (changed && Array.isArray(globalThis.__hmSourceTransactionTrace)) {
       globalThis.__hmSourceTransactionTrace.push({
         transactions: applied.transactions.map((candidate) => ({

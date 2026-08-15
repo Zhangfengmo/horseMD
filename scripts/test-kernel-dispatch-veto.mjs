@@ -31,6 +31,7 @@ console.log('Test 1: veto=true blocks updateState')
     updateState(newState) {
       updateStateCalled = true
       updateStateCount++
+      this.state = newState
     }
   }
 
@@ -42,7 +43,7 @@ console.log('Test 1: veto=true blocks updateState')
 
   assert.equal(updateStateCalled, false, 'updateState should NOT be called when veto=true')
   assert.equal(updateStateCount, 0, 'updateState count should be 0')
-  // View state should remain unchanged
+  // View state should remain unchanged when vetoed
   assert.equal(stubView.state, initialState, 'view.state should not change when vetoed')
   console.log('✓ Test 1 passed')
 }
@@ -104,8 +105,8 @@ console.log('Test 3: selection-only transaction always applies')
 
   dispatch.call(stubView, tr)
 
-  // For selection-only transactions, onTransactions may or may not be called
-  // but updateState should always be called
+  // Selection-only transactions must NOT consult onTransactions (gated by !changed)
+  assert.equal(onTransactionsCount, 0, 'selection-only tr must not consult onTransactions')
   assert.equal(updateStateCount, 1, 'updateState should be called for selection-only transaction')
   console.log('✓ Test 3 passed')
 }
