@@ -391,4 +391,43 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   assert.equal(committed.code, 'unsupported-structure')
 }
 
+// Case 19 (Task 11.5): @milkdown/plugin-trailing's own append — one
+// ReplaceStep inserting exactly one EMPTY paragraph at the very end — is
+// classified `trailing-append`, never `blocked` (pre-fix it fell through to
+// INPUT_TYPE and the veto channel would refuse the plugin's convenience
+// node). A NON-empty paragraph, or an insert not at the end, must NOT match.
+{
+  const d = tdoc(bl(li(null, tp(ttext('甲')))))
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const end = state.doc.content.size
+  const tr = state.tr.insert(end, taskSchema.nodes.paragraph.createAndFill())
+  assert.equal(classifyTransactions([tr], state).kind, 'trailing-append')
+
+  const nonEmpty = state.tr.insert(end, taskSchema.node('paragraph', null, [ttext('x')]))
+  assert.equal(classifyTransactions([nonEmpty], state).kind, 'blocked')
+
+  const notAtEnd = state.tr.insert(0, taskSchema.nodes.paragraph.createAndFill())
+  assert.equal(classifyTransactions([notAtEnd], state).kind, 'blocked')
+}
+
+// Case 20 (Task 11.5): commitPlainText into the trailing VIRTUAL paragraph.
+// markdown '- 甲\n' (length 4) with the live PM doc [bullet_list, empty
+// trailing paragraph] — typing '新' at the trailing content position must
+// commit '\n新' at raw 4 (blank-line separator + text -> a NEW paragraph),
+// byte-for-byte, never the lazy continuation '- 甲\n新'.
+{
+  const md = '- 甲\n'
+  const d = tdoc(bl(li(null, tp(ttext('甲')))), taskSchema.nodes.paragraph.createAndFill())
+  const state = EditorState.create({ schema: taskSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'trailing-placeholder doc must map')
+  // bullet_list@0 nodeSize 7 -> trailing p@7, content start 8.
+  const tr = state.tr.insertText('新', 8)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true)
+  assert.deepEqual(committed.transaction.edits, [{ from: 4, to: 4, insert: '\n新' }])
+  assert.equal(committed.applied.doc.text, '- 甲\n\n新')
+}
+
 console.log('PASS kernel gateway')

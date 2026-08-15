@@ -139,6 +139,35 @@ function extractTaskToggleStep(transactions, oldState) {
   return { pos: step.pos }
 }
 
+// Detects `@milkdown/plugin-trailing`'s own append: ONE transaction whose
+// single ReplaceStep inserts exactly one EMPTY paragraph at the very end of
+// the document (from === to === the step-doc's content size). Crepe ships
+// that plugin unconditionally; its appendTransaction can ride any dispatch
+// batch (even a selection-only click) the moment the doc's last child is a
+// non-paragraph block. Left unclassified this fell through to
+// `blocked`/`INPUT_TYPE` and the dispatch-veto channel would refuse the
+// plugin's own convenience paragraph — vetoing a batch the user never
+// authored. The shape is view-only (an empty paragraph has no markdown
+// bytes), so the kernel lets it through without any byte commit; the
+// projection map's trailing-placeholder tolerance pairs it.
+function extractTrailingAppend(transactions) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'ReplaceStep') return null
+  const stepDoc = tr.docs?.[0]
+  if (!stepDoc) return null
+  if (step.from !== step.to || step.from !== stepDoc.content.size) return null
+  const slice = step.slice
+  if (!slice || slice.openStart || slice.openEnd) return null
+  if (slice.content?.childCount !== 1) return null
+  const node = slice.content.firstChild
+  if (!node || node.type?.name !== 'paragraph' || node.content?.size !== 0) return null
+  return { at: step.from }
+}
+
 // classifyTransactions: pure triage of a dispatch batch into one of six
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
@@ -168,7 +197,10 @@ function extractTaskToggleStep(transactions, oldState) {
 //      task-checkbox click shape (see `extractTaskToggleStep` above) — tried
 //      before the plain-text guard since it is never a `ReplaceStep` batch
 //      and would otherwise fall through to `blocked`/`INPUT_TYPE`.
-//   6. Otherwise, try the plain-text step guard; anything it can't prove is
+//   6. The trailing plugin's own empty-paragraph append (see
+//      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
+//      be vetoed.
+//   7. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
 //      block reasons for the plain-text path; ProjectionReconciler/dispatch
@@ -189,6 +221,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const taskToggle = extractTaskToggleStep(trs, oldState)
   if (taskToggle) return { kind: 'task-toggle', pos: taskToggle.pos }
+
+  const trailingAppend = extractTrailingAppend(trs)
+  if (trailingAppend) return { kind: 'trailing-append', at: trailingAppend.at }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
@@ -229,8 +264,19 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
     const oldTo = step.to - cumulativeDelta
-    const rawFrom = map.pmPosToRaw(oldFrom)
-    const rawTo = map.pmPosToRaw(oldTo)
+    // Virtual block (trailing placeholder / split placeholder / empty list
+    // item — see editor-kernel-projection-map.js): the decision is made by
+    // PM position (unique), never by raw offset (a virtual pair's raw anchor
+    // can coincide with a real block's end in a doc without a final
+    // newline). The insert lands at the pair's raw anchor, prefixed with the
+    // separator bytes the pair demands (e.g. a blank line after a trailing
+    // list so the typed text parses as a new paragraph, not a lazy
+    // continuation of the last item).
+    const virtualBlock = typeof map.virtualBlockAt === 'function' && oldFrom === oldTo
+      ? map.virtualBlockAt(oldFrom)
+      : null
+    const rawFrom = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldFrom)
+    const rawTo = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldTo)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
     }
@@ -243,7 +289,14 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       // instead of the kernel's generic invalid-range).
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
     }
-    edits.push({ from: rawFrom, to: rawTo, insert: step.insertText })
+    edits.push({
+      from: rawFrom,
+      to: rawTo,
+      insert: virtualBlock ? virtualBlock.prefix + step.insertText : step.insertText
+    })
+    // PM-side delta (never the raw insert with its separator prefix): this
+    // rebases later steps' PM coordinates, which know nothing about raw
+    // separator bytes.
     cumulativeDelta += step.insertText.length - (step.to - step.from)
   }
 

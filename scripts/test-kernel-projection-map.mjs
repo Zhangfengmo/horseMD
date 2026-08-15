@@ -313,4 +313,88 @@ console.log('--- kernel projection map ---')
   assert.equal(buildProjectionMap(md, d), null, 'bullet_list vs ordered markdown must reject the whole map')
 }
 
+// --- Task 11.5 regressions: trailing placeholder (plugin-trailing), empty
+// list items, pending split placeholder, standalone image-block ---
+
+// Case 11: the trailing synthetic paragraph. Crepe's @milkdown/plugin-trailing
+// appends an empty paragraph after any doc whose last block is a
+// list/table/code/blockquote/hr/html — the live PM doc for '- 甲\n' is
+// [bullet_list, <empty paragraph>]. Raw '- 甲\n': -=0 ' '=1 甲=2 \n=3, length
+// 4. PM: bullet_list@0 (li@1, p@2 content start 3), trailing p@7 (content
+// start 8), doc content size 9.
+{
+  const md = '- 甲\n'
+  const d = doc(
+    schema.node('bullet_list', null, [schema.node('list_item', null, [p(text('甲'))])]),
+    p()
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'trailing placeholder must be tolerated, not reject the whole map')
+  assert.equal(map.blockPairs.length, 4)
+  const trailing = map.blockPairs[3]
+  assert.equal(trailing.virtual, true)
+  assert.equal(trailing.charMap.visibleToRaw(0), 4, 'virtual boundary = raw document end')
+  assert.equal(trailing.insertPrefix, '\n', 'one more terminator makes the blank-line separator')
+  assert.deepEqual(map.virtualBlockAt(8), { raw: 4, prefix: '\n' })
+  assert.equal(map.pmPosToRaw(8), 4)
+  const restored = map.rawToPmPos(4)
+  assert.ok(restored)
+  assert.equal(restored.pos, 8)
+  assert.equal(restored.atom, false)
+  // Real blocks unaffected by the tolerance.
+  assert.equal(map.pmPosToRaw(3), 2)
+  assert.equal(map.virtualBlockAt(3), null, 'real blocks are never virtual')
+}
+
+// Case 11b: fail-closed for every OTHER surplus shape.
+{
+  const md = '- 甲\n'
+  const bl = () => schema.node('bullet_list', null, [schema.node('list_item', null, [p(text('甲'))])])
+  // two extra trailing paragraphs
+  assert.equal(buildProjectionMap(md, doc(bl(), p(), p())), null, 'two extra paragraphs must reject')
+  // extra NON-empty paragraph at the end
+  assert.equal(buildProjectionMap(md, doc(bl(), p(text('x')))), null, 'non-empty surplus paragraph must reject')
+  // extra empty paragraph NOT at the end
+  assert.equal(buildProjectionMap(md, doc(p(), bl())), null, 'mid-doc surplus paragraph must reject')
+  // extra non-paragraph block at the end
+  assert.equal(
+    buildProjectionMap(md, doc(bl(), schema.node('code_block', null, []))),
+    null,
+    'non-paragraph surplus must reject'
+  )
+}
+
+// Case 11c: insertPrefix per document tail shape, including CRLF.
+{
+  const bl = (s) => schema.node('bullet_list', null, [schema.node('list_item', null, [p(text(s))])])
+  // CRLF: '- 甲\r\n' length 5 -> prefix is the dominant '\r\n'.
+  const crlf = buildProjectionMap('- 甲\r\n', doc(bl('甲'), p()))
+  assert.ok(crlf, 'CRLF doc must map')
+  assert.deepEqual(crlf.virtualBlockAt(8), { raw: 5, prefix: '\r\n' })
+  // No final newline: '- 甲' length 3 -> a full blank line ('\n\n') is needed.
+  const bare = buildProjectionMap('- 甲', doc(bl('甲'), p()))
+  assert.ok(bare)
+  assert.deepEqual(bare.virtualBlockAt(8), { raw: 3, prefix: '\n\n' })
+  // Raw-offset ambiguity at the doc end resolves to the REAL block first:
+  // raw 3 is both 甲's text end and the virtual anchor; rawToPmPos walks
+  // pairs in document order, so the item's own end wins.
+  assert.equal(bare.rawToPmPos(3).pos, 4)
+  // Already blank-line-terminated: '- 甲\n\n' length 5 -> no prefix needed.
+  const blank = buildProjectionMap('- 甲\n\n', doc(bl('甲'), p()))
+  assert.ok(blank)
+  assert.deepEqual(blank.virtualBlockAt(8), { raw: 5, prefix: '' })
+}
+
+// Case 11d: empty document. '' parses to ZERO mdast blocks while the PM doc
+// always holds one empty paragraph (schema minimum) — the same virtual
+// pairing makes an empty kernel-mode document editable instead of degraded.
+{
+  const map = buildProjectionMap('', doc(p()))
+  assert.ok(map, 'empty document must map')
+  assert.equal(map.blockPairs.length, 1)
+  assert.equal(map.blockPairs[0].virtual, true)
+  assert.deepEqual(map.virtualBlockAt(1), { raw: 0, prefix: '' })
+  assert.equal(map.rawToPmPos(0).pos, 1)
+}
+
 console.log('PASS kernel projection map')

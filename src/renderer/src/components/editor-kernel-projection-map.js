@@ -107,6 +107,40 @@ function flattenMd(tree) {
   return result
 }
 
+// charMap-shaped mapping for a virtual (PM-only) empty paragraph: exactly
+// one boundary, visible offset 0 <-> `rawOffset`. Same public contract as
+// buildCharacterMap's zero-unit result, so pmPosToRaw/rawToPmPos consume it
+// through the identical code path.
+const virtualCharMap = (rawOffset) => ({
+  units: [],
+  visibleLength: 0,
+  visibleToRaw: (vis) => (vis === 0 ? rawOffset : null),
+  rawRangeForVisibleRange: (visFrom, visTo) => (
+    visFrom === 0 && visTo === 0 ? { from: rawOffset, to: rawOffset } : null
+  )
+})
+
+// The separator bytes a plain-text insert at the very end of the document
+// needs BEFORE the typed text so the reparse yields a new paragraph instead
+// of a lazy continuation line of the final list/blockquote ('- item\n' +
+// '甲' would parse as '- item 甲' — one item; '- item\n' + '\n甲' parses as
+// [list, paragraph]). Rule: the raw text must end with a BLANK LINE (or be
+// empty) before the typed text starts:
+//   '- item\n'   -> one more terminator  -> ending
+//   '- item'     -> two                  -> ending + ending
+//   '- item\n\n' -> already blank-line-terminated -> ''
+//   '' / '\n'    -> nothing before the text -> ''
+// `ending` is the document's dominant line ending, so CRLF sources get
+// '\r\n' separators, never a mixed-ending file.
+const trailingInsertPrefix = (markdown, ending) => {
+  let rest = markdown
+  if (rest.endsWith('\r\n')) rest = rest.slice(0, -2)
+  else if (rest.endsWith('\n') || rest.endsWith('\r')) rest = rest.slice(0, -1)
+  else return markdown === '' ? '' : ending + ending
+  if (rest === '' || rest.endsWith('\n') || rest.endsWith('\r')) return ''
+  return ending
+}
+
 // Reconstruct a raw -> visible-offset lookup for one block's charMap, by
 // replaying the exact same forward accumulation buildCharacterMap uses to
 // build `units[]` into its (private) boundaries map — buildCharacterMap
@@ -127,13 +161,51 @@ export function buildProjectionMap(markdown, pmDoc) {
   const index = buildSyntaxIndex(markdown)
   const pmBlocks = flattenPm(pmDoc)
   const mdBlocks = flattenMd(index.tree)
-  if (pmBlocks.length !== mdBlocks.length) return null
 
   const blockPairs = []
-  for (let i = 0; i < pmBlocks.length; i += 1) {
-    const pm = pmBlocks[i]
-    const md = mdBlocks[i]
+  let mdIndex = 0
+  for (let pmIndex = 0; pmIndex < pmBlocks.length; pmIndex += 1) {
+    const pm = pmBlocks[pmIndex]
     const pmType = pm.node.type.name
+
+    if (mdIndex >= mdBlocks.length) {
+      // Crepe ships `@milkdown/plugin-trailing` UNCONDITIONALLY: its
+      // appendTransaction inserts an EMPTY `paragraph` after the document's
+      // last top-level child whenever that child's type is anything other
+      // than `heading`/`paragraph` — a "there's always somewhere to click
+      // below the content" convenience with NO markdown-source counterpart.
+      // Left unhandled, this one synthetic node made EVERY document ending
+      // in a list/table/code-block/blockquote/thematic-break/html block fail
+      // the length check and reject the WHOLE map, silently degrading kernel
+      // mode to full legacy for a huge share of real documents (Task 11's
+      // Bug 2). Tolerate EXACTLY ONE such node: it must be the LAST pm block
+      // AND a top-level doc child (its end reaches the very end of the whole
+      // document) AND empty. It pairs as a virtual EDITABLE block whose only
+      // boundary maps to the raw document end (markdown.length); a
+      // plain-text insert there must carry `insertPrefix` (see
+      // trailingInsertPrefix above) so the typed text becomes a new
+      // paragraph rather than a lazy continuation of the final block. Any
+      // OTHER surplus (two extra paragraphs, a non-paragraph, a non-empty or
+      // non-final paragraph) still rejects the whole map — fail-closed.
+      const isLast = pmIndex === pmBlocks.length - 1
+      const isTrailingPlaceholder = isLast && pmType === 'paragraph' &&
+        pm.node.content.size === 0 &&
+        pm.pos + pm.node.nodeSize === pmDoc.content.size
+      if (!isTrailingPlaceholder) return null
+      blockPairs.push({
+        mdBlock: null,
+        pmNode: pm.node,
+        pmPos: pm.pos,
+        charMap: virtualCharMap(markdown.length),
+        virtual: true,
+        insertPrefix: trailingInsertPrefix(markdown, index.dominantEnding)
+      })
+      continue
+    }
+
+    const md = mdBlocks[mdIndex]
+    mdIndex += 1
+
     const allowed = PM_TO_MD[pmType] || []
     if (!allowed.includes(md.type)) return null
 
@@ -179,6 +251,11 @@ export function buildProjectionMap(markdown, pmDoc) {
     }
     blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap })
   }
+  // Every mdast block must have been consumed — a PM side that ran out first
+  // (e.g. a PM node type flattenPm doesn't recognize while mdast still has
+  // its counterpart) rejects the whole map, exactly like the old length
+  // check did.
+  if (mdIndex !== mdBlocks.length) return null
 
   // pmPos -> raw: locate the textblock pair whose content range
   // [contentPos, contentPos + visibleLength] contains pmPos (both ends
@@ -250,5 +327,24 @@ export function buildProjectionMap(markdown, pmDoc) {
     return null
   }
 
-  return { blockPairs, pmPosToRaw, rawToPmPos }
+  // Writers (gateway commitPlainText, kernel-mode commitReplace) consult
+  // this BEFORE the generic pmPosToRaw path: a virtual pair's raw anchor can
+  // be byte-ambiguous with a real block's end (e.g. a doc without a final
+  // newline, where the last item's text ends exactly at markdown.length), so
+  // the virtual-block decision must be made by PM position — which is
+  // unique — never by raw offset. Returns the pair's raw anchor plus the
+  // separator bytes an insert there must be prefixed with ('' for split
+  // placeholders and empty list items, whose separators already exist in
+  // the raw bytes).
+  const virtualBlockAt = (pmPos) => {
+    for (const pair of blockPairs) {
+      if (!pair.virtual || !pair.charMap) continue
+      if (pmPos === pair.pmPos + 1) {
+        return { raw: pair.charMap.visibleToRaw(0), prefix: pair.insertPrefix || '' }
+      }
+    }
+    return null
+  }
+
+  return { blockPairs, pmPosToRaw, rawToPmPos, virtualBlockAt }
 }

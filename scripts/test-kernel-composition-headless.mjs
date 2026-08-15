@@ -90,7 +90,7 @@ console.log('--- kernel composition headless ---')
   await tick()
 
   assert.equal(h.session.isActive(), false, 'session cleared after a committed end')
-  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲' }])
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲', pmFrom: 2 }])
   assert.deepEqual(h.revertCalls, [])
   assert.deepEqual(h.notifications, [])
 }
@@ -253,7 +253,7 @@ console.log('--- kernel composition headless ---')
   await settledPromise
 
   assert.equal(settledFlag, true, 'a refused commit must still settle (never hang)')
-  assert.deepEqual(commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲' }],
+  assert.deepEqual(commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲', pmFrom: 2 }],
     'commitReplace was called with the derived range even though it refused')
   assert.deepEqual(revertCalls, ['composition-range-invalidated'],
     'a falsy commitReplace return reverts the view, exactly like a failed diff')
@@ -280,7 +280,7 @@ console.log('--- kernel composition headless ---')
   h.session.onEnd()
   await tick()
 
-  assert.deepEqual(h.commitCalls, [{ rawFrom: 0, rawTo: 5, text: 'Hello!' }],
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 0, rawTo: 5, text: 'Hello!', pmFrom: 1 }],
     'commitReplace receives the range the diff actually covers, not session-start rawRange {5,5}')
   assert.deepEqual(h.revertCalls, [])
   assert.deepEqual(h.notifications, [])
@@ -310,7 +310,7 @@ console.log('--- kernel composition headless ---')
   view.state.doc = doc(p('a甲b'))
   h.session.onEnd()
   await tick()
-  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲' }])
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 1, text: '甲', pmFrom: 2 }])
   assert.deepEqual(h.revertCalls, [null], 'no further revert beyond the double-start one')
 }
 

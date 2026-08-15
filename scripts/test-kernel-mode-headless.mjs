@@ -46,7 +46,10 @@ const FIXTURE_DOCS = {
   '甲\n\n乙\n': () => doc(p(text('甲')), p(text('乙'))),
   '甲\t乙\n': () => doc(p(text('甲\t乙'))),
   '- [x] 乙\n': () => doc(bl(li(true, p(text('乙'))))),
-  '- [ ] 乙\n': () => doc(bl(li(false, p(text('乙')))))
+  '- [ ] 乙\n': () => doc(bl(li(false, p(text('乙'))))),
+  // Task 11.5 fixtures: trailing-placeholder typing + split placeholder.
+  '- 甲\n': () => doc(bl(li(null, p(text('甲'))))),
+  '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -438,6 +441,49 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   const undone = h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view)
   assert.equal(undone, true)
   assert.equal(h.controller.kernel.doc.text, '- [x] 乙\n', 'undo restores the checked marker exactly')
+}
+
+// Case 12 (Task 11.5, trailing placeholder): a document ENDING IN A LIST
+// attaches live (this is the exact shape @milkdown/plugin-trailing appends
+// its empty paragraph after — pre-fix, the map rejected the whole doc and
+// kernel mode silently degraded to legacy). Typing into the trailing
+// paragraph commits at the raw document end WITH the blank-line separator,
+// so the source gains a new paragraph — never a lazy continuation line of
+// the last item. Raw '- 甲\n' length 4; trailing p@7, content start 8.
+{
+  const h = makeHarness('- 甲\n', doc(bl(li(null, p(text('甲')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true,
+    'a list-ending doc (with its trailing placeholder) must attach live, not degrade')
+  assert.equal(h.controller.isDegraded(), false)
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(8), { raw: 4, prefix: '\n' })
+
+  const oldState = h.view.state
+  const tr = oldState.tr.insertText('X', 8)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in the trailing paragraph is allowed')
+  assert.equal(h.controller.kernel.doc.text, '- 甲\n\nX',
+    'the insert carries the blank-line separator: a new paragraph, NOT "- 甲\\nX" (lazy continuation)')
+  assert.deepEqual(h.changes.at(-1), ['- 甲\n\nX', false])
+  assert.ok(h.view.state.doc.eq(doc(bl(li(null, p(text('甲')))), p(text('X')))))
+  assert.ok(h.controller.kernel.map, 'map realigns once the paragraph is real')
+}
+
+// Case 15 (Task 11.5): @milkdown/plugin-trailing's own append transaction —
+// an empty paragraph inserted at the very end of a list-ending doc — is
+// passed through (never vetoed) with no kernel byte change, and the map is
+// rebound so the new node pairs as the trailing placeholder.
+{
+  const h = makeHarness('- [x] 乙\n', doc(bl(li(true, p(text('乙'))))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const oldState = h.view.state
+  const end = oldState.doc.content.size
+  const tr = oldState.tr.insert(end, schema.nodes.paragraph.createAndFill())
+  const verdict = dispatchThrough(h, tr)
+  assert.equal(verdict, undefined, 'the trailing append must not be vetoed')
+  assert.equal(h.controller.kernel.doc.text, '- [x] 乙\n', 'no kernel bytes for a view-only node')
+  assert.equal(h.changes.length, 0, 'nothing published for the trailing append')
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(end + 1), { raw: 8, prefix: '\n' })
 }
 
 console.log('PASS kernel mode headless')

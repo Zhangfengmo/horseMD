@@ -101,9 +101,34 @@ export function createKernelMode({
     ))
   }
 
+  // Mirror `@milkdown/plugin-trailing`'s default shouldAppend (Crepe ships it
+  // unconditionally, with the default config): the live view always carries
+  // one EMPTY trailing paragraph whenever the doc's last top-level child is
+  // not a paragraph/heading. A raw parse never produces that node (it has no
+  // markdown bytes), so every doc-to-doc comparison against the live view —
+  // reconcileProjection targets, verifyPlainTextProjection diffs — must
+  // append the same placeholder to the parse output. Without this, every
+  // plain-text keystroke in a list/table/code-ending document reports a
+  // projection mismatch whose "repair" deletes the trailing paragraph only
+  // for the plugin to immediately re-append it — a churn loop.
+  const withTrailingParagraph = (docNode) => {
+    try {
+      const last = docNode?.lastChild
+      if (!last) return docNode
+      const name = last.type?.name
+      if (name === 'paragraph' || name === 'heading') return docNode
+      const paragraph = docNode.type?.schema?.nodes?.paragraph?.createAndFill?.()
+      if (!paragraph) return docNode
+      return docNode.copy(docNode.content.addToEnd(paragraph))
+    } catch {
+      return docNode
+    }
+  }
+
   const safeParse = (markdownText) => {
     try {
-      return parse(markdownText) || null
+      const parsed = parse(markdownText) || null
+      return parsed ? withTrailingParagraph(parsed) : null
     } catch {
       return null
     }
@@ -194,6 +219,13 @@ export function createKernelMode({
       case 'blocked':
         notifyBlocked(classified.blockedCode)
         return { veto: true }
+      case 'trailing-append':
+        // @milkdown/plugin-trailing's own convenience paragraph (see
+        // editor-kernel-gateway.js extractTrailingAppend): view-only, no
+        // markdown bytes, no history entry — just rebind the map so the
+        // trailing-placeholder tolerance pairs the new node.
+        bindMap(newState?.doc || null)
+        return undefined
       case 'plain-text': {
         const committed = commitPlainText({ kernel, map: kernel.map, transactions, oldState })
         if (!committed.ok) {
@@ -299,15 +331,29 @@ export function createKernelMode({
   // unit even if a future intent rename ever made it coalescable, and it
   // stops whatever plain-text edit comes right after the composition from
   // merging backward into it.
-  const commitReplace = ({ rawFrom, rawTo, text }) => {
+  const commitReplace = ({ rawFrom, rawTo, text, pmFrom }) => {
     const view = getView?.()
     if (!view || disposed) return false
+    // A composition that ran inside a VIRTUAL block (the trailing
+    // placeholder below a list/table/code ending, a split placeholder, or an
+    // empty list item) must carry the same separator prefix a plain-text
+    // commit there carries — otherwise the committed bytes land as a lazy
+    // continuation of the final block instead of a new paragraph. The
+    // decision is made by PM position (`pmFrom`, the diff start the
+    // composition session proved), never by raw offset, which can be
+    // ambiguous at the document end.
+    const virtualBlock = Number.isFinite(pmFrom) && rawFrom === rawTo
+      ? kernel.map?.virtualBlockAt?.(pmFrom)
+      : null
+    const insert = virtualBlock && virtualBlock.raw === rawFrom
+      ? virtualBlock.prefix + text
+      : text
     kernel.history.breakGroup()
     const applied = applyKernelTransaction({
       baseRevision: kernel.doc.revision,
       from: rawFrom,
       to: rawTo,
-      insert: text,
+      insert,
       intent: 'ime-commit'
     }, view)
     kernel.history.breakGroup()
@@ -366,8 +412,12 @@ export function createKernelMode({
   // editable block pair that contains the selection.
   const insertPlainTextAtSelection = (insert, state, view) => {
     const { from, to } = state.selection
+    // Virtual pairs are excluded: a raw '\t' at a virtual block's anchor
+    // (line start after a list, or a blank line) would parse as an indented
+    // code block / continuation — not the tab the user meant. Refusing is
+    // the fail-closed choice.
     const pair = (kernel.map?.blockPairs || []).find((candidate) => {
-      if (!candidate.charMap) return false
+      if (!candidate.charMap || candidate.virtual) return false
       const contentPos = candidate.pmPos + 1
       const end = contentPos + candidate.charMap.visibleLength
       return from >= contentPos && to <= end

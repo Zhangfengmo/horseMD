@@ -194,7 +194,12 @@ export function createCompositionSession({
     }
     let applied
     try {
-      applied = commitReplace?.({ rawFrom, rawTo, text })
+      // `pmFrom` (the diff's PM start position) rides along so the caller
+      // can recognize a commit landing in a VIRTUAL block (trailing/split
+      // placeholder, empty list item) — the raw offset alone is ambiguous at
+      // the document end, only the PM position is unique. See
+      // editor-kernel-mode.js commitReplace.
+      applied = commitReplace?.({ rawFrom, rawTo, text, pmFrom: diff.from })
     } catch {
       applied = false
     }
