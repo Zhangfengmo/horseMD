@@ -77,6 +77,16 @@ export function useSourceModeSwitch({
     const sourceEdited = sourceEditedIds.current.has(id)
     if ((sourceEl.value || '') === baseline && !sourceEdited) return false
 
+    // Source-kernel mode (Plan 2, Task 8): no branch needed here. For a
+    // kernel tab, `api.replaceMarkdown` IS the kernel override installed by
+    // `editor-kernel-mode.js`'s apiOverrides (see Editor.jsx's
+    // `Object.assign(api, kernelController.apiOverrides)`) — it reparses
+    // `next`, reconciles the ProseMirror doc via a minimal-diff projection
+    // replace, and resets `kernel.doc`/`kernel.history`/the projection map to
+    // this exact authored text (see the override's body in
+    // editor-kernel-mode.js). A legacy (non-kernel) tab's `api.replaceMarkdown`
+    // is unchanged. Either way this call site stays a single polymorphic
+    // dispatch through the same `api` object.
     const api = editorApis.current[id]
     if (api?.replaceMarkdown?.(next)) {
       sourceEl.__horsemdSourceBaseline = sourceEl.value || ''
@@ -102,6 +112,15 @@ export function useSourceModeSwitch({
     // in flight, and refusing the switch on a snapshot that was about to
     // resolve would fail closed for no reason. Only a settled null is a real
     // mapping failure.
+    // Source-kernel mode (Plan 2, Task 8): for a kernel tab, `api.flushMarkdownSettled`
+    // is the kernel override (editor-kernel-mode.js apiOverrides) — it awaits
+    // `composition.settled()` (any in-flight IME edit resolves to its
+    // committed or reverted state first) and returns `kernel.doc.text`
+    // directly, with NO serializer/preservation round-trip. That text is
+    // already the durable source, so this entry into source mode is
+    // naturally exempt from the legacy serializer path without any branch
+    // here — same call, same return contract (a string or a non-string
+    // failure signal), just answered by a different implementation.
     let markdown = typeof api?.flushMarkdownSettled === 'function'
       ? await api.flushMarkdownSettled()
       : api?.flushMarkdown?.()

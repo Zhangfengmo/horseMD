@@ -150,6 +150,68 @@ function ThemePicker({
   )
 }
 
+// Source/rich view switch, now a `block-switch` popover (same structure as
+// ThemePicker above) rather than a flat toggle button, so it can also host
+// the per-tab experimental source-kernel opt-in without a second status-bar
+// button. The trigger's outer look (icon + current-mode label + caret) and
+// item 1's behavior (calls the existing `onToggleSource`) are unchanged from
+// the flat button this replaces — a tab with no kernel eligibility (or while
+// `kernelModeIds` is empty for every tab) sees byte-identical rich/source
+// toggle behavior, just reached through one extra click to open the menu.
+function SourceSwitch({
+  sourceMode,
+  onToggleSource,
+  kernelMode,
+  kernelEligible,
+  onToggleKernelMode,
+  effectiveKeybindings
+}) {
+  const { t } = useI18n()
+  const { open, setOpen, ref } = usePopover()
+  return (
+    <div className="block-switch" ref={ref}>
+      <button
+        className="status-btn"
+        onClick={() => setOpen((v) => !v)}
+        title={labelWithShortcut(t('tip.toggleSource'), 'view.toggleSource', effectiveKeybindings)}
+      >
+        <Icon name="code" size={14} /> {sourceMode ? t('status.source') : t('status.rich')}
+        <span className="block-switch-caret">▾</span>
+      </button>
+      {open && (
+        <div className="block-switch-menu">
+          <button
+            className="block-menu-item"
+            onClick={() => {
+              onToggleSource()
+              setOpen(false)
+            }}
+          >
+            <Icon name="code" size={13} />
+            <span className="block-menu-name">
+              {sourceMode ? t('status.source') : t('status.rich')}
+            </span>
+          </button>
+          {kernelEligible && (
+            <>
+              <div className="theme-menu-sep" />
+              <button
+                className={`block-menu-item${kernelMode ? ' active' : ''}`}
+                onClick={() => {
+                  onToggleKernelMode?.()
+                  setOpen(false)
+                }}
+              >
+                <span className="block-menu-name">{t('status.kernelMode')}</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LangSwitch({ lang, setLang }) {
   const { t } = useI18n()
   const { open, setOpen, ref } = usePopover()
@@ -187,6 +249,9 @@ function MobileMore({
   onSettings,
   sourceMode,
   onToggleSource,
+  kernelMode,
+  kernelEligible,
+  onToggleKernelMode,
   theme,
   setTheme,
   lang,
@@ -240,6 +305,17 @@ function MobileMore({
               {sourceMode ? t('status.source') : t('status.rich')}
             </span>
           </button>
+          {kernelEligible && (
+            <button
+              className={`block-menu-item${kernelMode ? ' active' : ''}`}
+              onClick={() => {
+                onToggleKernelMode?.()
+                setOpen(false)
+              }}
+            >
+              <span className="block-menu-name">{t('status.kernelMode')}</span>
+            </button>
+          )}
 
           <div className="theme-menu-label">{t('settings.fontSize')}</div>
           <div className="hm-sheet-fontsize">
@@ -336,6 +412,9 @@ export default function StatusBar({
   effectiveKeybindings,
   sourceMode,
   onToggleSource,
+  kernelMode,
+  kernelEligible,
+  onToggleKernelMode,
   pageWidth,
   onSetPageWidth,
   fontSize,
@@ -417,6 +496,9 @@ export default function StatusBar({
                 onSettings={onSettings}
                 sourceMode={sourceMode}
                 onToggleSource={onToggleSource}
+                kernelMode={kernelMode}
+                kernelEligible={kernelEligible}
+                onToggleKernelMode={onToggleKernelMode}
                 theme={theme}
                 setTheme={setTheme}
                 lang={lang}
@@ -433,13 +515,14 @@ export default function StatusBar({
         ) : (
           <>
             {tab && <StatsControl stats={s} />}
-            <button
-              className="status-btn"
-              onClick={onToggleSource}
-              title={labelWithShortcut(t('tip.toggleSource'), 'view.toggleSource', effectiveKeybindings)}
-            >
-              <Icon name="code" size={14} /> {sourceMode ? t('status.source') : t('status.rich')}
-            </button>
+            <SourceSwitch
+              sourceMode={sourceMode}
+              onToggleSource={onToggleSource}
+              kernelMode={kernelMode}
+              kernelEligible={kernelEligible}
+              onToggleKernelMode={onToggleKernelMode}
+              effectiveKeybindings={effectiveKeybindings}
+            />
             <LayoutControl
               fontSize={fontSize}
               onSetFontSize={onSetFontSize}

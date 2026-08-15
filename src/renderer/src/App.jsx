@@ -198,6 +198,12 @@ export default function App() {
   // Tab ids the user explicitly chose to render richly despite being "heavy"
   // (would otherwise open in the fast plain-text editor to avoid a long freeze).
   const [richForced, setRichForced] = useState(() => new Set())
+  // Source-kernel mode (Plan 2, Task 8): a per-tab, session-only experiment
+  // toggle. Deliberately NOT persisted to session/localStorage — this is an
+  // in-flight architecture switch, not a user preference (see docs/handoff
+  // for P2 plan). An empty Set means zero tabs are opted in, which is the
+  // default for every existing user and reproduces today's behavior exactly.
+  const [kernelModeIds, setKernelModeIds] = useState(() => new Set())
 
   const activeTab = useMemo(() => tabs.find((t) => t.id === activeId) || null, [tabs, activeId])
   const activePath = activeTab?.path || null
@@ -595,6 +601,51 @@ export default function App() {
   const getRecoveryMarkdownForTab = useCallback((id) => (
     editorApis.current[id]?.getRecoveryMarkdown?.() ?? null
   ), [editorApis])
+
+  // A tab qualifies for the source-kernel experiment under the same rule as
+  // every other rich-editor-only surface (source/rich split, find-in-rich,
+  // outline edits): a real document tab that is not forced to the plain
+  // textarea (plain-text extension, or an un-opted-into heavy doc).
+  const isKernelEligibleTab = useCallback((tab) => (
+    !!tab && tab.kind === 'doc' && !isPlainTextDoc(tab) && !(tab.heavy && !richForced.has(tab.id))
+  ), [richForced])
+
+  // Flip the experimental source-kernel flag for the active tab. Gated on a
+  // successful settle-and-flush of the CURRENT rich edit (never toggles over
+  // an edit that could not be verified) so the kernel — on either side of the
+  // flip — always initializes from the same bytes the reader/legacy pipeline
+  // just agreed are the tab's true content.
+  const toggleKernelMode = useCallback(async () => {
+    const id = activeIdRef.current
+    const tab = tabsRef.current.find((item) => item.id === id)
+    if (!id || !isKernelEligibleTab(tab)) return
+    const md = await getSettledMarkdownForTab(id)
+    if (typeof md !== 'string') {
+      fireToast(tRef.current('kernelMode.toggleFailed'), { sticky: true })
+      return
+    }
+    const turningOn = !kernelModeIds.has(id)
+    setKernelModeIds((prev) => {
+      const next = new Set(prev)
+      if (turningOn) next.add(id)
+      else next.delete(id)
+      return next
+    })
+    // getSettledMarkdownForTab already committed `md` into tab.content via
+    // commitRichSnapshotToTab (unconditionally, on both a clean and a dirty
+    // tab). Setting `content: md` again here is a defensive no-op that keeps
+    // this remount self-contained even if that contract ever changes; the
+    // reloadNonce bump is what actually forces EditorArea to remount the
+    // editor (rich Crepe host AND any mounted source textarea share this key),
+    // so the kernel — or, turning it off, the legacy pipeline — attaches to
+    // exactly these settled bytes instead of stale pre-toggle state.
+    const bump = (list) => list.map((t) => (
+      t.id === id ? { ...t, content: md, reloadNonce: t.reloadNonce + 1 } : t
+    ))
+    tabsRef.current = bump(tabsRef.current)
+    setTabs((prev) => bump(prev))
+    fireToast(tRef.current(turningOn ? 'kernelMode.toggleOn' : 'kernelMode.toggleOff'))
+  }, [activeIdRef, getSettledMarkdownForTab, isKernelEligibleTab, kernelModeIds, setTabs, tabsRef, tRef])
 
   // Source/rich view state and anchor restoration live in useSourceModeSwitch.
 
@@ -1111,6 +1162,12 @@ export default function App() {
     ...(fmStack ? { '--font-mono': fmStack } : {})
   }
 
+  // Same tab StatusBar's non-kernel controls already key off (null on the
+  // welcome screen or a Settings tab) — reused for the kernel-mode toggle so
+  // its eligibility/active state can never disagree with what the status bar
+  // is otherwise showing.
+  const statusBarTab = home || activeTab?.kind === 'settings' ? null : activeTab
+
   return (
     <I18nProvider lang={lang} setLang={setLang}>
     <div className={`app${platformClass}${isMobile && sidebarOpen ? ' drawer-open' : ''}${settings.selectionToolbar === false ? ' hm-selection-toolbar-disabled' : ''}`} style={appFontStyle}>
@@ -1243,6 +1300,7 @@ export default function App() {
             sourceRichSplitRatio={sourceRichSplitRatio}
             richPreviewState={richPreviewState}
             richForced={richForced}
+            kernelModeIds={kernelModeIds}
             mountedIds={mountedIds}
             activeTab={activeTab}
             imageUploadCommand={settings.imageUploadCommand}
@@ -1356,7 +1414,7 @@ export default function App() {
       </div>
 
       <StatusBar
-        tab={home || activeTab?.kind === 'settings' ? null : activeTab}
+        tab={statusBarTab}
         isMobile={isMobile}
         onSave={() => handlers.current.save()}
         onShare={() => {
@@ -1382,6 +1440,9 @@ export default function App() {
         effectiveKeybindings={effectiveKeybindings}
         sourceMode={sourceMode}
         onToggleSource={toggleSourceView}
+        kernelMode={!!statusBarTab && kernelModeIds.has(statusBarTab.id)}
+        kernelEligible={isKernelEligibleTab(statusBarTab)}
+        onToggleKernelMode={toggleKernelMode}
         activeBlock={activeBlock}
         onPickBlock={mobileReadOnly ? undefined : (id) => editorApis.current[activeId]?.setBlock(id)}
         pageWidth={settings.pageWidth}

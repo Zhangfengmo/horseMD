@@ -28,6 +28,7 @@ export default function EditorArea({
   sourceRichSplitRatio,
   richPreviewState,
   richForced,
+  kernelModeIds,
   mountedIds,
   activeTab,
   imageUploadCommand,
@@ -99,6 +100,10 @@ export default function EditorArea({
         // intentionally distinct from `split`, which shows TWO documents.
         const heavyAsSource = tab.heavy && !richForced.has(tab.id)
         const plainText = isPlainTextDoc(tab)
+        // Source-kernel mode (Plan 2, Task 8): only a real rich-eligible tab
+        // can run the kernel — a plain-text doc or an un-opted-into heavy doc
+        // never mounts a Crepe host to attach it to.
+        const sourceKernelMode = !!kernelModeIds?.has(tab.id) && !plainText && !heavyAsSource
         const isSourceRichSplit = sourceRichSplitMode && isLeft && !plainText && !heavyAsSource
         const onPaneFocus = (pane = null) => {
           focusedTabRef.current = tab.id
@@ -268,6 +273,7 @@ export default function EditorArea({
                 inlineMathDeleteMode={inlineMathDeleteMode}
                 selectionToolbar={selectionToolbar}
                 readOnly={readOnly || isSourceRichSplit}
+                sourceKernelMode={sourceKernelMode}
                 effectiveKeybindings={effectiveKeybindings}
                 onChange={(md, isInitial) => updateContent(tab.id, md, isInitial)}
                 onToggleSourceRichSplit={isSourceRichSplit ? undefined : onToggleSourceRichSplit}
