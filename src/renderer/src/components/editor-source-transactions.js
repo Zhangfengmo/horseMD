@@ -31,7 +31,10 @@ export function createSourceTransactionDispatch(onTransactions) {
       }
     }
 
-    if (changed) onTransactions?.(applied.transactions, oldState, applied.state)
+    if (changed) {
+      const verdict = onTransactions?.(applied.transactions, oldState, applied.state)
+      if (verdict?.veto) return
+    }
     view.updateState(applied.state)
   }
 }
