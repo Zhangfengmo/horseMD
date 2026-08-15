@@ -30,6 +30,18 @@ export function routeStructuralKey(key, ctx) {
       return NOT_STRUCTURAL
     }
     case 'Delete': {
+      // Delete with the caret inside a list item is a phase-1 text-path case
+      // (mirrors the Backspace branch's `!item` guard on the caret side).
+      // Without this, `resolveBlock`/`blockAt` below can't tell a list
+      // item's own paragraph child from a top-level paragraph — Delete at
+      // the end of a list item's text (e.g. '- 甲\n\n乙\n', caret right after
+      // "甲") would resolve that paragraph as `block`, find "乙" as the next
+      // paragraph, and absorb it into the list item as a lazy continuation
+      // line. `joinParagraphBackward`'s own list-item guard (delete.js) is
+      // the second net for the few paths that could still reach it via a
+      // future caller, but this check keeps the common case from ever
+      // starting the forward scan.
+      if (item) return NOT_STRUCTURAL
       // offset === block.end 要用 resolveBlock 而非裸 blockAt：blockAt 是
       // exclusive-end，caret 恰好停在段落最后一个字符之后（下一行终止符之
       // 前——Delete 最常见的触发位置）时，直接探测在该偏移处会落空。

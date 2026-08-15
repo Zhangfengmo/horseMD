@@ -46,6 +46,18 @@ export function joinParagraphBackward({ doc, index, offset }) {
   if (!previous || previous.type !== 'paragraph') {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // Neither side may be a paragraph nested inside a list item. blockAt does
+  // not distinguish "top-level paragraph" from "a listItem's own paragraph
+  // child" — both are plain `paragraph` nodes to it — so without this check
+  // a paragraph directly following a list (e.g. '甲\n\n- x\n\n乙\n', 乙 right
+  // after the list) would find the list item's paragraph as `previous` and
+  // splice 乙 into it as a lazy continuation line of that list item, silently
+  // absorbing prose into unrelated list structure. Phase 1 never joins across
+  // a list-item boundary in either direction; `listItemAt` (not `blockAt`) is
+  // list-aware and is the source of truth here.
+  if (index.listItemAt(block.start) || index.listItemAt(previous.start)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
   const line = index.lineAt(offset)
   const prefix = quotePrefixOfLine(line)
   const prevLine = index.lineAt(previous.end - 1)

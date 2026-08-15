@@ -151,3 +151,55 @@ assert.equal(run('# 头\n\n乙\n', 5, joinParagraphBackward).code, 'unsupported-
 }
 
 console.log('PASS source-kernel delete + router')
+
+// Regression: joinParagraphBackward / the Delete branch must never join
+// across a list-item boundary. blockAt treats a list item's own paragraph
+// child the same as a top-level paragraph, so without an explicit
+// listItemAt-based guard both directions can splice unrelated prose into a
+// list item as a lazy continuation line — a silent, wrong structural edit
+// (code review finding, both repros confirmed against the pre-fix code
+// before the guards were added).
+{
+  // Repro A (Backspace): 乙 sits right after a list ('- x'); caret at 乙's
+  // start must NOT merge it into the list item's paragraph as a lazy
+  // continuation line.
+  const src = '甲\n\n- x\n\n乙\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const offset = src.indexOf('乙')
+  assert.equal(
+    routeStructuralKey('Backspace', { doc, index, offset }).code,
+    'unsupported-structure'
+  )
+  assert.equal(
+    joinParagraphBackward({ doc, index, offset }).code,
+    'unsupported-structure'
+  )
+}
+{
+  // Repro B (Delete): caret at the end of a list item's own text ('甲'); the
+  // next paragraph ('乙') must NOT be absorbed into the item.
+  const src = '- 甲\n\n乙\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const offset = src.indexOf('甲') + 1 // right after "甲", == the item's block.end
+  assert.equal(
+    routeStructuralKey('Delete', { doc, index, offset }).code,
+    'not-structural'
+  )
+}
+{
+  // Positive control: an ordinary paragraph-into-paragraph join with a list
+  // elsewhere in the document (not adjacent to the join point) must still
+  // succeed — the list-item guard must not become a blanket "any list
+  // anywhere in the doc" rejection.
+  const src = '- x\n\n甲\n\n乙\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const offset = src.indexOf('乙')
+  const r = routeStructuralKey('Backspace', { doc, index, offset })
+  assert.equal(r.ok, true)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '- x\n\n甲\n乙\n')
+}
+
+console.log('PASS source-kernel delete + router (list-boundary guard)')
