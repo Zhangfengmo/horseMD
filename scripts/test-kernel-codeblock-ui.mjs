@@ -196,12 +196,42 @@ const AFTER_PY_EDIT = [
   ''
 ].join('\n')
 
-// Backspace at the START of "DONEMARK" joins it with the previous quoted
+// Backspace x2 at the end of "DONEMARK" deletes its last two chars ("RK"):
+// the within-line delete on the QUOTED fence, the fourth combination the
+// review round 2 finding called out (js-within-line/js-join/py-join already
+// existed; py-within-line was the missing one).
+const AFTER_PY_BACKSPACE = [
+  '# 内核代码块测试',
+  '',
+  '前置段落用于占位。',
+  '',
+  '```js',
+  'function greet(name) {',
+  '  return name;',
+  '}TAILMARKNEXTLI',
+  '```',
+  '',
+  '引用中的代码：',
+  '',
+  '> ```py',
+  '> print(name) OKMARK',
+  '> DONEMA',
+  '> ```',
+  '',
+  '```mermaid',
+  'graph TD; A-->B;',
+  '```',
+  '',
+  '尾段落用于占位。',
+  ''
+].join('\n')
+
+// Backspace at the START of "DONEMA" joins it with the previous quoted
 // line: the codeMap linebreak unit's raw span for a QUOTED fence spans the
 // terminator AND the next line's '> ' prefix (buildCodeMap's own
 // `rawEnd = nextLine.start + prefix.length` for a linebreak unit), so this
 // single CM-visible character deletion must swallow '\n> ' (3 raw bytes),
-// not just '\n' — the exact case Task 6's review round called out.
+// not just '\n' — the exact case Task 6's first review round called out.
 const AFTER_PY_JOIN = [
   '# 内核代码块测试',
   '',
@@ -216,7 +246,7 @@ const AFTER_PY_JOIN = [
   '引用中的代码：',
   '',
   '> ```py',
-  '> print(name) OKMARKDONEMARK',
+  '> print(name) OKMARKDONEMA',
   '> ```',
   '',
   '```mermaid',
@@ -556,12 +586,30 @@ async function run() {
     await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the py edit verification')
     await sleep(200)
 
-    // ---- 3a) cross-line-join Backspace on the QUOTED fence: must swallow
+    // ---- 3a) Backspace x2: within-line delete on the QUOTED fence (the
+    // fourth combination — js-within-line/js-join/py-join already existed,
+    // this was the missing one) ----
+    await clickCmLineEnd(evaluate, send, 'window.__hmPyBlock', { last: true })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmPyBlock') || '').includes('DONEMA') &&
+      !(await cmContent(evaluate, 'window.__hmPyBlock') || '').includes('DONEMAR'),
+      'Backspace x2 did not remove the last two typed characters in the py CodeMirror editor')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the py Backspace x2')
+    assert.equal(shown, AFTER_PY_BACKSPACE, 'quoted py block within-line Backspace x2 must match the kernel-derived bytes exactly')
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the py Backspace x2 verification')
+    await sleep(200)
+
+    // ---- 3b) cross-line-join Backspace on the QUOTED fence: must swallow
     // the '> ' prefix too, not just the terminator (the linebreak unit's
     // raw span spans BOTH per buildCodeMap) ----
     await clickCmLineStart(evaluate, send, 'window.__hmPyBlock', { last: true })
     await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: delay + 30 })
-    await waitFor(async () => (await cmContent(evaluate, 'window.__hmPyBlock') || '').includes('OKMARKDONEMARK'),
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmPyBlock') || '').includes('OKMARKDONEMA'),
       'cross-line-join Backspace did not merge the two py CodeMirror lines')
     await sleep(200)
 
@@ -667,7 +715,7 @@ async function run() {
     ;({ evaluate, send } = app)
     await waitFor(async () => {
       const text = await mounted(evaluate)
-      return text && text.includes('TAILMARK') && text.includes('DONEMARK') ? text : null
+      return text && text.includes('TAILMARK') && text.includes('OKMARKDONEMA') ? text : null
     }, 'reopened document did not mount with the saved content')
     await toggleSourceMode(evaluate)
     const reopened = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
