@@ -275,13 +275,28 @@ function atEndOfBlock(sel) {
   return $head.parentOffset === $head.parent.content.size
 }
 
+// Fallback-aware translation lookup — same "value missing / equals key" test
+// used by editor-kernel-mode.js's local tOr, so a blocked-item message reads
+// sensibly even a beat before i18n.jsx ships the real string.
+function tOr(getT, key, fallback) {
+  const value = getT?.(key)
+  return !value || value === key ? fallback : value
+}
+
 // ---- the menu controller. One per editor (pluginView lifetime). ----
 class SlashMenu {
-  constructor(ctx, view, getT, onCommand) {
+  constructor(ctx, view, getT, onCommand, options = {}) {
     this.ctx = ctx
     this.view = view
     this.getT = getT
     this.onCommand = onCommand
+    // Source-kernel mode (Task 7 blocking matrix): `isBlocked(id)` returns an
+    // i18n key when the item is unsupported ('kernelMode.unsupported' in
+    // phase 1, for every item), else a falsy value. Blocked items stay
+    // visible (rendered `.disabled`) — they must not run and must not reach
+    // `onCommand`, but the menu itself keeps working (query/filter/nav).
+    this.isBlocked = options.isBlocked || null
+    this.notify = options.notify || null
     this.items = buildItems(getT, '')
     this.filtered = []
     this.selectedIndex = 0
@@ -338,16 +353,23 @@ class SlashMenu {
         '</div></div></div>'
       return
     }
-    const itemLi = (it, idx) =>
-      '<li class="hm-slash-item' +
-      (idx === this.selectedIndex ? ' hover' : '') +
-      '" data-index="' +
-      idx +
-      '" role="option">' +
-      it.icon +
-      '<span>' +
-      esc(it.label) +
-      '</span></li>'
+    const itemLi = (it, idx) => {
+      const blocked = this.isBlocked ? this.isBlocked(it.id) : null
+      return (
+        '<li class="hm-slash-item' +
+        (idx === this.selectedIndex ? ' hover' : '') +
+        (blocked ? ' disabled' : '') +
+        '" data-index="' +
+        idx +
+        '" role="option"' +
+        (blocked ? ' aria-disabled="true"' : '') +
+        '>' +
+        it.icon +
+        '<span>' +
+        esc(it.label) +
+        '</span></li>'
+      )
+    }
     let html = '<div class="menu-groups">'
     if (q) {
       // Flat ranked list (single group) when filtering.
@@ -395,6 +417,16 @@ class SlashMenu {
   runSelected() {
     const item = this.filtered[this.selectedIndex]
     if (!item) return
+    const blockedKey = this.isBlocked ? this.isBlocked(item.id) : null
+    if (blockedKey) {
+      // Blocked: hide the menu and toast, but never run the item's command
+      // nor call onCommand — the caller's before/after bookkeeping (e.g.
+      // markUserEdit, source-commit hooks) must not fire for a no-op.
+      this.provider.hide()
+      this.notify?.(tOr(this.getT, blockedKey, 'Not supported yet in the experimental source kernel'))
+      this.view.focus()
+      return
+    }
     this.provider.hide()
     const token = this.onCommand?.({ phase: 'before', id: item.id, view: this.view })
     item.run(this.ctx, this.view)
@@ -473,13 +505,16 @@ function esc(s) {
   )
 }
 
-// ---- public: build the raw ProseMirror plugin. Add via prosePluginsCtx. ----
-export function createSlashPlugin(ctx, getT, onCommand) {
+// ---- public: build the raw ProseMirror plugin. Add via prosePluginsCtx.
+// `options.isBlocked(id) -> string|null` + `options.notify(message)` wire the
+// source-kernel blocking matrix (Task 7); both default off so non-kernel
+// callers are byte-identical to before this option existed. ----
+export function createSlashPlugin(ctx, getT, onCommand, options = {}) {
   let menu = null
   return new Plugin({
     key: KEY,
     view: (view) => {
-      menu = new SlashMenu(ctx, view, getT, onCommand)
+      menu = new SlashMenu(ctx, view, getT, onCommand, options)
       return {
         update: (v, prev) => menu && menu.update(v, prev),
         destroy: () => {

@@ -1055,6 +1055,14 @@ export default function Editor({
     }
     const convertBlockToList = (targetType, blockPos) => {
       if (readOnlyRef.current) return false
+      // Source-kernel mode (Task 7 blocking matrix): block/list conversion is
+      // a structural transaction the kernel doesn't own yet. The context menu
+      // already hides this affordance (JSX gated on `!sourceKernelMode`); this
+      // guard covers any direct api.convertBlockToList() caller too.
+      if (kernelModeEnabled) {
+        fireToast(tRef.current('kernelMode.unsupported'))
+        return false
+      }
       const sourceBeforeConversion = lastMarkdownRef.current
       const canonicalBeforeConversion = canonicalMarkdownRef.current
       let sourceOffset = null
@@ -1119,6 +1127,13 @@ export default function Editor({
     const canConvertBlockToList = (blockPos) => !readOnlyRef.current && canConvertCurrentBlockToList(blockPos)
     const convertList = (targetType, listPos, anchorPos) => {
       if (readOnlyRef.current) return false
+      // Source-kernel mode (Task 7 blocking matrix): see convertBlockToList
+      // above — same structural-transaction restriction and same
+      // direct-caller belt-and-suspenders rationale.
+      if (kernelModeEnabled) {
+        fireToast(tRef.current('kernelMode.unsupported'))
+        return false
+      }
       const view = viewRef.current
       if (!view) return false
       // Record source offsets before changing the document. Crepe's
@@ -2100,7 +2115,12 @@ export default function Editor({
             left: Math.min(ctxMenu.x, window.innerWidth - 210),
             top: Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 360))
           }}>
-            {ctxMenu.showTextFormatting && (
+            {/* Source-kernel mode (Task 7 blocking matrix): inline text
+                formatting and review markup are not structural, but their
+                apiOverrides are toast-no-ops in kernel mode (Task 5) — hide
+                the submenu entirely rather than presenting live-looking
+                buttons that always refuse. */}
+            {!sourceKernelMode && ctxMenu.showTextFormatting && (
               <>
                 <div className="block-menu-submenu-parent">
                   <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="format" aria-haspopup="menu">
@@ -2158,7 +2178,11 @@ export default function Editor({
                 <div className="block-menu-divider" />
               </>
             )}
-            {!ctxMenu.listConversion && (
+            {/* Source-kernel mode: block "turn into" (heading/paragraph/quote
+                switch) and block→list conversion are structural transactions
+                the kernel doesn't own yet (convertBlockToList also refuses
+                directly — see the guard above). */}
+            {!sourceKernelMode && !ctxMenu.listConversion && (
               <div className="block-menu-submenu-parent">
                 <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="block" aria-haspopup="menu">
                   <span className="block-menu-short">H</span>
@@ -2195,7 +2219,10 @@ export default function Editor({
                 </div>
               </div>
             )}
-            {ctxMenu.listConversion && (
+            {/* Source-kernel mode: list-type conversion (bullet/ordered/task)
+                is structural — same restriction as the block region above;
+                convertList() also refuses directly if reached some other way. */}
+            {!sourceKernelMode && ctxMenu.listConversion && (
               <div className="block-menu-submenu-parent">
                 <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="list" aria-haspopup="menu">
                   <span className="block-menu-short">☷</span>

@@ -117,6 +117,12 @@ export function createConfiguredCrepe({
   kernelPlugins = null
 }) {
   const t = getT
+  // Source-kernel mode (Task 7 blocking matrix): mark the Crepe root so the
+  // block drag/add handle can be hidden purely in CSS
+  // (`.hm-kernel-mode .milkdown-block-handle` in app.css) — belt-and-suspenders
+  // on top of not registering createBlockHandleGutterPlugin() below and the
+  // drop-veto already wired in Task 3. Non-kernel callers never get the class.
+  if (kernelMode) host.classList.add('hm-kernel-mode')
   const platform = window.api?.platform
   const isMobile = platform === 'ios' || platform === 'android'
   const crepe = new Crepe({
@@ -240,7 +246,10 @@ export function createConfiguredCrepe({
       // item into the previous item instead of exiting the list.
       listBackspaceKeymap(),
       createStrikeGuardPlugin(),
-      createBlockHandleGutterPlugin(),
+      // Source-kernel mode: the block handle only offers structural
+      // operations (drag-reorder, add-block, turn-into) the kernel doesn't
+      // own yet, so it isn't registered at all — not merely hidden by CSS.
+      ...(kernelMode ? [] : [createBlockHandleGutterPlugin()]),
       ...plugins,
       tableBreakKeymap(),
       createInlineCodeEditingPlugin({
@@ -251,7 +260,15 @@ export function createConfiguredCrepe({
       createInlineMathEditingPlugin({ getDeleteMode: getInlineMathDeleteMode }),
       createKatexDomPrunePlugin(),
       mathPreviewPlugin(getT),
-      createSlashPlugin(ctx, getT, onSlashCommand),
+      createSlashPlugin(
+        ctx,
+        getT,
+        onSlashCommand,
+        // Source-kernel mode: every slash item is a structural insert the
+        // kernel can't own yet (phase 1 of the blocking matrix) — block all
+        // ids, keep them visible-but-disabled (handled in editor-slash-menu.js).
+        kernelMode ? { isBlocked: () => 'kernelMode.unsupported', notify } : undefined
+      ),
       toolbarAutohidePlugin(),
       createReviewDecorationPlugin({
         getT: (key, fallback) => {

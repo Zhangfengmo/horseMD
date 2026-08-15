@@ -2562,6 +2562,14 @@ body.hm-full-width .editor-skeleton {
   height: 20px;
 }
 
+/* Source-kernel mode (experimental): the drag/add block handle exposes only
+   structural transactions the kernel doesn't own yet (Task 3 already vetoes
+   its drop; this belt-and-suspenders rule removes the affordance entirely).
+   The class is added to the Crepe root host in editor-crepe-setup.js. */
+.hm-kernel-mode .milkdown-block-handle {
+  display: none;
+}
+
 /* Rendered raw-HTML blocks (e.g. an HTML <table> in the Markdown). The node is
    non-editable; we just give it sensible, theme-aware styling so a pasted
    <table> looks like a table instead of escaped source. */
