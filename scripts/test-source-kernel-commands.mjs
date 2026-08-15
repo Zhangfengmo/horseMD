@@ -465,3 +465,137 @@ console.log('PASS source-kernel commands (splitTextBlock final-review coverage g
 }
 
 console.log('PASS source-kernel commands (changeCodeLanguage)')
+
+// ---- Plan 3 Task 5: exitCodeBlock（Mod-Enter 退出代码块）----
+import { exitCodeBlock } from '../src/renderer/src/lib/source-kernel/commands/code-exit.js'
+
+// Exit A: 文档末尾（闭栅行带终止符）——插入 `ending+ending`，caret 锚在新的
+// 文档末尾（trailing-virtual 机制的锚点）。
+// src = '```js\nconst a = 1\n```\n'：闭栅行 [18,21)，insertPos = 22 = EOF。
+{
+  const src = '```js\nconst a = 1\n```\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 0 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 22)
+  assert.equal(r.transaction.to, 22)
+  assert.equal(r.transaction.insert, '\n\n')
+  assert.equal(r.transaction.intent, 'exit-code-block')
+  assert.deepEqual(r.transaction.selection, { anchor: 24, head: 24 }) // new EOF
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text,
+    '```js\nconst a = 1\n```\n\n\n')
+}
+
+// Exit B: 文档末尾、闭栅行没有终止符（文件不以换行结尾）——第一个 ending
+// 终结闭栅行，第二个成为空白行；caret 仍在新 EOF。
+{
+  const src = '```js\na\n```'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 6 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 11)
+  assert.equal(r.transaction.insert, '\n\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 13, head: 13 })
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '```js\na\n```\n\n')
+}
+
+// Exit C: 文档中段——caret 锚在第一个空行行首（split-placeholder 锚点）；
+// 其后输入 'x' 于该锚点得到 'x\n\nnext'：独立段落，验证行布局正确。
+{
+  const src = '```js\na\n```\nnext\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 0 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 12)
+  assert.equal(r.transaction.insert, '\n\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 12, head: 12 })
+  const applied = applySourceTransaction(c.doc, r.transaction)
+  assert.equal(applied.doc.text, '```js\na\n```\n\n\nnext\n')
+  // 在锚点补一个字符（模拟占位段的第一次输入），布局必须解析为独立段落
+  const typed = applySourceTransaction(applied.doc, {
+    baseRevision: applied.doc.revision, from: 12, to: 12, insert: 'x', intent: 'insert-text'
+  })
+  assert.equal(typed.doc.text, '```js\na\n```\nx\n\nnext\n')
+}
+
+// Exit D: 引用内文档中段——插入 `prefix+E+bareQuote+E`，caret 在 prefix 之后。
+// src = '> ```js\n> a\n> ```\n> more\n'：闭栅行 [12,17)，insertPos = 18。
+{
+  const src = '> ```js\n> a\n> ```\n> more\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 2 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 18)
+  assert.equal(r.transaction.insert, '> \n>\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 20, head: 20 })
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text,
+    '> ```js\n> a\n> ```\n> \n>\n> more\n')
+}
+
+// Exit E: CRLF 文档——闭栅行终止符沿用 '\r\n'；insertPos 在闭栅行终止符之后。
+// src = '```js\r\na\r\n```\r\n'：'```'闭栅行 [10,13) ending '\r\n' → insertPos 15。
+{
+  const src = '```js\r\na\r\n```\r\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 0 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 15)
+  assert.equal(r.transaction.insert, '\r\n\r\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 19, head: 19 })
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text,
+    '```js\r\na\r\n```\r\n\r\n\r\n')
+}
+
+// Exit F: 未闭合栅栏——拒绝，不补栅、不写字节。
+{
+  const src = '```js\nabc'
+  const c = ctx(src)
+  assert.deepEqual(exitCodeBlock({ ...c, offset: 6 }), { ok: false, code: 'unsupported-structure' })
+}
+// Exit F2: 只有开栅行的未闭合空块。
+{
+  const src = '```\n'
+  const c = ctx(src)
+  assert.deepEqual(exitCodeBlock({ ...c, offset: 0 }), { ok: false, code: 'unsupported-structure' })
+}
+
+// Exit G: 波浪线栅栏 + 闭栅游程更长（合法闭栅）→ 接受；同字符校验。
+{
+  const src = '~~~js\na\n~~~~\nnext\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 0 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 13)
+}
+
+// Exit H: 非代码块（段落 / math 块）→ 拒绝。
+{
+  const src = '甲乙\n\n$$\nx+y\n$$\n'
+  const c = ctx(src)
+  assert.deepEqual(exitCodeBlock({ ...c, offset: 0 }), { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(exitCodeBlock({ ...c, offset: src.indexOf('$$') + 1 }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
+// Exit I: 列表缩进内的栅栏（前缀是纯缩进，非引用）→ 拒绝（fail-closed：空白
+// 行会终结列表续行上下文）。
+{
+  const src = '- item\n\n  ```js\n  a\n  ```\n'
+  const c = ctx(src)
+  const at = src.indexOf('```')
+  assert.deepEqual(exitCodeBlock({ ...c, offset: at }), { ok: false, code: 'unsupported-structure' })
+}
+
+// Exit J: 引用内、引用（及文档）到此为止 → 文档末尾分支：插入裸 ending 对，
+// caret 在新 EOF（退出到顶层——trailing-virtual 给它顶层空段落的家）。
+{
+  const src = '> ```js\n> a\n> ```\n'
+  const c = ctx(src)
+  const r = exitCodeBlock({ ...c, offset: 2 })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.from, 18)
+  assert.equal(r.transaction.insert, '\n\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 20, head: 20 })
+}
+
+console.log('PASS source-kernel commands (exitCodeBlock)')
