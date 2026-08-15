@@ -9,4 +9,4 @@ export { splitTextBlock, splitListItem, exitEmptyListItem } from './commands/ent
 export { indentListItem, outdentListItem } from './commands/indent.js'
 export { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
 export { routeStructuralKey } from './router.js'
-// Task 8 补充：export { createSourceHistory } from './history.js'
+export { createSourceHistory } from './history.js'
