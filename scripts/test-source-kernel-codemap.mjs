@@ -172,14 +172,22 @@ console.log('--- source-kernel code map ---')
   assert.equal(map.visibleToRaw(2), 18)
 }
 
-// Case 8: CRLF document — remark does NOT normalize a code node's line
-// endings (unlike prose text nodes), so `.value` literally embeds '\r\n' as
-// two separate JS string units. text = '```js\r\nab\r\ncd\r\n```\r\n'
+// Case 8: CRLF document — remark does NOT normalize EITHER prose or code
+// line endings (verified against the real parser: a plain paragraph's own
+// text node for 'ab\r\ncd\r\n' is 'ab\r\ncd', literal '\r' + '\n', matching
+// what character-map.js's `textUnits` already assumes for prose). `.value`
+// for a code node behaves identically. text = '```js\r\nab\r\ncd\r\n```\r\n'
 // '```js' 0-4 \r\n 5-6 | 'ab' 7-8 \r\n 9-10 | 'cd' 11-12 \r\n 13-14 | '```'
 // 15-17 \r\n 18-19. open fence line [0,5) ending '\r\n'; prefix = ''.
-// value = 'ab\r\ncd' (6 JS chars: a,b,\r,\n,c,d) -> visibleLength 5 (the
-// \r\n pair collapses to ONE linebreak unit, width 1, raw span [9,11) — 2
-// raw bytes for 1 visible position, same "front unit's end" convention.)
+// value = 'ab\r\ncd' (6 JS chars: a,b,\r,\n,c,d) -> visibleLength MUST equal
+// value.length (6): following character-map.js's own convention, the '\r'
+// (first half of '\r\n') is its own literal 'char' unit (raw [9,10), 1
+// byte); only the '\n' triggers the actual line-crossing ('linebreak' unit,
+// raw [10,11), 1 byte here since there's no prefix at top level). This is
+// what keeps `visibleLength` equal to `value.length` — and therefore equal
+// to ProseMirror's own un-normalized `content.size` — for ANY line-ending
+// style, rather than manufacturing a false mismatch by collapsing the whole
+// 2-byte terminator into one unit.
 {
   const text = '```js\r\nab\r\ncd\r\n```\r\n'
   const node = codeNodeOf(text)
@@ -187,21 +195,84 @@ console.log('--- source-kernel code map ---')
   assert.equal(node.value.length, 6)
   const map = buildCodeMap(text, node)
   assert.ok(map, 'CRLF fence must map')
-  assert.equal(map.visibleLength, 5)
+  assert.equal(map.visibleLength, node.value.length, 'visibleLength must equal value.length for CRLF')
+  assert.equal(map.visibleLength, 6)
+  // Probes around the \r boundary: 'a'(0) 'b'(1) \r-as-char(2) \n-linebreak(3) 'c'(4) 'd'(5).
   assert.equal(map.visibleToRaw(0), 7) // before 'a'
-  assert.equal(map.visibleToRaw(2), 9) // after 'ab', before the CRLF linebreak
-  assert.equal(map.visibleToRaw(3), 11) // after the CRLF linebreak, before 'c'
-  assert.deepEqual(map.rawRangeForVisibleRange(2, 3), { from: 9, to: 11 })
-  assert.equal(text.slice(9, 11), '\r\n')
-  assert.equal(map.visibleToRaw(5), 13) // after 'cd' (content end)
+  assert.equal(map.visibleToRaw(2), 9) // after 'ab', before the '\r' char unit
+  assert.equal(map.visibleToRaw(3), 10) // after the '\r' char unit, before the '\n' linebreak unit
+  assert.equal(map.visibleToRaw(4), 11) // after the linebreak, before 'c'
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 3), { from: 9, to: 10 })
+  assert.equal(text.slice(9, 10), '\r')
+  assert.deepEqual(map.rawRangeForVisibleRange(3, 4), { from: 10, to: 11 })
+  assert.equal(text.slice(10, 11), '\n')
+  assert.equal(map.visibleToRaw(6), 13) // after 'cd' (content end)
 
-  // Interior-of-multi-byte-linebreak-span (the CRLF pair itself): raw 10 (the
-  // '\n' half of the '\r\n' pair) sits strictly inside [9,11) and must not be
-  // any unit's rawStart/rawEnd.
+  // Every unit at top level (no prefix) spans exactly 1 raw byte — no
+  // interior to test here; the genuine multi-byte-span case is CRLF
+  // COMBINED with a prefix (blockquote), covered right below.
+  for (const u of map.units) assert.equal(u.rawEnd - u.rawStart, 1)
+}
+
+// Case 8b: CRLF INSIDE a blockquote — the linebreak unit's raw span now
+// covers the '\n' byte PLUS the next line's quote prefix, a genuine
+// multi-byte span (unlike Case 8's top-level, prefix-less CRLF, where every
+// unit is exactly 1 raw byte). This is the interior-of-multi-byte-
+// linebreak-span case for a CRLF document specifically.
+// text = '> ```js\r\n> ab\r\n> cd\r\n> ```\r\n'
+// '> ' 0-1 '```js' 2-6 \r\n 7-8 | '> ' 9-10 'ab' 11-12 \r\n 13-14 | '> '
+// 15-16 'cd' 17-18 \r\n 19-20 | '> ' 21-22 '```' 23-25 \r\n 26-27.
+// value = 'ab\r\ncd'. 'a'(11) 'b'(12) \r-as-char(13) \n-linebreak([14,17),
+// covering '\n'(14) + '> '(15-16)) 'c'(17) 'd'(18).
+{
+  const text = '> ```js\r\n> ab\r\n> cd\r\n> ```\r\n'
+  const node = codeNodeOf(text, 'ab')
+  assert.equal(node.value, 'ab\r\ncd')
+  const map = buildCodeMap(text, node)
+  assert.ok(map, 'quoted CRLF fence must map')
+  assert.equal(map.visibleLength, 6)
+  assert.equal(map.visibleToRaw(0), 11) // before 'a'
+  assert.equal(map.visibleToRaw(2), 13) // after 'ab', before the '\r' char unit
+  assert.equal(map.visibleToRaw(3), 14) // after the '\r' char unit, before the linebreak
+  assert.equal(map.visibleToRaw(4), 17) // after the linebreak (+ prefix), before 'c'
+  assert.deepEqual(map.rawRangeForVisibleRange(3, 4), { from: 14, to: 17 })
+  assert.equal(text.slice(14, 17), '\n> ')
+
   const linebreakUnit = map.units.find((u) => u.kind === 'linebreak')
-  assert.equal(linebreakUnit.rawStart, 9)
-  assert.equal(linebreakUnit.rawEnd, 11)
-  assert.equal(map.units.some((u) => u.rawStart === 10 || u.rawEnd === 10), false)
+  assert.equal(linebreakUnit.rawStart, 14)
+  assert.equal(linebreakUnit.rawEnd, 17)
+  for (const interior of [15, 16]) {
+    assert.equal(
+      map.units.some((u) => u.rawStart === interior || u.rawEnd === interior),
+      false,
+      `raw ${interior} must not be any unit boundary`
+    )
+  }
+}
+
+// Case 8c: lone-CR line endings (old Mac style, no '\n' at all) — a bonus
+// regression for the third ending shape buildCodeMap now branches on.
+// remark's own value for this shape (verified against the real parser) is
+// 'ab\rcd' (5 chars: the bare '\r' IS the sole separator, nothing follows
+// it in `.value`) — so unlike the '\r\n' case, the '\r' here is itself the
+// FULL line-crossing trigger, not a plain char waiting for a '\n'.
+// text = '```js\rab\rcd\r```\r': '```js' 0-4 \r 5 | 'ab' 6-7 \r 8 | 'cd' 9-10
+// \r 11 | '```' 12-14 \r 15.
+{
+  const text = '```js\rab\rcd\r```\r'
+  const node = codeNodeOf(text)
+  assert.equal(node.value, 'ab\rcd')
+  const map = buildCodeMap(text, node)
+  assert.ok(map, 'lone-CR fence must map')
+  assert.equal(map.visibleLength, node.value.length)
+  assert.equal(map.visibleLength, 5)
+  assert.equal(map.visibleToRaw(0), 6) // before 'a'
+  assert.equal(map.visibleToRaw(2), 8) // after 'ab', before the lone-CR linebreak
+  assert.equal(map.visibleToRaw(3), 9) // after the linebreak, before 'c'
+  assert.equal(map.visibleToRaw(5), 11) // after 'cd' (content end)
+  const linebreakUnit = map.units.find((u) => u.kind === 'linebreak')
+  assert.equal(linebreakUnit.kind, 'linebreak')
+  assert.equal(linebreakUnit.rawEnd - linebreakUnit.rawStart, 1) // no prefix at top level
 }
 
 // Case 9: less-indented content line -> null (fail-closed). A blockquote's

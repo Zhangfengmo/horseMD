@@ -657,13 +657,13 @@ console.log('--- kernel projection map ---')
   // and ProseMirror's `Schema.text()`/`TextNode` do no newline normalization
   // either (verified by reading node_modules/prosemirror-model's source) —
   // so a code_block's PM textContent is byte-identical to the mdast code
-  // node's `.value` for an LF document: no trailing-newline or other
-  // discrepancy to account for. (A CRLF document would differ — the PM text
-  // node keeps literal '\r\n' while buildCodeMap's linebreak unit collapses
-  // it to one visible position — the content.size cross-check below then
-  // correctly rejects the WHOLE map for a CRLF code block, rather than
-  // mismapping it; that's exercised at the buildCodeMap level directly in
-  // scripts/test-source-kernel-codemap.mjs, not the live-PM level here.)
+  // node's `.value`, no trailing-newline or other discrepancy to account
+  // for. This holds for CRLF too, not just LF: remark does not normalize a
+  // code node's (or a prose text node's) line endings either — verified
+  // against the real parser — so `buildCodeMap`'s `visibleLength` (which by
+  // construction always equals `value.length`, see code-map.js's header
+  // comment) matches PM's un-normalized `content.size` for BOTH line-ending
+  // styles. A CRLF code block is exercised end-to-end below (Case 16b).
   assert.equal(d.child(1).textContent, codeText, 'PM textContent must equal mdast value verbatim')
   assert.equal(d.child(1).content.size, codeText.length)
 
@@ -684,6 +684,50 @@ console.log('--- kernel projection map ---')
   // Surrounding paragraphs unaffected.
   assert.equal(map.pmPosToRaw(26), 35) // before p2
   assert.equal(map.pmPosToRaw(28), 37) // after p2
+}
+
+// Case 16b: CRLF document, editable js code block — the map must NOT reject
+// just because the document uses CRLF line endings (a prior version of this
+// fix wrongly collapsed a '\r\n' terminator into one width-1 unit, which
+// under-counted `visibleLength` by 1 per line break and made the
+// content.size cross-check reject the WHOLE map for any CRLF code block;
+// see code-map.js's header comment for the corrected convention).
+// md = 'p1\r\n\r\n```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\np2\r\n'
+// 'p1' 0-1 \r\n 2-3 \r\n 4-5 '```js' 6-10 \r\n 11-12 'let a = 1' 13-21 \r\n
+// 22-23 'let b = 2' 24-32 \r\n 33-34 '```' 35-37 \r\n 38-39 \r\n 40-41 'p2'
+// 42-43 \r\n 44-45. code value 'let a = 1\r\nlet b = 2' (20 chars) ==
+// PM textContent exactly (checked directly, same as Case 16's LF pin).
+// PM: paragraph1@0 (nodeSize 4) -> code_block@4 (content size 20, nodeSize
+// 22, content start 5, content end 25) -> paragraph2@26 (content start 27).
+{
+  const md = 'p1\r\n\r\n```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\np2\r\n'
+  const codeText = 'let a = 1\r\nlet b = 2'
+  const d = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'js' }, text(codeText)),
+    p(text('p2'))
+  )
+  assert.equal(d.child(1).textContent, codeText)
+  assert.equal(d.child(1).content.size, codeText.length)
+  assert.equal(codeText.length, 20)
+
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'CRLF doc with an editable js code block must map (not reject)')
+  assert.equal(map.blockPairs.length, 3)
+  const codePair = map.blockPairs[1]
+  assert.ok(codePair.charMap, 'CRLF js code_block pair must carry a real charMap')
+  assert.equal(codePair.charMap.visibleLength, 20)
+  assert.equal(map.pmPosToRaw(5), 13) // before 'l' of "let a = 1"
+  assert.equal(map.pmPosToRaw(14), 22) // after "let a = 1" (9 chars), before the '\r' char unit
+  assert.equal(map.pmPosToRaw(15), 23) // after the '\r' char unit, before the '\n' linebreak unit
+  assert.equal(map.pmPosToRaw(16), 24) // after the linebreak, before 'l' of "let b = 2"
+  assert.equal(map.pmPosToRaw(25), 33) // after "let b = 2" (content end)
+  assert.deepEqual(map.rawToPmPos(22), { pos: 14, atom: false })
+  assert.deepEqual(map.rawToPmPos(24), { pos: 16, atom: false })
+  // Round trip across the CRLF break.
+  assert.equal(map.pmPosToRaw(map.rawToPmPos(24).pos), 24)
+  // Surrounding paragraphs unaffected.
+  assert.equal(map.pmPosToRaw(27), 42) // before p2
 }
 
 // Case 17: a ```mermaid code block stays non-editable even though

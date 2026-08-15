@@ -380,16 +380,17 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // (`state.addText(node.value)`) inserts the mdast `.value` string
         // into the PM text child completely verbatim, so `content.size`
         // (== textContent.length for a text-only content model, no atoms)
-        // equals `value.length` exactly for LF-only content — a document
-        // using CRLF line endings inside this fence naturally mismatches
-        // here (buildCodeMap's linebreak units collapse a raw '\r\n' pair to
-        // ONE visible position, but the un-normalized PM text still carries
-        // both), which correctly rejects the WHOLE map rather than silently
-        // mismapping the block. No separate empty-textblock guard is needed
-        // here (unlike the generic path below): buildCodeMap's own
-        // empty-value case already anchors to the real content start (right
-        // after the open fence line's ending), never to the block's own
-        // marker position.
+        // equals `value.length` exactly. This holds for ANY line-ending
+        // style, including CRLF: remark does NOT normalize a code node's
+        // (or a prose text node's) line endings — verified against the real
+        // parser — and `buildCodeMap` matches that by construction, every
+        // unit it produces has width 1 and consumes exactly one `value` JS
+        // char (see code-map.js's own header comment), so `visibleLength`
+        // always equals `value.length` too. No separate empty-textblock
+        // guard is needed here (unlike the generic path below):
+        // buildCodeMap's own empty-value case already anchors to the real
+        // content start (right after the open fence line's ending), never
+        // to the block's own marker position.
         if (pm.node.content.size !== charMap.visibleLength) return null
       }
     } else if (editable) {

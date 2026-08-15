@@ -11,15 +11,26 @@
 //
 // Code content is VERBATIM — unlike prose text (character-map.js's job),
 // a fenced code block has no escapes/entities to decode. The only raw/value
-// divergence is:
-//   - the per-line PREFIX every content line repeats (derived once from the
-//     open fence line: the byte string from that line's own start up to the
-//     fence marker's first byte);
-//   - each line's terminator ('\n' / '\r\n' / '\r') collapsing to ONE visible
-//     line-break position in `.value` (remark does NOT normalize a fenced
-//     code block's line endings the way it does prose text nodes — a CRLF
-//     document's code `.value` literally contains '\r\n', two JS string
-//     units, verified against the real parser before writing this module).
+// divergence is the per-line PREFIX every content line repeats (derived once
+// from the open fence line: the byte string from that line's own start up to
+// the fence marker's first byte).
+//
+// Line terminators are NOT collapsed into a single multi-raw-byte unit —
+// remark does not normalize EITHER prose or code line endings (verified
+// against the real parser: a CRLF document's `.value`, prose or code,
+// literally contains '\r\n' as two separate JS string units, and a lone-CR
+// document's `.value` literally contains a bare '\r'). This module follows
+// character-map.js's own established convention for the identical situation
+// (its `textUnits`, which only special-cases a decoded `ch === '\n'`): a
+// '\r' that is the FIRST half of a '\r\n' pair is its own literal 'char'
+// unit (verbatim, like any other content byte); only the '\n' (or a lone
+// '\r' with no following '\n') triggers the actual line-crossing ('linebreak'
+// unit, raw span = the terminator's remaining byte + the next content
+// line's prefix). Every unit this module ever produces has width 1 and
+// consumes exactly one `value` JS char — this is what keeps `visibleLength`
+// equal to `value.length` for ANY line-ending style, matching ProseMirror's
+// own un-normalized `content.size` (see editor-kernel-projection-map.js's
+// cross-check) rather than manufacturing a false mismatch.
 //
 // remark's `code` node position spans the OPEN fence line through the CLOSE
 // fence line (or the raw end, if the fence is never closed) — this module
@@ -88,19 +99,20 @@ export function buildCodeMap(text, codeNode) {
   if (!text.startsWith(prefix, line.start)) return null
   let r = line.start + prefix.length
   let lineContentEnd = line.end
+  // True right after this line's '\r' half (of a '\r\n' ending) was consumed
+  // as its own literal 'char' unit below — the very next `value` char MUST
+  // be the matching '\n', which is what actually crosses into the next
+  // line. A dangling true at loop end (a '\r' with nothing after it in
+  // `value`) fails closed, same as any other divergence.
+  let crlfPending = false
 
   const units = []
   let v = 0
   while (v < value.length) {
-    if (r === lineContentEnd) {
-      // End of this raw line's content: `value`'s next char(s) must encode
-      // exactly this line's own terminator, and the FOLLOWING raw line must
-      // reproduce the same prefix — any divergence (a short/mismatched
-      // ending, no next line, a content line with less indentation/prefix
-      // than the fence) can't be proven aligned, fail closed.
-      const ending = line.ending
-      if (!ending) return null
-      if (value.slice(v, v + ending.length) !== ending) return null
+    const ch = value[v]
+
+    if (crlfPending) {
+      if (ch !== '\n' || text[r] !== '\n') return null
       lineIdx += 1
       if (lineIdx >= lines.length) return null
       const nextLine = lines[lineIdx]
@@ -108,7 +120,46 @@ export function buildCodeMap(text, codeNode) {
       const rawEnd = nextLine.start + prefix.length
       units.push({ rawStart: r, rawEnd, width: 1, kind: 'linebreak' })
       r = rawEnd
-      v += ending.length
+      v += 1
+      line = nextLine
+      lineContentEnd = line.end
+      crlfPending = false
+      continue
+    }
+
+    if (r === lineContentEnd) {
+      // End of this raw line's content: `value`'s next char must encode
+      // this line's own terminator, and (once the terminator is fully
+      // consumed) the FOLLOWING raw line must reproduce the same prefix —
+      // any divergence (a short/mismatched ending, no next line, a content
+      // line with less indentation/prefix than the fence) can't be proven
+      // aligned, fail closed.
+      const ending = line.ending
+      if (!ending) return null
+      if (ending === '\r\n') {
+        // Only the '\r' half is consumed here — see character-map.js's own
+        // convention for the identical case (its `textUnits` only
+        // special-cases a decoded '\n'; a raw '\r' that precedes it is an
+        // ordinary literal char). The '\n' half (crlfPending, above) is what
+        // actually performs the line-crossing.
+        if (ch !== '\r' || text[r] !== '\r') return null
+        units.push({ rawStart: r, rawEnd: r + 1, width: 1, kind: 'char' })
+        r += 1
+        v += 1
+        crlfPending = true
+        continue
+      }
+      // Lone '\n' or lone '\r' ending: a single `value` char performs the
+      // whole line-crossing.
+      if (ch !== ending || text[r] !== ending) return null
+      lineIdx += 1
+      if (lineIdx >= lines.length) return null
+      const nextLine = lines[lineIdx]
+      if (!text.startsWith(prefix, nextLine.start)) return null
+      const rawEnd = nextLine.start + prefix.length
+      units.push({ rawStart: r, rawEnd, width: 1, kind: 'linebreak' })
+      r = rawEnd
+      v += 1
       line = nextLine
       lineContentEnd = line.end
       continue
@@ -118,14 +169,15 @@ export function buildCodeMap(text, codeNode) {
     // must be the exact same JS string unit as `value[v]` (per UTF-16 code
     // unit, not per code point — a literal surrogate pair is just two
     // matching units in both strings, needing no special handling here).
-    if (text[r] !== value[v]) return null
+    if (text[r] !== ch) return null
     units.push({ rawStart: r, rawEnd: r + 1, width: 1, kind: 'char' })
     r += 1
     v += 1
   }
   // The last content char must land exactly at its line's own end — proves
-  // the whole final content line was consumed, not a truncated prefix of it.
-  if (r !== lineContentEnd) return null
+  // the whole final content line was consumed, not a truncated prefix of it
+  // — and there must be no dangling half-consumed '\r\n'.
+  if (crlfPending || r !== lineContentEnd) return null
 
   let visibleLength = 0
   const boundaries = new Map()
