@@ -36,7 +36,7 @@ const schema = new Schema({
     bullet_list: { content: 'list_item+', group: 'block' },
     ordered_list: { content: 'list_item+', group: 'block' },
     list_item: { content: 'paragraph block*' },
-    code_block: { content: 'text*', group: 'block', code: true },
+    code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } },
     table: { content: 'table_row+', group: 'block' },
     table_row: { content: 'table_cell+' },
     table_cell: { content: 'paragraph+' },
@@ -191,40 +191,58 @@ console.log('--- kernel projection map ---')
 // \n=10 `=11 `=12 `=13 \n=14 \n=15 p=16 2=17 \n=18. mdast (kernel run):
 // paragraph[0,2), code[4,14), paragraph[16,18).
 // PM: paragraph1@0 (content start 1, size 2 -> range [1,3]); code_block@4
-// (non-editable: charMap must be null even though it has real content —
-// this is the case that used to null the WHOLE map via the content.size
-// mismatch); paragraph2@8 (content start 9, size 2 -> range [9,11]).
+// (content "hi" size 2, content start 5); paragraph2@8 (content start 9,
+// size 2 -> range [9,11]).
+//
+// Plan 3 Task 3 update: `code_block` now gets a real charMap via
+// buildCodeMap (it used to be hardcoded non-editable, see the superseded
+// history in editor-kernel-projection-map.js's NON_EDITABLE_LEAF_TYPES
+// comment) — this pair's charMap is non-null and its content raw-mapped,
+// same as any other textblock. This does NOT make code blocks actually
+// editable in the live app yet: `editor-kernel-cm-bridge.js` still enforces
+// a REAL CodeMirror `readOnly` facet independent of this map (Plan 3's
+// gateway relaxation is a later task) — see docs/... Task 3 report.
 {
   const md = 'p1\n\n```\nhi\n```\n\np2\n'
   const d = doc(p(text('p1')), schema.node('code_block', null, text('hi')), p(text('p2')))
   const map = buildProjectionMap(md, d)
   assert.ok(map, 'doc containing a non-empty code block must still map')
   assert.equal(map.blockPairs.length, 3)
-  assert.equal(map.blockPairs[1].charMap, null, 'code_block pair must be non-editable')
+  assert.ok(map.blockPairs[1].charMap, 'code_block pair now carries a real charMap')
+  assert.equal(map.blockPairs[1].charMap.visibleLength, 2)
   assert.equal(map.pmPosToRaw(1), 0) // before p1
   assert.equal(map.pmPosToRaw(3), 2) // after p1
   assert.equal(map.pmPosToRaw(9), 16) // before p2
   assert.equal(map.pmPosToRaw(11), 18) // after p2
-  assert.equal(map.pmPosToRaw(5), null) // inside the code block's PM content
-  assert.equal(map.rawToPmPos(9), null) // raw 9 = 'i' of "hi", inside the fence
+  assert.equal(map.pmPosToRaw(5), 8) // before 'h' (code content start)
+  assert.equal(map.pmPosToRaw(6), 9) // between 'h' and 'i'
+  assert.equal(map.pmPosToRaw(7), 10) // after "hi" (code content end)
+  assert.deepEqual(map.rawToPmPos(9), { pos: 6, atom: false }) // raw 9 = 'i' of "hi"
+  assert.deepEqual(map.rawToPmPos(8), { pos: 5, atom: false }) // raw 8 = 'h' of "hi"
 }
 
 // Case 7: empty fenced code block ('```\n```\n'). mdast code node has NO
 // `.children` at all regardless of whether its `.value` is empty or not —
-// buildCharacterMap would return an empty (non-null) units array either
-// way, so this case specifically proves the fix isn't just "big code blocks
-// null the whole map" but "code blocks never claim a charMap, period" —
-// an empty one must NOT silently report its fence position as a valid
-// content boundary.
+// buildCharacterMap's `collectUnits` (which only reads `.children`) would
+// have returned an empty (non-null) units array either way, a false "proof"
+// of alignment that motivated keeping `code_block` non-editable altogether
+// (see the superseded history in editor-kernel-projection-map.js's
+// NON_EDITABLE_LEAF_TYPES comment). `buildCodeMap` (Plan 3 Task 3) has its
+// own dedicated empty-value path instead: it anchors the ONE boundary to
+// the real raw content start (right after the open fence line's ending,
+// raw 4 here: '```\n' is 4 bytes), which is provably correct rather than a
+// coincidence of collectUnits never looking at the payload.
 {
   const md = '```\n```\n'
   const d = doc(schema.node('code_block', null, []))
   const map = buildProjectionMap(md, d)
-  assert.ok(map, 'doc with only an empty code block must still map (non-editable, not rejected)')
+  assert.ok(map, 'doc with only an empty code block must still map')
   assert.equal(map.blockPairs.length, 1)
-  assert.equal(map.blockPairs[0].charMap, null)
-  assert.equal(map.pmPosToRaw(1), null) // content pos of the empty code block
-  assert.equal(map.rawToPmPos(2), null) // third backtick of the opening fence
+  assert.ok(map.blockPairs[0].charMap, 'empty code_block still carries a (zero-unit) charMap')
+  assert.equal(map.blockPairs[0].charMap.visibleLength, 0)
+  assert.equal(map.pmPosToRaw(1), 4) // content pos of the empty code block -> right after '```\n'
+  assert.equal(map.rawToPmPos(2), null) // third backtick of the opening fence: unmappable
+  assert.deepEqual(map.rawToPmPos(4), { pos: 1, atom: false }) // right after the open fence line
 }
 
 // Case 8: empty ATX heading ('#\nP\n') followed by a normal paragraph.
@@ -609,6 +627,114 @@ console.log('--- kernel projection map ---')
   assert.equal(map.blockPairs[1].virtual, true)
   // image-block@0 has nodeSize 1 (atom) -> trailing p@1, content start 2.
   assert.deepEqual(map.virtualBlockAt(2), { raw: 12, prefix: '\n' })
+}
+
+// --- Plan 3 Task 3: code_block gets a real, prefix-aware charMap ---
+
+// Case 16: editable js code block, two content lines — proves pmPosToRaw
+// resolves real raw offsets INTO the code content, including across the
+// line break, not just at the pair's own start/end (the way Case 6 above
+// only ever probed a single-line block).
+// Raw 'p1\n\n```js\nlet a = 1\nlet b = 2\n```\n\np2\n':
+// p1 [0,2) \n\n [2,4) '```js' [4,9) \n [9,10) 'let a = 1' [10,19) \n [19,20)
+// 'let b = 2' [20,29) \n [29,30) '```' [30,33) \n\n [33,35) p2 [35,37) \n [37]
+// (checked against a real remark parse: code node value is exactly
+// 'let a = 1\nlet b = 2', 19 chars.)
+// PM: paragraph1@0 (nodeSize 4) -> code_block@4 (content 'let a = 1\nlet b = 2'
+// size 19, nodeSize 21, content start 5, content end 24) -> paragraph2@25
+// (content start 26).
+{
+  const md = 'p1\n\n```js\nlet a = 1\nlet b = 2\n```\n\np2\n'
+  const codeText = 'let a = 1\nlet b = 2'
+  const d = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'js' }, text(codeText)),
+    p(text('p2'))
+  )
+  // Deliverable 2's probe, pinned: Milkdown's codeBlockSchema.parseMarkdown
+  // runner does `state.addText(node.value)` with NO transformation (verified
+  // by reading node_modules/@milkdown/preset-commonmark's source directly),
+  // and ProseMirror's `Schema.text()`/`TextNode` do no newline normalization
+  // either (verified by reading node_modules/prosemirror-model's source) —
+  // so a code_block's PM textContent is byte-identical to the mdast code
+  // node's `.value` for an LF document: no trailing-newline or other
+  // discrepancy to account for. (A CRLF document would differ — the PM text
+  // node keeps literal '\r\n' while buildCodeMap's linebreak unit collapses
+  // it to one visible position — the content.size cross-check below then
+  // correctly rejects the WHOLE map for a CRLF code block, rather than
+  // mismapping it; that's exercised at the buildCodeMap level directly in
+  // scripts/test-source-kernel-codemap.mjs, not the live-PM level here.)
+  assert.equal(d.child(1).textContent, codeText, 'PM textContent must equal mdast value verbatim')
+  assert.equal(d.child(1).content.size, codeText.length)
+
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with an editable js code block must map')
+  assert.equal(map.blockPairs.length, 3)
+  const codePair = map.blockPairs[1]
+  assert.ok(codePair.charMap, 'js code_block pair must carry a real charMap')
+  assert.equal(codePair.charMap.visibleLength, 19)
+  assert.equal(map.pmPosToRaw(5), 10) // before 'l' of "let a = 1"
+  assert.equal(map.pmPosToRaw(14), 19) // after "let a = 1" (9 chars), before the linebreak
+  assert.equal(map.pmPosToRaw(15), 20) // after the linebreak, before 'l' of "let b = 2"
+  assert.equal(map.pmPosToRaw(24), 29) // after "let b = 2" (content end)
+  assert.deepEqual(map.rawToPmPos(19), { pos: 14, atom: false })
+  assert.deepEqual(map.rawToPmPos(20), { pos: 15, atom: false })
+  // Round trip across the line break.
+  assert.equal(map.pmPosToRaw(map.rawToPmPos(20).pos), 20)
+  // Surrounding paragraphs unaffected.
+  assert.equal(map.pmPosToRaw(26), 35) // before p2
+  assert.equal(map.pmPosToRaw(28), 37) // after p2
+}
+
+// Case 17: a ```mermaid code block stays non-editable even though
+// buildCodeMap could map it just fine — Crepe renders it as a diagram
+// PREVIEW (editor-crepe-setup.js's codeBlockConfig.renderPreview), not
+// literal text, so the kernel must never offer a raw-text edit path into
+// it. Matched case-insensitively against the PM node's own attrs.language.
+{
+  const md = 'p1\n\n```mermaid\ngraph TD\n```\n\np2\n'
+  const d = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'mermaid' }, text('graph TD')),
+    p(text('p2'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with a mermaid code block must still map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].charMap, null, 'mermaid code_block pair must stay non-editable')
+  // Language match is case-insensitive.
+  const upper = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'MERMAID' }, text('graph TD')),
+    p(text('p2'))
+  )
+  assert.equal(buildProjectionMap(md, upper).blockPairs[1].charMap, null)
+}
+
+// Case 18: the math/latex shape. Crepe's own math-block feature
+// (@milkdown/crepe's blockLatexSchema, verified by reading its source)
+// literally REUSES the plain codeBlockSchema for a `$$...$$` block — on the
+// PM side, a math block IS a `code_block` with `attrs.language === 'latex'`,
+// indistinguishable in shape from a real ```latex code fence. That's the
+// half of the guard this test can exercise with a REAL parse: the kernel's
+// own buildSyntaxIndex (syntax-index.js) registers only remark-parse +
+// remark-gfm, no remark-math, so it can never itself produce an mdast
+// `math` node to pair against — `md.type === 'math'` in
+// editor-kernel-projection-map.js's codeReadOnly check is accordingly a
+// defensive/forward-compatible branch, unreachable via today's kernel
+// parser (documented here so the next reader doesn't mistake the missing
+// coverage for an oversight).
+{
+  const md = 'p1\n\n```latex\nx^2\n```\n\np2\n'
+  const d = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'latex' }, text('x^2')),
+    p(text('p2'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with a latex-language code block must still map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].charMap, null, 'latex-language code_block pair must stay non-editable')
 }
 
 console.log('PASS kernel projection map')

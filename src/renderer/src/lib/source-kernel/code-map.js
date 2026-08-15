@@ -1,0 +1,147 @@
+// SourceCodeMap: character-level boundary mapping between a FENCED CODE
+// BLOCK's decoded `.value` and its raw source bytes, prefix-aware (a
+// blockquote's `> ` markers / a list item's indentation strip a per-line
+// prefix that carries no content, exactly like `markdown-preservation`'s
+// QUOTE_PREFIX convention elsewhere in this codebase).
+//
+// Same charmap-compatible contract as `character-map.js`'s
+// `buildCharacterMap`: `{ units, visibleLength, visibleToRaw,
+// rawRangeForVisibleRange }`, "front unit's end" boundary convention,
+// fail-closed (`null`) on any alignment this module can't prove.
+//
+// Code content is VERBATIM — unlike prose text (character-map.js's job),
+// a fenced code block has no escapes/entities to decode. The only raw/value
+// divergence is:
+//   - the per-line PREFIX every content line repeats (derived once from the
+//     open fence line: the byte string from that line's own start up to the
+//     fence marker's first byte);
+//   - each line's terminator ('\n' / '\r\n' / '\r') collapsing to ONE visible
+//     line-break position in `.value` (remark does NOT normalize a fenced
+//     code block's line endings the way it does prose text nodes — a CRLF
+//     document's code `.value` literally contains '\r\n', two JS string
+//     units, verified against the real parser before writing this module).
+//
+// remark's `code` node position spans the OPEN fence line through the CLOSE
+// fence line (or the raw end, if the fence is never closed) — this module
+// never assumes a closing fence exists; it only ever walks forward from the
+// open fence line through however many content lines `.value` accounts for.
+//
+// CommonMark's "up to N spaces of indentation, whichever are present" rule
+// (and a blockquote's optional post-'>' space) can let a content line be
+// exactly reproduced by remark using LESS than the open line's own prefix.
+// This module does not model that leniency: a content line must reproduce
+// the derived prefix BYTE-FOR-BYTE, or the whole block fails closed (null) —
+// under-mapping to "not editable" is safe, a silently wrong raw offset is
+// not.
+//
+// This directory (source-kernel) forbids importing electron/react/@milkdown.
+import { scanLines } from './syntax-index.js'
+
+function lineIndexAt(lines, offset) {
+  let lo = 0
+  let hi = lines.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (lines[mid].start <= offset) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+// Zero-content code block ('```\n```\n'): the only meaningful raw position is
+// right after the open fence line's own ending — where a closing fence (or a
+// user's first typed line) would begin. No content lines to prefix-check.
+function emptyCodeMap(rawOffset) {
+  return {
+    units: [],
+    visibleLength: 0,
+    visibleToRaw: (vis) => (vis === 0 ? rawOffset : null),
+    rawRangeForVisibleRange: (from, to) => (
+      from === 0 && to === 0 ? { from: rawOffset, to: rawOffset } : null
+    )
+  }
+}
+
+export function buildCodeMap(text, codeNode) {
+  const value = String(codeNode?.value ?? '')
+  const start = codeNode?.position?.start?.offset
+  const end = codeNode?.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null
+
+  const lines = scanLines(text)
+  const openIdx = lineIndexAt(lines, start)
+  const openLine = lines[openIdx]
+  if (start < openLine.start || start > openLine.end) return null
+
+  // Everything from the open fence line's own start up to the fence
+  // marker's first byte: quote markers + indentation. Applied identically,
+  // byte-for-byte, to every content line below.
+  const prefix = text.slice(openLine.start, start)
+
+  if (value.length === 0) {
+    return emptyCodeMap(openLine.end + openLine.ending.length)
+  }
+
+  let lineIdx = openIdx + 1
+  if (lineIdx >= lines.length) return null
+  let line = lines[lineIdx]
+  if (!text.startsWith(prefix, line.start)) return null
+  let r = line.start + prefix.length
+  let lineContentEnd = line.end
+
+  const units = []
+  let v = 0
+  while (v < value.length) {
+    if (r === lineContentEnd) {
+      // End of this raw line's content: `value`'s next char(s) must encode
+      // exactly this line's own terminator, and the FOLLOWING raw line must
+      // reproduce the same prefix — any divergence (a short/mismatched
+      // ending, no next line, a content line with less indentation/prefix
+      // than the fence) can't be proven aligned, fail closed.
+      const ending = line.ending
+      if (!ending) return null
+      if (value.slice(v, v + ending.length) !== ending) return null
+      lineIdx += 1
+      if (lineIdx >= lines.length) return null
+      const nextLine = lines[lineIdx]
+      if (!text.startsWith(prefix, nextLine.start)) return null
+      const rawEnd = nextLine.start + prefix.length
+      units.push({ rawStart: r, rawEnd, width: 1, kind: 'linebreak' })
+      r = rawEnd
+      v += ending.length
+      line = nextLine
+      lineContentEnd = line.end
+      continue
+    }
+
+    // Verbatim content char: no escapes/entities, so the raw byte at `r`
+    // must be the exact same JS string unit as `value[v]` (per UTF-16 code
+    // unit, not per code point — a literal surrogate pair is just two
+    // matching units in both strings, needing no special handling here).
+    if (text[r] !== value[v]) return null
+    units.push({ rawStart: r, rawEnd: r + 1, width: 1, kind: 'char' })
+    r += 1
+    v += 1
+  }
+  // The last content char must land exactly at its line's own end — proves
+  // the whole final content line was consumed, not a truncated prefix of it.
+  if (r !== lineContentEnd) return null
+
+  let visibleLength = 0
+  const boundaries = new Map()
+  boundaries.set(0, units[0].rawStart)
+  for (const unit of units) {
+    visibleLength += unit.width
+    boundaries.set(visibleLength, unit.rawEnd)
+  }
+
+  const visibleToRaw = (vis) => (boundaries.has(vis) ? boundaries.get(vis) : null)
+  const rawRangeForVisibleRange = (visFrom, visTo) => {
+    const from = visibleToRaw(visFrom)
+    const to = visibleToRaw(visTo)
+    if (from === null || to === null || from > to) return null
+    return { from, to }
+  }
+
+  return { units, visibleLength, visibleToRaw, rawRangeForVisibleRange }
+}

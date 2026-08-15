@@ -15,15 +15,21 @@
 // non-editable by construction, though — they still occupy a slot in the
 // structural pairing (so a document CONTAINING one still maps its other
 // blocks), but never carry a charMap and any offset targeting them (or
-// their raw span) resolves to `null`: `code_block`/`html` (no reliable
-// character-level decode contract; math shares `code_block` on the PM
-// side) and `table` (treated as one opaque leaf — see OPAQUE_TYPES below).
+// their raw span) resolves to `null`: `html` (no reliable character-level
+// decode contract) and `table` (treated as one opaque leaf — see
+// OPAQUE_TYPES below). `code_block` (Plan 3 Task 3) gets a real,
+// prefix-aware charMap via `buildCodeMap` — EXCEPT when it pairs with mdast
+// `math` (TeX source, not the char-per-char prose/code contract) or its own
+// `attrs.language` is one Crepe renders as a preview-only diagram instead of
+// literal text (mermaid/latex) — see READONLY_CODE_LANGUAGES below.
 // See docs referenced by Task 1 brief:
 // scripts/test-editor-source-map.mjs for the hand-built-PM-schema precedent
 // and src/renderer/src/lib/source-kernel/character-map.js for the unit
 // model (`units[]`, `kind` in char|escape|entity|atom|linebreak, boundary
-// convention "front unit's end").
-import { buildSyntaxIndex, buildCharacterMap } from '../lib/source-kernel/index.js'
+// convention "front unit's end") — `code-map.js`'s `buildCodeMap` returns
+// the same shape (`kind` in char|linebreak only, code has no escapes/
+// entities).
+import { buildSyntaxIndex, buildCharacterMap, buildCodeMap } from '../lib/source-kernel/index.js'
 
 // PM block-level node name -> the mdast block type(s) it may structurally
 // pair with. Both sides are walked in document order (pre-order, containers
@@ -58,20 +64,27 @@ const MD_BLOCK_TYPES = new Set(Object.values(PM_TO_MD).flat())
 // PM leaf types that structurally pair (so a doc CONTAINING one still gets
 // a map for its other blocks) but are never treated as character-mappable
 // content, regardless of what buildCharacterMap would report:
-//  - `code_block` (mdast `code`/`math`): the mdast `code`/`math` node has no
-//    `.children` — its text lives in `.value` — so `buildCharacterMap`'s
-//    `collectUnits` (which only reads `.children`) sees zero children and
-//    returns an EMPTY units array (not null) for any code block, empty or
-//    not. That's not a proof of alignment, it's collectUnits never looking
-//    at the payload at all — treating it as editable let a non-empty code
-//    block null the WHOLE map (content.size mismatch) and let an empty code
-//    block silently report its own fence position as if it were a valid
-//    content boundary. Both are wrong; the fix is to never claim character
-//    mapping for this node type in the first place.
 //  - `html`: block HTML is opaque prose (may contain raw markdown-like
 //    bytes with no decode contract) — kept non-editable even on schemas
 //    where it's declared as a textblock rather than an atom.
-const NON_EDITABLE_LEAF_TYPES = new Set(['code_block', 'html'])
+// `code_block` used to be in this set too (mdast `code`/`math` has no
+// `.children` — its text lives in `.value` — so `buildCharacterMap`'s
+// `collectUnits`, which only reads `.children`, saw zero children and
+// returned an EMPTY-but-not-null units array for any code block, a false
+// "proof" of alignment). Plan 3 Task 3 gives it a real mapper instead
+// (`buildCodeMap`, prefix-aware for blockquote/list-indented fences) —
+// see the `pmType === 'code_block'` branch below, which still forces
+// non-editable for the two cases `buildCodeMap` genuinely can't/shouldn't
+// cover: pairing with mdast `math`, and Crepe's preview-only languages.
+const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
+
+// `code_block` languages Crepe renders as a diagram/formula PREVIEW instead
+// of literal text (editor-crepe-setup.js's codeBlockConfig.renderPreview) —
+// their PM textContent is the SOURCE the preview is generated from, but
+// editing that source through the kernel's character-level machinery isn't
+// wired up (a later Plan 3 task). Matched case-insensitively against the PM
+// node's own `attrs.language` (Milkdown's codeBlockSchema attr).
+const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
 
 // PM/mdast types whose subtree is intentionally NOT walked into for
 // pairing purposes: `table` is recorded as ONE opaque pair. A typical PM
@@ -349,7 +362,37 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       !NON_EDITABLE_LEAF_TYPES.has(pmType) &&
       !OPAQUE_TYPES.has(pmType)
     let charMap = null
-    if (editable) {
+    if (editable && pmType === 'code_block') {
+      // mdast `math` shares the PM `code_block` type but is TeX source, not
+      // the char-per-char code contract `buildCodeMap` proves — never claim
+      // a charMap for it. Otherwise, a language Crepe renders as a
+      // preview-only diagram/formula (mermaid/latex, checked
+      // case-insensitively on the PM node's own `attrs.language`) also stays
+      // non-editable, regardless of what buildCodeMap could prove.
+      const language = String(pm.node.attrs?.language || '').toLowerCase()
+      const codeReadOnly = md.type === 'math' || READONLY_CODE_LANGUAGES.has(language)
+      if (!codeReadOnly) {
+        charMap = buildCodeMap(markdown, md)
+        if (!charMap) return null
+        // Same structural (not textual) consistency check as the generic
+        // path below: PM's own content size must equal the kernel's decoded
+        // visible length. Milkdown's own code_block parseMarkdown runner
+        // (`state.addText(node.value)`) inserts the mdast `.value` string
+        // into the PM text child completely verbatim, so `content.size`
+        // (== textContent.length for a text-only content model, no atoms)
+        // equals `value.length` exactly for LF-only content — a document
+        // using CRLF line endings inside this fence naturally mismatches
+        // here (buildCodeMap's linebreak units collapse a raw '\r\n' pair to
+        // ONE visible position, but the un-normalized PM text still carries
+        // both), which correctly rejects the WHOLE map rather than silently
+        // mismapping the block. No separate empty-textblock guard is needed
+        // here (unlike the generic path below): buildCodeMap's own
+        // empty-value case already anchors to the real content start (right
+        // after the open fence line's ending), never to the block's own
+        // marker position.
+        if (pm.node.content.size !== charMap.visibleLength) return null
+      }
+    } else if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character
       // alignment — no charMap means the kernel couldn't prove the raw
       // source round-trips through this block's decoded text, so the whole

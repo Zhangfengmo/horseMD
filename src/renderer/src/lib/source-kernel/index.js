@@ -3,6 +3,7 @@
 export { createMarkdownDocument, applySourceTransaction } from './markdown-document.js'
 export { buildSyntaxIndex, scanLines } from './syntax-index.js'
 export { buildCharacterMap } from './character-map.js'
+export { buildCodeMap } from './code-map.js'
 export { replaceVisibleText } from './commands/replace-text.js'
 export { toggleTaskMarker } from './commands/task-toggle.js'
 export { splitTextBlock, splitListItem, exitEmptyListItem } from './commands/enter.js'
