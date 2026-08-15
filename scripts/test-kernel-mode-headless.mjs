@@ -68,7 +68,12 @@ const FIXTURE_DOCS = {
   // insert) followed by a language switch, both on the same block.
   '```js\nab\n```\n': () => doc(cb('js', 'ab')),
   '```js\naX\nYb\n```\n': () => doc(cb('js', 'aX\nYb')),
-  '```python\naX\nYb\n```\n': () => doc(cb('python', 'aX\nYb'))
+  '```python\naX\nYb\n```\n': () => doc(cb('python', 'aX\nYb')),
+  // Fix-review ADR fixture (2026-08-16): CRLF code block (non-editable) +
+  // a plain LF paragraph — Case 13 edits the paragraph AFTER the code block
+  // edit is refused, to prove no global lockout.
+  '```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))),
+  '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲丙乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -775,6 +780,49 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
       entry.type === 'projection-mismatch' || entry.type === 'map-refresh-failed').length,
     0,
     'neither commit should have needed a projection repair'
+  )
+}
+
+// Case 13 (fix-review ADR, 2026-08-16): a CRLF-lineEnding code block is
+// non-editable (editor-kernel-projection-map.js's ADR comment) — a
+// multi-line insert targeting it must be VETOED, never committed (i) kernel
+// bytes stay byte-identical to the pre-edit source, (ii) no
+// projection-mismatch/repair churn (nothing was ever dispatched to the
+// kernel, so there is nothing to reconcile), and (iii) the controller stays
+// fully healthy afterward — a SEPARATE, ordinary edit elsewhere in the same
+// document still commits normally (no global lockout from the refused
+// code-block edit).
+{
+  globalThis.__hmKernelDiagnostics = []
+  const initialMd = '```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n'
+  const h = makeHarness(initialMd, doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true, 'CRLF-code + paragraph doc must map')
+
+  // code_block open@0, content 'ab\r\ncd' [1,7) (a@1 b@2 \r@3 \n@4 c@5 d@6).
+  const tr1 = h.view.state.tr.insertText('X\nY', 3)
+  const verdict1 = dispatchThrough(h, tr1)
+  await flushMicrotasks()
+  assert.deepEqual(verdict1, { veto: true }, 'a CRLF code_block edit must be vetoed, never committed')
+  assert.equal(h.controller.kernel.doc.text, initialMd, 'kernel bytes untouched by the refused edit')
+  assert.equal(h.view.state.doc.textContent, 'ab\r\ncd甲乙', 'view untouched after veto (dispatch protocol skips updateState)')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
+    0,
+    'nothing was ever committed, so there is nothing to reconcile'
+  )
+
+  // (iii) no lockout: an ordinary edit into the paragraph ('甲乙', PM
+  // content [9,11)) right after the refused code-block edit must still
+  // commit normally.
+  const tr2 = h.view.state.tr.insertText('丙', 10)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined, 'an unrelated edit after a refused code-block edit must not be vetoed')
+  assert.equal(h.controller.kernel.doc.text, '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
+    0,
+    'the follow-up commit must also pass cheap-path verify cleanly'
   )
 }
 

@@ -686,12 +686,22 @@ console.log('--- kernel projection map ---')
   assert.equal(map.pmPosToRaw(28), 37) // after p2
 }
 
-// Case 16b: CRLF document, editable js code block — the map must NOT reject
-// just because the document uses CRLF line endings (a prior version of this
-// fix wrongly collapsed a '\r\n' terminator into one width-1 unit, which
-// under-counted `visibleLength` by 1 per line break and made the
-// content.size cross-check reject the WHOLE map for any CRLF code block;
-// see code-map.js's header comment for the corrected convention).
+// Case 16b: CRLF document, code block STAYS PAIRED but is now NON-EDITABLE
+// (ADR, Plan 3 Task 4 fix-review, 2026-08-16 — see the matching comment in
+// editor-kernel-projection-map.js's `pmType === 'code_block'` branch for the
+// full investigation). A prior version of this suite asserted the OPPOSITE
+// (CRLF code blocks carry a real, editable charMap) — that was correct
+// about buildCodeMap's OWN math (it does not under-count CRLF units; see
+// code-map.js's header comment), but did not yet know that the LIVE
+// CodeMirror bridge (`@milkdown/components`'s CodeMirrorBlock) silently
+// drops '\r' from its own internal position model, which can misalign
+// `forwardUpdate`'s PM step positions for any edit past a CRLF block's first
+// line break — a defect this projection-map module cannot see or correct
+// from its own vantage point. Until that vendored bridge is fixed, a
+// non-'\n' `lineEnding` (buildCodeMap's own derived value) keeps the block
+// non-editable, exactly like mermaid/latex/math — the block still occupies
+// its slot in the structural pairing (surrounding blocks stay mappable),
+// it just never claims a charMap.
 // md = 'p1\r\n\r\n```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\np2\r\n'
 // 'p1' 0-1 \r\n 2-3 \r\n 4-5 '```js' 6-10 \r\n 11-12 'let a = 1' 13-21 \r\n
 // 22-23 'let b = 2' 24-32 \r\n 33-34 '```' 35-37 \r\n 38-39 \r\n 40-41 'p2'
@@ -712,21 +722,13 @@ console.log('--- kernel projection map ---')
   assert.equal(codeText.length, 20)
 
   const map = buildProjectionMap(md, d)
-  assert.ok(map, 'CRLF doc with an editable js code block must map (not reject)')
+  assert.ok(map, 'CRLF doc with a code block must still map (structural pairing preserved)')
   assert.equal(map.blockPairs.length, 3)
   const codePair = map.blockPairs[1]
-  assert.ok(codePair.charMap, 'CRLF js code_block pair must carry a real charMap')
-  assert.equal(codePair.charMap.visibleLength, 20)
-  assert.equal(map.pmPosToRaw(5), 13) // before 'l' of "let a = 1"
-  assert.equal(map.pmPosToRaw(14), 22) // after "let a = 1" (9 chars), before the '\r' char unit
-  assert.equal(map.pmPosToRaw(15), 23) // after the '\r' char unit, before the '\n' linebreak unit
-  assert.equal(map.pmPosToRaw(16), 24) // after the linebreak, before 'l' of "let b = 2"
-  assert.equal(map.pmPosToRaw(25), 33) // after "let b = 2" (content end)
-  assert.deepEqual(map.rawToPmPos(22), { pos: 14, atom: false })
-  assert.deepEqual(map.rawToPmPos(24), { pos: 16, atom: false })
-  // Round trip across the CRLF break.
-  assert.equal(map.pmPosToRaw(map.rawToPmPos(24).pos), 24)
-  // Surrounding paragraphs unaffected.
+  assert.equal(codePair.charMap, null, 'CRLF code_block pair must stay non-editable (CM bridge ADR)')
+  // Surrounding paragraphs unaffected — only the CRLF code block itself
+  // loses its charMap, everything else in the document maps normally.
+  assert.equal(map.pmPosToRaw(1), 0) // inside p1
   assert.equal(map.pmPosToRaw(27), 42) // before p2
 }
 

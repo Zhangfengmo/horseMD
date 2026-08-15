@@ -598,4 +598,48 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
     'a \\n inside a plain paragraph must stay refused')
 }
 
+// Case 28 (fix-review ADR, 2026-08-16): a CRLF-lineEnding code block stays
+// structurally paired but NON-EDITABLE (see editor-kernel-projection-map.js's
+// ADR comment on the `pmType === 'code_block'` branch for the full
+// investigation — the vendored @milkdown/components CodeMirrorBlock nodeview
+// silently drops '\r' from its own internal CM6 position model, which can
+// misalign `forwardUpdate`'s PM step positions for any edit past a CRLF
+// block's first line break, undetectably from this gateway's own vantage
+// point). Classification stays PM-structural only (unaffected by the ADR —
+// it still says `plain-text`), but `commitPlainText` must fail closed
+// (UNMAPPED) for ANY edit targeting the block, single-char OR multi-line,
+// never silently corrupting a line ending or reaching the newline-expansion
+// path at all.
+{
+  const md = '```js\r\nab\r\ncd\r\n```\r\n'
+  const d = doc(cb('js', 'ab\r\ncd'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'CRLF code block doc must still map (structural pairing preserved)')
+  assert.equal(map.blockPairs[0].charMap, null, 'CRLF code_block pair must be non-editable')
+
+  // (a) a single-char edit on line 2 — content 'ab\r\ncd': a@1 b@2 \r@3 \n@4
+  // c@5 d@6 — inserting right before 'c' (PM pos 5) is exactly the shape a
+  // CM-bridge position bug could otherwise misalign.
+  const tr1 = state.tr.insertText('X', 5)
+  const classified1 = classifyTransactions([tr1], state)
+  assert.equal(classified1.kind, 'plain-text', 'classification is PM-structural only, unaffected by the ADR')
+  const kernel1 = { doc: createMarkdownDocument(md) }
+  const committed1 = commitPlainText({ kernel: kernel1, map, transactions: [tr1], oldState: state })
+  assert.equal(committed1.ok, false)
+  assert.equal(committed1.code, KERNEL_CODES.UNMAPPED)
+  assert.equal(kernel1.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+
+  // (b) a multi-line insert (the shape this task set out to support) must
+  // ALSO fail closed for a CRLF block.
+  const tr2 = state.tr.insertText('X\nY', 3)
+  const classified2 = classifyTransactions([tr2], state)
+  assert.equal(classified2.kind, 'plain-text')
+  const kernel2 = { doc: createMarkdownDocument(md) }
+  const committed2 = commitPlainText({ kernel: kernel2, map, transactions: [tr2], oldState: state })
+  assert.equal(committed2.ok, false)
+  assert.equal(committed2.code, KERNEL_CODES.UNMAPPED)
+  assert.equal(kernel2.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+}
+
 console.log('PASS kernel gateway')

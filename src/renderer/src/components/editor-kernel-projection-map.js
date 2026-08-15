@@ -397,6 +397,72 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // content start (right after the open fence line's ending), never
         // to the block's own marker position.
         if (pm.node.content.size !== charMap.visibleLength) return null
+        // ADR (Plan 3 Task 4 fix-review, 2026-08-16): a code_block whose
+        // dominant line ending is NOT bare '\n' stays non-editable, for a
+        // reason entirely outside this module's own math — it is a
+        // pre-existing defect in the VENDORED `@milkdown/components`
+        // CodeMirrorBlock nodeview (node_modules/@milkdown/components/lib/
+        // code-block/index.js), not something buildCodeMap/pmPosToRaw gets
+        // wrong. Investigation findings:
+        //  - `initializeCodeMirror()` feeds the PM node's literal (CRLF-
+        //    preserving) `textContent` into `new EditorView({ doc, ... })`.
+        //    CodeMirror6 builds its OWN internal `Text` model by splitting
+        //    on `/\r\n?|\n/` (verified by reading
+        //    node_modules/@codemirror/state/dist/index.cjs) — the
+        //    separator bytes are DISCARDED, never stored. Empirically:
+        //    `EditorState.create({doc:"let a = 1\r\nlet b = 2"}).doc.length`
+        //    is 19, not the raw string's 20 — CM's internal doc is missing
+        //    the '\r'. Every CM position at/after the block's first
+        //    line-break is therefore off by one PM offset (more for
+        //    further lines) relative to the PM node's own '\r\n'-preserving
+        //    positions, from the moment the nodeview mounts — independent
+        //    of any particular edit.
+        //  - `forwardUpdate` (CM -> PM) computes PM step positions as
+        //    `offset + fromA` / `offset + toA` using CM's own (already
+        //    deficient) coordinates with no correction for the dropped
+        //    '\r' bytes. A ReplaceStep built this way is structurally
+        //    indistinguishable from a correct one by the time it reaches
+        //    editor-kernel-gateway.js's classification — there is no
+        //    signal at the gateway/kernel layer that could detect "this
+        //    position undercounts N dropped bytes". A single-character
+        //    edit anywhere past the block's first line break can silently
+        //    commit to the WRONG raw range (e.g. a Backspace meant to join
+        //    two CRLF lines instead deletes only the '\r' half, quietly
+        //    converting that one line ending to a bare '\n' while the rest
+        //    of the block stays CRLF) — this predates Plan 3 Task 4
+        //    entirely; it was already reachable the moment code_block
+        //    became editable at all.
+        //  - Separately (and independent of the bug above), `Text.
+        //    prototype.toString()` (used to build `forwardUpdate`'s
+        //    inserted text) always joins with a bare '\n' — CM can never
+        //    itself emit a '\r'. So even a text-commit confined to a
+        //    block's first line (where CM's position math is still
+        //    correct) leaves the block's OWN PM node with a bare '\n' at
+        //    the newly-typed line break, while the correctly-committed raw
+        //    bytes (via this module's `lineEnding`-aware expansion in
+        //    editor-kernel-gateway.js `commitPlainText`) correctly carry a
+        //    2-byte '\r\n' there — a guaranteed cheap-path verify mismatch
+        //    (editor-kernel-mode.js `verifyPlainTextProjection`) on every
+        //    such commit, triggering an async repair reconcile every time.
+        //    `CodeMirrorBlock.update()`'s own resync then re-absorbs the
+        //    repaired node content through the SAME '\r'-stripping split,
+        //    so this manifests as repeat churn, not the injected-'\r'
+        //    lockout a first-pass hypothesis suspected — but churn (lost
+        //    scroll/cursor stability, noisy projection-mismatch
+        //    diagnostics) is still a real defect.
+        // Fixing the CM bridge's own position math (or teaching it to
+        // preserve/reconstruct '\r') is out of scope here: it lives in a
+        // vendored dependency, and normalizing kernel.doc's own bytes is
+        // forbidden (source bytes are the one truth). Until a dedicated
+        // task addresses the CM bridge (or proves a different safe
+        // contract), the SAME fail-closed posture already used for
+        // mermaid/latex/math (structurally paired, never charMap-editable)
+        // is the coherent, in-scope choice — it removes the whole attack
+        // surface (both the confirmed churn and the deeper, undetectable
+        // position-corruption risk) rather than trying to special-case
+        // "currently single-line, might become multi-line" blocks, which
+        // would just delay the same failure to the user's very next Enter.
+        if (charMap.lineEnding !== '\n') charMap = null
       }
     } else if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character
