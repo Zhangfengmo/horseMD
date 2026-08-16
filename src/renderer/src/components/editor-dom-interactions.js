@@ -4,6 +4,29 @@ import { getEffectiveKeybindingMap } from '../lib/commands/keybinding-store.js'
 import { isReadOnlyMutationKey } from './editor-read-only.js'
 import { readMermaidCodeSource, refreshMermaidPreviewFromCodeBlock } from './editor-mermaid.js'
 
+// Blockquote wrap/unwrap ctxmenu gating (Plan 4 Task 5.5). Walk ancestors
+// from the clicked position INWARD-OUT (innermost first): a code_block or
+// table ancestor closer to the click than any blockquote means the click
+// landed inside content the quote command can't own (fenced code interior,
+// table cells) — hide the item entirely. Otherwise it's quotable, and
+// `quoted` reports whether the nearest ancestor found is a blockquote (so
+// the caller can flip the label between "quote"/"unquote").
+function resolveQuoteMenuState(state, pos) {
+  if (!state || !Number.isFinite(pos)) return { quotable: false, quoted: false }
+  const safePos = Math.max(0, Math.min(pos, state.doc.content.size))
+  const $pos = state.doc.resolve(safePos)
+  if (!state.schema.nodes.blockquote) return { quotable: false, quoted: false }
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const typeName = $pos.node(depth).type.name
+    if (typeName === 'blockquote') return { quotable: true, quoted: true }
+    if (typeName === 'code_block' || typeName === 'table' || typeName === 'table_row' ||
+      typeName === 'table_cell' || typeName === 'table_header') {
+      return { quotable: false, quoted: false }
+    }
+  }
+  return { quotable: true, quoted: false }
+}
+
 export function mountEditorInteractionBindings({
   view,
   viewRef,
@@ -135,11 +158,14 @@ export function mountEditorInteractionBindings({
     let listConversion = null
     let blockPos = null
     let blockListConvertible = false
+    let quotable = false
+    let quoted = false
     if (currentView) {
       const at = currentView.posAtCoords({ left: event.clientX, top: event.clientY })
       if (at) {
         blockPos = at.pos
         blockListConvertible = canConvertBlockToList?.(blockPos) === true
+        ;({ quotable, quoted } = resolveQuoteMenuState(currentView.state, blockPos))
         // ProseMirror can report the outer list boundary for a click on an
         // indented item. Resolve the actual DOM list item as a fallback so the
         // context menu can explain why a nested conversion is unavailable.
@@ -197,16 +223,18 @@ export function mountEditorInteractionBindings({
           listConversion,
           blockPos,
           blockListConvertible,
+          quotable,
+          quoted,
           showTextFormatting,
           selection: showTextFormatting
             ? { anchor: activeSelection.anchor, head: activeSelection.head }
             : null
         })
       } else {
-        setCtxMenu({ x: event.clientX, y: event.clientY, listConversion, blockPos, blockListConvertible, showTextFormatting: false, selection: null })
+        setCtxMenu({ x: event.clientX, y: event.clientY, listConversion, blockPos, blockListConvertible, quotable, quoted, showTextFormatting: false, selection: null })
       }
     } else {
-      setCtxMenu({ x: event.clientX, y: event.clientY, listConversion, blockPos, blockListConvertible, showTextFormatting: false, selection: null })
+      setCtxMenu({ x: event.clientX, y: event.clientY, listConversion, blockPos, blockListConvertible, quotable, quoted, showTextFormatting: false, selection: null })
     }
     // The view update and its node-view DOM work can span two animation frames.
     // Restore twice rather than using a fixed timeout, and only for the table

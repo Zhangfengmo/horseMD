@@ -72,6 +72,22 @@ const AFTER_TYPING = AFTER_F.replace('前**午未申酉**后段尾', '前X**午�
 const AFTER_QUOTE_QUERY = AFTER_TYPING.replace('\n\nz\n\n', '\n\n/quote\n\n')
 const SAVED = AFTER_QUOTE_QUERY
 
+// ---- Plan 4 Task 5.5: right-click ctxmenu quote/unquote byte checkpoints ----
+// LEGACY (before kernel mode is ever enabled): a plain PM wrapIn/lift
+// dispatch through the normal markdownUpdated/preservation pipeline. Single
+// standalone paragraph, no other block on its line — the generic
+// preserveSource diff has nothing else to touch, so the byte delta is
+// exactly a "> " prefix on that one line (captured against the live app;
+// see task-5.5-report.md's derivation transcript).
+const LEGACY_AFTER_QUOTE = FIXTURE.replace('首段落用于占位说明。', '> 首段落用于占位说明。')
+// KERNEL (after step 9's redo x2, i.e. against AFTER_QUOTE_QUERY): a single
+// trailing paragraph wraps the same as test-source-kernel-quote.mjs's basic
+// case ("text\n" -> "> text\n"). The loose list (blank line between items)
+// wraps like that same file's loose-list case: the blank separator line
+// becomes a BARE '>' so the reparse stays one blockquote, not two.
+const KERNEL_PARA_QUOTED = AFTER_QUOTE_QUERY.replace('尾段落。', '> 尾段落。')
+const KERNEL_LIST_QUOTED = AFTER_QUOTE_QUERY.replace('- 列项一\n\n- 列项二', '> - 列项一\n>\n> - 列项二')
+
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
     const value = await check()
@@ -112,6 +128,18 @@ async function assertSource(evaluate, expected, message) {
   assert.equal(shown, expected, message)
   await toggleSourceMode(evaluate)
   await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), `rich view did not return (${message})`)
+  await sleep(150)
+}
+
+// Same round trip as assertSource, but for the LEGACY (non-kernel) tab —
+// there is no `.hm-kernel-mode` marker to wait for on the way back, just the
+// ordinary editor DOM.
+async function assertSourceLegacy(evaluate, expected, message) {
+  await toggleSourceMode(evaluate)
+  const shown = await waitFor(() => visibleSource(evaluate), `source view did not appear (${message})`)
+  assert.equal(shown, expected, message)
+  await toggleSourceMode(evaluate)
+  await waitFor(async () => ((await mounted(evaluate)) || '').length > 0, `rich view did not return (${message})`)
   await sleep(150)
 }
 
@@ -197,6 +225,15 @@ async function selectRange(evaluate, send, paragraphText, from, to) {
   return point
 }
 
+// A screen point at a specific character offset, without clicking —
+// used to right-click-open the ctxmenu at a precise spot (the real click
+// happens via openCtxMenuAt/click below).
+async function pointAt(evaluate, paragraphText, offset) {
+  const rect = await waitFor(() => charRect(evaluate, paragraphText, offset, offset),
+    `could not locate offset ${offset} in ${JSON.stringify(paragraphText)}`)
+  return { x: rect.left, y: rect.top + Math.min(12, rect.height / 2) }
+}
+
 // Collapsed-range caret placement at a specific character offset.
 async function clickAt(evaluate, send, paragraphText, offset) {
   const rect = await waitFor(() => charRect(evaluate, paragraphText, offset, offset),
@@ -253,6 +290,23 @@ async function closeCtxMenu(evaluate) {
   await sleep(150)
 }
 
+// Right-click at `point`, then click the ctxmenu's quote/unquote item —
+// `expectedKind` ('quote'|'unquote') is asserted via the item's own
+// `data-quote-toggle` attribute (Editor.jsx), which doubles as a check that
+// the label actually flipped to the state the caller expects (a stale
+// 'quote' button after the block is already quoted would fail to match).
+async function clickQuoteMenuItem(evaluate, send, point, expectedKind) {
+  await openCtxMenuAt(send, point)
+  await waitFor(() => evaluate(`!!document.querySelector('.block-ctxmenu')`), 'right-click context menu did not open')
+  const rect = await waitFor(() => evaluate(`(() => {
+    const b = document.querySelector('[data-quote-toggle="${expectedKind}"]')
+    const r = b?.getBoundingClientRect()
+    return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null
+  })()`), `ctxmenu "${expectedKind}" item missing`)
+  await click(send, rect)
+  await sleep(300)
+}
+
 // `Mod-<letter>` — Meta on darwin, same convention every other kernel-mode
 // UI script's pressUndo() uses.
 async function pressMod(send, key, code, keyCode) {
@@ -286,6 +340,26 @@ async function run() {
       return text && text.includes('甲乙丙丁') && text.includes('列项二') ? text : null
     }, 'initial document did not mount')
     assert.equal(app.dialogs.length, 0, 'no dialog on plain mount')
+
+    // ============================================================
+    // 0) LEGACY-mode ctxmenu quote/unquote (Plan 4 Task 5.5) — one minimal
+    //    check in the SAME app session, BEFORE kernel mode is ever turned
+    //    on. Uses the fixture's own lead paragraph, untouched by every
+    //    other scenario in this file. A plain PM wrapIn/lift dispatch goes
+    //    through the ordinary markdownUpdated/preservation pipeline, same
+    //    as any other rich edit — no kernel involved at all yet.
+    // ============================================================
+    {
+      const point = await pointAt(evaluate, '首段落用于占位说明。', 0)
+      await clickQuoteMenuItem(evaluate, send, point, 'quote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the legacy ctxmenu quote')
+      await assertSourceLegacy(evaluate, LEGACY_AFTER_QUOTE, 'legacy ctxmenu Quote must wrap the paragraph with "> "')
+
+      const point2 = await pointAt(evaluate, '首段落用于占位说明。', 0)
+      await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the legacy ctxmenu unquote')
+      await assertSourceLegacy(evaluate, FIXTURE, 'legacy ctxmenu Unquote must revert to the exact original bytes')
+    }
 
     // ---- 1) enable kernel mode + live-attach assert ----
     await toggleKernelMode(evaluate)
@@ -518,6 +592,51 @@ async function run() {
     await pressRedo(send)
     await sleep(250)
     await assertSource(evaluate, AFTER_QUOTE_QUERY, 'redo x2 must restore the pre-undo state exactly')
+
+    // ============================================================
+    // 9a) KERNEL ctxmenu quote/unquote — a real, general UI entry point for
+    //     the quote domain (Plan 4 Task 5.5). Runs AFTER the undo/redo
+    //     assertions above (so it never disturbs that history-group
+    //     scrutiny) and nets to zero bytes (wrap, assert, then unwrap,
+    //     assert back to AFTER_QUOTE_QUERY) so the save/reopen checks below
+    //     stay unaffected. Right-clicking the SAME (now-quoted) paragraph a
+    //     second time is exactly "right-click inside the quote -> 取消引用
+    //     -> unwrapped".
+    // ============================================================
+    {
+      const point = await pointAt(evaluate, '尾段落。', 0)
+      await clickQuoteMenuItem(evaluate, send, point, 'quote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu quote')
+      await assertSource(evaluate, KERNEL_PARA_QUOTED, 'kernel ctxmenu Quote must wrap the paragraph with "> "')
+
+      const point2 = await pointAt(evaluate, '尾段落。', 0)
+      await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu unquote')
+      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote must revert to the exact original bytes')
+    }
+
+    // ============================================================
+    // 9b) KERNEL ctxmenu quote on a LOOSE LIST — the exact scenario Task 5's
+    //     report (Finding 3) proved UI-unreachable via `/quote` (its
+    //     shouldShow gate refuses inside any list item, before even
+    //     checking the query text). The ctxmenu path has no such gate: a
+    //     click anywhere inside the list resolves to the list's own
+    //     top-level node, and the whole list wraps as one blockquote, its
+    //     internal blank (looseness) line becoming a bare '>' — the same
+    //     shape test-source-kernel-quote.mjs's loose-list case proves.
+    // ============================================================
+    {
+      const point = await pointAt(evaluate, '列项一', 0)
+      await clickQuoteMenuItem(evaluate, send, point, 'quote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu list quote')
+      await assertSource(evaluate, KERNEL_LIST_QUOTED,
+        'kernel ctxmenu Quote on a loose list must wrap the WHOLE list, with a bare ">" for the internal blank line')
+
+      const point2 = await pointAt(evaluate, '列项一', 0)
+      await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu list unquote')
+      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote on the list must revert to the exact original bytes')
+    }
 
     // ============================================================
     // 10) Save FAB -> disk bytes exact; dialogs empty; full quit; cold

@@ -9,6 +9,8 @@ import {
 import './editor-codeblock-eager.js' // side effect: root-fix #25 — eager, non-tearing code-block node view
 import './editor-table-click.js' // side effect: single click in a table cell places the caret
 import { TextSelection } from '@milkdown/prose/state'
+import { wrapIn } from '@milkdown/prose/commands'
+import { liftTarget } from '@milkdown/prose/transform'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
 import '@milkdown/crepe/theme/common/link-tooltip.css'
@@ -1243,6 +1245,70 @@ export default function Editor({
       return true
     }
 
+    // Right-click block menu: wrap/unwrap the clicked block in a blockquote
+    // (emergent P4-5.5). The kernel's `toggleBlockquote`/`runQuoteToggle`
+    // command was headless-proven in Plan 4 Task 4, but the only UI surface
+    // ever wired to it (`/quote`) can never reach real content — Task 5's
+    // report (Finding 3) established `shouldShow` only fires when the
+    // block's ENTIRE raw text IS the typed query, which rules out both an
+    // existing paragraph and anything inside a list. This is the minimal
+    // real entry point for the domain: one ctxmenu item, consistent in both
+    // modes.
+    const quoteToggleBlock = (blockPos) => {
+      if (readOnlyRef.current) return false
+      const view = viewRef.current
+      if (!view) return false
+      if (kernelModeEnabled) {
+        // The kernel command is caret-based (same contract as every other
+        // structural kernel command — Enter/Tab/…), so move the selection to
+        // the clicked block first: a right-click away from the live caret
+        // must still target the block the menu was opened on.
+        const state = view.state
+        const safePos = Number.isFinite(blockPos)
+          ? Math.max(0, Math.min(blockPos, state.doc.content.size))
+          : state.selection.head
+        if (safePos !== state.selection.head) {
+          view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(safePos))))
+        }
+        setCtxMenu(null)
+        return kernelController ? kernelController.runQuoteToggle(view) : false
+      }
+      // Legacy mode: an ordinary PM wrapIn/lift dispatch. `markdownUpdated`
+      // picks this transaction up through the normal serializer/preservation
+      // pipeline exactly like any other rich edit — no bespoke source-diff
+      // patching needed (contrast with convertBlockToList/convertList above,
+      // which hand-derive the source diff because Crepe's list schema has no
+      // single canonical wrap/unwrap command; blockquote's schema does).
+      const state = view.state
+      const safePos = Number.isFinite(blockPos)
+        ? Math.max(0, Math.min(blockPos, state.doc.content.size))
+        : state.selection.head
+      const workingState = state.apply(
+        state.tr.setSelection(TextSelection.near(state.doc.resolve(safePos)))
+      )
+      const blockquoteType = workingState.schema.nodes.blockquote
+      if (!blockquoteType) return false
+      const $pos = workingState.selection.$from
+      // Same lookup for both directions: the nearest blockquote ancestor's
+      // NodeRange (its children, spanning $pos) — if one exists, unwrap it;
+      // otherwise wrap the clicked block in a fresh blockquote.
+      const quoteRange = $pos.blockRange($pos, (node) => node.type === blockquoteType)
+      let transaction = null
+      if (quoteRange) {
+        const target = liftTarget(quoteRange)
+        if (target != null) transaction = workingState.tr.lift(quoteRange, target)
+      } else {
+        let tr = null
+        if (wrapIn(blockquoteType)(workingState, (t) => { tr = t })) transaction = tr
+      }
+      if (!transaction) return false
+      markUserEdit()
+      view.dispatch(transaction)
+      view.focus()
+      setCtxMenu(null)
+      return true
+    }
+
     // IMPORTANT: register listeners BEFORE create(). Crepe wires them during
     // create(), so registering afterwards means `markdownUpdated` never fires —
     // which left tab.content (outline, word count, dirty state, and saves!)
@@ -1824,6 +1890,7 @@ export default function Editor({
         })
         api.convertList = convertList
         api.convertBlockToList = convertBlockToList
+        api.quoteToggle = quoteToggleBlock
         // Kernel mode: kernel.doc.text replaces the serializer/preservation
         // pipeline as the flush/save/offset authority. The legacy
         // implementations are captured FIRST so a degraded tab's overrides
@@ -2066,6 +2133,7 @@ export default function Editor({
   const pickListConversion = (targetType, listPos, anchorPos) =>
     apiRef.current?.convertList(targetType, listPos, anchorPos)
   const pickBlockListConversion = (targetType, blockPos) => apiRef.current?.convertBlockToList(targetType, blockPos)
+  const pickQuoteToggle = (blockPos) => apiRef.current?.quoteToggle(blockPos)
   const pickTextFormat = (format, selection) => {
     const applied = apiRef.current?.applyTextFormat(format, selection)
     if (applied) setCtxMenu(null)
@@ -2191,6 +2259,31 @@ export default function Editor({
                     <div className="block-menu-divider" />
                   </>
                 )}
+              </>
+            )}
+            {/* Blockquote wrap/unwrap (Plan 4 Task 5.5): the ONLY real UI
+                entry point for the quote domain — unlike "turn into" below,
+                available in BOTH modes. Legacy dispatches a plain PM
+                wrapIn/lift (quoteToggleBlock, Editor.jsx); kernel mode routes
+                through the controller's `runQuoteToggle` (caret-based source
+                transaction, toasts its own refusals). Hidden entirely for
+                non-quotable click targets (code_block interior, table
+                cells — see the ctxMenu.quotable derivation in
+                editor-dom-interactions.js). */}
+            {ctxMenu.quotable && (
+              <>
+                <button
+                  className="block-menu-item"
+                  data-quote-toggle={ctxMenu.quoted ? 'unquote' : 'quote'}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pickQuoteToggle(ctxMenu.blockPos)}
+                >
+                  <span className="block-menu-short">❝</span>
+                  <span className="block-menu-name">
+                    {t(ctxMenu.quoted ? 'block.unquote' : 'block.quote')}
+                  </span>
+                </button>
+                <div className="block-menu-divider" />
               </>
             )}
             {/* Source-kernel mode: block "turn into" (heading/paragraph/quote
