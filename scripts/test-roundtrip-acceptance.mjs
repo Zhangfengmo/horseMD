@@ -79,6 +79,42 @@ check('standard leading-space spellings pass', () => {
   assert.ok(roundTripPreserved('- &nbsp;项目\n', '* &#x20;项目\n'))
 })
 
+check('authored CRLF line endings pass against an LF canonical', () => {
+  // Milkdown's canonical is always LF. A line ending is spelling, not content —
+  // CommonMark reads `\r\n`, `\r` and `\n` as the same break — but micromark
+  // copies the raw bytes into node values, so a soft break, a code block body
+  // and an HTML block used to compare unequal purely because of the author's
+  // Windows convention. Every correctly mapped CRLF edit then failed this gate
+  // and the fail-closed rebuild respelled the whole file to LF.
+  assert.ok(roundTripPreserved('# T\r\n\r\npara one.\r\n', '# T\n\npara one.\n'))
+  assert.ok(roundTripPreserved('line one\r\nline two\r\n', 'line one\nline two\n'))
+  assert.ok(roundTripPreserved(
+    '```js\r\nlet a = 1;\r\nlet b = 2;\r\n```\r\n',
+    '```js\nlet a = 1;\nlet b = 2;\n```\n'
+  ))
+  assert.ok(roundTripPreserved('- alpha\r\n- beta\r\n', '* alpha\n* beta\n'))
+  assert.ok(roundTripPreserved('> quoted\r\n>\r\n> second\r\n', '> quoted\n>\n> second\n'))
+  // Legacy lone-CR endings are the same break to CommonMark.
+  assert.ok(roundTripPreserved('one\rtwo\r', 'one\ntwo\n'))
+})
+
+check('a split CRLF pair is still rejected', () => {
+  // The defect this gate caught: an insertion mapped BETWEEN `\r` and `\n`
+  // leaves a lone `\r` that reads as a real line break. Line-ending
+  // spelling-insensitivity must not make that corruption acceptable.
+  assert.equal(
+    roundTripPreserved('para one.\rZ\n\r\npara two.\r\n', 'para one.Z\n\npara two.\n'),
+    false
+  )
+  assert.equal(
+    roundTripPreserved(
+      '```js\r\nlet a = 1;\rX\r\n```\r\n',
+      '```js\nlet a = 1;X\n```\n'
+    ),
+    false
+  )
+})
+
 check('display math spellings pass', () => {
   // The editor normalizes single-line `$$x^2$$` into the multi-line spelling
   // (editor-math.js normalizeDisplayMath); preservation keeps the authored

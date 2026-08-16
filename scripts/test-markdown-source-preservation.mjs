@@ -15,6 +15,7 @@ import {
 import { normalizeEmptyListItems } from '../src/renderer/src/lib/markdown-preservation/lists.js'
 import { sourceVisibleIndex } from '../src/renderer/src/mode-visible-map.js'
 import { adoptAdjacentBulletMarker, commonChange } from '../src/renderer/src/lib/markdown-preservation/core.js'
+import { roundTripPreserved } from '../src/renderer/src/lib/markdown-preservation/roundtrip.js'
 import { createGfmTableSourceParser } from '../src/renderer/src/lib/markdown-preservation/table-source-model.js'
 import {
   preserveLocallyAlignedTextChange,
@@ -445,6 +446,147 @@ assert.equal(
   crlfSource.replace('正文 0~9。', '正文\r\n\r\n0~9。'),
   'new rich-text block separators must follow the source CRLF convention'
 )
+
+// A CRLF line ending is ONE line ending spelled with TWO bytes, but the
+// canonical Milkdown produces is always LF. Every offset mapped from that LF
+// canonical onto a CRLF source therefore has to name the position where the
+// pair BEGINS. Naming the `\n` instead put an "end of this line's text"
+// insertion INSIDE the pair (`para one.\rZ\n`) — a lone `\r` plus a bare `\n`,
+// which the round-trip acceptance gate correctly refused, so the fail-closed
+// rebuild respelled the WHOLE file's structural line endings to LF on the very
+// first edit of any CRLF document. Lock the byte-exact result AND the gate for
+// every block shape whose edit lands on a line end.
+{
+  const lineEndCases = [
+    {
+      name: 'paragraph end',
+      source: '# 标题\r\n\r\npara one.\r\n\r\npara two.\r\n',
+      previous: '# 标题\n\npara one.\n\npara two.\n',
+      next: '# 标题\n\npara one.Z\n\npara two.\n',
+      expected: '# 标题\r\n\r\npara one.Z\r\n\r\npara two.\r\n'
+    },
+    {
+      name: 'heading end',
+      source: '# 标题\r\n\r\npara one.\r\n',
+      previous: '# 标题\n\npara one.\n',
+      next: '# 标题X\n\npara one.\n',
+      expected: '# 标题X\r\n\r\npara one.\r\n'
+    },
+    {
+      name: 'list row end',
+      source: '- alpha\r\n- beta\r\n',
+      previous: '* alpha\n* beta\n',
+      next: '* alphaX\n* beta\n',
+      expected: '- alphaX\r\n- beta\r\n'
+    },
+    {
+      name: 'nested list row end',
+      source: '- alpha\r\n  - nested\r\n- beta\r\n',
+      previous: '* alpha\n\n  * nested\n* beta\n',
+      next: '* alpha\n\n  * nestedX\n* beta\n',
+      expected: '- alpha\r\n  - nestedX\r\n- beta\r\n'
+    },
+    {
+      name: 'task row end',
+      source: '- [ ] task one\r\n- [x] task two\r\n',
+      previous: '* [ ] task one\n* [x] task two\n',
+      next: '* [ ] task oneX\n* [x] task two\n',
+      expected: '- [ ] task oneX\r\n- [x] task two\r\n'
+    },
+    {
+      name: 'quoted block line end',
+      source: '> quoted line\r\n>\r\n> second\r\n',
+      previous: '> quoted line\n>\n> second\n',
+      next: '> quoted lineX\n>\n> second\n',
+      expected: '> quoted lineX\r\n>\r\n> second\r\n'
+    },
+    {
+      name: 'soft-break line end',
+      source: 'line one\r\nline two\r\n\r\ntail\r\n',
+      previous: 'line one\nline two\n\ntail\n',
+      next: 'line oneX\nline two\n\ntail\n',
+      expected: 'line oneX\r\nline two\r\n\r\ntail\r\n'
+    },
+    {
+      // The generic backward mapping lands BEFORE a closing `**`/`` ` ``: the
+      // rule has to skip that hidden syntax and still stop before the `\r`.
+      name: 'after an inline closer',
+      source: '**bold**\r\n\r\ntail\r\n',
+      previous: '**bold**\n\ntail\n',
+      next: '**bold**X\n\ntail\n',
+      expected: '**bold**X\r\n\r\ntail\r\n'
+    },
+    {
+      // Fenced code content IS part of the visible stream, and its line endings
+      // are visible newlines — the only place a CRLF pair is itself a mapped
+      // character rather than an invisible gap.
+      name: 'fenced code line end',
+      source: '# T\r\n\r\n```js\r\nlet a = 1;\r\nlet b = 2;\r\n```\r\n',
+      previous: '# T\n\n```js\nlet a = 1;\nlet b = 2;\n```\n',
+      next: '# T\n\n```js\nlet a = 1;X\nlet b = 2;\n```\n',
+      expected: '# T\r\n\r\n```js\r\nlet a = 1;X\r\nlet b = 2;\r\n```\r\n'
+    },
+    {
+      // An authored hard break must keep its two trailing spaces on the far
+      // side of the insertion AND on the near side of the `\r`.
+      name: 'hard-break line end',
+      source: 'alpha  \r\nbeta\r\n',
+      previous: 'alpha  \nbeta\n',
+      next: 'alphaX  \nbeta\n',
+      expected: 'alphaX  \r\nbeta\r\n'
+    },
+    {
+      name: 'multi-character paste at a line end',
+      source: '# T\r\n\r\npara one.\r\n\r\npara two.\r\n',
+      previous: '# T\n\npara one.\n\npara two.\n',
+      next: '# T\n\npara one. And more words.\n\npara two.\n',
+      expected: '# T\r\n\r\npara one. And more words.\r\n\r\npara two.\r\n'
+    },
+    {
+      name: 'line-end insert batched with a new block',
+      source: 'one\r\n\r\ntwo\r\n\r\nthree\r\n',
+      previous: 'one\n\ntwo\n\nthree\n',
+      next: 'one\n\ntwoX\n\nY\n\nthree\n',
+      expected: 'one\r\n\r\ntwoX\r\n\r\nY\r\n\r\nthree\r\n'
+    },
+    {
+      name: 'deletion at a line end',
+      source: '# 标题\r\n\r\npara one.\r\n\r\npara two.\r\n',
+      previous: '# 标题\n\npara one.\n\npara two.\n',
+      next: '# 标题\n\npara one\n\npara two.\n',
+      expected: '# 标题\r\n\r\npara one\r\n\r\npara two.\r\n'
+    }
+  ]
+  for (const testCase of lineEndCases) {
+    const result = preserveRichMarkdownSource(testCase.source, testCase.previous, testCase.next)
+    assert.equal(result.preserved, true, `${testCase.name}: CRLF line-end edit must map`)
+    assert.equal(
+      result.markdown,
+      testCase.expected,
+      `${testCase.name}: a CRLF line-end edit must not split the CR/LF pair`
+    )
+    assert.ok(
+      !/\r(?!\n)|(?<!\r)\n/.test(result.markdown),
+      `${testCase.name}: the committed source must stay uniformly CRLF`
+    )
+    assert.ok(
+      roundTripPreserved(result.markdown, testCase.next),
+      `${testCase.name}: the committed CRLF source must pass the round-trip gate`
+    )
+    // The same edit on the LF spelling of the same document must be
+    // byte-identical apart from the line endings: this fix may not change LF.
+    const lfResult = preserveRichMarkdownSource(
+      testCase.source.replace(/\r\n/g, '\n'),
+      testCase.previous,
+      testCase.next
+    )
+    assert.equal(
+      testCase.expected.replace(/\r\n/g, '\n'),
+      lfResult.markdown,
+      `${testCase.name}: CRLF and LF sources must agree apart from the line ending`
+    )
+  }
+}
 
 const unrelatedFormattingSource = [
   '| A | B |',

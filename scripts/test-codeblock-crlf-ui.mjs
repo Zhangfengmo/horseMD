@@ -29,8 +29,8 @@
 // pair, not just the '\r'), and (5) a second Enter + line whose inserted
 // '\r\n' must survive to disk. After each stage the source view must show
 // the exact content (LF projection — see assertSource), then Save must
-// write the EXPECTED_DISK bytes (coherent CRLF code value; see its note
-// for the pre-existing structural-respell defect outside this fix) and a
+// write the EXPECTED_DISK bytes (uniform CRLF — structure and code value
+// alike; see its note) and a
 // full-quit cold reopen must reproduce them. The CodeMirror view is also
 // asserted phantom-blank-line-free after the edits (the update() churn
 // shape above).
@@ -104,26 +104,19 @@ const AFTER_JOIN = AFTER_BACKSPACE.replace(`}TAIL${CRLF}NEXTLI`, '}TAILNEXTLI')
 // conversion end to end (stage A's inserted break is consumed by stage C).
 const AFTER_LASTLINE = AFTER_JOIN.replace('}TAILNEXTLI', `}TAILNEXTLI${CRLF}LASTLINE`)
 
-// What the DEFAULT pipeline actually writes to disk today. The CM↔PM fix
-// guarantees the code VALUE is byte-coherent (authored '\r\n' pairs intact,
-// the inserted break spelled '\r\n', no split pairs / lone '\r' / bare-'\n'
-// strays, every char at its true position). The STRUCTURAL line endings
-// (heading/paragraph/fence lines) are respelled to LF by a SEPARATE,
-// pre-existing defect outside this fix's scope: the canonical-diff
-// preservation mapper has its own CRLF off-by-one (observed via
-// __hmPreserveLog: inserting 'Z' at a CRLF paragraph end yields
-// 'para one.\rZ\n' with preserved:true), the round-trip acceptance gate
-// rejects that wrong success, and the commit falls back to the canonical
-// serialization — LF structure with the PM code value verbatim. Verified
-// byte-identical on an UNPATCHED build with a pure paragraph edit, so it is
-// not introduced by the CM patch. When that mapper defect is fixed, this
-// expectation should tighten to `AFTER_LASTLINE` (uniform CRLF).
+// What the DEFAULT pipeline writes to disk: UNIFORM CRLF, byte-identical to
+// the staged source. Two independent layers have to be right for this to hold.
+// (1) The CM↔PM fix in this module's subject keeps the code VALUE coherent
+// (authored '\r\n' pairs intact, the inserted break spelled '\r\n', every char
+// at its true position). (2) The canonical-diff preservation mapper keeps the
+// STRUCTURAL line endings (heading/paragraph/fence lines): it used to map an
+// LF-canonical line end onto the '\n' of the source's CRLF pair, splitting it
+// ('para one.\rZ\n' with preserved:true), and the round-trip acceptance gate
+// then rejected that wrong success so the commit fell back to the canonical
+// serialization — respelling the whole file's structure to LF. Both the mapper
+// arithmetic and the gate's line-ending blindness are fixed, so a lone '\r' or
+// a bare '\n' anywhere in this file is a real regression, not a known gap.
 const EXPECTED_DISK = AFTER_LASTLINE
-  .replace(/\r\n/g, '\n')
-  .replace(
-    'function greet(name) {\n  return name;\n}TAILNEXTLI\nLASTLINE',
-    `function greet(name) {${CRLF}  return name;${CRLF}}TAILNEXTLI${CRLF}LASTLINE`
-  )
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -284,10 +277,12 @@ async function run() {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
     const disk = await readFile(file, 'utf8')
-    assert.equal(disk, EXPECTED_DISK, 'disk bytes must match exactly (coherent CRLF code value, see EXPECTED_DISK note)')
+    assert.equal(disk, EXPECTED_DISK, 'disk bytes must match exactly (uniform CRLF, see EXPECTED_DISK note)')
     // Property assertions the corruption family violated, independent of the
-    // exact-shape assertion above: no split '\r\n' pair may leave a lone '\r'.
+    // exact-shape assertion above: no split '\r\n' pair may leave a lone '\r',
+    // and no authored line ending may be respelled to a bare '\n'.
     assert.ok(!/\r(?!\n)/.test(disk), 'disk must contain no lone \\r (split-pair corruption shape)')
+    assert.ok(!/(?<!\r)\n/.test(disk), 'disk must contain no bare \\n (LF respell of an authored CRLF file)')
     assert.equal(app.dialogs.length, 0,
       `no rebuild/fail-closed dialog may appear: ${JSON.stringify(app.dialogs.map((dialog) => dialog.message))}`)
 
