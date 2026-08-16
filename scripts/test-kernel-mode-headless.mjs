@@ -80,7 +80,13 @@ const FIXTURE_DOCS = {
   '```js\nab\n```\n\n\n': () => doc(cb('js', 'ab')),
   '```js\nab\n```\n甲\n': () => doc(cb('js', 'ab'), p(text('甲'))),
   '```js\nab\n```\n\n\n甲\n': () => doc(cb('js', 'ab'), p(text('甲'))),
-  '```js\nab\n```\nX\n\n甲\n': () => doc(cb('js', 'ab'), p(text('X')), p(text('甲')))
+  '```js\nab\n```\nX\n\n甲\n': () => doc(cb('js', 'ab'), p(text('X')), p(text('甲'))),
+  // Final-review fixtures (2026-08-16): the from-readonly language-switch
+  // refusal was lifted — a mermaid block can switch straight to a real
+  // language and immediately accept a plain-text commit afterward.
+  '```mermaid\ngraph TD\n```\n': () => doc(cb('mermaid', 'graph TD')),
+  '```js\ngraph TD\n```\n': () => doc(cb('js', 'graph TD')),
+  '```js\nXgraph TD\n```\n': () => doc(cb('js', 'Xgraph TD'))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -817,6 +823,24 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     0,
     'nothing was ever committed, so there is nothing to reconcile'
   )
+  // (final-review finding, 2026-08-16) the defensive veto-after-CM-applied
+  // resync must have run — this batch's step targeted the code_block, so
+  // `scheduleVetoResync`'s microtask fires (flushed above) and pushes its
+  // own diagnostic regardless of whether a repair dispatch was needed. Here
+  // it wasn't (the view already agrees with parse(kernel.doc.text), a
+  // genuine no-op), so no failure diagnostic and the view stays consistent.
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'cm-veto-resync').length,
+    1,
+    'a code_block-targeting veto must schedule the defensive nodeview resync'
+  )
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) =>
+      entry.type === 'cm-veto-resync-failed' || entry.type === 'cm-veto-resync-parse-failure').length,
+    0,
+    'the resync reconcile must be a clean no-op when the view already agrees with the kernel'
+  )
+  assert.equal(h.view.state.doc.textContent, 'ab\r\ncd甲乙', 'view remains consistent after the resync no-op')
 
   // (iii) no lockout: an ordinary edit into the paragraph ('甲乙', PM
   // content [9,11)) right after the refused code-block edit must still
@@ -983,6 +1007,42 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   assert.equal(h.controller.runExitCode({ dom: {} }), true, 'refusal still swallows the key')
   assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n')
   assert.ok(h.notifications.length > before, 'refusal notifies')
+}
+
+// Case T5f (final-review finding, 2026-08-16): the from-readonly
+// language-switch refusal is lifted — mermaid -> js must commit (not veto),
+// and the map's UNCONDITIONAL rebind after a code-language commit (see the
+// `code-language` case's own comment) must leave the block genuinely
+// editable on the very next transaction: switch then type, end to end.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('```mermaid\ngraph TD\n```\n', doc(cb('mermaid', 'graph TD'), p()))
+  assert.equal(h.controller.attachAfterCreate(), true, 'mermaid-only doc must map')
+  assert.equal(h.controller.kernel.map.blockPairs[0].charMap, null, 'sanity: mermaid pair starts non-editable')
+
+  // (a) mermaid -> js language switch.
+  const tr1 = h.view.state.tr.setNodeAttribute(0, 'language', 'js')
+  const verdict1 = dispatchThrough(h, tr1)
+  await flushMicrotasks()
+  assert.equal(verdict1, undefined, 'mermaid -> js switch is allowed through (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '```js\ngraph TD\n```\n')
+  assert.equal(h.view.state.doc.firstChild.attrs.language, 'js')
+  assert.ok(h.controller.kernel.map.blockPairs[0].charMap,
+    'the rebound map must carry a real charMap for the block immediately after the switch')
+
+  // (b) typing right after the switch: a plain-text insert at the block's
+  // content start (PM pos 1, doc's sole non-placeholder child) must commit,
+  // proving the block is genuinely editable now, not just reclassified.
+  const tr2 = h.view.state.tr.insertText('X', 1)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined, 'typing into the newly-js block must commit, not veto')
+  assert.equal(h.controller.kernel.doc.text, '```js\nXgraph TD\n```\n')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
+    0,
+    'both the switch and the follow-up type must pass cheap-path verify cleanly'
+  )
 }
 
 console.log('PASS kernel mode headless')

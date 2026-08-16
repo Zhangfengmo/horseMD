@@ -85,10 +85,15 @@ const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 // wired up (a later Plan 3 task). Matched case-insensitively against the PM
 // node's own `attrs.language` (Milkdown's codeBlockSchema attr).
 // Exported (Plan 3 Task 4): editor-kernel-gateway.js's `extractLanguageStep`
-// needs the same set to refuse a language switch OUT of a currently
-// preview-only code block — its own charMap is null (never built for these
-// languages, see the branch below), so there is no raw anchor to resolve a
-// fence-rewrite offset from.
+// consults the same set — NOT to refuse switching languages (that guard was
+// lifted, final-review fix, 2026-08-16: a switch OUT of mermaid/latex is now
+// allowed, `commitCodeLanguage` resolves it via the pair's `mdBlock` fence
+// start when `charMap` is null), only so a language picker can tell whether
+// the block it is about to switch FROM is currently preview-only. Once a
+// switch commits, `editor-kernel-mode.js` unconditionally rebinds the
+// projection map, so a block newly switched AWAY from one of these
+// languages gets a real `charMap` (editable) and a block newly switched
+// INTO one loses it (preview-only) — always freshly evaluated, never stale.
 export const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
 
 // PM/mdast types whose subtree is intentionally NOT walked into for
@@ -378,7 +383,22 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       const codeReadOnly = md.type === 'math' || READONLY_CODE_LANGUAGES.has(language)
       if (!codeReadOnly) {
         charMap = buildCodeMap(markdown, md)
-        if (!charMap) return null
+        // `buildCodeMap` fails closed (null) for a content shape it can't
+        // prove byte-for-byte, most commonly a blockquote/list-indented
+        // fence whose per-line prefix a BLANK content line can't reproduce
+        // (e.g. a quoted fence's blank line written as a bare '>' instead of
+        // '> ' — see code-map.js's own `text.startsWith(prefix, line.start)`
+        // guard). That is a property of THIS ONE block's content, not a
+        // structural PM/mdast disagreement — degrade only this pair to
+        // non-editable (final-review fix, 2026-08-16; `charMap` stays `null`,
+        // same contract as mermaid/latex/math above) instead of rejecting
+        // the WHOLE map, so the rest of the document (including any OTHER
+        // code block) stays fully mappable. The two checks below only run
+        // when `buildCodeMap` DID prove a charMap; they still reject the
+        // WHOLE map on their own failures (a genuine PM/mdast structural
+        // mismatch, or the CRLF-bridge ADR), which is unrelated to this
+        // per-block content-shape case.
+        //
         // Same structural (not textual) consistency check as the generic
         // path below: PM's own content size must equal the kernel's decoded
         // visible length. Milkdown's own code_block parseMarkdown runner
@@ -396,7 +416,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // buildCodeMap's own empty-value case already anchors to the real
         // content start (right after the open fence line's ending), never
         // to the block's own marker position.
-        if (pm.node.content.size !== charMap.visibleLength) return null
+        if (charMap && pm.node.content.size !== charMap.visibleLength) return null
         // ADR (Plan 3 Task 4 fix-review, 2026-08-16): a code_block whose
         // dominant line ending is NOT bare '\n' stays non-editable, for a
         // reason entirely outside this module's own math — it is a
@@ -462,7 +482,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // position-corruption risk) rather than trying to special-case
         // "currently single-line, might become multi-line" blocks, which
         // would just delay the same failure to the user's very next Enter.
-        if (charMap.lineEnding !== '\n') charMap = null
+        if (charMap && charMap.lineEnding !== '\n') charMap = null
       }
     } else if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character

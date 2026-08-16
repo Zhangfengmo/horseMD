@@ -31,6 +31,21 @@ export function changeCodeLanguage({ doc, index, offset, language }) {
   const markerMatch = doc.text.slice(block.start, line.end).match(FENCE_MARKER_RE)
   if (!markerMatch) return { ok: false, code: 'unsupported-structure' }
 
+  // Fail-closed fence guard: a backtick-fenced block's info string may not
+  // contain a backtick (CommonMark's own restriction — a backtick there
+  // would be ambiguous with an inline code span and, verified against the
+  // real parser, silently un-fences the whole block: `'```js`ts\nabc\n```\n'`
+  // reparses as a paragraph followed by an EMPTY, unrelated code block, not
+  // a `js\`ts`-language fence). A tilde-fenced block's info string is NOT
+  // restricted the same way by the spec (verified against the real parser:
+  // both a tilde in a tilde-fenced info string and either marker char in the
+  // OTHER fence type's info string reparse to the exact same lang/value —
+  // `'~~~js~ts\nabc\n~~~\n'` and `'```js~ts\nabc\n```\n'` both round-trip
+  // correctly), so only the marker char matching THIS block's own fence type
+  // is refused, not the other one.
+  const fenceMarker = markerMatch[1]
+  if (lang.includes(fenceMarker)) return { ok: false, code: 'unsupported-structure' }
+
   const markerEnd = block.start + markerMatch[0].length
   const infoEnd = line.end
   const removedLength = infoEnd - markerEnd

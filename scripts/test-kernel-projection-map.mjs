@@ -783,4 +783,36 @@ console.log('--- kernel projection map ---')
   assert.equal(map.blockPairs[1].charMap, null, 'latex-language code_block pair must stay non-editable')
 }
 
+// Case 19 (final-review finding, 2026-08-16): `buildCodeMap` returning null
+// for ONE code pair must degrade only THAT pair, never reject the whole map.
+// Fixture: a quoted fence whose blank content line is written as a bare '>'
+// (no trailing space) instead of '> ' — buildCodeMap's own per-line prefix
+// check ('> ') can't reproduce that line byte-for-byte, so it fails closed
+// for this block (verified against the real parser: remark still parses
+// this as ONE blockquote > code node spanning the bare '>' line, value
+// 'a\n\nb'), followed by an ordinary trailing paragraph that must stay fully
+// mappable and editable.
+// md = '> ```py\n> a\n>\n> b\n> ```\n\n尾\n'
+{
+  const md = '> ```py\n> a\n>\n> b\n> ```\n\n尾\n'
+  const d = doc(
+    schema.node('blockquote', null, [
+      schema.node('code_block', { language: 'py' }, text('a\n\nb'))
+    ]),
+    p(text('尾'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a doc with one unmappable quoted-fence pair must still map overall')
+  // blockquote (container, its own structural slot) -> code_block -> paragraph.
+  assert.equal(map.blockPairs.length, 3)
+  const codePair = map.blockPairs[1]
+  assert.equal(codePair.pmNode.type.name, 'code_block')
+  assert.ok(codePair.mdBlock, 'the pair itself is still structurally recorded, just non-editable')
+  assert.equal(codePair.charMap, null, 'the unmappable quoted fence stays non-editable')
+  const paraPair = map.blockPairs[2]
+  assert.equal(paraPair.pmNode.type.name, 'paragraph')
+  assert.ok(paraPair.charMap, 'the unrelated trailing paragraph stays fully editable')
+  assert.equal(map.pmPosToRaw(paraPair.pmPos + 1), md.indexOf('尾'), 'the paragraph maps correctly')
+}
+
 console.log('PASS kernel projection map')

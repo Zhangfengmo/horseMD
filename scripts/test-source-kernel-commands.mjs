@@ -464,6 +464,50 @@ console.log('PASS source-kernel commands (splitTextBlock final-review coverage g
     { ok: false, code: 'unsupported-structure' })
 }
 
+// Case H (final-review finding, 2026-08-16): fence-marker fail-closed guard.
+// A backtick in a language committed onto a BACKTICK fence provably breaks
+// the fence — verified against the real parser (remark-parse + remark-gfm):
+// '```js`ts\nabc\n```\n' reparses as a paragraph followed by an unrelated
+// EMPTY code block, not a 'js`ts'-language fence over 'abc'. Must reject
+// before ever producing those bytes.
+{
+  const src = '```js\nabc\n```\n'
+  const c = ctx(src)
+  assert.deepEqual(changeCodeLanguage({ ...c, offset: 7, language: 'js`ts' }),
+    { ok: false, code: 'unsupported-structure' },
+    'a backtick in the language must be refused on a backtick fence')
+}
+
+// Case I: a tilde in a language committed onto a TILDE fence — same failure
+// class as Case H, just the other marker/fence pairing. Reject.
+{
+  const src = '~~~js\nabc\n~~~\n'
+  const c = ctx(src)
+  assert.deepEqual(changeCodeLanguage({ ...c, offset: 7, language: 'js~ts' }),
+    { ok: false, code: 'unsupported-structure' },
+    'a tilde in the language must be refused on a tilde fence')
+}
+
+// Case J: the CROSS combinations are valid CommonMark and must stay allowed
+// — verified against the real parser: both round-trip to the exact
+// 'js~ts'/'js`ts' language over the same code content, byte-exact.
+// (a) a tilde-containing language on a BACKTICK fence.
+{
+  const src = '```js\nabc\n```\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 7, language: 'js~ts' })
+  assert.equal(r.ok, true, 'a tilde in the language is valid CommonMark on a backtick fence')
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '```js~ts\nabc\n```\n')
+}
+// (b) a backtick-containing language on a TILDE fence.
+{
+  const src = '~~~js\nabc\n~~~\n'
+  const c = ctx(src)
+  const r = changeCodeLanguage({ ...c, offset: 7, language: 'js`ts' })
+  assert.equal(r.ok, true, 'a backtick in the language is valid CommonMark on a tilde fence')
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '~~~js`ts\nabc\n~~~\n')
+}
+
 console.log('PASS source-kernel commands (changeCodeLanguage)')
 
 // ---- Plan 3 Task 5: exitCodeBlock（Mod-Enter 退出代码块）----

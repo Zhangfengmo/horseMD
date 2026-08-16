@@ -254,6 +254,77 @@ export function createKernelMode({
     })
   }
 
+  // Best-effort scan: does any ReplaceStep in this batch target a
+  // `code_block` textblock? Used only to decide whether the veto-after-
+  // CM-applied defensive resync below is worth scheduling — a false
+  // negative just skips that extra (harmless) resync, so this does not need
+  // `extractPlainTextSteps`' full validation (batch chaining, slice shape,
+  // …), only the parent-node-type check, walked with the same per-step
+  // `tr.docs[index]` convention that file's own doc-comment explains (a
+  // multi-step transaction's step N is expressed in the doc-after-step-
+  // (N-1) coordinate space, not `oldState.doc` for every step).
+  const batchTargetsCodeBlock = (transactions, oldState) => {
+    const trs = Array.isArray(transactions) ? transactions : [transactions]
+    let fallbackDoc = oldState?.doc || null
+    for (const tr of trs) {
+      if (!tr || !tr.docChanged || !Array.isArray(tr.steps)) continue
+      for (let index = 0; index < tr.steps.length; index += 1) {
+        const step = tr.steps[index]
+        if (!Number.isFinite(step?.from)) continue
+        const stepDoc = tr.docs?.[index] || fallbackDoc
+        if (!stepDoc) continue
+        try {
+          if (stepDoc.resolve(step.from).parent?.type?.name === 'code_block') return true
+        } catch {
+          /* unresolvable position: not provably a code_block, keep scanning */
+        }
+      }
+      fallbackDoc = tr.doc || fallbackDoc
+    }
+    return false
+  }
+
+  // Defense-in-depth for the P3-4 corruption vector (final-review finding,
+  // 2026-08-16): CodeMirror's own `forwardUpdate` fires from CM's update
+  // listener, which runs AFTER CM has already applied a change to its OWN
+  // internal `EditorState` — by the time the resulting PM transaction
+  // reaches the kernel gateway, CM's DOM/state may already show the edit
+  // regardless of what the gateway decides. A normal veto leaves
+  // `view.state` (and therefore the code_block's PM node) untouched — see
+  // `editor-source-transactions.js`'s `if (verdict?.veto) return` — so
+  // nothing ever calls the nodeview's own `update()` to pull CM back in
+  // sync with the kernel's truth; left alone, that is a PERMANENT
+  // divergence (CM shows bytes the kernel never owned). Scheduled as a
+  // microtask (never synchronously — the dispatch-veto protocol runs this
+  // while the view still holds the pre-batch state) and built on the exact
+  // same reconcile `verifyPlainTextProjection` above uses: reconciling
+  // against `parse(kernel.doc.text)` is a genuine no-op when the view
+  // already agrees with the kernel (no diff -> no dispatch, so this costs
+  // nothing on the overwhelmingly common "CM did NOT diverge" path), and a
+  // real repair dispatch whenever it doesn't — which is exactly the signal
+  // that forces the affected code_block's nodeview `update()` to run and
+  // resync CM's own buffer to the kernel-owned bytes. The diagnostic is
+  // pushed unconditionally so a regression test can prove this path ran
+  // without depending on whether a repair dispatch actually fired.
+  const scheduleVetoResync = () => {
+    queueMicrotask(() => {
+      const view = getView?.()
+      if (!view || disposed) return
+      pushKernelDiagnostic({ type: 'cm-veto-resync', revision: kernel.doc.revision })
+      const parsed = safeParse(kernel.doc.text)
+      if (!parsed) {
+        pushKernelDiagnostic({ type: 'cm-veto-resync-parse-failure' })
+        return
+      }
+      try {
+        reconcileProjection({ view, newDoc: parsed })
+      } catch {
+        pushKernelDiagnostic({ type: 'cm-veto-resync-failed' })
+      }
+      bindMap(view.state.doc)
+    })
+  }
+
   const handleTransactions = (transactions, oldState, newState) => {
     if (inactive()) return undefined
     const view = getView?.()
@@ -284,8 +355,15 @@ export function createKernelMode({
         const committed = commitPlainText({ kernel, map: kernel.map, transactions, oldState })
         if (!committed.ok) {
           // Veto: the PM view never changes and kernel.doc was not advanced,
-          // so both sides stay consistent with no repair needed.
+          // so both sides stay consistent with no repair needed — EXCEPT
+          // that CM may already have applied this edit to its own internal
+          // state before the (now-vetoed) PM transaction ever reached here
+          // (see scheduleVetoResync's own comment). Schedule the defensive
+          // resync whenever this batch's steps targeted a code_block, so a
+          // genuine CM-side divergence gets pulled back in sync instead of
+          // persisting forever.
           notifyBlocked(committed.code)
+          if (batchTargetsCodeBlock(transactions, oldState)) scheduleVetoResync()
           return { veto: true }
         }
         kernel.doc = committed.applied.doc

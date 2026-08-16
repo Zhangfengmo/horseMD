@@ -566,23 +566,58 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   assert.equal(classifyTransactions([tr], state).kind, 'blocked')
 }
 
-// Case 26: mermaid-target rejection — a code_block whose CURRENT language is
-// one Crepe renders as a preview (READONLY_CODE_LANGUAGES) never got a
-// charMap built for it, so extractLanguageStep refuses it at classification
-// time rather than surfacing a generic UNMAPPED later. Case-insensitive,
-// matching editor-kernel-projection-map.js's own guard.
+// Case 26 (final-review finding, 2026-08-16 — the from-readonly refusal was
+// LIFTED, making the language switch bidirectional): a code_block whose
+// CURRENT language is one Crepe renders as a preview (READONLY_CODE_LANGUAGES)
+// now classifies and COMMITS a switch out of it, exactly like any other
+// language switch. `commitCodeLanguage` resolves its anchor via the pair's
+// `mdBlock` fence-start fallback (no charMap needed) — see that function's
+// own comment. Case-insensitive on the CURRENT language, matching
+// editor-kernel-projection-map.js's own guard.
 {
   const md = '```mermaid\ngraph TD\n```\n'
   const d = doc(cb('mermaid', 'graph TD'))
   const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'mermaid-only fence must still structurally map')
+  assert.equal(map.blockPairs[0].charMap, null, 'sanity: the mermaid pair itself has no charMap')
+
   const tr = state.tr.setNodeAttribute(0, 'language', 'js')
-  assert.equal(classifyTransactions([tr], state).kind, 'blocked',
-    'switching a mermaid block\'s OWN language must be refused, not silently mapped')
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, { kind: 'code-language', pmPos: 0, language: 'js' },
+    'switching a mermaid block\'s OWN language must now classify, not block')
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitCodeLanguage({ kernel, map, pmPos: 0, language: 'js' })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '```js\ngraph TD\n```\n',
+    'mermaid -> js must commit the exact fence-rewrite bytes, content untouched')
 
   const upper = doc(cb('MERMAID', 'graph TD'))
   const upperState = EditorState.create({ schema, doc: upper })
   const upperTr = upperState.tr.setNodeAttribute(0, 'language', 'js')
-  assert.equal(classifyTransactions([upperTr], upperState).kind, 'blocked', 'case-insensitive')
+  assert.deepEqual(classifyTransactions([upperTr], upperState), { kind: 'code-language', pmPos: 0, language: 'js' },
+    'case-insensitive: MERMAID -> js also classifies')
+}
+
+// Case 26b: the reverse direction (js -> mermaid) was always allowed (the
+// CURRENT language there is not readonly) — locked here as an explicit byte
+// test alongside Case 26's mermaid -> js, so both directions of the switch
+// are pinned, not just one.
+{
+  const md = '```js\nabc\n```\n'
+  const d = doc(cb('js', 'abc'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'plain js fence must map')
+  const tr = state.tr.setNodeAttribute(0, 'language', 'mermaid')
+  assert.deepEqual(classifyTransactions([tr], state), { kind: 'code-language', pmPos: 0, language: 'mermaid' })
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitCodeLanguage({ kernel, map, pmPos: 0, language: 'mermaid' })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '```mermaid\nabc\n```\n',
+    'js -> mermaid must commit the exact fence-rewrite bytes, content untouched')
 }
 
 // Case 27: the relaxation is SCOPED to code_block — a \n-bearing slice

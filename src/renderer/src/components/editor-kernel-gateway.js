@@ -4,13 +4,10 @@
 //
 // This module imports NOTHING from electron/react/@milkdown — only
 // `../lib/source-kernel` (KERNEL_CODES, applySourceTransaction, the pure
-// command functions), `READONLY_CODE_LANGUAGES` from the sibling
-// `editor-kernel-projection-map.js` (a plain data constant, shared so the
-// two modules' notion of "preview-only code language" can never drift), and
-// plain ProseMirror step/model objects passed in by the caller. It does not
-// talk to a live EditorView, does not read `crepe.*`, and does not dispatch
-// anything itself; the Editor-side wiring (Task 5) is the only place that
-// calls into a live view.
+// command functions) and plain ProseMirror step/model objects passed in by
+// the caller. It does not talk to a live EditorView, does not read
+// `crepe.*`, and does not dispatch anything itself; the Editor-side wiring
+// (Task 5) is the only place that calls into a live view.
 //
 // classifyTransactions() re-derives the same "is this a plain, unmarked,
 // single-textblock edit" guard that src/renderer/src/lib/source-transaction-sync.js
@@ -22,7 +19,6 @@
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
 import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage } from '../lib/source-kernel/index.js'
-import { READONLY_CODE_LANGUAGES } from './editor-kernel-projection-map.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -167,14 +163,28 @@ function extractTaskToggleStep(transactions, oldState) {
 // `ReplaceStep`, so neither `structuralHandler` nor `extractPlainTextSteps`
 // ever sees it. Proves the same shape `extractTaskToggleStep` proves for its
 // own attribute (ONE transaction, ONE `AttrStep`, the right `attr` name, a
-// PM node of the expected type at `step.pos`) plus one extra guard this
-// attribute needs that `checked` doesn't: a code_block whose CURRENT
+// PM node of the expected type at `step.pos`).
+//
+// BIDIRECTIONAL (final-review fix, 2026-08-16): a code_block whose CURRENT
 // (pre-switch) language Crepe renders as a preview (mermaid/latex —
 // `READONLY_CODE_LANGUAGES`, shared with editor-kernel-projection-map.js so
-// the two stay in lockstep) never got a `charMap` built for it (see that
-// file's `codeReadOnly` branch), so there is no raw anchor `commitCodeLanguage`
-// could resolve its fence-rewrite offset from — refused here, at
-// classification time, rather than failing later with a less specific code.
+// the two stay in lockstep) is no longer refused here. The original refusal
+// assumed there was "no raw anchor `commitCodeLanguage` could resolve its
+// fence-rewrite offset from" for such a block — but `commitCodeLanguage`
+// (below) already has a null-charMap fallback anchor (the pair's own
+// `mdBlock.position.start.offset`, the fence's own start), which resolves a
+// `changeCodeLanguage` offset just as well as a charMap-derived one: the
+// command only needs an offset that `index.blockAt` resolves to the SAME
+// code block, and the fence start always does. Refusing this direction was
+// therefore a one-way door with no correctness reason behind it — a `js`
+// block can freely become `mermaid` (this file always allowed that: the
+// CURRENT language there is not readonly), but the reverse (`mermaid` ->
+// `js`) was blocked. Lifting the guard makes the switch symmetric: once the
+// switch commits, `editor-kernel-mode.js`'s `code-language` case
+// unconditionally rebinds the projection map (see its own comment), so the
+// pair's `charMap` is freshly (re-)evaluated against the NEW language and
+// the block becomes genuinely editable immediately — the very next commit
+// into it goes through the ordinary plain-text path.
 function extractLanguageStep(transactions, oldState) {
   const changed = transactions.filter((tr) => tr && tr.docChanged)
   if (changed.length !== 1) return null
@@ -192,8 +202,6 @@ function extractLanguageStep(transactions, oldState) {
     return null
   }
   if (!node || node.type?.name !== 'code_block') return null
-  const currentLanguage = String(node.attrs?.language || '').toLowerCase()
-  if (READONLY_CODE_LANGUAGES.has(currentLanguage)) return null
   return { pmPos: step.pos, language: String(step.value ?? '') }
 }
 
@@ -454,16 +462,20 @@ export function commitTaskToggle({ kernel, map, pos }) {
 // rather than through `pairAt`, which resolves CONTENT positions. The pair
 // carries its `mdBlock` (the mdast `code` node) even when `charMap` is null
 // (`buildProjectionMap` always records `mdBlock`, editable or not — see its
-// `pmType === 'code_block'` branch) — but this function is never reached for
-// a currently-readonly target anyway, because `extractLanguageStep` already
-// refused those at classification time. When the pair DOES carry a charMap
-// (the common, editable case), its own content-start raw offset
-// (`charMap.visibleToRaw(0)`) is passed to `changeCodeLanguage` as the
-// caret-preservation anchor — a reasonable stand-in for "the block's content
-// start" since the gateway has no access to the live view's actual
-// selection here (the original AttrStep transaction, selection untouched,
-// is what the caller lets through to the view on success — see
-// editor-kernel-mode.js's `code-language` case).
+// `pmType === 'code_block'` branch) — which is exactly what makes a switch
+// FROM a currently-readonly target (mermaid/latex -> a real language) work
+// now that `extractLanguageStep` no longer refuses it at classification
+// time (final-review fix, 2026-08-16): a null-charMap pair falls back to
+// `start` (the fence's own start offset, always present) as the anchor
+// `changeCodeLanguage` resolves the block from — `index.blockAt(start)`
+// finds the same code block a charMap-derived offset would, so there is no
+// correctness gap. When the pair DOES carry a charMap (the common, already-
+// editable case), its own content-start raw offset (`charMap.visibleToRaw(0)`)
+// is passed instead, as the caret-preservation anchor — a reasonable
+// stand-in for "the block's content start" since the gateway has no access
+// to the live view's actual selection here (the original AttrStep
+// transaction, selection untouched, is what the caller lets through to the
+// view on success — see editor-kernel-mode.js's `code-language` case).
 export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
   if (!kernel?.doc || !map || !Array.isArray(map.blockPairs)) {
     return { ok: false, code: KERNEL_CODES.UNMAPPED }

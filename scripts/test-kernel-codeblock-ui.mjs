@@ -274,6 +274,20 @@ const AFTER_EXIT_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
   'NEXTLI\n```\nZ\n\n\n引用中的代码'
 )
 
+// `__LANG2__` stands in for the live picker's exact casing for the mermaid
+// block's own switch (final-review finding, 2026-08-16: the from-readonly
+// language-switch refusal was lifted — mermaid -> a real language must
+// commit AND leave the block genuinely editable right after, so this proves
+// the switch-then-type sequence end to end in the live app, not just
+// headlessly). Built from AFTER_LANG_SWITCH_TPL — the exact document state
+// right before the mermaid-blocked probe (step 7) below.
+const withLang2 = (template, lang) => template.split('__LANG2__').join(lang)
+
+const AFTER_MERMAID_SWITCH_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
+  '```mermaid\ngraph TD; A-->B;\n```\n',
+  '```__LANG2__\ngraph TD; A-->B;MERMAIDNOWJS\n```\n'
+)
+
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
     const value = await check()
@@ -439,41 +453,56 @@ const cmContent = (evaluate, blockRef) => evaluate(`(${blockRef})?.querySelector
 
 const cmFocused = (evaluate) => evaluate(`document.activeElement?.className || ''`)
 
-// Open the js block's language picker, filter to "python", read back the
-// EXACT `data-language` string the live picker offers, and click it.
-async function switchJsLanguageToPython(evaluate, send) {
+// Open a block's language picker, filter to `query`, read back the EXACT
+// `data-language` string the live picker offers, and click it. `blockRef` is
+// a window-scoped JS expression string (e.g. 'window.__hmJsBlock') so this
+// helper can drive ANY captured code block's own picker instance, not just
+// the js block.
+async function switchBlockLanguage(evaluate, send, blockRef, query) {
+  // The vendored LanguagePicker always PREPENDS the block's CURRENTLY
+  // selected language to the filtered list, regardless of the search query
+  // (`languages` computed: `return [selected, ...filtered]` — verified by
+  // reading @milkdown/components' source) — but ONLY when that current
+  // language happens to be a registered canonical language NAME (e.g.
+  // "Mermaid", which HorseMD registers so `/mermaid` and this picker can
+  // both address it — see editor-crepe-setup.js's `mermaidLanguage`); a
+  // non-canonical alias like "js" isn't found by that lookup, so nothing
+  // gets prepended there. Captured up front so the picked item can skip it
+  // when it IS prepended, instead of always grabbing the (possibly
+  // unchanged) first list entry.
+  const currentLang = (await evaluate(`(${blockRef})?.querySelector('.language-button')?.textContent?.trim()`)) || ''
   const opened = await evaluate(`(() => {
-    const btn = window.__hmJsBlock?.querySelector('.language-button')
+    const btn = (${blockRef})?.querySelector('.language-button')
     btn?.click()
     return !!btn
   })()`)
-  assert.ok(opened, 'language-button not found on the js block')
-  await waitFor(() => evaluate(`!!window.__hmJsBlock?.querySelector('.language-picker .search-input')`),
+  assert.ok(opened, `language-button not found on the block (${blockRef})`)
+  await waitFor(() => evaluate(`!!(${blockRef})?.querySelector('.language-picker .search-input')`),
     'language picker did not open')
   await sleep(150)
   const typed = await evaluate(`(() => {
-    const input = window.__hmJsBlock.querySelector('.language-picker .search-input')
+    const input = (${blockRef}).querySelector('.language-picker .search-input')
     if (!input) return false
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-    setter.call(input, 'python')
+    setter.call(input, ${JSON.stringify(query)})
     input.dispatchEvent(new Event('input', { bubbles: true }))
     return true
   })()`)
   assert.ok(typed, 'could not type into the language search box')
   const language = await waitFor(() => evaluate(`(() => {
-    const item = [...window.__hmJsBlock.querySelectorAll('.language-picker .language-list-item')]
-      .find((node) => node.dataset.language)
+    const item = [...(${blockRef}).querySelectorAll('.language-picker .language-list-item')]
+      .find((node) => node.dataset.language && node.dataset.language.toLowerCase() !== ${JSON.stringify(currentLang.toLowerCase())})
     return item ? item.dataset.language : null
-  })()`), 'no language list item matched the "python" filter')
+  })()`), `no language list item matched the ${JSON.stringify(query)} filter (other than the current "${currentLang}")`)
   const clicked = await evaluate(`(() => {
-    const item = [...window.__hmJsBlock.querySelectorAll('.language-picker .language-list-item')]
+    const item = [...(${blockRef}).querySelectorAll('.language-picker .language-list-item')]
       .find((node) => node.dataset.language === ${JSON.stringify(language)})
     item?.click()
     return !!item
   })()`)
   assert.ok(clicked, `could not click the "${language}" language item`)
-  await waitFor(() => evaluate(`window.__hmJsBlock.querySelector('.language-button')?.textContent?.trim() === ${JSON.stringify(language)}`),
-    "the js block's language-button label did not update after the picker click")
+  await waitFor(() => evaluate(`(${blockRef}).querySelector('.language-button')?.textContent?.trim() === ${JSON.stringify(language)}`),
+    "the block's language-button label did not update after the picker click")
   return language
 }
 
@@ -624,7 +653,7 @@ async function run() {
     // ============================================================
     // 4) language picker: js -> python, assert the open fence line rewrite
     // ============================================================
-    const language = await switchJsLanguageToPython(evaluate, send)
+    const language = await switchBlockLanguage(evaluate, send, 'window.__hmJsBlock', 'python')
     await sleep(200)
     await toggleSourceMode(evaluate)
     shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the language switch')
@@ -696,10 +725,38 @@ async function run() {
       'typing into the mermaid code block changed its CodeMirror content — the per-block gate must refuse it')
 
     await toggleSourceMode(evaluate)
-    const SAVED = withLang(AFTER_LANG_SWITCH_TPL, language)
     shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the mermaid edit-attempt probe')
-    assert.equal(shown, SAVED, 'the mermaid edit attempt must not have changed the kernel document bytes')
+    assert.equal(shown, withLang(AFTER_LANG_SWITCH_TPL, language), 'the mermaid edit attempt must not have changed the kernel document bytes')
     assert.equal(app.dialogs.length, 0, 'no dialog appeared from the mermaid edit-attempt probe')
+    await toggleSourceMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the mermaid-blocked verification')
+    await sleep(200)
+
+    // ============================================================
+    // 7b) mermaid -> js language switch (final-review finding, 2026-08-16:
+    //    the from-readonly refusal is LIFTED — bidirectional switch), then
+    //    type into the now-editable block right after: switch-then-type,
+    //    end to end in the live app.
+    // ============================================================
+    const mermaidLang = await switchBlockLanguage(evaluate, send, 'window.__hmMermaidBlock', 'javascript')
+    await sleep(200)
+    // No `ensureCmVisible` call here: step 7's mermaid-blocked probe (just
+    // above) already clicked the Edit toggle to reveal this block's
+    // CodeMirror editor, and that reveal persists across the language
+    // switch — clicking the toggle AGAIN here would just hide it back.
+    await clickCmLineEnd(evaluate, send, 'window.__hmMermaidBlock', { last: true })
+    await typeTextLikeUser(send, 'MERMAIDNOWJS', { delayMs: delay })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmMermaidBlock') || '').includes('MERMAIDNOWJS'),
+      'MERMAIDNOWJS never landed in the (renamed) mermaid CodeMirror editor — the block must be editable right after the switch')
+    await sleep(200)
+
+    await toggleSourceMode(evaluate)
+    const SAVED = withLang2(withLang(AFTER_MERMAID_SWITCH_TYPE_TPL, language), mermaidLang)
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the mermaid switch-then-type')
+    assert.equal(shown, SAVED,
+      'mermaid -> js switch must rewrite the fence line, and the immediate follow-up type must commit, byte-exact')
+    // Stays in source mode into the Save step below (same convention the
+    // original step 7 verification used) — Save must work from either view.
 
     // ============================================================
     // 8) Save FAB -> byte-exact disk write; full quit -> cold reopen
@@ -715,14 +772,14 @@ async function run() {
     ;({ evaluate, send } = app)
     await waitFor(async () => {
       const text = await mounted(evaluate)
-      return text && text.includes('TAILMARK') && text.includes('OKMARKDONEMA') ? text : null
+      return text && text.includes('TAILMARK') && text.includes('OKMARKDONEMA') && text.includes('MERMAIDNOWJS') ? text : null
     }, 'reopened document did not mount with the saved content')
     await toggleSourceMode(evaluate)
     const reopened = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode code-block domain UI: js multi-line edit + Backspace (within-line and cross-line-join), quoted py per-line prefix expansion on insert AND delete, language picker rewrite, Mod-Enter exit, CM-focused undo groups, mermaid gate refusal (with a focus positive-control), save and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode code-block domain UI: js multi-line edit + Backspace (within-line and cross-line-join), quoted py per-line prefix expansion on insert AND delete, language picker rewrite (both directions, including mermaid -> js switch-then-type), Mod-Enter exit, CM-focused undo groups, mermaid gate refusal (with a focus positive-control), save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
