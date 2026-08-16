@@ -32,11 +32,16 @@ import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarke
 // `ReplaceStep`s whose inserted text carries a bare `'\n'` for a multi-line
 // CM edit — there is no separate hardbreak node inside a code block's `text*`
 // content model, the newline IS the text. `commitPlainText` below is what
-// turns each such `'\n'` into the raw bytes (line ending + the block's own
-// per-line prefix) this actually has to become on disk; a bare '\r' is
-// refused even with `allowNewline` because CM never produces one (its own
-// line-break representation is always '\n') and the expansion below only
-// knows how to translate '\n'. Mirrors source-transaction-sync.js's
+// turns each such break into the raw bytes (line ending + the block's own
+// per-line prefix) this actually has to become on disk. A '\r' IS accepted
+// under `allowNewline` (2026-08-17, CRLF un-narrowing): the CRLF bridge
+// patch (`editor-codeblock-crlf.js`) rewrites every break CM inserts into
+// the block's own dominant ending BEFORE the ReplaceStep is built, so a
+// CRLF/lone-CR block's slice legitimately carries '\r\n'/'\r'. Refusing it
+// here made every such block permanently unwritable. `commitPlainText`
+// below still proves, per break, that its spelling matches the raw source's
+// own `charMap.lineEnding` — a mismatch is refused there, so nothing
+// unproven gets through. Mirrors source-transaction-sync.js's
 // `plainSliceText` (:22-36) but is redefined here so this module has no
 // dependency on that file's raw-matching helpers.
 const plainSliceText = (slice, { allowNewline = false } = {}) => {
@@ -52,10 +57,7 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
     text += node.text || ''
   })
   if (!valid) return null
-  if (allowNewline) {
-    if (/\r/.test(text)) return null
-    return text
-  }
+  if (allowNewline) return text
   if (/[\r\n]/.test(text)) return null
   return text
 }
@@ -549,26 +551,55 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       // instead of the kernel's generic invalid-range).
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
     }
-    // Code-block newline expansion (Plan 3 Task 4): `step.insertText` can
-    // carry a bare `'\n'` only when its target textblock is a `code_block`
-    // (`extractPlainTextSteps`' `allowNewline` guard) — a raw byte-for-byte
-    // insert of that '\n' would silently break a quoted/indented fence's
-    // per-line prefix contract (`buildCodeMap` requires EVERY content line
-    // to reproduce the same prefix byte-for-byte). Every such '\n' must
-    // instead become `lineEnding + linePrefix` — the exact bytes
-    // `buildCodeMap` already proved every OTHER content line in this block
-    // uses. `pairAt` (never virtual: `virtualBlockAt` above only ever
-    // matches trailing/split placeholders and empty list items, none of
-    // which are `code_block`s) resolves the covering pair by the same
-    // content-position search `pmPosToRaw` uses internally.
+    // Code-block line-break expansion (Plan 3 Task 4; CRLF un-narrowing
+    // 2026-08-17). `step.insertText` can carry a line break only when its
+    // target textblock is a `code_block` (`extractPlainTextSteps`'
+    // `allowNewline` guard). A raw byte-for-byte insert of the break alone
+    // would silently break a quoted/indented fence's per-line prefix
+    // contract (`buildCodeMap` requires EVERY content line to reproduce the
+    // same prefix byte-for-byte), so each break must become
+    // `lineEnding + linePrefix` — the exact bytes `buildCodeMap` already
+    // proved every OTHER content line in this block uses. `pairAt` (never
+    // virtual: `virtualBlockAt` above only ever matches trailing/split
+    // placeholders and empty list items, none of which are `code_block`s)
+    // resolves the covering pair by the same content-position search
+    // `pmPosToRaw` uses internally.
+    //
+    // SPELLING IS PROVEN, NEVER RE-SPELLED. The CRLF bridge
+    // (`editor-codeblock-crlf.js` `crlfForwardUpdate`) already converts every
+    // break CM inserts into the block's dominant ending, so by the time a
+    // step arrives here the PM side ALREADY holds '\r\n' for a CRLF block.
+    // Re-spelling (the old `split('\n').join(ending + prefix)`) would then
+    // double-convert: '\r\n' -> '\r' + '\r\n' + '' — a lone '\r' injected
+    // into the source, i.e. exactly the corruption shape this whole family
+    // is about. Instead every break is required to EQUAL the block's raw
+    // `lineEnding` and only the prefix is added. Two shapes are refused by
+    // that rule, both deliberately:
+    //  - a bare '\n' in a CRLF/lone-CR block. Reachable only when the
+    //    block's CURRENT text holds no '\r' (single-line or empty fence in a
+    //    CRLF document): the bridge's `hasCarriageReturn` fast path then
+    //    delegates to the vendored `forwardUpdate`, which always emits '\n'
+    //    (CM's `Text.toString()` joins with '\n' and can never emit '\r').
+    //    Committing '\r\n' to raw while PM holds '\n' would pass the kernel
+    //    but fail `verifyPlainTextProjection`'s cheap-path diff on EVERY
+    //    such commit — repair-reconcile churn, the P3-4 symptom. Refused
+    //    (veto + toast), so the bytes and the view never diverge.
+    //  - a '\r'-bearing break in an LF block. The bridge cannot produce one,
+    //    so this is an unknown-provenance slice; fail closed.
     let insertText = step.insertText
-    if (insertText.includes('\n')) {
+    if (/[\r\n]/.test(insertText)) {
       const pair = typeof map.pairAt === 'function' ? map.pairAt(oldFrom) : null
       const codeMap = pair?.charMap
       if (!codeMap || typeof codeMap.lineEnding !== 'string' || typeof codeMap.linePrefix !== 'string') {
         return { ok: false, code: KERNEL_CODES.UNMAPPED }
       }
-      insertText = insertText.split('\n').join(codeMap.lineEnding + codeMap.linePrefix)
+      const breaks = insertText.match(/\r\n|\r|\n/g) || []
+      if (breaks.some((brk) => brk !== codeMap.lineEnding)) {
+        return { ok: false, code: KERNEL_CODES.UNMAPPED }
+      }
+      insertText = codeMap.linePrefix
+        ? insertText.split(codeMap.lineEnding).join(codeMap.lineEnding + codeMap.linePrefix)
+        : insertText
     }
     edits.push({
       from: rawFrom,
