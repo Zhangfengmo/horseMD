@@ -126,16 +126,34 @@ console.log('--- kernel gateway ---')
   assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
 }
 
-// Case 6: editing inside a textblock that already carries a mark (bold) is
-// out of scope for the plain-text path, even though the inserted text itself
-// carries no mark.
+// Case 6 (FLIPPED by P4-3.5 Fix B — this used to pin the blanket "any mark
+// in the textblock refuses all typing" rule): a PLAIN insert into a
+// textblock that carries a mark now classifies as plain-text and commits.
+// The caret sits at visible 0 of a block STARTING with a mark run — the
+// neutral insert resolver must land the plain char BEFORE the opening
+// delimiter ('X**bold**', never '**Xbold**').
 {
+  const md = '**bold**\n'
   const d = doc(p(schema.text('bold', [schema.mark('strong')])))
   const state = EditorState.create({ schema, doc: d })
-  const tr = state.tr.insertText('X', 1)
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a marked paragraph maps (content-size identity holds)')
+  // NB: `tr.insertText('X', 1)` would INHERIT the strong mark here
+  // ($from.marks() falls through to the adjacent run at a boundary) and
+  // correctly stay refused — the plain slice is built explicitly.
+  const tr = state.tr.replaceWith(1, 1, text('X'))
   const result = classifyTransactions([tr], state)
-  assert.equal(result.kind, 'blocked')
-  assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(result.kind, 'plain-text')
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 0, to: 0, insert: 'X' }])
+  assert.equal(committed.applied.doc.text, 'X**bold**\n')
+
+  // …and the inheriting form IS refused (the mark-inheritance trap pin).
+  const trInherit = state.tr.insertText('X', 1)
+  assert.equal(classifyTransactions([trInherit], state).kind, 'blocked')
 }
 
 // Case 7: a slice containing a hard_break (not text) is not plain text.
@@ -694,29 +712,17 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
 // layer (`test-source-kernel-commands.mjs`'s "review fix" section), proven
 // again here at the gateway layer.
 //
-// Note on WHY this fixture pairs an UNMARKED PM paragraph against a MARKED
-// markdown source ('a **bold** b\n'): `extractPlainTextSteps`'
-// `isPlainTextblock` guard (used by BOTH `classifyTransactions` and
-// `commitPlainText` itself, unconditionally, before any raw-offset
-// resolution runs) refuses ANY edit whose PM parent textblock carries a
-// mark ANYWHERE in it (see Case 6 above) — so with a REAL marked PM doc,
-// `commitPlainText` never reaches `pmPosToRawStart` at all; the bug this
-// case targets is unreachable through today's live `classifyTransactions ->
-// commitPlainText` pipeline for an ALREADY-mark-toggled paragraph. It
-// remains live and directly reachable, unconditionally, through
-// `replaceVisibleText` (any future caller of that command against marked
-// content — including a mode-level verify/reconcile repair path) and would
-// become immediately live here too the moment a future task relaxes
-// `isPlainTextblock` for post-mark-toggle paragraphs (exactly the kind of
-// relaxation Plan 4 Task 3's kernel-mode routing is expected to need). This
-// fixture proves `pmPosToRawStart`/`commitPlainText`'s `oldFrom < oldTo`
-// branch is correct NOW, pre-emptively, using `buildProjectionMap` for
-// real (not a hand-rolled fake map) — its pairing is content-SIZE-based,
-// not mark-aware (see editor-kernel-projection-map.js's own pairing
-// comment), so an unmarked 8-char PM paragraph legitimately pairs against
-// an 8-visible-char markdown paragraph that happens to contain '**' bytes,
-// exercising the exact same charMap gap a real post-mark-toggle paragraph
-// would have.
+// Note on the fixture shape (an UNMARKED PM paragraph against a MARKED
+// markdown source, 'a **bold** b\n'): when this case was written (P4-2
+// review), the then-blanket `isPlainTextblock` guard made this path
+// unreachable through the live pipeline with a REAL marked PM doc, so the
+// case proved `pmPosToRawStart` pre-emptively through a size-compatible
+// unmarked stand-in (the projection pairing is content-SIZE-based, not
+// mark-aware, so an unmarked 8-char PM paragraph legitimately pairs against
+// an 8-visible-char markdown paragraph containing '**' bytes — exercising
+// the exact same charMap gap). P4-3.5's Fix B has since relaxed the guard —
+// the REAL marked-doc scenarios are covered end-to-end in the "Fix B"
+// section below; this fixture stays as the focused pmPosToRawStart lock.
 {
   const md = 'a **bold** b\n'
   const d = doc(p(text('a bold b')))
@@ -751,6 +757,139 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   const committed2 = commitPlainText({ kernel: kernel2, map, transactions: [tr2], oldState: state })
   assert.equal(committed2.ok, true, committed2.code)
   assert.equal(committed2.applied.doc.text, 'a **** b\n')
+}
+
+// ---- P4-3.5 Fix B: plain typing in marked textblocks (byte matrix) ----
+// The blanket refusal is gone; every scenario below runs the REAL pipeline
+// (classifyTransactions -> commitPlainText) against a REAL marked PM doc +
+// buildProjectionMap. 'a **bold** b\n' raw indices: a=0 sp=1 *=2 *=3 b=4
+// o=5 l=6 d=7 *=8 *=9 sp=10 b=11 \n=12. PM: p@0, contentPos 1, children
+// 'a '(1..3), 'bold'[strong](3..7), ' b'(7..9).
+const markedFixture = () => {
+  const md = 'a **bold** b\n'
+  const d = doc(p(text('a '), schema.text('bold', [schema.mark('strong')]), text(' b')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'marked paragraph must map')
+  return { md, state, map }
+}
+const commitOf = (md, map, state, tr) => {
+  const kernel = { doc: createMarkdownDocument(md) }
+  return { kernel, committed: commitPlainText({ kernel, map, transactions: [tr], oldState: state }) }
+}
+
+// (a) type BEFORE the bold run (plain slice): lands before the opening '**'.
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.insertText('X', 3)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'a X**bold** b\n')
+}
+
+// (b) type AFTER the bold run with a PLAIN slice: the neutral resolver
+// lands the char AFTER the closing '**', never inside it. (Real typing at
+// this exact caret inherits the strong mark — `$from.marks()` — and stays
+// refused, pinned right below; the plain shape is built explicitly.)
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.replaceWith(7, 7, text('X'))
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'a **bold**X b\n')
+
+  // inherited-mark typing at the run's trailing edge → refused (trap pin).
+  const trInherit = state.tr.insertText('X', 7)
+  assert.equal(classifyTransactions([trInherit], state).kind, 'blocked')
+}
+
+// (c) type in the PLAIN run of the marked paragraph.
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.insertText('X', 8) // between the space and trailing 'b'
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'a **bold** Xb\n')
+}
+
+// (d) type BETWEEN two adjacent mark runs: the char lands between the
+// closing and opening delimiters.
+{
+  const md = '**a**_b_\n'
+  const d = doc(p(
+    schema.text('a', [schema.mark('strong')]),
+    schema.text('b', [schema.mark('emphasis')])
+  ))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const tr = state.tr.replaceWith(2, 2, text('X')) // explicit plain slice
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '**a**X_b_\n')
+}
+
+// (e) type INSIDE the bold run with an inherited mark (real typing inside a
+// run inserts a MARKED slice) → still refused: the storedMarks/
+// mark-inheritance trap stays closed.
+{
+  const { state } = markedFixture()
+  const tr = state.tr.replaceWith(5, 5, schema.text('X', [schema.mark('strong')]))
+  const result = classifyTransactions([tr], state)
+  assert.equal(result.kind, 'blocked')
+  assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// (f) DELETE straddling a mark boundary (from plain text INTO the run):
+// would strand the run's delimiters ('a **' corruption shape) → refused.
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.delete(2, 5) // ' b' of 'a |bo|ld' — crosses into the run
+  const result = classifyTransactions([tr], state)
+  assert.equal(result.kind, 'blocked')
+  const { kernel, committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, false)
+  assert.equal(committed.code, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(kernel.doc.text, md, 'refused deletion leaves bytes untouched')
+}
+
+// (f2) …and the mirrored straddle (from inside the run OUT past its end).
+{
+  const { state } = markedFixture()
+  const tr = state.tr.delete(5, 8)
+  assert.equal(classifyTransactions([tr], state).kind, 'blocked')
+}
+
+// (g) delete the run's EXACT content → '****' residue (byte-consistent,
+// pinned by the P4-2 decision — see Case 21(b) and the matching
+// test-source-kernel-commands.mjs section).
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.delete(3, 7)
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'a **** b\n')
+}
+
+// (h) delete a range STRICTLY containing the whole run: the raw range
+// provably covers the delimiters too — clean removal, no residue.
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.delete(2, 8) // ' bold ' incl. both flanking chars
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'ab\n')
+}
+
+// (i) a paragraph with a NON-text inline child (hard_break) keeps refusing —
+// the relaxation is marks-only.
+{
+  const d = doc(p(text('ab'), schema.nodes.hard_break.create(), text('cd')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.insertText('X', 2)
+  assert.equal(classifyTransactions([tr], state).kind, 'blocked')
 }
 
 // ---- Plan 4 Task 3: mark-toggle classification ----

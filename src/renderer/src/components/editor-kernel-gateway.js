@@ -9,9 +9,11 @@
 // `crepe.*`, and does not dispatch anything itself; the Editor-side wiring
 // (Task 5) is the only place that calls into a live view.
 //
-// classifyTransactions() re-derives the same "is this a plain, unmarked,
+// classifyTransactions() re-derives the same "is this a plain,
 // single-textblock edit" guard that src/renderer/src/lib/source-transaction-sync.js
-// (:158-260) used for its legacy raw-text-matching path, but reimplements it
+// (:158-260) used for its legacy raw-text-matching path (relaxed for marked
+// textblocks since P4-3.5 — see textblockProfile below; the legacy file keeps
+// its own stricter copy), but reimplements it
 // directly against PM Step/Node objects — it deliberately does NOT reuse
 // that file's text-search/blockHints machinery (that belongs to the legacy
 // fallback, not the kernel path). Where the two diverge: the legacy path had
@@ -58,19 +60,59 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
   return text
 }
 
-// A textblock counts as "plain" only if every one of its current children
-// is unmarked text — an edit landing inside a block that already carries
-// any formatting (bold/italic/code/link/…) is out of scope for the
-// byte-for-byte text path, same guard as source-transaction-sync.js's
-// `isPlainTextblock` (:38-45), reimplemented locally for the same reason as
-// `plainSliceText` above.
-const isPlainTextblock = (node) => {
-  if (!node?.isTextblock) return false
-  let valid = true
+// Textblock inline profile (P4-3.5, Fix B — replaces the old blanket
+// `isPlainTextblock` refusal): a textblock qualifies for the plain-text path
+// when every inline child is TEXT (marked or not). Non-text inline content
+// (inline images, hard breaks, …) stays out of scope exactly as before —
+// those atoms' raw syntax spans make byte-for-byte step translation
+// unprovable here. Marks alone no longer disqualify the block: after P4-3
+// made mark toggles real, "bold a word, then type anywhere in that
+// paragraph" refused every keystroke with a toast — the relaxation lets the
+// plain parts of a marked paragraph type normally while two guards keep the
+// byte contract closed:
+//  1. the inserted slice itself must still be PLAIN (`plainSliceText` above)
+//     — typing INSIDE a mark run inherits the mark, so the storedMarks/
+//     mark-inheritance trap stays refused;
+//  2. a DELETION/replacement range must not partially overlap any marked
+//     run (`stepRespectsMarkedRuns` below) — a range crossing INTO a run
+//     would delete content while stranding its delimiters ('a **' — the
+//     P4-2 probed corruption shape).
+const textblockProfile = (node) => {
+  if (!node?.isTextblock) return null
+  let allText = true
+  let hasMarkedRun = false
   node.forEach((child) => {
-    if (!child?.isText || (child.marks && child.marks.length)) valid = false
+    if (!child?.isText) allText = false
+    else if (child.marks && child.marks.length) hasMarkedRun = true
   })
-  return valid
+  return allText ? { hasMarkedRun } : null
+}
+
+// Guard 2 of the relaxation above: for a range step [from, to) inside a
+// textblock that carries marked runs, every marked run the range INTERSECTS
+// must be either fully contained IN the range with room on BOTH sides
+// (`from < runFrom && to > runTo` — the raw range then provably covers the
+// run's delimiters too, via the gap-aware from/to resolvers) or fully
+// containing the range (`from >= runFrom && to <= runTo` — a pure content
+// edit inside one run; deleting a run's EXACT content leaves empty
+// delimiters '****', the pinned byte-consistent P4-2 outcome). An exact-edge
+// straddle (range starting/ending precisely ON a run boundary while crossing
+// the other side) resolves its raw offsets INSIDE the delimiters on one
+// side only — orphaning them — and is refused.
+const stepRespectsMarkedRuns = (parent, blockContentStart, from, to) => {
+  let offset = blockContentStart
+  let ok = true
+  parent.forEach((child) => {
+    const runFrom = offset
+    const runTo = offset + child.nodeSize
+    offset = runTo
+    if (!child.isText || !child.marks || !child.marks.length) return
+    if (to <= runFrom || from >= runTo) return // no intersection
+    const insideRun = from >= runFrom && to <= runTo
+    const containsRun = from < runFrom && to > runTo
+    if (!insideRun && !containsRun) ok = false
+  })
+  return ok
 }
 
 // Flattens every ReplaceStep across every changed transaction, in order,
@@ -112,7 +154,13 @@ function extractPlainTextSteps(transactions, oldState) {
       } catch {
         return null
       }
-      if (!$from.sameParent($to) || !isPlainTextblock($from.parent)) return null
+      if (!$from.sameParent($to)) return null
+      const profile = textblockProfile($from.parent)
+      if (!profile) return null
+      if (profile.hasMarkedRun && step.from < step.to &&
+          !stepRespectsMarkedRuns($from.parent, $from.start(), step.from, step.to)) {
+        return null
+      }
       const allowNewline = $from.parent.type?.name === 'code_block'
       const insertText = plainSliceText(step.slice, { allowNewline })
       if (insertText == null) return null
@@ -243,7 +291,7 @@ const MARK_TOGGLE_KINDS = Object.freeze({
 // pre-batch doc's — and the single-textblock guard resolves the coalesced
 // range against `tr.docs[0]` (== oldState.doc for a lone transaction)
 // without any delta arithmetic. The parent textblock is NOT required to be
-// `isPlainTextblock`: toggling a mark in a paragraph that already carries
+// mark-free: toggling a mark in a paragraph that already carries
 // other marks is exactly the unwrap/nesting shape `toggleInlineMark` owns
 // (it re-proves everything against the raw bytes; a shape it cannot own
 // refuses with its own code).
@@ -469,17 +517,26 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // character-map.js's ADR comment on `buildCharacterMap` for the byte
     // corruption this specifically fixes (typing over a selected, already-
     // marked word used to silently eat its opening marker). A zero-width
-    // step (`oldFrom === oldTo`, a bare caret insert) deliberately keeps
-    // BOTH ends on the plain `pmPosToRaw` — using different resolvers for
-    // the same PM position here would make `rawFrom` and `rawTo` diverge
-    // for a single point, corrupting a zero-width insert into a spurious
-    // non-zero-width edit (or, at an ambiguous boundary, `rawFrom > rawTo`,
-    // which the guard below would then reject outright — an unrelated,
-    // never-reported regression this task must not introduce).
+    // step (`oldFrom === oldTo`, a bare caret insert) resolves BOTH ends
+    // through ONE resolver — `pmPosToRawInsert` (P4-3.5, Fix B), the
+    // marker-gap-NEUTRAL point: the slice was proven PLAIN above, so a char
+    // typed at a mark run's boundary must land OUTSIDE the run's delimiters
+    // ('a **bold**' + plain X at the run's end -> 'a **bold**X', never
+    // 'a **boldX**'), and between two adjacent runs it lands between their
+    // marker bytes. At every gap-free boundary (all previously-typeable
+    // content) the neutral resolver returns exactly the old `pmPosToRaw`
+    // value. Using one resolver for both ends keeps `rawFrom === rawTo`
+    // structurally (never a spurious non-zero-width edit); the legacy
+    // `pmPosToRaw` fallback covers hand-built maps in older tests.
+    const insertPoint = typeof map.pmPosToRawInsert === 'function'
+      ? map.pmPosToRawInsert
+      : map.pmPosToRaw
     const rawFrom = virtualBlock
       ? virtualBlock.raw
-      : oldFrom < oldTo ? map.pmPosToRawStart(oldFrom) : map.pmPosToRaw(oldFrom)
-    const rawTo = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldTo)
+      : oldFrom < oldTo ? map.pmPosToRawStart(oldFrom) : insertPoint(oldFrom)
+    const rawTo = virtualBlock
+      ? virtualBlock.raw
+      : oldFrom < oldTo ? map.pmPosToRaw(oldTo) : insertPoint(oldFrom)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
     }

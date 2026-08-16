@@ -106,7 +106,10 @@ const FIXTURE_DOCS = {
   '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
   '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
   '甲`乙`丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙'))),
-  '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')])))
+  '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')]))),
+  // P4-3.5 Fix B fixtures: plain typing inside the already-marked paragraph.
+  '甲**乙**丙X\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙X'))),
+  '甲**乙**X丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('X丙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1202,6 +1205,57 @@ for (const [markName, from, to, label] of [
   assert.deepEqual(verdict4, { veto: true })
   assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'multi-char code unwrap restores the original')
   assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+}
+
+// Case M7 (P4-3.5 Fix B — flips the old blanket "any mark in the textblock
+// refuses all typing" behavior): after a real strong wrap, PLAIN typing in
+// the same paragraph commits through the normal plain-text path; a plain
+// char at the run's trailing edge lands OUTSIDE the closing markers
+// (rawNeutralInsert); typing with an INHERITED mark stays refused.
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tr = toggleVia(h, schema.marks.strong, 2, 3) // bold 乙
+  dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n')
+
+  // (a) plain X at the end of the paragraph (inside the plain 丙 run).
+  const before = h.notifications.length
+  const trType = h.view.state.tr.replaceWith(4, 4, text('X'))
+  const verdict = dispatchThrough(h, trType)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'plain typing in a marked paragraph must commit (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙X\n', 'bytes commit at the right raw offset')
+  assert.equal(h.notifications.length, before, 'no toast for legitimate typing')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((e) => e.type === 'projection-mismatch').length, 0,
+    'cheap-path verify passes — PM view and committed bytes agree'
+  )
+
+  // undo the typing, then (b) plain X right AFTER the bold run: the neutral
+  // resolver writes it after the closing '**', never inside.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n')
+  const trEdge = h.view.state.tr.replaceWith(3, 3, text('X'))
+  const verdictEdge = dispatchThrough(h, trEdge)
+  await flushMicrotasks()
+  assert.equal(verdictEdge, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**X丙\n',
+    'plain char at the run edge lands OUTSIDE the markers')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((e) => e.type === 'projection-mismatch').length, 0,
+    'edge insert also verifies cleanly'
+  )
+
+  // (c) typing WITH the inherited strong mark (real keystroke inside the
+  // run) → marked slice → veto + toast: the inheritance trap stays closed.
+  const notifBefore = h.notifications.length
+  const trMarked = h.view.state.tr.replaceWith(3, 3, schema.text('Y', [schema.mark('strong')]))
+  const verdictMarked = dispatchThrough(h, trMarked)
+  assert.deepEqual(verdictMarked, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**X丙\n', 'kernel bytes untouched')
+  assert.ok(h.notifications.length > notifBefore, 'marked-slice refusal notifies')
 }
 
 // Case M5: link toggle (no kernel kind) → blocked/veto, nothing changes.

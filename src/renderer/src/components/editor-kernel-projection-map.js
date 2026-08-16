@@ -583,6 +583,25 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return pair.charMap.rawStartForVisible(pmPos - contentPos)
   }
 
+  // Insert-role counterpart (P4-3.5, Fix B): resolves a PLAIN zero-width
+  // insert's landing point through the charMap's marker-gap-neutral resolver
+  // (`rawNeutralInsert`, see character-map.js) so a plain char typed at a
+  // mark run's boundary lands OUTSIDE the markers — matching the unmarked
+  // slice the gateway proved — instead of silently extending the run.
+  // charMap shapes without the resolver (buildCodeMap, virtualCharMap: no
+  // inline markers exist there, no gap possible) fall back to the plain
+  // boundary table, which is identical for gap-free content.
+  const pmPosToRawInsert = (pmPos) => {
+    const pair = pairForContentPos(pmPos)
+    if (!pair) return null
+    const contentPos = pair.pmPos + 1
+    const { charMap } = pair
+    if (typeof charMap.rawNeutralInsert === 'function') {
+      return charMap.rawNeutralInsert(pmPos - contentPos)
+    }
+    return charMap.visibleToRaw(pmPos - contentPos)
+  }
+
   // raw -> pmPos: locate the pair whose charMap raw range contains the
   // offset, then walk its units (front-to-back) looking for an exact
   // boundary match:
@@ -651,5 +670,13 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return null
   }
 
-  return { blockPairs, pmPosToRaw, pmPosToRawStart, rawToPmPos, virtualBlockAt, pairAt: pairForContentPos }
+  return {
+    blockPairs,
+    pmPosToRaw,
+    pmPosToRawStart,
+    pmPosToRawInsert,
+    rawToPmPos,
+    virtualBlockAt,
+    pairAt: pairForContentPos
+  }
 }

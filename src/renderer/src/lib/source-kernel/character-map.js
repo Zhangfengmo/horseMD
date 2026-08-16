@@ -166,8 +166,25 @@ function inlineCodeUnits(text, node) {
   return units
 }
 
-function collectUnits(text, node) {
+// `gaps` (P4-3.5, Fix B): records, for every recursed container child
+// (strong/emphasis/delete/link/…) and every inlineCode span, where its
+// marker-syntax gap bytes sit — `starts.get(firstUnitRawStart) ===
+// nodeStartRaw` and `ends.get(lastUnitRawEnd) === nodeEndRaw`. Backs
+// `rawNeutralInsert` below (the "a PLAIN insert at a marker boundary lands
+// OUTSIDE the markers" resolver). An outer container is recorded after its
+// inner child returns, overwriting the same key; `rawNeutralInsert`'s chase
+// loop follows nesting either way.
+function collectUnits(text, node, gaps = null) {
   const units = []
+  const recordGaps = (child, inner) => {
+    if (!gaps || !inner.length) return
+    const s = child.position?.start?.offset
+    const e = child.position?.end?.offset
+    if (Number.isInteger(s) && s < inner[0].rawStart) gaps.starts.set(inner[0].rawStart, s)
+    if (Number.isInteger(e) && e > inner[inner.length - 1].rawEnd) {
+      gaps.ends.set(inner[inner.length - 1].rawEnd, e)
+    }
+  }
   for (const child of node.children || []) {
     if (ATOMS.has(child.type)) {
       const s = child.position?.start?.offset
@@ -181,10 +198,12 @@ function collectUnits(text, node) {
     } else if (child.type === 'inlineCode') {
       const t = inlineCodeUnits(text, child)
       if (!t) return null
+      recordGaps(child, t)
       units.push(...t)
     } else if (child.children) {
-      const inner = collectUnits(text, child)
+      const inner = collectUnits(text, child, gaps)
       if (!inner) return null
+      recordGaps(child, inner)
       units.push(...inner)
     } else {
       // Unknown leaf node type with no `.value` and no `.children` — nothing
@@ -250,7 +269,8 @@ function collectUnits(text, node) {
 // real multi-character selection's `from`, itself not going through this
 // module's `rawRangeForVisibleRange`) use `rawStartForVisible` directly.
 export function buildCharacterMap(text, blockNode) {
-  const units = collectUnits(text, blockNode)
+  const gaps = { starts: new Map(), ends: new Map() }
+  const units = collectUnits(text, blockNode, gaps)
   if (!units) return null
 
   let visibleLength = 0
@@ -275,5 +295,49 @@ export function buildCharacterMap(text, blockNode) {
     return { from, to }
   }
 
-  return { units, visibleLength, visibleToRaw, rawStartForVisible, rawRangeForVisibleRange }
+  // rawNeutralInsert (P4-3.5, Fix B): where must a PLAIN (unmarked) zero-width
+  // insert at visible boundary `vis` land in the raw bytes? Neither existing
+  // table answers this at a marker-gap boundary:
+  //  - `boundaries` (gap-BEFORE) resolves the trailing edge of a mark run to
+  //    its content end — a plain char inserted there would land INSIDE the
+  //    closing marker ('a **bold**' + X at the run's end -> 'a **boldX**',
+  //    silently bolding an unmarked insert; for the inclusive:false inlineCode
+  //    mark this contradicts the schema's own "typed char is NOT code" rule).
+  //  - `startBoundaries` (gap-AFTER) has the mirrored problem at a leading
+  //    edge, and between two adjacent marks BOTH tables put the char inside
+  //    one of the runs.
+  // The neutral point is "outside every marker that closes at this boundary,
+  // before any marker that opens here": chase the recorded mark-node end
+  // offsets (`gaps.ends`) from the content-end boundary outward — each hop
+  // jumps past one closing marker run; nested marks chain (strictly
+  // increasing, so the loop terminates). A boundary with no closing markers
+  // chases zero hops and degenerates to the plain `boundaries` value, so
+  // unmarked blocks (and every currently-editable shape) resolve EXACTLY as
+  // before. Visible index 0 is the mirrored special case: `boundaries[0]` is
+  // the first unit's own rawStart (already past any opening markers), so
+  // chase `gaps.starts` backwards instead — a block STARTING with a mark run
+  // gets the insert before its opening marker ('**a**' + X at 0 ->
+  // 'X**a**'), while a heading's `# ` prefix (not a recorded mark gap)
+  // stays put.
+  const rawNeutralInsert = (vis) => {
+    if (vis === 0) {
+      if (!units[0]) return blockStart
+      let s = units[0].rawStart
+      while (gaps.starts.has(s)) s = gaps.starts.get(s)
+      return s
+    }
+    if (!boundaries.has(vis)) return null
+    let e = boundaries.get(vis)
+    while (gaps.ends.has(e)) e = gaps.ends.get(e)
+    return e
+  }
+
+  return {
+    units,
+    visibleLength,
+    visibleToRaw,
+    rawStartForVisible,
+    rawRangeForVisibleRange,
+    rawNeutralInsert
+  }
 }

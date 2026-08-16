@@ -150,6 +150,66 @@ const mapOf = (src, findText = null) => {
   assert.equal(map.visibleToRaw(2), 2)
 }
 
+// rawNeutralInsert（P4-3.5 Fix B）：PLAIN 插入落点在 marker 之外。
+// 'a **bold** b'：a=0 sp=1 **=2,3 b=4 o=5 l=6 d=7 **=8,9 sp=10 b=11
+{
+  const src = 'a **bold** b\n'
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  // run 前边界（vis2）：落在开 marker 之前（与 visibleToRaw 相同）
+  assert.equal(map.rawNeutralInsert(2), 2)
+  // run 尾边界（vis6）：boundaries 给 8（闭 marker 之内）；neutral 跳到
+  // strong 节点 end = 10（marker 之外）—— plain 字符不得吞进 bold
+  assert.equal(map.visibleToRaw(6), 8)
+  assert.equal(map.rawNeutralInsert(6), 10)
+  // 无缺口边界：与 visibleToRaw 完全一致（既有行为零变化）
+  assert.equal(map.rawNeutralInsert(7), map.visibleToRaw(7))
+  assert.equal(map.rawNeutralInsert(0), 0)
+}
+
+// 块首以 mark 开头：vis0 的 neutral 落在开 marker 之前（块起点）
+{
+  const src = '**a** b\n'
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.equal(map.visibleToRaw(0), 2, 'boundaries[0] 是首 unit 的 rawStart（marker 之后）')
+  assert.equal(map.rawNeutralInsert(0), 0, 'neutral 反向跳过开 marker')
+}
+
+// 标题前缀不是 mark 缺口：vis0 保持在 '# ' 之后（不得把字符插到 # 前面）
+{
+  const src = '# abc\n'
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.equal(map.rawNeutralInsert(0), 2)
+}
+
+// 相邻两个 mark 之间：落在闭/开 marker 之间
+{
+  const src = '**a**_b_\n' // *0 *1 a2 *3 *4 _5 b6 _7
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.equal(map.rawNeutralInsert(1), 5) // strong end（'_' 之前）
+}
+
+// 嵌套 mark 的公共尾边界：链式跳到最外层节点 end
+{
+  const src = '**a _b_** c\n' // strong[0,9) > em[4,7)；'b' 是两层的共同末位
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.equal(map.rawNeutralInsert(3), 9) // 'a b' 的 vis3（b 之后）→ 跳过 '_' 和 '**'
+}
+
+// inlineCode（含 padding）：尾边界 neutral 跳过 padding + 闭反引号
+{
+  const src = 'a ` x ` b\n' // a0 sp1 `2 sp3 x4 sp5? 实际 content [3,6)=' x '
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  // 可见 'a x b'：x 是 vis2，x 之后的边界是 vis3
+  assert.equal(map.rawNeutralInsert(3), 7) // inlineCode 节点 end（闭反引号之后）
+  assert.equal(map.rawNeutralInsert(2), 2) // x 之前：开反引号之前
+}
+
 // raw 与 value 无法对齐 → 整块 null（fail-closed）
 {
   const idx = buildSyntaxIndex('plain\n')
