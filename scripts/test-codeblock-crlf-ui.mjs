@@ -1,4 +1,5 @@
-// LEGACY-editor CRLF code-block fidelity regression (ai-handoff §5.2e).
+// CRLF code-block fidelity regression (ai-handoff §5.2e) — the LEGACY
+// editor (stages A–E) AND the experimental source kernel (stage K).
 //
 // The vendored @milkdown/components CodeMirrorBlock node view does its
 // CM↔PM position math with CodeMirror 6's INTERNAL coordinates. CM6's Text
@@ -42,6 +43,21 @@
 // language-aware auto-indent cannot add unpredictable whitespace, and no
 // typed text contains bracket/quote characters (closeBrackets ships in
 // Crepe's CodeMirror basicSetup).
+//
+// STAGE K (CRLF un-narrowing, 2026-08-17) lives here, not in
+// test-kernel-codeblock-ui.mjs, because CRLF is THIS script's subject: the
+// fixture, the LF-projection source assertion, the uniform-CRLF disk
+// expectation and the "no lone '\r' / no bare '\n'" property assertions all
+// already exist here, so proving the same document under the kernel costs a
+// stage instead of a duplicated second document. It is also where the
+// contrast is visible in one file: the legacy stages document what the
+// preservation pipeline guarantees, stage K documents the STRICTER,
+// byte-exact guarantee the source kernel gives on the same bytes.
+// Kernel mode used to force every CRLF code block non-editable (Plan 3 Task 4
+// fix-review ADR); with editor-codeblock-crlf.js fixing the CM bridge at its
+// source, the projection map no longer gates on `lineEnding` and the gateway
+// commits the bridge's already-'\r\n'-spelled breaks verbatim (adding only a
+// per-line prefix, never re-spelling — re-spelling would emit a lone '\r').
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -136,6 +152,14 @@ const AFTER_PARAGRAPH = AFTER_LASTLINE.replace('前置段落用于占位。', '�
 // fixed, so a lone '\r' or a bare '\n' anywhere in this file is a real
 // regression, not a known gap.
 const EXPECTED_DISK = AFTER_PARAGRAPH
+
+// Stage K: the SAME document, now under the experimental source kernel.
+// Caret at the end of the block's last line ('LASTLINE'), type KTAIL, Enter,
+// type KNEXT. Under the kernel every one of those keystrokes is a raw-byte
+// commit through commitPlainText — so the inserted break must reach disk as
+// '\r\n' with no repair reconcile in between (`projection-mismatch` was the
+// P3-4 churn symptom and must stay at zero).
+const AFTER_KERNEL = AFTER_PARAGRAPH.replace('LASTLINE', `LASTLINEKTAIL${CRLF}KNEXT`)
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -233,6 +257,25 @@ async function clickCmLine(evaluate, send, { line, edge }) {
 // '\r' WOULD still surface here (normalization maps it to '\n', which would
 // show up as an unexpected extra line), and a stray bare '\n' shifts every
 // following line — so this projection still pins the corruption shapes.
+// Stage K only: the kernel toggle lives behind the StatusBar's split-button
+// caret (same convention every kernel-mode UI script uses).
+async function toggleKernelMode(evaluate) {
+  const opened = await evaluate(`(() => {
+    const button = document.querySelector('.block-switch-caret-btn')
+    button?.click()
+    return !!button
+  })()`)
+  assert.ok(opened, 'no kernel-mode caret button — tab not kernel-eligible?')
+  await sleep(150)
+  const clicked = await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.block-switch-menu .block-menu-item')]
+      .find((node) => node.offsetParent)
+    item?.click()
+    return !!item
+  })()`)
+  assert.ok(clicked, 'kernel-toggle menu item missing')
+}
+
 async function assertSource(evaluate, expected, label) {
   await toggleSourceMode(evaluate)
   const shown = await waitFor(() => visibleSource(evaluate), `source view did not appear (${label})`)
@@ -351,7 +394,105 @@ async function run() {
     assert.equal(await readFile(file, 'utf8'), EXPECTED_DISK,
       'a reopen without edits must not rewrite the disk bytes')
 
-    console.log('PASS legacy CRLF code-block UI: line-2+ typing, CRLF Enter break, within-line Backspace, full-pair line-join delete, phantom-line-free CodeMirror view, byte-exact save and cold reopen')
+    // ---- Stage K: the same CRLF fence, now under the source kernel ----
+    // Back to rich, then enable kernel mode on this tab.
+    await toggleSourceMode(evaluate)
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('前置段落') ? text : null
+    }, 'rich view did not return before enabling kernel mode')
+    await sleep(200)
+
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'kernel mode did not remount the tab')
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('LASTLINE') ? text : null
+    }, 'document did not remount after enabling kernel mode')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(!attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy fallback for this CRLF fixture: ${attachDiagnostics}`)
+    assert.equal(app.dialogs.length, 0, 'no dialog after enabling kernel mode')
+    await waitFor(() => evaluate(`!!(${BLOCK})?.querySelector('.cm-editor')`),
+      'code block CodeMirror did not mount under kernel mode')
+
+    // The gate this task removed: the CRLF block must be EDITABLE now, so
+    // every keystroke below reaches commitPlainText instead of the blocked-CM
+    // keydown allowlist.
+    await clickCmLine(evaluate, send, { line: 3, edge: 'end' })
+    await typeTextLikeUser(send, 'KTAIL', { delayMs: delay })
+    await waitFor(async () => ((await cmContent(evaluate)) || '').includes('KTAIL'),
+      'KTAIL never landed in the CodeMirror editor — is the CRLF block still gated non-editable?')
+    await sleep(400)
+
+    // Reset the diagnostics buffer AFTER the first commit of the session, on
+    // purpose: the very first kernel commit in ANY heading-bearing document
+    // reports one `projection-mismatch` whose diff is exactly the heading
+    // node — Crepe's heading plugin stamps a slug `attrs.id` onto the live
+    // node that `parse(kernel.doc.text)` does not reproduce (measured:
+    // live `id:"crlf-代码块测试"` vs parsed `id:""`). It is a one-shot,
+    // pre-existing, CRLF-independent quirk (the repair reconcile clears the
+    // id, so every later commit matches), unrelated to this stage's subject.
+    // What must be zero is a mismatch caused by a CRLF LINE BREAK commit —
+    // that is the P3-4 churn symptom — so the window starts here.
+    await evaluate(`(window.__hmKernelDiagnostics = []).length`)
+
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await typeTextLikeUser(send, 'KNEXT', { delayMs: delay })
+    await waitFor(async () => ((await cmContent(evaluate)) || '').includes('KNEXT'),
+      'KNEXT never landed in the CodeMirror editor')
+    await sleep(400)
+
+    // Zero repair churn: a CRLF code commit must pass the cheap-path verify
+    // (`verifyPlainTextProjection`) outright. A `projection-mismatch` here is
+    // exactly the P3-4 symptom the old ADR fenced off, and a `blocked`/veto
+    // notification would mean the un-narrowing did not actually reach the
+    // gateway.
+    const stageDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(!stageDiagnostics.includes('projection-mismatch'),
+      `a CRLF code-block commit must not need a projection repair: ${stageDiagnostics}`)
+    assert.ok(!stageDiagnostics.includes('cm-veto-resync'),
+      `no keystroke in the CRLF block may have been vetoed: ${stageDiagnostics}`)
+    assert.deepEqual(JSON.parse(await cmLineTexts(evaluate)), [
+      'function greet(name) {',
+      '  return name;',
+      '}TAILNEXTLI',
+      'LASTLINEKTAIL',
+      'KNEXT'
+    ], 'CodeMirror view must not accumulate phantom blank lines under the kernel either')
+
+    await assertSource(evaluate, AFTER_KERNEL, 'stage K (kernel-mode CRLF fence edit)')
+
+    // ---- Save under the kernel → byte-exact uniform CRLF ----
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing after the kernel edit')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'kernel-mode save did not finish')
+    const kernelDisk = await readFile(file, 'utf8')
+    assert.equal(kernelDisk, AFTER_KERNEL, 'kernel-mode disk bytes must match exactly (uniform CRLF)')
+    assert.ok(!/\r(?!\n)/.test(kernelDisk), 'kernel-mode disk must contain no lone \\r')
+    assert.ok(!/(?<!\r)\n/.test(kernelDisk), 'kernel-mode disk must contain no bare \\n')
+    assert.equal(app.dialogs.length, 0,
+      `no dialog may appear during the kernel stage: ${JSON.stringify(app.dialogs.map((dialog) => dialog.message))}`)
+
+    // ---- Full quit → cold reopen → byte-exact ----
+    await stopBuiltElectron(app, { removeProfile: false })
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, cleanProfile: false, appArgs: [file] })
+    ;({ evaluate, send } = app)
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('LASTLINEKTAIL') && text.includes('KNEXT') ? text : null
+    }, 'reopened document did not mount with the kernel-saved content')
+    await toggleSourceMode(evaluate)
+    const kernelReopened = await waitFor(() => visibleSource(evaluate),
+      'source view did not appear after the kernel-stage cold reopen')
+    assert.equal(kernelReopened, AFTER_KERNEL.replace(/\r\n/g, '\n'),
+      'cold reopen source view must reproduce the kernel-saved content (LF projection)')
+    assert.equal(app.dialogs.length, 0, 'no dialog may appear on the kernel-stage cold reopen')
+    assert.equal(await readFile(file, 'utf8'), AFTER_KERNEL,
+      'a reopen without edits must not rewrite the kernel-saved bytes')
+
+    console.log('PASS CRLF code-block UI: legacy line-2+ typing, CRLF Enter break, within-line Backspace, full-pair line-join delete, phantom-line-free CodeMirror view, byte-exact save and cold reopen — plus kernel-mode CRLF fence editing with zero projection repairs')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

@@ -662,48 +662,179 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
     'a \\n inside a plain paragraph must stay refused')
 }
 
-// Case 28 (fix-review ADR, 2026-08-16): a CRLF-lineEnding code block stays
-// structurally paired but NON-EDITABLE (see editor-kernel-projection-map.js's
-// ADR comment on the `pmType === 'code_block'` branch for the full
-// investigation — the vendored @milkdown/components CodeMirrorBlock nodeview
-// silently drops '\r' from its own internal CM6 position model, which can
-// misalign `forwardUpdate`'s PM step positions for any edit past a CRLF
-// block's first line break, undetectably from this gateway's own vantage
-// point). Classification stays PM-structural only (unaffected by the ADR —
-// it still says `plain-text`), but `commitPlainText` must fail closed
-// (UNMAPPED) for ANY edit targeting the block, single-char OR multi-line,
-// never silently corrupting a line ending or reaching the newline-expansion
-// path at all.
+// Case 28 (CRLF un-narrowing, 2026-08-17): a CRLF-lineEnding code block is
+// EDITABLE and every commit is byte-exact '\r\n'-preserving. Supersedes the
+// 2026-08-16 fix-review ADR, which forced such blocks non-editable because
+// the vendored @milkdown/components CodeMirrorBlock nodeview dropped '\r'
+// from its own CM6 position model; `editor-codeblock-crlf.js` now fixes that
+// bridge at the source (locked by scripts/test-codeblock-crlf-ui.mjs), so
+// the gateway's own byte math is the only remaining contract — and it is
+// proven here.
+//
+// KEY: the bridge hands PM a slice whose breaks are ALREADY spelled with the
+// block's dominant ending ('\r\n'), so the gateway must NOT re-spell them
+// (`'\r\n'.split('\n').join('\r\n')` would emit '\r' + '\r\n' — a lone '\r'
+// injected into the source, the exact corruption family this is about). It
+// requires every break to equal `charMap.lineEnding` and only adds the
+// per-line prefix.
+// md = '```js\r\nab\r\ncd\r\n```\r\n': '```js' 0-4 \r 5 \n 6 'ab' 7-8 \r 9
+// \n 10 'cd' 11-12 \r 13 \n 14 '```' 15-17 \r 18 \n 19.
+// PM content 'ab\r\ncd' starts at 1: a@1 b@2 \r@3 \n@4 c@5 d@6.
 {
   const md = '```js\r\nab\r\ncd\r\n```\r\n'
   const d = doc(cb('js', 'ab\r\ncd'))
   const state = EditorState.create({ schema, doc: d })
   const map = buildProjectionMap(md, state.doc)
-  assert.ok(map, 'CRLF code block doc must still map (structural pairing preserved)')
-  assert.equal(map.blockPairs[0].charMap, null, 'CRLF code_block pair must be non-editable')
+  assert.ok(map, 'CRLF code block doc must map')
+  const pair = map.blockPairs[0]
+  assert.ok(pair.charMap, 'CRLF code_block pair must be EDITABLE')
+  assert.equal(pair.charMap.lineEnding, '\r\n')
+  assert.equal(pair.charMap.visibleLength, pair.pmNode.content.size)
 
-  // (a) a single-char edit on line 2 — content 'ab\r\ncd': a@1 b@2 \r@3 \n@4
-  // c@5 d@6 — inserting right before 'c' (PM pos 5) is exactly the shape a
-  // CM-bridge position bug could otherwise misalign.
-  const tr1 = state.tr.insertText('X', 5)
-  const classified1 = classifyTransactions([tr1], state)
-  assert.equal(classified1.kind, 'plain-text', 'classification is PM-structural only, unaffected by the ADR')
-  const kernel1 = { doc: createMarkdownDocument(md) }
-  const committed1 = commitPlainText({ kernel: kernel1, map, transactions: [tr1], oldState: state })
-  assert.equal(committed1.ok, false)
-  assert.equal(committed1.code, KERNEL_CODES.UNMAPPED)
-  assert.equal(kernel1.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+  // (a) single-char edit on line 2 — the shape the old CM position bug
+  // could misalign. Insert before 'c' (PM 5 -> raw 11).
+  {
+    const tr = state.tr.insertText('X', 5)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '```js\r\nab\r\nXcd\r\n```\r\n')
+  }
 
-  // (b) a multi-line insert (the shape this task set out to support) must
-  // ALSO fail closed for a CRLF block.
-  const tr2 = state.tr.insertText('X\nY', 3)
-  const classified2 = classifyTransactions([tr2], state)
-  assert.equal(classified2.kind, 'plain-text')
-  const kernel2 = { doc: createMarkdownDocument(md) }
-  const committed2 = commitPlainText({ kernel: kernel2, map, transactions: [tr2], oldState: state })
-  assert.equal(committed2.ok, false)
-  assert.equal(committed2.code, KERNEL_CODES.UNMAPPED)
-  assert.equal(kernel2.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+  // (b) multi-line insert. The bridge spells the break '\r\n', so the slice
+  // is 'X\r\nY' — committed verbatim (no prefix on a bare fence), NOT
+  // re-expanded.
+  {
+    const tr = state.tr.insertText('X\r\nY', 3)
+    assert.equal(tr.steps.length, 1, 'fixture sanity: one ReplaceStep')
+    const classified = classifyTransactions([tr], state)
+    assert.equal(classified.kind, 'plain-text', "a '\\r\\n'-bearing code slice must classify as plain-text")
+    assert.deepEqual(classified.steps[0], { from: 3, to: 3, insertText: 'X\r\nY' })
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '```js\r\nabX\r\nY\r\ncd\r\n```\r\n')
+    assert.equal(/\r(?!\n)/.test(committed.applied.doc.text), false, 'no lone \\r may be injected')
+  }
+
+  // (c) cross-line-join delete: PM [3,5) is the whole '\r\n' pair (what the
+  // patched bridge maps a CM line-start Backspace to). raw [9,11).
+  {
+    assert.equal(map.pmPosToRaw(3), 9)
+    assert.equal(map.pmPosToRaw(5), 11)
+    const tr = state.tr.delete(3, 5)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '```js\r\nabcd\r\n```\r\n')
+  }
+
+  // (d) FAIL-CLOSED: a bare '\n' break in a CRLF block is refused, never
+  // silently re-spelled to '\r\n'. This is the residual shape the bridge
+  // cannot serve (a block whose current text holds no '\r' — see the ADR in
+  // commitPlainText); committing '\r\n' while PM holds '\n' would diverge
+  // the view from the bytes and churn the verify repair on every keystroke.
+  {
+    const tr = state.tr.insertText('X\nY', 3)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, false, 'a bare \\n in a CRLF block must fail closed')
+    assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
+    assert.equal(kernel.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+  }
+}
+
+// Case 28b: quoted CRLF fence — the prefix-bearing shape. The gateway adds
+// `linePrefix` after each break WITHOUT re-spelling the break itself.
+// md = '> ```js\r\n> ab\r\n> ```\r\n': '>' 0 ' ' 1 '```js' 2-6 \r 7 \n 8
+// '>' 9 ' ' 10 'a' 11 'b' 12 \r 13 \n 14 ...
+// PM doc(bq(cb)): blockquote@0, code_block@1, content 'ab' start 2.
+{
+  const md = '> ```js\r\n> ab\r\n> ```\r\n'
+  const d = doc(bq(cb('js', 'ab')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'quoted CRLF single-line fence must map')
+  const pair = map.blockPairs.find((candidate) => candidate.pmNode.type.name === 'code_block')
+  assert.ok(pair.charMap, 'quoted CRLF code_block pair must be EDITABLE')
+  assert.equal(pair.charMap.lineEnding, '\r\n')
+  assert.equal(pair.charMap.linePrefix, '> ')
+  // Insert 'X\r\nY' between 'a' and 'b' (PM 3 -> raw 12): the break keeps
+  // its '\r\n' spelling and gains the '> ' prefix.
+  const tr = state.tr.insertText('X\r\nY', 3)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '> ```js\r\n> aX\r\n> Yb\r\n> ```\r\n')
+  assert.equal(/\r(?!\n)/.test(committed.applied.doc.text), false, 'no lone \\r may be injected')
+}
+
+// Case 28c: a lone-'\r' (classic Mac) fence is editable on the same terms —
+// the break must be spelled '\r' (what the bridge's dominantLineEnding
+// returns for such a block) and a '\r\n' or bare '\n' is refused.
+// md = '```js\rab\rcd\r```\r': '```js' 0-4 \r 5 'ab' 6-7 \r 8 'cd' 9-10 \r 11
+{
+  const md = '```js\rab\rcd\r```\r'
+  const d = doc(cb('js', 'ab\rcd'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'lone-CR fence must map')
+  assert.equal(map.blockPairs[0].charMap.lineEnding, '\r')
+
+  const ok = commitPlainText({
+    kernel: { doc: createMarkdownDocument(md) },
+    map,
+    transactions: [state.tr.insertText('X\rY', 2)],
+    oldState: state
+  })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.applied.doc.text, '```js\raX\rYb\rcd\r```\r')
+
+  for (const bad of ['X\r\nY', 'X\nY']) {
+    const refused = commitPlainText({
+      kernel: { doc: createMarkdownDocument(md) },
+      map,
+      transactions: [state.tr.insertText(bad, 2)],
+      oldState: state
+    })
+    assert.equal(refused.ok, false, `a ${JSON.stringify(bad)} break in a lone-CR block must fail closed`)
+    assert.equal(refused.code, KERNEL_CODES.UNMAPPED)
+  }
+}
+
+// Case 28d: the mirror guard — a '\r'-bearing break in an LF block is
+// refused. The bridge cannot produce one (it only converts breaks for
+// blocks whose text already contains '\r'), so such a slice has unknown
+// provenance; LF documents keep exactly their pre-2026-08-17 behavior.
+{
+  const md = '```js\nab\ncd\n```\n'
+  const d = doc(cb('js', 'ab\ncd'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  assert.equal(map.blockPairs[0].charMap.lineEnding, '\n')
+  for (const bad of ['X\r\nY', 'X\rY']) {
+    const refused = commitPlainText({
+      kernel: { doc: createMarkdownDocument(md) },
+      map,
+      transactions: [state.tr.insertText(bad, 2)],
+      oldState: state
+    })
+    assert.equal(refused.ok, false, `a ${JSON.stringify(bad)} break in an LF block must fail closed`)
+    assert.equal(refused.code, KERNEL_CODES.UNMAPPED)
+  }
+  // ...while the plain '\n' break still commits exactly as before.
+  const ok = commitPlainText({
+    kernel: { doc: createMarkdownDocument(md) },
+    map,
+    transactions: [state.tr.insertText('X\nY', 2)],
+    oldState: state
+  })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.applied.doc.text, '```js\naX\nYb\ncd\n```\n')
 }
 
 // Case 21 (review fix, Plan 4 Task 2): gap-aware selection-start resolution

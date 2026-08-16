@@ -686,22 +686,21 @@ console.log('--- kernel projection map ---')
   assert.equal(map.pmPosToRaw(28), 37) // after p2
 }
 
-// Case 16b: CRLF document, code block STAYS PAIRED but is now NON-EDITABLE
-// (ADR, Plan 3 Task 4 fix-review, 2026-08-16 — see the matching comment in
-// editor-kernel-projection-map.js's `pmType === 'code_block'` branch for the
-// full investigation). A prior version of this suite asserted the OPPOSITE
-// (CRLF code blocks carry a real, editable charMap) — that was correct
-// about buildCodeMap's OWN math (it does not under-count CRLF units; see
-// code-map.js's header comment), but did not yet know that the LIVE
-// CodeMirror bridge (`@milkdown/components`'s CodeMirrorBlock) silently
-// drops '\r' from its own internal position model, which can misalign
-// `forwardUpdate`'s PM step positions for any edit past a CRLF block's first
-// line break — a defect this projection-map module cannot see or correct
-// from its own vantage point. Until that vendored bridge is fixed, a
-// non-'\n' `lineEnding` (buildCodeMap's own derived value) keeps the block
-// non-editable, exactly like mermaid/latex/math — the block still occupies
-// its slot in the structural pairing (surrounding blocks stay mappable),
-// it just never claims a charMap.
+// Case 16b: CRLF document — the code block is EDITABLE (CRLF un-narrowing,
+// 2026-08-17). This case has flipped twice, so the history matters:
+//  - originally editable (buildCodeMap's own CRLF math was always correct);
+//  - then forced non-editable (Plan 3 Task 4 fix-review ADR, 2026-08-16),
+//    because the VENDORED CodeMirrorBlock bridge dropped '\r' from its own
+//    position model and could misalign `forwardUpdate`'s PM step positions;
+//  - now editable again: `editor-codeblock-crlf.js` fixes that bridge at
+//    the source (bijective CM<->PM position map, inserted breaks spelled
+//    with the block's dominant ending, LF-normalized `update()` diff,
+//    mapped `setSelection`), locked by scripts/test-codeblock-crlf-ui.mjs.
+// The identity this case really proves is the one the projection map needs:
+// `pm.node.content.size === charMap.visibleLength` for a '\r\n' block —
+// remark keeps a code node's line endings verbatim, and buildCodeMap emits
+// one width-1 unit per `value` char (the '\r' is its own `char` unit, the
+// '\n' the `linebreak` unit).
 // md = 'p1\r\n\r\n```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n\r\np2\r\n'
 // 'p1' 0-1 \r\n 2-3 \r\n 4-5 '```js' 6-10 \r\n 11-12 'let a = 1' 13-21 \r\n
 // 22-23 'let b = 2' 24-32 \r\n 33-34 '```' 35-37 \r\n 38-39 \r\n 40-41 'p2'
@@ -722,14 +721,80 @@ console.log('--- kernel projection map ---')
   assert.equal(codeText.length, 20)
 
   const map = buildProjectionMap(md, d)
-  assert.ok(map, 'CRLF doc with a code block must still map (structural pairing preserved)')
+  assert.ok(map, 'CRLF doc with a code block must still map')
   assert.equal(map.blockPairs.length, 3)
   const codePair = map.blockPairs[1]
-  assert.equal(codePair.charMap, null, 'CRLF code_block pair must stay non-editable (CM bridge ADR)')
-  // Surrounding paragraphs unaffected — only the CRLF code block itself
-  // loses its charMap, everything else in the document maps normally.
+  assert.ok(codePair.charMap, 'CRLF code_block pair must be EDITABLE (charMap present)')
+  // THE identity, stated explicitly: PM's own content size equals the
+  // kernel's decoded visible length for a CRLF block.
+  assert.equal(codePair.charMap.visibleLength, d.child(1).content.size)
+  assert.equal(codePair.charMap.visibleLength, 20)
+  assert.equal(codePair.charMap.lineEnding, '\r\n')
+  assert.equal(codePair.charMap.linePrefix, '')
+  // Raw offsets across the CRLF break. Content starts at PM 5 -> raw 13.
+  assert.equal(map.pmPosToRaw(5), 13) // before 'l' of "let a = 1"
+  assert.equal(map.pmPosToRaw(14), 22) // after "let a = 1", before the '\r'
+  assert.equal(map.pmPosToRaw(15), 23) // between '\r' and '\n'
+  assert.equal(map.pmPosToRaw(16), 24) // after the break, before 'l' of "let b = 2"
+  assert.equal(map.pmPosToRaw(25), 33) // content end
+  assert.deepEqual(map.rawToPmPos(24), { pos: 16, atom: false })
+  assert.equal(map.pmPosToRaw(map.rawToPmPos(24).pos), 24)
+  // Surrounding paragraphs unaffected.
   assert.equal(map.pmPosToRaw(1), 0) // inside p1
   assert.equal(map.pmPosToRaw(27), 42) // before p2
+}
+
+// Case 16c: lone-'\r' (classic Mac) document — same un-narrowing, same
+// identity. buildCodeMap treats a lone '\r' as a single-char line ending
+// (one `linebreak` unit, width 1), so visibleLength still equals value.length
+// and therefore PM's content.size.
+// md = '```js\rlet a = 1\rlet b = 2\r```\r'
+// '```js' 0-4 \r 5 'let a = 1' 6-14 \r 15 'let b = 2' 16-24 \r 25 '```' 26-28
+{
+  const md = '```js\rlet a = 1\rlet b = 2\r```\r'
+  const codeText = 'let a = 1\rlet b = 2'
+  const d = doc(schema.node('code_block', { language: 'js' }, text(codeText)), p())
+  assert.equal(codeText.length, 19)
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'lone-CR doc with a code block must map')
+  const codePair = map.blockPairs[0]
+  assert.ok(codePair.charMap, 'lone-CR code_block pair must be EDITABLE')
+  assert.equal(codePair.charMap.visibleLength, d.child(0).content.size)
+  assert.equal(codePair.charMap.visibleLength, 19)
+  assert.equal(codePair.charMap.lineEnding, '\r')
+  assert.equal(map.pmPosToRaw(1), 6) // content start
+  assert.equal(map.pmPosToRaw(11), 16) // just after the '\r' break
+}
+
+// Case 16d: a '> '-quoted CRLF fence — the prefix-bearing shape. Proves the
+// same identity holds when every content line carries a quote prefix, and
+// that the '\n' half of the break is the unit that ALSO spans the next
+// line's prefix bytes (what makes the gateway's per-break prefix expansion
+// and a cross-line delete both land byte-exactly).
+// md = '> ```js\r\n> a\r\n> b\r\n> ```\r\n'
+// '>' 0 ' ' 1 '```js' 2-6 \r 7 \n 8 '>' 9 ' ' 10 'a' 11 \r 12 \n 13
+// '>' 14 ' ' 15 'b' 16 \r 17 \n 18 ...
+{
+  const md = '> ```js\r\n> a\r\n> b\r\n> ```\r\n'
+  const codeText = 'a\r\nb'
+  const d = doc(
+    schema.node('blockquote', null, [schema.node('code_block', { language: 'js' }, text(codeText))]),
+    p()
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'quoted CRLF fence doc must map')
+  const codePair = map.blockPairs.find((pair) => pair.pmNode.type.name === 'code_block')
+  assert.ok(codePair.charMap, 'quoted CRLF code_block pair must be EDITABLE')
+  assert.equal(codePair.charMap.visibleLength, codePair.pmNode.content.size)
+  assert.equal(codePair.charMap.visibleLength, 4)
+  assert.equal(codePair.charMap.lineEnding, '\r\n')
+  assert.equal(codePair.charMap.linePrefix, '> ')
+  // content start (PM 2) -> raw 11 ('a'); the break's two halves -> 12/13;
+  // the '\n' unit's raw span reaches over '> ' so 'b' lands at 16.
+  assert.equal(map.pmPosToRaw(2), 11)
+  assert.equal(map.pmPosToRaw(3), 12)
+  assert.equal(map.pmPosToRaw(4), 13)
+  assert.equal(map.pmPosToRaw(5), 16)
 }
 
 // Case 17: a ```mermaid code block stays non-editable even though

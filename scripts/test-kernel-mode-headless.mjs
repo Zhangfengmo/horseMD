@@ -85,11 +85,13 @@ const FIXTURE_DOCS = {
   '```js\nab\n```\n': () => doc(cb('js', 'ab')),
   '```js\naX\nYb\n```\n': () => doc(cb('js', 'aX\nYb')),
   '```python\naX\nYb\n```\n': () => doc(cb('python', 'aX\nYb')),
-  // Fix-review ADR fixture (2026-08-16): CRLF code block (non-editable) +
-  // a plain LF paragraph — Case 13 edits the paragraph AFTER the code block
-  // edit is refused, to prove no global lockout.
+  // CRLF fixtures (un-narrowing, 2026-08-17): a CRLF code block is editable
+  // end to end — Case 13 commits a '\r\n'-spelled multi-line insert into it,
+  // then proves the bare-'\n' shape still fails closed and that neither
+  // outcome locks the rest of the document out.
   '```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))),
-  '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n': () => doc(cb('js', 'ab\r\ncd'), p(text('甲丙乙'))),
+  '```js\r\nabX\r\nY\r\ncd\r\n```\r\n甲乙\r\n': () => doc(cb('js', 'abX\r\nY\r\ncd'), p(text('甲乙'))),
+  '```js\r\nabX\r\nY\r\ncd\r\n```\r\n甲丙乙\r\n': () => doc(cb('js', 'abX\r\nY\r\ncd'), p(text('甲丙乙'))),
   // Plan 3 Task 5 fixtures: Mod-Enter code-block exit (doc-end + mid-doc)
   // — CommonMark collapses the exit's blank lines, so the post-exit texts
   // parse back to the same block sequences.
@@ -831,39 +833,57 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   )
 }
 
-// Case 13 (fix-review ADR, 2026-08-16): a CRLF-lineEnding code block is
-// non-editable (editor-kernel-projection-map.js's ADR comment) — a
-// multi-line insert targeting it must be VETOED, never committed (i) kernel
-// bytes stay byte-identical to the pre-edit source, (ii) no
-// projection-mismatch/repair churn (nothing was ever dispatched to the
-// kernel, so there is nothing to reconcile), and (iii) the controller stays
-// fully healthy afterward — a SEPARATE, ordinary edit elsewhere in the same
-// document still commits normally (no global lockout from the refused
-// code-block edit).
+// Case 13 (CRLF un-narrowing, 2026-08-17): a CRLF-lineEnding code block is
+// EDITABLE end to end. Supersedes the 2026-08-16 fix-review ADR, which
+// vetoed every such edit because the vendored CodeMirrorBlock bridge dropped
+// '\r' from its own position model; `editor-codeblock-crlf.js` fixes that
+// bridge at the source, so the slice arriving here already spells its break
+// '\r\n' (the block's dominant ending) and the gateway commits it verbatim.
+// This case proves (i) the commit is byte-exact CRLF-preserving, (ii) ZERO
+// projection-mismatch diagnostics — no repair churn, which was THE P3-4
+// symptom, (iii) the residual bare-'\n' shape still fails closed, and (iv)
+// neither outcome locks the rest of the document out.
 {
   globalThis.__hmKernelDiagnostics = []
   const initialMd = '```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n'
   const h = makeHarness(initialMd, doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))))
   assert.equal(h.controller.attachAfterCreate(), true, 'CRLF-code + paragraph doc must map')
 
-  // code_block open@0, content 'ab\r\ncd' [1,7) (a@1 b@2 \r@3 \n@4 c@5 d@6).
-  const tr1 = h.view.state.tr.insertText('X\nY', 3)
+  // (i) code_block open@0, content 'ab\r\ncd' [1,7) (a@1 b@2 \r@3 \n@4 c@5
+  // d@6). PM 3 (after 'b', before the break) -> raw 9. The patched bridge
+  // hands the break already spelled '\r\n'.
+  const tr1 = h.view.state.tr.insertText('X\r\nY', 3)
   const verdict1 = dispatchThrough(h, tr1)
   await flushMicrotasks()
-  assert.deepEqual(verdict1, { veto: true }, 'a CRLF code_block edit must be vetoed, never committed')
-  assert.equal(h.controller.kernel.doc.text, initialMd, 'kernel bytes untouched by the refused edit')
-  assert.equal(h.view.state.doc.textContent, 'ab\r\ncd甲乙', 'view untouched after veto (dispatch protocol skips updateState)')
+  assert.equal(verdict1, undefined, 'a CRLF code_block edit must commit, not veto')
+  assert.equal(
+    h.controller.kernel.doc.text,
+    '```js\r\nabX\r\nY\r\ncd\r\n```\r\n甲乙\r\n',
+    'kernel bytes must be byte-exact CRLF-preserving'
+  )
+  assert.equal(/\r(?!\n)/.test(h.controller.kernel.doc.text), false, 'no lone \\r may be injected')
+  assert.equal(h.view.state.doc.textContent, 'abX\r\nY\r\ncd甲乙', 'the view carries the same bytes')
+  // (ii) THE regression this un-narrowing had to earn: the cheap-path
+  // verify must pass, so no repair reconcile is ever scheduled.
   assert.equal(
     globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
     0,
-    'nothing was ever committed, so there is nothing to reconcile'
+    'a CRLF code commit must pass cheap-path verify — zero repair churn'
   )
-  // (final-review finding, 2026-08-16) the defensive veto-after-CM-applied
-  // resync must have run — this batch's step targeted the code_block, so
-  // `scheduleVetoResync`'s microtask fires (flushed above) and pushes its
-  // own diagnostic regardless of whether a repair dispatch was needed. Here
-  // it wasn't (the view already agrees with parse(kernel.doc.text), a
-  // genuine no-op), so no failure diagnostic and the view stays consistent.
+
+  // (iii) fail-closed residual: a bare '\n' break in a CRLF block (what the
+  // bridge emits only when the block's own text holds no '\r' — see
+  // commitPlainText's ADR) is refused, kernel bytes untouched, and the
+  // defensive veto-after-CM-applied resync still runs for a code_block
+  // target (pushing its own diagnostic even when the reconcile is a no-op).
+  const tr2 = h.view.state.tr.insertText('Z\nW', 3)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.deepEqual(verdict2, { veto: true }, 'a bare-\\n break in a CRLF block must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, '```js\r\nabX\r\nY\r\ncd\r\n```\r\n甲乙\r\n',
+    'kernel bytes untouched by the refused edit')
+  assert.equal(h.view.state.doc.textContent, 'abX\r\nY\r\ncd甲乙',
+    'view untouched after veto (dispatch protocol skips updateState)')
   assert.equal(
     globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'cm-veto-resync').length,
     1,
@@ -875,16 +895,16 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     0,
     'the resync reconcile must be a clean no-op when the view already agrees with the kernel'
   )
-  assert.equal(h.view.state.doc.textContent, 'ab\r\ncd甲乙', 'view remains consistent after the resync no-op')
 
-  // (iii) no lockout: an ordinary edit into the paragraph ('甲乙', PM
-  // content [9,11)) right after the refused code-block edit must still
-  // commit normally.
-  const tr2 = h.view.state.tr.insertText('丙', 10)
-  const verdict2 = dispatchThrough(h, tr2)
+  // (iv) no lockout: an ordinary edit into the paragraph ('甲乙') still
+  // commits normally. The code_block's content is now 10 chars
+  // ('abX\r\nY\r\ncd'), nodeSize 12, so the paragraph opens at 12 and its
+  // content start is 13: 甲@13, 乙@14.
+  const tr3 = h.view.state.tr.insertText('丙', 14)
+  const verdict3 = dispatchThrough(h, tr3)
   await flushMicrotasks()
-  assert.equal(verdict2, undefined, 'an unrelated edit after a refused code-block edit must not be vetoed')
-  assert.equal(h.controller.kernel.doc.text, '```js\r\nab\r\ncd\r\n```\r\n甲丙乙\r\n')
+  assert.equal(verdict3, undefined, 'an unrelated edit after a refused code-block edit must not be vetoed')
+  assert.equal(h.controller.kernel.doc.text, '```js\r\nabX\r\nY\r\ncd\r\n```\r\n甲丙乙\r\n')
   assert.equal(
     globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
     0,
@@ -945,9 +965,10 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
 
 // Case T5b: isCmBlockEditable — the per-instance identity is the CM
 // editor's DOM resolved through view.posAtDOM into the CURRENT map's
-// blockPairs. An LF js block (charMap proven) reports editable; a CRLF
-// block (charMap null by the P3-4 ADR) and a failed DOM resolution report
-// non-editable (fail-closed).
+// blockPairs. An LF js block (charMap proven) reports editable, a CRLF block
+// now reports editable too (un-narrowing, 2026-08-17), and a failed DOM
+// resolution reports non-editable (fail-closed). A `mermaid` block is the
+// remaining always-blocked shape.
 {
   const h = makeHarness('```js\nab\n```\n甲\n', doc(cb('js', 'ab'), p(text('甲'))))
   assert.equal(h.controller.attachAfterCreate(), true)
@@ -967,7 +988,14 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   const crlf = makeHarness('```js\r\nab\r\ncd\r\n```\r\n甲乙\r\n', doc(cb('js', 'ab\r\ncd'), p(text('甲乙'))))
   assert.equal(crlf.controller.attachAfterCreate(), true)
   crlf.view.posAtDOM = () => 1
-  assert.equal(crlf.controller.isCmBlockEditable({ dom: {} }), false, 'CRLF block must stay non-editable')
+  assert.equal(crlf.controller.isCmBlockEditable({ dom: {} }), true, 'CRLF block must now be editable')
+
+  // The still-blocked shape: a preview-rendered language never claims a
+  // charMap, so its CM instance stays keydown-gated.
+  const mermaid = makeHarness('```mermaid\ngraph TD\n```\n', doc(cb('mermaid', 'graph TD')))
+  assert.equal(mermaid.controller.attachAfterCreate(), true)
+  mermaid.view.posAtDOM = () => 1
+  assert.equal(mermaid.controller.isCmBlockEditable({ dom: {} }), false, 'mermaid block must stay non-editable')
 }
 
 // Case T5c: runExitCode at document end — exit bytes are written
