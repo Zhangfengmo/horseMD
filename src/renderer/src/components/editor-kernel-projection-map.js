@@ -162,14 +162,21 @@ function flattenMd(tree, index) {
 // one boundary, visible offset 0 <-> `rawOffset`. Same public contract as
 // buildCharacterMap's zero-unit result, so pmPosToRaw/rawToPmPos consume it
 // through the identical code path.
-const virtualCharMap = (rawOffset) => ({
-  units: [],
-  visibleLength: 0,
-  visibleToRaw: (vis) => (vis === 0 ? rawOffset : null),
-  rawRangeForVisibleRange: (visFrom, visTo) => (
-    visFrom === 0 && visTo === 0 ? { from: rawOffset, to: rawOffset } : null
-  )
-})
+const virtualCharMap = (rawOffset) => {
+  const visibleToRaw = (vis) => (vis === 0 ? rawOffset : null)
+  return {
+    units: [],
+    visibleLength: 0,
+    visibleToRaw,
+    // Single-point map (no units, no gap possible) — plain alias, kept for
+    // interface uniformity with buildCharacterMap/buildCodeMap. See
+    // character-map.js's ADR comment on `buildCharacterMap`.
+    rawStartForVisible: visibleToRaw,
+    rawRangeForVisibleRange: (visFrom, visTo) => (
+      visFrom === 0 && visTo === 0 ? { from: rawOffset, to: rawOffset } : null
+    )
+  }
+}
 
 // The separator bytes a plain-text insert at the very end of the document
 // needs BEFORE the typed text so the reparse yields a new paragraph instead
@@ -560,6 +567,22 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return pair.charMap.visibleToRaw(pmPos - contentPos)
   }
 
+  // Start-role counterpart of `pmPosToRaw`, for a caller resolving the LEFT
+  // edge of a genuine (non-empty) selection about to be replaced/deleted —
+  // see character-map.js's ADR comment on `buildCharacterMap` for why a
+  // range's `from` needs the gap-aware resolver (`rawStartForVisible`) while
+  // a bare/single PM position (a caret, or a range's `to`) keeps using
+  // `pmPosToRaw`/`visibleToRaw` unchanged. Every charMap-shaped object this
+  // module consumes (buildCharacterMap, buildCodeMap, `virtualCharMap`
+  // above) exposes `rawStartForVisible`, so no fallback branch is needed
+  // here.
+  const pmPosToRawStart = (pmPos) => {
+    const pair = pairForContentPos(pmPos)
+    if (!pair) return null
+    const contentPos = pair.pmPos + 1
+    return pair.charMap.rawStartForVisible(pmPos - contentPos)
+  }
+
   // raw -> pmPos: locate the pair whose charMap raw range contains the
   // offset, then walk its units (front-to-back) looking for an exact
   // boundary match:
@@ -628,5 +651,5 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return null
   }
 
-  return { blockPairs, pmPosToRaw, rawToPmPos, virtualBlockAt, pairAt: pairForContentPos }
+  return { blockPairs, pmPosToRaw, pmPosToRawStart, rawToPmPos, virtualBlockAt, pairAt: pairForContentPos }
 }

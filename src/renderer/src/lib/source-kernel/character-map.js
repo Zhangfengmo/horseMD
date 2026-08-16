@@ -139,26 +139,84 @@ function collectUnits(text, node) {
   return units
 }
 
+// ADR — selection-range `from` is gap-aware, `visibleToRaw` alone is not
+// (both intentional; see below):
+//
+// `boundaries` records, for each visible index, the rawEnd of whatever unit
+// was JUST consumed — correct whenever the next unit's raw bytes pick up
+// exactly where the last one left off, but AMBIGUOUS the moment a gap of
+// unit-less raw bytes sits between two units. The only place such a gap
+// exists in this schema is a strong/emphasis/delete node's own opening OR
+// closing delimiter: `collectUnits` recurses into these nodes' children
+// without ever emitting a unit for the marker itself, so entering (or
+// leaving) one from/to adjacent content leaves the marker's bytes belonging
+// to no unit. `boundaries` resolves that visible index to the position
+// BEFORE the gap (end of whatever came before) — correct as a range END
+// (content genuinely ends there, the gap is irrelevant to what was just
+// consumed) but WRONG as a range START: naively used as `from`, it silently
+// folds an existing mark's own delimiter into what should be a
+// marker-exclusive selection.
+//
+// This is not a theoretical concern — it was proven live: for `a **bold**
+// b`, selecting the rendered word "bold" (visFrom 2, visTo 6) and replacing
+// it via `rawRangeForVisibleRange` used to resolve to raw `[2,8)` (the
+// literal bytes `"**bold"`), so typing 'X' over the selection produced
+// `a X** b` (the opening marker silently eaten, the closing marker
+// orphaned) instead of `a **X** b`. Reachable through ordinary typing over
+// a selection in shipped kernel mode (`editor-kernel-gateway.js`'s
+// `commitPlainText`, which resolves each step's raw range through this same
+// per-block map), not just through mark-toggle commands.
+//
+// Fix: `startBoundaries` is the mirror table — for each visible index, the
+// rawSTART of the unit that begins there (skip-FORWARD past any gap,
+// symmetric to how index 0 already had to special-case skipping a LEADING
+// gap before any unit existed to record one). `rawRangeForVisibleRange`
+// resolves its `from` through this table and its `to` through the original
+// (gap-before, content-end-accurate) `boundaries` table — no caller of a
+// SELECTION RANGE legitimately wants the old pre-gap `from`; none was found
+// depending on it (`replace-text.js`'s `replaceVisibleText`, this task's
+// `mark-toggle.js`, and `editor-kernel-gateway.js`'s `commitPlainText` for a
+// genuine non-empty selection all want "start strictly after any marker
+// that precedes the selected content").
+//
+// `visibleToRaw` itself is intentionally left with its original semantics
+// and is NOT retargeted at `startBoundaries`: it is also used standalone
+// (not as a range) for CARET/POSITION queries (e.g.
+// `editor-kernel-projection-map.js`'s `pmPosToRaw` for a bare, zero-width
+// PM position, and `rawToPmPos`'s own boundary walk) where there is no
+// "selection" to reason about, only a single point that may legitimately
+// sit on either side of an adjacent gap — changing its contract there is
+// out of scope for the range-selection corruption this ADR fixes, and would
+// itself risk changing caret-placement/typing-at-a-boundary behavior that
+// was never reported as broken. Callers that need the gap-aware start for a
+// non-range, single-position use (as `editor-kernel-gateway.js` does for a
+// real multi-character selection's `from`, itself not going through this
+// module's `rawRangeForVisibleRange`) use `rawStartForVisible` directly.
 export function buildCharacterMap(text, blockNode) {
   const units = collectUnits(text, blockNode)
   if (!units) return null
 
   let visibleLength = 0
   const boundaries = new Map()
-  boundaries.set(0, units[0] ? units[0].rawStart : (blockNode.position?.start?.offset ?? 0))
+  const startBoundaries = new Map()
+  const blockStart = blockNode.position?.start?.offset ?? 0
+  boundaries.set(0, units[0] ? units[0].rawStart : blockStart)
+  startBoundaries.set(0, units[0] ? units[0].rawStart : blockStart)
   for (const unit of units) {
+    startBoundaries.set(visibleLength, unit.rawStart)
     visibleLength += unit.width
     boundaries.set(visibleLength, unit.rawEnd)
   }
 
   const visibleToRaw = (vis) => (boundaries.has(vis) ? boundaries.get(vis) : null)
+  const rawStartForVisible = (vis) => (startBoundaries.has(vis) ? startBoundaries.get(vis) : null)
 
   const rawRangeForVisibleRange = (visFrom, visTo) => {
-    const from = visibleToRaw(visFrom)
+    const from = rawStartForVisible(visFrom)
     const to = visibleToRaw(visTo)
     if (from === null || to === null || from > to) return null
     return { from, to }
   }
 
-  return { units, visibleLength, visibleToRaw, rawRangeForVisibleRange }
+  return { units, visibleLength, visibleToRaw, rawStartForVisible, rawRangeForVisibleRange }
 }

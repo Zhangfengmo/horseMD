@@ -69,10 +69,18 @@ function lineIndexAt(lines, offset) {
 // only proof available, and are exactly what every content line would have
 // to reproduce byte-for-byte once one exists (see the main branch below).
 function emptyCodeMap(rawOffset, linePrefix, lineEnding) {
+  const visibleToRaw = (vis) => (vis === 0 ? rawOffset : null)
   return {
     units: [],
     visibleLength: 0,
-    visibleToRaw: (vis) => (vis === 0 ? rawOffset : null),
+    visibleToRaw,
+    // Code content has no marker-recursion (see the module comment above),
+    // so there is never a gap between units — `rawStartForVisible` is a
+    // plain alias of `visibleToRaw` here, kept only so every charMap-shaped
+    // object (character-map.js, code-map.js, editor-kernel-projection-map.js's
+    // virtualCharMap) exposes the same shape for callers that pick either
+    // uniformly (see character-map.js's ADR comment on `buildCharacterMap`).
+    rawStartForVisible: visibleToRaw,
     rawRangeForVisibleRange: (from, to) => (
       from === 0 && to === 0 ? { from: rawOffset, to: rawOffset } : null
     ),
@@ -218,5 +226,19 @@ export function buildCodeMap(text, codeNode) {
   // this whole module exists to prove. Exposed here (not re-derived by
   // callers) because this function is the only place that has already
   // proven `prefix` is byte-for-byte consistent across every content line.
-  return { units, visibleLength, visibleToRaw, rawRangeForVisibleRange, linePrefix: prefix, lineEnding }
+  //
+  // `rawStartForVisible` is a plain alias of `visibleToRaw` (not a separate
+  // gap-aware table like character-map.js's): every unit here is verbatim
+  // code content with no marker-recursion gap possible (see the module
+  // comment above), so there is nothing for a start-role resolver to skip
+  // past. Kept for interface uniformity — see character-map.js's ADR.
+  return {
+    units,
+    visibleLength,
+    visibleToRaw,
+    rawStartForVisible: visibleToRaw,
+    rawRangeForVisibleRange,
+    linePrefix: prefix,
+    lineEnding
+  }
 }

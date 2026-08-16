@@ -657,15 +657,56 @@ import { exitCodeBlock } from '../src/renderer/src/lib/source-kernel/commands/co
 
 console.log('PASS source-kernel commands (exitCodeBlock)')
 
+// ---- review fix (Plan 4 Task 2 code review): replaceVisibleText over
+// already-marked content ----
+//
+// Live-probed corruption, not a mark-toggle-specific concern: ANY caller of
+// `replaceVisibleText` (this generic command predates marks entirely) that
+// resolves a selection sitting inside an existing strong/emphasis/delete
+// node used to have its `from` silently swallow that mark's opening
+// delimiter — `rawRangeForVisibleRange(2,6)` over 'a **bold** b\n' used to
+// resolve to raw [2,8) ("**bold", markers-included-on-the-left, excluded-
+// on-the-right) instead of [4,8) ("bold", content-only). Fixed centrally in
+// character-map.js's `buildCharacterMap` (`rawStartForVisible`, a
+// gap-aware mirror of the existing `visibleToRaw` boundary table — see its
+// ADR comment) rather than locally in mark-toggle.js, since it is shared
+// plumbing every `rawRangeForVisibleRange` consumer relies on.
+{
+  const src = 'a **bold** b\n'
+  const { doc, map } = setup(src, src.indexOf('bold'))
+
+  // Typing 'X' over the fully-selected word must land INSIDE the markers.
+  const typed = replaceVisibleText({ doc, map, visFrom: 2, visTo: 6, insert: 'X' })
+  assert.equal(typed.ok, true)
+  assert.deepEqual(typed.transaction, {
+    baseRevision: 0, from: 4, to: 8, insert: 'X', intent: 'insert-text',
+    selection: { anchor: 5, head: 5 }
+  })
+  assert.equal(applySourceTransaction(doc, typed.transaction).doc.text, 'a **X** b\n')
+
+  // Deleting the whole word (insert: ''): pinned decision — produce the
+  // empty-marker bytes and stop there. `replaceVisibleText` has no mark
+  // awareness (that is `toggleInlineMark`'s domain, a separate command) and
+  // this task does not add any here; probed as byte-consistent and safe —
+  // 'a **** b\n' reparses to a plain literal '****' text run (not a broken
+  // node, not data loss), left for a later mode-level verify/reconcile pass
+  // to clean up if ever desired.
+  const deleted = replaceVisibleText({ doc, map, visFrom: 2, visTo: 6, insert: '' })
+  assert.equal(deleted.ok, true)
+  assert.equal(applySourceTransaction(doc, deleted.transaction).doc.text, 'a **** b\n')
+}
+
+console.log('PASS source-kernel commands (review fix: replaceVisibleText over marked content)')
+
 // ---- Task 2 (Plan 4): toggleInlineMark ----
 
 // Test-only helpers that walk a character map's `units` directly to find the
-// visible index that STARTS (resp. ENDS) at a given raw offset. This mirrors
-// mark-toggle.js's own gap-aware `rawStartAtVisible` resolution rather than
-// map.visibleToRaw's boundary table, which is ambiguous on the `from` side
-// whenever the target raw offset sits right after an existing mark's opening
-// delimiter (see mark-toggle.js's `rawRangeForSelection` comment) — using the
-// boundary table here would make it impossible to even construct a realistic
+// visible index that STARTS (resp. ENDS) at a given raw offset — mirrors
+// character-map.js's own gap-aware `rawStartForVisible`/`rawRangeForVisibleRange`
+// (see its ADR comment on `buildCharacterMap`) rather than `map.visibleToRaw`
+// alone, which stays ambiguous on the `from` side whenever the target raw
+// offset sits right after an existing mark's opening delimiter — using
+// `visibleToRaw` here would make it impossible to even construct a realistic
 // "select this already-marked word" visFrom in these tests.
 const visStartFor = (map, raw) => {
   let v = 0
@@ -772,6 +813,26 @@ wrapUnwrapRoundtrip('delete', 'a strike b\r\n', 'strike')
   })
   assert.equal(r.ok, true, r.code)
   assert.equal(applySourceTransaction(doc, r.transaction).doc.text, 'a **bold** b\n')
+}
+
+// nbsp-shrink regression (review ride-along, Plan 4 Task 2): an HTML entity
+// like `&nbsp;` decodes to a whitespace CHARACTER, but its raw bytes are the
+// literal `&nbsp;` text, tagged `kind:'entity'` by the character map —
+// `isWhitespaceVisible` deliberately only trusts `char`/`linebreak` units
+// (see its own comment), so an entity is never treated as shrinkable
+// whitespace even though `/\s/` would match its decoded value. Pin this: a
+// selection flanked by `&nbsp;` entities on both sides shrinks NOT AT ALL
+// (there is no leading/trailing literal-space unit to trim), so the wrap
+// markers land around the ENTIRE selection, entities included.
+{
+  const src = 'a&nbsp;bold&nbsp;b\n'
+  // visible: a(0) nbsp(1) b(2) o(3) l(4) d(5) nbsp(6) b(7) — select
+  // [1,7) ("&nbsp;bold&nbsp;" worth of visible chars).
+  const { doc, index, map } = blockSetup(src, 0)
+  const r = toggleInlineMark({ doc, index, map, visFrom: 1, visTo: 7, kind: 'strong' })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+    'a**&nbsp;bold&nbsp;**b\n', 'entity flanks are not trimmed by the whitespace shrink')
 }
 
 // All-whitespace selection: nothing survives the shrink → reject.

@@ -71,6 +71,30 @@ const mapOf = (src, findText = null) => {
   assert.equal(src.slice(atom.rawStart, atom.rawEnd), '`code`')
 }
 
+// 缺口感知的选区起点（Plan 4 Task 2 复审修复）：strong/emphasis/delete 递归
+// 进子节点时不为 marker 本身生成 unit，进入/离开该内容时前后各有一段"无主"
+// 原始字节（marker 自身）。旧实现的 rawRangeForVisibleRange 的 from 端复用
+// "consumed-so-far" 边界表，会把选区起点回退到 marker 之前（把 marker 一起
+// 吞进选区）；已验证为真实字节损坏：对 'a **bold** b\n' 精确选中可见词
+// "bold"（visFrom 2, visTo 6），旧值解析为 raw [2,8) = "**bold"（含开
+// marker、不含闭 marker），对着这个范围输入会吞掉开 marker、留下孤立的闭
+// marker。现在 from 端改经 `rawStartForVisible`（跳过 marker 缺口），必须
+// 精确落在内容本身（marker 之后）。
+{
+  const src = 'a **bold** b\n'
+  const idx = buildSyntaxIndex(src)
+  const block = idx.blockAt(src.indexOf('bold'))
+  const map = buildCharacterMap(src, block.node)
+  // 可见 "a bold b"：a=0 sp=1 b=2 o=3 l=4 d=5 sp=6 b=7，"bold" 是 visible[2,6)
+  assert.equal(map.rawStartForVisible(2), 4, 'skips the opening ** entirely')
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 6), { from: 4, to: 8 })
+  assert.equal(src.slice(4, 8), 'bold', 'range must start AT the content, after **')
+  // visibleToRaw(2) 本身保持不变（单点查询语义不受影响，仍是 2 —— 用于非
+  // 选区场景，例如插入符定位）；只有 rawRangeForVisibleRange/
+  // rawStartForVisible 的 from 端改用缺口感知解析。
+  assert.equal(map.visibleToRaw(2), 2)
+}
+
 // raw 与 value 无法对齐 → 整块 null（fail-closed）
 {
   const idx = buildSyntaxIndex('plain\n')

@@ -677,4 +677,69 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   assert.equal(kernel2.doc.text, md, 'kernel bytes must be untouched by a refused edit')
 }
 
+// Case 21 (review fix, Plan 4 Task 2): gap-aware selection-start resolution
+// through `commitPlainText`'s own `pmPosToRawStart` — the same corruption
+// class the reviewer live-probed at the `replaceVisibleText`/character-map
+// layer (`test-source-kernel-commands.mjs`'s "review fix" section), proven
+// again here at the gateway layer.
+//
+// Note on WHY this fixture pairs an UNMARKED PM paragraph against a MARKED
+// markdown source ('a **bold** b\n'): `extractPlainTextSteps`'
+// `isPlainTextblock` guard (used by BOTH `classifyTransactions` and
+// `commitPlainText` itself, unconditionally, before any raw-offset
+// resolution runs) refuses ANY edit whose PM parent textblock carries a
+// mark ANYWHERE in it (see Case 6 above) — so with a REAL marked PM doc,
+// `commitPlainText` never reaches `pmPosToRawStart` at all; the bug this
+// case targets is unreachable through today's live `classifyTransactions ->
+// commitPlainText` pipeline for an ALREADY-mark-toggled paragraph. It
+// remains live and directly reachable, unconditionally, through
+// `replaceVisibleText` (any future caller of that command against marked
+// content — including a mode-level verify/reconcile repair path) and would
+// become immediately live here too the moment a future task relaxes
+// `isPlainTextblock` for post-mark-toggle paragraphs (exactly the kind of
+// relaxation Plan 4 Task 3's kernel-mode routing is expected to need). This
+// fixture proves `pmPosToRawStart`/`commitPlainText`'s `oldFrom < oldTo`
+// branch is correct NOW, pre-emptively, using `buildProjectionMap` for
+// real (not a hand-rolled fake map) — its pairing is content-SIZE-based,
+// not mark-aware (see editor-kernel-projection-map.js's own pairing
+// comment), so an unmarked 8-char PM paragraph legitimately pairs against
+// an 8-visible-char markdown paragraph that happens to contain '**' bytes,
+// exercising the exact same charMap gap a real post-mark-toggle paragraph
+// would have.
+{
+  const md = 'a **bold** b\n'
+  const d = doc(p(text('a bold b')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  // PM pos 3..7 = content offset 2..6 = the visible word "bold" (a=1 sp=2
+  // b=3 o=4 l=5 d=6 sp=7 b=8 in content-offset terms, contentPos=1).
+  assert.equal(map.pmPosToRaw(3), 2, 'old (gap-before) value: right before **')
+  assert.equal(map.pmPosToRawStart(3), 4, 'gap-aware value: right after **, at the content')
+  assert.equal(map.pmPosToRaw(7), 8, 'the TO side was never ambiguous — content end either way')
+
+  // (a) type 'X' over the fully-selected word: must land INSIDE the markers.
+  const tr = state.tr.insertText('X', 3, 7)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 4, to: 8, insert: 'X' }])
+  assert.equal(committed.applied.doc.text, 'a **X** b\n',
+    'the opening ** must NOT be eaten and the closing ** must NOT be orphaned')
+
+  // (b) deleting the whole word: pinned decision (see the matching
+  // "review fix" section of test-source-kernel-commands.mjs) — the empty-
+  // marker bytes 'a **** b\n' are byte-consistent and safe (no data loss,
+  // no crash); reparsing them yields a plain literal '****' text run, not a
+  // broken/ambiguous structure. commitPlainText does not special-case this
+  // (it has no mark awareness — that is `toggleInlineMark`'s domain), and
+  // this task deliberately does not add any here; the result is left for a
+  // later mode-level verify/reconcile pass to clean up if desired.
+  const tr2 = state.tr.delete(3, 7)
+  const kernel2 = { doc: createMarkdownDocument(md) }
+  const committed2 = commitPlainText({ kernel: kernel2, map, transactions: [tr2], oldState: state })
+  assert.equal(committed2.ok, true, committed2.code)
+  assert.equal(committed2.applied.doc.text, 'a **** b\n')
+}
+
 console.log('PASS kernel gateway')

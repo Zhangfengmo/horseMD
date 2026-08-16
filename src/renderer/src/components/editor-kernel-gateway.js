@@ -325,7 +325,8 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 // `applySourceTransaction`/`trailingCaret` already use for its own
 // sequential-edits bookkeeping, kept consistent across the kernel boundary.
 export function commitPlainText({ kernel, map, transactions, oldState }) {
-  if (!kernel?.doc || !map || typeof map.pmPosToRaw !== 'function') {
+  if (!kernel?.doc || !map || typeof map.pmPosToRaw !== 'function' ||
+      typeof map.pmPosToRawStart !== 'function') {
     return { ok: false, code: KERNEL_CODES.UNMAPPED }
   }
   const trs = Array.isArray(transactions) ? transactions : [transactions]
@@ -361,7 +362,21 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       ? virtualBlock.prefix
       : ''
     if (virtualBlock) prefixedVirtualBlocks.add(oldFrom)
-    const rawFrom = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldFrom)
+    // A genuine (non-empty) selection's LEFT edge is resolved through the
+    // gap-aware `pmPosToRawStart`, never plain `pmPosToRaw` — see
+    // character-map.js's ADR comment on `buildCharacterMap` for the byte
+    // corruption this specifically fixes (typing over a selected, already-
+    // marked word used to silently eat its opening marker). A zero-width
+    // step (`oldFrom === oldTo`, a bare caret insert) deliberately keeps
+    // BOTH ends on the plain `pmPosToRaw` — using different resolvers for
+    // the same PM position here would make `rawFrom` and `rawTo` diverge
+    // for a single point, corrupting a zero-width insert into a spurious
+    // non-zero-width edit (or, at an ambiguous boundary, `rawFrom > rawTo`,
+    // which the guard below would then reject outright — an unrelated,
+    // never-reported regression this task must not introduce).
+    const rawFrom = virtualBlock
+      ? virtualBlock.raw
+      : oldFrom < oldTo ? map.pmPosToRawStart(oldFrom) : map.pmPosToRaw(oldFrom)
     const rawTo = virtualBlock ? virtualBlock.raw : map.pmPosToRaw(oldTo)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
