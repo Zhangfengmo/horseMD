@@ -433,9 +433,21 @@ async function run() {
     // node that `parse(kernel.doc.text)` does not reproduce (measured:
     // live `id:"crlf-代码块测试"` vs parsed `id:""`). It is a one-shot,
     // pre-existing, CRLF-independent quirk (the repair reconcile clears the
-    // id, so every later commit matches), unrelated to this stage's subject.
-    // What must be zero is a mismatch caused by a CRLF LINE BREAK commit —
-    // that is the P3-4 churn symptom — so the window starts here.
+    // id and the plugin's restore AttrStep is then vetoed as
+    // `unsupported-input-type`, so it never recurs), unrelated to this
+    // stage's subject. What must be zero is a mismatch caused by a CRLF LINE
+    // BREAK commit — that is the P3-4 churn symptom — so the window starts
+    // here.
+    //
+    // The reset is NOT blind: exactly ONE mismatch may have accumulated over
+    // the five characters of 'KTAIL'. Two or more would mean a plain
+    // single-char commit inside the CRLF block is itself churning, which is a
+    // real regression this stage must catch.
+    const preResetMismatches = JSON.parse(await evaluate(
+      `JSON.stringify((window.__hmKernelDiagnostics || []).filter((entry) => entry.type === 'projection-mismatch'))`
+    ))
+    assert.equal(preResetMismatches.length, 1,
+      `exactly one (heading-slug) projection repair may precede the break commits, got ${JSON.stringify(preResetMismatches)}`)
     await evaluate(`(window.__hmKernelDiagnostics = []).length`)
 
     await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })

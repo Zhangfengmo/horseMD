@@ -456,6 +456,30 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   return { kind: 'plain-text', steps }
 }
 
+// True when `rawOffset` sits strictly INSIDE a '\r\n' line ending, i.e. on the
+// boundary between a `char` unit holding the '\r' and the `linebreak` unit
+// holding the '\n'. Used by `commitPlainText`'s bisection guard (see its call
+// site for the corruption shapes this refuses).
+//
+// The cheap text test is the fast path AND a necessary condition; the unit
+// walk is what actually PROVES the offset is that boundary in THIS block's
+// map (rather than, say, a '\r\n' that happens to sit in surrounding source).
+// charMap shapes without a `units` array (virtualCharMap, hand-built maps in
+// older tests) can carry no such boundary and answer `false`.
+function bisectsLineEnding(charMap, text, rawOffset) {
+  if (!charMap || typeof text !== 'string' || !Number.isFinite(rawOffset)) return false
+  if (text.charCodeAt(rawOffset - 1) !== 13 || text.charCodeAt(rawOffset) !== 10) return false
+  const units = charMap.units
+  if (!Array.isArray(units)) return false
+  for (let index = 0; index < units.length - 1; index += 1) {
+    const unit = units[index]
+    const next = units[index + 1]
+    if (unit?.kind !== 'char' || next?.kind !== 'linebreak') continue
+    if (unit.rawEnd === rawOffset && next.rawStart === rawOffset) return true
+  }
+  return false
+}
+
 // commitPlainText: turns a `plain-text`-classified batch into ONE kernel
 // transaction and applies it. Independently re-derives the step list (it
 // does not trust a caller-supplied `classification.steps` — this function's
@@ -541,6 +565,36 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       : oldFrom < oldTo ? map.pmPosToRaw(oldTo) : insertPoint(oldFrom)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       return { ok: false, code: KERNEL_CODES.UNMAPPED }
+    }
+    // CRLF bisection guard (review finding, 2026-08-17) — the DELETE-side
+    // half of the same contract the break-spelling check above enforces for
+    // inserts. A code `charMap` deliberately models a '\r\n' ending as TWO
+    // units (a `char` unit for the '\r', then the `linebreak` unit for the
+    // '\n', which also spans the next line's prefix — see code-map.js), so
+    // it legitimately exposes a boundary BETWEEN them. Any raw offset landing
+    // there bisects the pair. Reviewer-probed shapes on
+    // '```js\r\nab\r\ncd\r\n```\r\n' (content 'ab\r\ncd' from PM 1):
+    //  - delete PM[4,5) (the '\n' alone) -> raw [10,11): leaves a lone '\r';
+    //  - delete PM[3,4) (the '\r' alone) -> raw [9,10): leaves a bare '\n',
+    //    i.e. mixed endings inside a uniform-CRLF file;
+    //  - the quoted-fence version is the worst: the `linebreak` unit's raw
+    //    span carries the next line's '> ' prefix, so deleting the '\n' half
+    //    eats the prefix while the lone '\r' survives as a line terminator —
+    //    line 2 silently loses its quote marker.
+    // None of these is reachable through today's UI (the patched bridge's
+    // `cmToPm` never returns an interior offset, and find/replace cannot
+    // produce a code_block-parented step) — but that defence lives in a
+    // prototype patch in ANOTHER module. This file owns the byte contract, so
+    // it proves it here rather than inheriting it. A correctly shaped
+    // full-pair delete (PM[3,5) -> raw [9,11)) is untouched: neither end sits
+    // between the two units.
+    if (!virtualBlock) {
+      const pair = typeof map.pairAt === 'function' ? map.pairAt(oldFrom) : null
+      const text = kernel.doc.text
+      if (bisectsLineEnding(pair?.charMap, text, rawFrom) ||
+          bisectsLineEnding(pair?.charMap, text, rawTo)) {
+        return { ok: false, code: KERNEL_CODES.UNMAPPED }
+      }
     }
     if (edits.length && rawFrom < edits[edits.length - 1].to) {
       // A later step's mapped raw range starts before the previous step's

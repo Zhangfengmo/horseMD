@@ -103,31 +103,63 @@ For LF blocks this is byte-identical to the previous behavior
 |---|---|---|
 | bare `\n` break in a CRLF / lone-`\r` block | yes — only when the block's **current** text holds no `\r` (single-line or empty fence in a CRLF file): the bridge's `hasCarriageReturn` fast path then delegates to the vendored `forwardUpdate`, which can only emit `\n` (`Text.toString()` joins with `\n`) | committing `\r\n` to raw while PM holds `\n` passes the kernel but fails `verifyPlainTextProjection` on **every** such commit → repair-reconcile churn, the P3-4 symptom. Refusing keeps bytes and view in lockstep. Plain typing/deleting in such a block is unaffected. |
 | `\r`-bearing break in an LF block | no (bridge only converts for `\r`-containing blocks) | unknown provenance; fail closed |
-| mixed-ending fence interior | no | `buildCodeMap` already fails closed → `charMap === null` → block non-editable |
+| `Enter` in a mixed-ending fence whose FIRST content line is LF | yes | **Correction (review finding):** `buildCodeMap` does NOT fail closed on a mixed interior — probed, `` ```js\r\na\r\nb\nc\r\n``` `` maps with `lineEnding='\r\n'` and `` ```js\r\na\nb\r\nc\r\n``` `` maps with `lineEnding='\n'`. `lineEnding` is only a statement about the FIRST content line. In a mixed block whose first line ends LF, the bridge (text contains `\r`) spells inserted breaks `\r\n` while `charMap.lineEnding` is `\n`, so every `Enter` is refused. Units stay byte-exact either way; the cost is a refused Enter, never a wrong byte. |
 | mermaid / latex / mdast `math` | n/a | unchanged: `READONLY_CODE_LANGUAGES` + `md.type === 'math'` still gate these |
 
 Closing the first residual would require teaching the bridge the block's *raw*
 line ending (which lives in the kernel, not in the PM node) — a new cross-module
 seam. Out of scope here; recorded as a follow-up candidate.
 
+### Delete side (review finding, 2026-08-17)
+
+The insert-side proof above says nothing about a raw RANGE. Because the charMap
+models a `\r\n` ending as two units, it legitimately exposes the boundary
+between them, and a range landing there bisects the pair. Reviewer probes on
+`` ```js\r\nab\r\ncd\r\n``` `` (PM content `ab\r\ncd` from 1):
+
+| probe | raw range | would produce |
+|---|---|---|
+| delete PM[4,5) (the `\n` half) | [10,11) | lone `\r` |
+| delete PM[3,4) (the `\r` half) | [9,10) | bare `\n` — mixed endings in a uniform-CRLF file |
+| quoted fence, delete PM[4,5) | [13,16) | **worst**: the `linebreak` unit's raw span carries the next line's `> `, so the quote prefix is eaten while the lone `\r` survives as a terminator — line 2 loses its marker |
+
+None is reachable through today's UI (`cmToPm` never returns an interior
+offset; find/replace cannot produce a code_block-parented step) — but that
+defence is a property of a prototype patch in *another* module. The gateway now
+proves it itself: `bisectsLineEnding(charMap, text, rawOffset)` refuses
+(`UNMAPPED`) when `rawFrom` or `rawTo` sits on the boundary between a
+`char('\r')` unit and its following `linebreak` unit. Correctly shaped deletes
+are untouched — PM[3,5) → `` ```js\r\nabcd\r\n``` ``, quoted PM[3,5) removes
+`\r\n> `. Locked by gateway Cases 28e (three refusals + full-pair success),
+28f (quoted, incl. the prefix-eating shape) and 28g (LF unaffected).
+
 ---
 
 ## 4. Changes
 
-**Production (2 files):**
+**Production (4 files):**
 - `src/renderer/src/components/editor-kernel-projection-map.js` — removed the
   `lineEnding !== '\n'` gate; replaced the 65-line ADR with a ~35-line one
   recording the identity measurements and pointing at the new gateway guard.
 - `src/renderer/src/components/editor-kernel-gateway.js` — `plainSliceText`'s
   `allowNewline` branch no longer rejects `\r`; `commitPlainText`'s expansion
   now matches breaks with `/\r\n|\r|\n/`, requires each to equal
-  `charMap.lineEnding`, and only appends `linePrefix`.
+  `charMap.lineEnding`, and only appends `linePrefix`; new `bisectsLineEnding`
+  guard refuses any raw range end that splits a `\r\n` pair.
+- `src/renderer/src/lib/source-kernel/code-map.js` — corrected the false
+  "fails closed on mixed endings" claim in the `lineEnding` comment.
+- `src/renderer/src/components/editor-codeblock-crlf.js` — header no longer
+  says CRLF blocks are non-editable in kernel mode; records that the
+  dominant-ending rewrite is now a byte contract with the gateway.
 
 **Tests (4 files):**
 - `scripts/test-kernel-projection-map.mjs` — Case 16b rewritten (CRLF editable +
   the explicit `content.size === visibleLength` identity + raw offsets across
   the break); new Case 16c (lone `\r`) and 16d (quoted CRLF fence, prefix-span).
-- `scripts/test-kernel-gateway.mjs` — Case 28 rewritten into 4 sub-cases
+- `scripts/test-kernel-gateway.mjs` — Cases 28e/28f/28g lock the delete-side
+  bisection guard (all three probed corruption shapes refused with bytes
+  untouched, both full-pair deletes still succeeding, LF unaffected).
+  Case 28 rewritten into 4 sub-cases
   (single-char edit, `\r\n` multi-line insert, cross-line-join delete, bare-`\n`
   refusal) + 28b (quoted CRLF prefix expansion), 28c (lone `\r`, both refusals),
   28d (LF mirror guard + unchanged LF behavior). Every success asserts
@@ -173,12 +205,22 @@ parsed: {"type":"heading","attrs":{"id":"","level":1}, …}
 diff  : {"from":0,"to":12,"insertFrom":0,"insertTo":12}
 ```
 
-It is one-shot (the repair reconcile clears the id) and CRLF-independent — the
-same LF fixture in `test-kernel-codeblock-ui.mjs` has a heading too. It is
-**not** a regression from this change and is out of scope; flagged here because
-it makes "assert zero projection-mismatch from session start" impossible in any
-heading-bearing UI fixture, and because it is a real (if harmless) source of one
-repair reconcile per session. Worth a follow-up.
+It is one-shot and CRLF-independent — the same LF fixture in
+`test-kernel-codeblock-ui.mjs` has a heading too. **Not** a regression from this
+change, and out of scope; flagged because it makes "assert zero
+projection-mismatch from session start" impossible in any heading-bearing UI
+fixture.
+
+There is a second-order wrinkle worth recording (reviewer-reported, consistent
+with the code): the repair reconcile clears `attrs.id`, and the heading
+plugin's transaction that tries to re-stamp it is a bare `AttrStep` on a
+`heading` node — which `extractTaskToggleStep` (list_item/`checked`) and
+`extractLanguageStep` (code_block/`language`) both correctly decline, so it
+falls through to `blocked`/`unsupported-input-type` and is vetoed. Net effect:
+in a kernel-mode session, headings keep an EMPTY `attrs.id` (no DOM anchor) for
+the rest of the session. That is why the mismatch never recurs — and it is a
+real, if minor, user-visible gap (heading anchors) that the follow-up should
+cover alongside the mismatch itself.
 
 ---
 
@@ -194,3 +236,6 @@ repair reconcile per session. Worth a follow-up.
 | `npm run test:kernel-ui` (mode/ime/nodeview/codeblock/marks) | PASS |
 | `npm run test:kernel-mode-ui` | PASS |
 | `npm run guide:check` | PASS |
+
+(Re-run after the review round: `test:kernel-headless`, `test:source-kernel`,
+`build`, `test:kernel-codeblock-ui`, `test:codeblock-crlf-ui`.)

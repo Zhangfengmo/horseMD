@@ -114,13 +114,25 @@ export function buildCodeMap(text, codeNode) {
   let line = lines[lineIdx]
   if (!text.startsWith(prefix, line.start)) return null
   // The first content line's own terminator is the canonical `lineEnding`
-  // this block's newlines use (buildCodeMap already fails closed, below, if
-  // a LATER content line's own ending diverges from what `.value`'s '\n'/
-  // '\r' chars predict for it — so a real, provably-mapped block never
-  // actually has a mixed-ending interior; only ONE ending style ever reaches
-  // the return below). Falls back to the open fence line's own ending for
-  // the degenerate "no terminator at all" case (captured before the walk
-  // below can mutate `line`).
+  // this block's newlines use. Falls back to the open fence line's own
+  // ending for the degenerate "no terminator at all" case (captured before
+  // the walk below can mutate `line`).
+  //
+  // CORRECTION (review finding, 2026-08-17): an earlier version of this
+  // comment claimed buildCodeMap fails closed on a mixed-ending interior, so
+  // that "only ONE ending style ever reaches the return below". That is
+  // FALSE and was propagated into the callers' docs. The walk below proves
+  // each line's ending against what `.value`'s own '\n'/'\r' chars say for
+  // THAT line — which is satisfied by a mixed block, because `.value`
+  // carries the real per-line bytes. Probed: '```js\r\na\r\nb\nc\r\n```\r\n'
+  // maps fine with `lineEnding` '\r\n', and '```js\r\na\nb\r\nc\r\n```\r\n'
+  // maps fine with `lineEnding` '\n'. Every UNIT is still byte-exact (that
+  // is what this module proves); `lineEnding` is only ever a statement about
+  // the FIRST content line, and consumers must treat it as such. The one
+  // consumer that acts on it — editor-kernel-gateway.js `commitPlainText`'s
+  // break-spelling check — is fail-closed by construction: in a mixed block
+  // it refuses any inserted break spelled differently from the first line's,
+  // which costs a refused Enter, never a wrong byte.
   const lineEnding = line.ending || openLine.ending || '\n'
   let r = line.start + prefix.length
   let lineContentEnd = line.end

@@ -747,6 +747,93 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   }
 }
 
+// Case 28e (review finding, 2026-08-17): the DELETE-side half of the byte
+// contract — a raw range must never BISECT a '\r\n' pair. The code charMap
+// models a CRLF ending as two units (a `char` unit for the '\r', then the
+// `linebreak` unit for the '\n' which also spans the next line's prefix), so
+// it legitimately exposes the boundary between them; a range landing there
+// splits the ending. Reviewer-probed corruption shapes, all now refused with
+// bytes untouched. (Not reachable through today's UI — the patched bridge's
+// `cmToPm` never returns an interior offset — but the defence must live in
+// this file, which owns the byte contract, not only in a prototype patch in
+// another module.)
+// md = '```js\r\nab\r\ncd\r\n```\r\n', PM content 'ab\r\ncd' from 1:
+// a@1 b@2 \r@3 \n@4 c@5 d@6; units char[7,8) char[8,9) char[9,10)='\r'
+// linebreak[10,11)='\n' char[11,12) char[12,13).
+{
+  const md = '```js\r\nab\r\ncd\r\n```\r\n'
+  const d = doc(cb('js', 'ab\r\ncd'))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  // The bisecting offset is REACHABLE through the map — this is a real
+  // boundary, not an impossible one, which is exactly why it needs a guard.
+  assert.equal(map.pmPosToRaw(4), 10, 'the map really does expose the mid-pair offset')
+
+  const refuse = (label, tr) => {
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, false, `${label} must fail closed`)
+    assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
+    assert.equal(kernel.doc.text, md, `${label}: kernel bytes must be untouched`)
+  }
+  // (a) delete the '\n' half alone -> would leave a lone '\r'.
+  refuse("deleting a CRLF pair's '\\n' half", state.tr.delete(4, 5))
+  // (b) delete the '\r' half alone -> would leave a bare '\n' (mixed endings).
+  refuse("deleting a CRLF pair's '\\r' half", state.tr.delete(3, 4))
+  // (c) a zero-width insert landing between the halves would split the pair.
+  refuse('inserting between the two halves of a CRLF pair', state.tr.insertText('X', 4))
+
+  // ...while the correctly shaped FULL-pair delete still succeeds: neither
+  // end sits between the two units (raw [9,11)).
+  const kernel = { doc: createMarkdownDocument(md) }
+  const ok = commitPlainText({ kernel, map, transactions: [state.tr.delete(3, 5)], oldState: state })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.applied.doc.text, '```js\r\nabcd\r\n```\r\n')
+}
+
+// Case 28f: the same guard on the QUOTED fence — the worst probed shape,
+// because the `linebreak` unit's raw span carries the next line's '> '
+// prefix: deleting the '\n' half alone would eat the quote marker while the
+// lone '\r' survives as a line terminator (line 2 silently loses its prefix).
+// md = '> ```js\r\n> a\r\n> b\r\n> ```\r\n', PM doc(bq(cb)) content 'a\r\nb'
+// from 2: a@2 \r@3 \n@4 b@5; units char[11,12) char[12,13)='\r'
+// linebreak[13,16)='\n> ' char[16,17).
+{
+  const md = '> ```js\r\n> a\r\n> b\r\n> ```\r\n'
+  const d = doc(bq(cb('js', 'a\r\nb')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  assert.equal(map.pmPosToRaw(4), 13, 'the quoted fence exposes the mid-pair offset too')
+
+  const kernel1 = { doc: createMarkdownDocument(md) }
+  const refused = commitPlainText({ kernel: kernel1, map, transactions: [state.tr.delete(4, 5)], oldState: state })
+  assert.equal(refused.ok, false, "deleting a quoted fence's '\\n' half must fail closed")
+  assert.equal(refused.code, KERNEL_CODES.UNMAPPED)
+  assert.equal(kernel1.doc.text, md, 'kernel bytes must be untouched')
+
+  // The correctly shaped full-pair delete removes '\r\n> ' — ending AND the
+  // next line's prefix — joining the two content lines.
+  const kernel2 = { doc: createMarkdownDocument(md) }
+  const ok = commitPlainText({ kernel: kernel2, map, transactions: [state.tr.delete(3, 5)], oldState: state })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.applied.doc.text, '> ```js\r\n> ab\r\n> ```\r\n')
+}
+
+// Case 28g: the guard is CRLF-specific and must not touch anything else — an
+// LF fence's linebreak boundary (no '\r' anywhere) keeps deleting normally.
+{
+  const md = '> ```js\n> ab\n> cd\n> ```\n'
+  const d = doc(bq(cb('js', 'ab\ncd')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const ok = commitPlainText({ kernel, map, transactions: [state.tr.delete(4, 5)], oldState: state })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.applied.doc.text, '> ```js\n> abcd\n> ```\n')
+}
+
 // Case 28b: quoted CRLF fence — the prefix-bearing shape. The gateway adds
 // `linePrefix` after each break WITHOUT re-spelling the break itself.
 // md = '> ```js\r\n> ab\r\n> ```\r\n': '>' 0 ' ' 1 '```js' 2-6 \r 7 \n 8

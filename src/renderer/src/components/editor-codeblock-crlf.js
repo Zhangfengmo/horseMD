@@ -53,9 +53,21 @@
 //
 // LF documents are untouched: every wrapper delegates to the ORIGINAL
 // implementation unless the block's current text actually contains '\r'.
-// Kernel mode is also safe: CRLF code blocks are non-editable there (dispatch
-// gate + projection-map ADR), but the PM→CM update() path still runs for
-// projection resyncs — which this patch makes converge instead of churn.
+//
+// KERNEL MODE DEPENDS ON THIS PATCH (updated 2026-08-17). CRLF code blocks
+// used to be non-editable there precisely because of the bug above; once this
+// patch landed, the projection map's `lineEnding` gate was removed and CRLF
+// fences became editable (see editor-kernel-projection-map.js's `code_block`
+// branch and docs/transaction-source-sync-architecture.md's "CRLF 代码块
+// ADR"). The kernel gateway now relies on `crlfForwardUpdate` having ALREADY
+// spelled every inserted break with the block's dominant ending: it verifies
+// that spelling against the raw source and refuses anything else, but it does
+// NOT re-spell. So the `.replace(/\n/g, ending)` on line ~172 is a byte
+// contract with editor-kernel-gateway.js `commitPlainText`, not a cosmetic
+// normalization — do not weaken it. The one shape the fast path below cannot
+// serve (a CRLF block whose CURRENT text holds no '\r', where this wrapper
+// delegates to the vendor and the break comes out bare '\n') is what the
+// gateway refuses fail-closed.
 import { CodeMirrorBlock } from '@milkdown/components/code-block'
 import { TextSelection } from '@milkdown/prose/state'
 import { EditorState } from '@codemirror/state'
