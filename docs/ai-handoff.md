@@ -303,7 +303,7 @@ android/, ios/           Capacitor 原生壳
 
 **修复（commit `1e8315f` fix(editor): correct CM position math for CRLF code blocks）**：新模块 `src/renderer/src/components/editor-codeblock-crlf.js`，沿用 `editor-codeblock-eager.js` 的 prototype 手术模式——按 `\r\n` 对索引建立双射位置映射（`cmToPm`/`pmToCm`），`forwardUpdate` 用编辑前文本映射 changeset A 区间（行合并因此删除完整 `\r\n` 对）、插入换行转成块主导行尾、编辑后选区用编辑后文本映射；`update()` 先把 PM 文本按 `/\r\n?/→'\n'` 归一化再 diff（坐标即 CM 坐标、幻影行消失、一次收敛）；`setSelection` 做 pmToCm 换算。文本不含 `\r` 时全部委托原实现（LF 文档零影响）。回归锁：`npm run test:codeblock-crlf-ui`（默认 legacy、RED 曾复现拆对+乱序损坏；已接入 `run-ui-regression` standalone）。**kernel-mode 的 CRLF fail-closed 收窄（5.2d ADR）现已解除阻塞**，取消收窄是独立后续任务（本次刻意未动）。
 
-**（原「遗留独立缺陷」已于 2026-08-17 修复，见 5.2f。）**完整证据链见 `.superpowers/codeblock-crlf-fix-report.md`；原调查见 `.superpowers/sdd/2026-08-16-source-kernel-codeblock-domain/task-4-report.md`「Fix-review round」。
+**（原「遗留独立缺陷」已于 2026-08-17 修复，见 5.2f。注意该段原文把「round-trip 验收门」当作运行时闸门，这是错的——运行时闸门是 `editor-source-verification.js` 的 `verifySourceDocument`；`roundtrip.js` 自 247eee0 起已无生产调用方。详见 5.2f。）**完整证据链见 `.superpowers/codeblock-crlf-fix-report.md`；原调查见 `.superpowers/sdd/2026-08-16-source-kernel-codeblock-domain/task-4-report.md`「Fix-review round」。
 
 ### 5.2f ✅ 已修复（2026-08-17）：canonical-diff 保真管线的 CRLF 插入算术与验收门的行尾盲区
 
@@ -311,11 +311,22 @@ android/, ios/           Capacitor 原生壳
 
 - `rawInsertionAtCanonicalLineEnd`（`lib/markdown-preservation/core.js`）用 `lineAt().end`（只按 `\n` 切分）当作行文本末尾，CRLF 下它就是 `\n` 的下标 → 产物 `para one.\rZ\n`，`preserved:true` 的**错误成功**。段落、标题、列表行、任务行、引用行、软换行行尾全部命中。
 - `sourceVisibleIndex`（`mode-visible-map.js`）把围栏代码块内的换行当作**可见字符**并锚定在 `\n` 上；`sourceRawFromVisibleIndex` 的 backward 亲和又按「上一个可见字符 +1」算「其后位置」。CRLF 的换行是一个可见字符、两个字节，所以代码块内的行尾插入同样拆对、行尾删除会留下孤立 `\r`。现在换行锚定在 `\r`（字符开始处），`rawWidthAt()` 让「其后位置」跨过整对。
-- `roundtrip.js` 的验收门本身对行尾也不是拼写无关的：micromark 会把原始字节抄进节点 `value`（段落软换行、代码块正文、HTML 块），所以**任何含软换行或代码块的 CRLF 文档都无法与 LF canonical 比较相等**——即使 mapper 产出完全正确的字节也会被判失败。`normalizeLineEndings` 在构造比较键时把 `\r\n|\r` 归一为 `\n`（与模块声明的「CRLF 属于要保护的拼写」一致）；拆对产生的孤立 `\r` 仍然改变文档结构，依旧被拒绝。
+**闸门归属（务必读，前一版本记述有误）**：拦下这些错误产物的**运行时**闸门是 `components/editor-source-verification.js` 的 `verifySourceDocument` → `editor-durable-semantics.js` 的 `areDurablyEquivalent`——它用编辑器自己的解析器把候选字节重新解析成 **ProseMirror 文档**再比对，由 `commitCanonicalResult`/`flushMarkdown` 经 `selectVerifiedSource` 调用。拆对产生的 `\r` 会被解析成真实换行，PM 文档因此不等价 → 拒绝 → fail-closed 重建 → 全文行尾改写为 LF。
 
-**影响面结论**：修复前的错误产物**全部**被验收门拦下（headless 扫描 11 份文档 × 全部可见字符位置的增/删共 558 例，0 例「错误但被门放行」），因此从未发生静默字节损坏；代价是 CRLF 文档**首次普通编辑**就会 fail-closed 回退全文 canonical，把结构性行尾整体改写成 LF。修复后同一扫描 558/558 字节正确，且与 LF 源码的结果仅差行尾拼写。
+`lib/markdown-preservation/roundtrip.js` 的 `roundTripPreserved` **不是**这个闸门：自 247eee0（fix(editor): centralize verified source commits）起它在 `src/` 下已无任何生产调用方，现在的角色是**headless 测试预言机**；`roundtrip.js` 唯一的生产出口是 `markdownComparisonKey`，被 `core.js:391` 用作**单行**转义安全检查（那里的 `line` 已按 `\n` 切分，永远不含换行符）。因此本次对 `roundtrip.js` 增加的 `normalizeLineEndings`（比较键里把 `\r\n|\r` 归一为 `\n`）**对运行时行为零影响**——它的作用是让测试预言机与模块自己声明的契约（「CRLF 属于要保护的拼写」）一致，否则任何含软换行或代码块的 CRLF 文档在测试里都会被误判为语义不等（micromark 把原始字节抄进节点 `value`）。该归一化的不变量是「CR 字节即行尾」，副作用是作者用 `&#13;` 写出的字面 CR 也会被当成换行——这是可接受的：源码里的字面 CR 无法与行尾区分。拆对留下的孤立 `\r` 仍然改变文档结构，预言机依旧拒绝（已加锁）。
 
-**回归锁**：`npm run test:markdown-preservation`（13 种 CRLF 行尾编辑形态，逐字节期望 + `roundTripPreserved` + 「全文统一 CRLF」属性 + 「与 LF 结果仅差行尾」对照）、`npm run test:roundtrip-acceptance`（CRLF 必须通过门 / 拆对必须被拒）、`npm run test:codeblock-crlf-ui`（磁盘期望已收紧为 `AFTER_LASTLINE` 全文统一 CRLF，并新增「不得出现裸 `\n`」属性断言）。完整证据链见 `.superpowers/preservation-crlf-fix-report.md`。
+**影响面结论**：修复前的错误产物**全部**被运行时闸门拦下（headless 扫描 11 份文档 × 全部可见字符位置的增/删共 558 例，0 例「错误但被放行」），因此从未发生静默字节损坏；代价是 CRLF 文档**首次普通编辑**就会 fail-closed 回退全文 canonical，把结构性行尾整体改写成 LF。修复后同一扫描 558/558 字节正确，且与 LF 源码的结果仅差行尾拼写。
+
+**回归锁**：`npm run test:markdown-preservation`（13 种 CRLF 行尾编辑形态，逐字节期望 + 预言机 + 「全文统一 CRLF」属性 + 「与 LF 结果仅差行尾」对照）、`npm run test:roundtrip-acceptance`（预言机层：CRLF 必须通过 / 拆对必须被拒）、`npm run test:codeblock-crlf-ui`（**端到端真实管线**：磁盘期望收紧为全文统一 CRLF，新增 stage E —— 对**首段**段落行尾的纯散文编辑，即 5.2e 记录的原始症状形态，并新增「不得出现裸 `\n`」属性断言）。stage E 必须落在**非末块**段落：文末最后一个块的行尾编辑由 `preserveDivergedTailBlockAppend` 接管，该路径一直是 CRLF 正确的，用尾段落做 stage E 在未修复的 mapper 上也会通过、锁不住任何东西（已实测验证：单独回退 `core.js` 时首段版本 RED、尾段版本 GREEN）。完整证据链见 `.superpowers/preservation-crlf-fix-report.md`。
+
+**遗留未修形态（CRLF 专属、命名开放项）**：以下真实可达的 CRLF 增量仍返回 `preserved:true` 但候选字节**丢内容**，运行时闸门拒绝后照例整篇改写为 LF（内容不丢、行尾丢）。修复它们需要另立任务，不要当成「今天无害」：
+
+| 形态 | `(source, previous, next)` | 错误产物 | LF 对照 |
+|---|---|---|---|
+| 引用块加一行（单行引用） | `('> q\r\n', '> q\n', '> q\n> r\n')` | `"> r\r\n"`（丢 `> q`） | LF 走 `exact-canonical-baseline`，正确 |
+| 引用块加一行（两行引用） | `('> q\r\n> r\r\n', '> q\n> r\n', '> q\n> r\n> s\n')` | `"> q\r\n> s\r\n"`（丢 `> r`） | LF 走 `exact-canonical-baseline`，正确 |
+
+根因同源但不同路径：CRLF 源码与 LF canonical 永远不字节相等，所以拿不到 `sourceMarkdown === previous` 的 `exact-canonical-baseline` 快捷路径，落到按可见位置映射的通用路径上被错误定位。另有一个**非 CRLF 专属**形态一并记录：列表项软换行 `('- alpha\r\n- beta\r\n', '* alpha\n* beta\n', '* alpha\\\n  cont\n* beta\n')` 会丢掉硬换行反斜杠，但 LF 源码产出同样形状、同样被拒，因此与行尾无关，属于独立的既有缺陷。
 
 ### 5.3 PDF 导出
 

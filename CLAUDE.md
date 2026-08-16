@@ -406,17 +406,26 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   of two commit points — `commitCanonicalResult` in `Editor.jsx` (markdownUpdated,
   frontmatter, inline code, both list conversions) or `flushMarkdown` in
   `editor-api.js`. Both enforce fail-closed on `preserved:false` AND the
-  **round-trip acceptance gate** (`lib/markdown-preservation/roundtrip.js`): the
-  committed source must parse to the same document as the canonical (semantic,
-  spelling-insensitive; Crepe's block-level `<br />` placeholders are not
-  content). A mapper's `preserved:true` alone is NOT proof — a wrong success
+  **verified-source gate** (`components/editor-source-verification.js`
+  `verifySourceDocument` → `editor-durable-semantics.js` `areDurablyEquivalent`,
+  reached via `selectVerifiedSource`): the candidate bytes are reparsed with the
+  editor's own Markdown parser and the resulting **ProseMirror document** must be
+  durably equivalent to the live one (semantic, spelling-insensitive; Crepe's
+  block-level `<br />` placeholders are not content).
+  **`lib/markdown-preservation/roundtrip.js` is NOT that gate** — since 247eee0
+  `roundTripPreserved` has no production caller at all; it is the **test oracle**
+  for the headless preservation suites, and its `markdownComparisonKey` is
+  additionally used by `core.js` as a per-LINE escape-safety check (single lines,
+  never a line ending). Do not cite roundtrip.js as the runtime authority.
+  A mapper's `preserved:true` alone is NOT proof — a wrong success
   poisons both baselines permanently (the v0.13.29 list lock-up family). Never
   advance `lastMarkdownRef`/`canonicalMarkdownRef` outside these paths; the
   fresh-scratch path is the only gate exemption (it deliberately unescapes).
   Fail-closed has an explicit exit: `rebuildMarkdownFromRich()` (user-confirmed,
   `sync.rebuildConfirm`) realigns the authored source to the live document —
   wired into the source-mode switch, `getMarkdownForTab`, and Pandoc export null
-  checks. Locked by `npm run test:roundtrip-acceptance`.
+  checks. Locked by `npm run test:editor-source-verification` (the runtime gate)
+  and `npm run test:roundtrip-acceptance` (the oracle).
 - **List Backspace** (`editor-list-backspace.js`): Backspace on an EMPTY list
   item lifts it out of the list (Typora behavior). The CommonMark preset's
   `joinBackward` merged it into the previous item as a second paragraph — the
