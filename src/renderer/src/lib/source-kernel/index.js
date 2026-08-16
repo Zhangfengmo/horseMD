@@ -4,7 +4,7 @@ export { createMarkdownDocument, applySourceTransaction } from './markdown-docum
 export { buildSyntaxIndex, scanLines } from './syntax-index.js'
 export { buildCharacterMap } from './character-map.js'
 export { buildCodeMap } from './code-map.js'
-export { inlineMarkAt, markerFor } from './mark-map.js'
+export { inlineMarkAt, markerFor, rangeFromInlineCode } from './mark-map.js'
 export { toggleInlineMark } from './commands/mark-toggle.js'
 export { replaceVisibleText } from './commands/replace-text.js'
 export { toggleTaskMarker } from './commands/task-toggle.js'

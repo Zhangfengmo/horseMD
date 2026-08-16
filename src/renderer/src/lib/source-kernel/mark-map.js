@@ -104,7 +104,14 @@ function rangeFromSpanNode(node) {
   }
 }
 
-function rangeFromInlineCode(node, text) {
+// Exported (not just used internally via `rangeForNode`) so a caller that
+// already has a concrete inlineCode mdast node in hand — but not a
+// [rawFrom,rawTo] query pair `inlineMarkAt` can match against, e.g.
+// mark-toggle.js's atom-selection fallback (inlineCode is a single
+// indivisible unit in character-map.js, so its content bytes can never
+// appear as rawFrom/rawTo on their own) — can derive the same open/close/
+// content split without duplicating the backtick-run-counting algorithm.
+export function rangeFromInlineCode(node, text) {
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset
   if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) return null

@@ -2,7 +2,7 @@
 // inlineCode/highlight) over a visible selection, entirely as raw-byte
 // source edits — no ProseMirror mark commands involved.
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
-import { inlineMarkAt, markerFor } from '../mark-map.js'
+import { inlineMarkAt, markerFor, rangeFromInlineCode } from '../mark-map.js'
 
 // Same domain gate as mark-map.js's inlineMarkAt (table cells / code blocks /
 // html / math are unprobed for this task and stay out of scope entirely —
@@ -51,46 +51,6 @@ function shrinkToNonWhitespace(map, text, visFrom, visTo) {
   return { from, to }
 }
 
-// character-map.js's boundary table (what `rawRangeForVisibleRange`'s `from`
-// side reads) is built by recording, for each visible index, the rawEnd of
-// whatever unit was JUST consumed — accurate whenever the next unit's raw
-// bytes pick up exactly where the last one left off, but ambiguous the
-// moment a GAP of unit-less raw bytes sits between them. The only place such
-// a gap exists in this schema is a strong/emphasis/delete node's own opening
-// delimiter: character-map.js recurses into these nodes' children without
-// ever emitting a unit for the marker itself, so entering one from preceding
-// content leaves the marker's bytes belonging to no unit. The boundary table
-// resolves that visible index to the position BEFORE the gap (end of the
-// preceding content) — a valid caret position, but wrong as a selection
-// START: naively used as `rawFrom`, it would silently fold an existing
-// mark's own opening marker into a "content" selection that should start
-// strictly after it (this is exactly what makes an already-bold word appear
-// unwrappable — the mapped raw range would cover the marker too, so it can
-// never equal `inlineMarkAt`'s marker-exclusive contentRange).
-// Resolve `rawFrom` ourselves by finding the unit that actually STARTS at
-// visFrom (skip-forward-past-gap semantics — the mirror of how
-// character-map.js already special-cases visible index 0). `rawTo` needs no
-// equivalent fix: a unit's own rawEnd is always the true end of the content
-// it represents regardless of what invisible bytes follow, so the boundary
-// table's value for the END of a range is never ambiguous.
-function rawStartAtVisible(map, visIndex) {
-  let v = 0
-  for (const unit of map.units) {
-    if (v === visIndex) return unit.rawStart
-    if (v > visIndex) return null
-    v += unit.width
-  }
-  return null
-}
-
-function rawRangeForSelection(map, visFrom, visTo) {
-  const from = rawStartAtVisible(map, visFrom)
-  if (from === null) return null
-  const to = map.visibleToRaw(visTo)
-  if (to === null || to < from) return null
-  return { from, to }
-}
-
 function collectOverlapRanges(node, out) {
   for (const child of node.children || []) {
     if (OVERLAP_NODE_TYPES.has(child.type)) {
@@ -110,12 +70,11 @@ function collectOverlapRanges(node, out) {
 // real "select this existing inline-code span, toggle code off" selection
 // therefore always resolves rawFrom/rawTo to the ATOM's full outer bounds
 // (backticks included), which `inlineMarkAt`'s content-only exact match will
-// never see. Detect that specific shape directly: an inlineCode child whose
-// own [start,end) equals [rawFrom,rawTo) exactly. The backtick-run counting
-// below duplicates mark-map.js's rangeFromInlineCode algorithm (not its
-// code — that helper isn't exported) because the delimiter run width isn't
-// derivable from anything else; see mark-map.js's inlineCode comment for why
-// counting off the raw slice, not `value.length` arithmetic, is required.
+// never see. Detect that specific shape directly — an inlineCode child whose
+// own [start,end) equals [rawFrom,rawTo) exactly — then derive its
+// open/close/content split via mark-map.js's exported `rangeFromInlineCode`
+// (the same backtick-run-counting algorithm `inlineMarkAt` itself uses; not
+// duplicated here).
 function inlineCodeAtomAt(block, text, rawFrom, rawTo) {
   if (!block?.node) return null
   let node = null
@@ -130,18 +89,7 @@ function inlineCodeAtomAt(block, text, rawFrom, rawTo) {
     }
   }
   visit(block.node)
-  if (!node) return null
-  let openEnd = rawFrom
-  while (openEnd < rawTo && text[openEnd] === '`') openEnd += 1
-  let closeStart = rawTo
-  while (closeStart > openEnd && text[closeStart - 1] === '`') closeStart -= 1
-  if (openEnd <= rawFrom || closeStart >= rawTo || openEnd > closeStart) return null
-  return {
-    type: 'inlineCode',
-    openRange: { from: rawFrom, to: openEnd },
-    closeRange: { from: closeStart, to: rawTo },
-    contentRange: { from: openEnd, to: closeStart }
-  }
+  return node ? rangeFromInlineCode(node, text) : null
 }
 
 // True if [rawFrom, rawTo) straddles some existing mark node's byte span
@@ -172,11 +120,13 @@ export function toggleInlineMark({ doc, index, map, visFrom, visTo, kind }) {
   const shrunk = shrinkToNonWhitespace(map, doc.text, visFrom, visTo)
   if (!shrunk) return { ok: false, code: 'unsupported-structure' }
 
-  // Step 2: map proof. A null result covers unmapped boundaries AND atoms
-  // (an atom is always exactly 1 visible unit wide, so no visible offset can
-  // ever land mid-atom — the map's boundary table simply has no entry
-  // there).
-  const range = rawRangeForSelection(map, shrunk.from, shrunk.to)
+  // Step 2: map proof. `rawRangeForVisibleRange` resolves `from` through the
+  // map's gap-aware `rawStartForVisible` (see character-map.js's ADR comment
+  // on `buildCharacterMap`) — a null result covers unmapped boundaries AND
+  // atoms (an atom is always exactly 1 visible unit wide, so no visible
+  // offset can ever land mid-atom — the map's boundary tables simply have no
+  // entry there).
+  const range = map.rawRangeForVisibleRange(shrunk.from, shrunk.to)
   if (!range) return { ok: false, code: 'unmapped-selection' }
   const { from: rawFrom, to: rawTo } = range
 
