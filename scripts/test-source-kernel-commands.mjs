@@ -6,6 +6,8 @@ import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/comman
 import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands/task-toggle.js'
 import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
+import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
+import { markerFor } from '../src/renderer/src/lib/source-kernel/mark-map.js'
 
 const setup = (text, at) => {
   const doc = createMarkdownDocument(text)
@@ -654,3 +656,228 @@ import { exitCodeBlock } from '../src/renderer/src/lib/source-kernel/commands/co
 }
 
 console.log('PASS source-kernel commands (exitCodeBlock)')
+
+// ---- Task 2 (Plan 4): toggleInlineMark ----
+
+// Test-only helpers that walk a character map's `units` directly to find the
+// visible index that STARTS (resp. ENDS) at a given raw offset. This mirrors
+// mark-toggle.js's own gap-aware `rawStartAtVisible` resolution rather than
+// map.visibleToRaw's boundary table, which is ambiguous on the `from` side
+// whenever the target raw offset sits right after an existing mark's opening
+// delimiter (see mark-toggle.js's `rawRangeForSelection` comment) — using the
+// boundary table here would make it impossible to even construct a realistic
+// "select this already-marked word" visFrom in these tests.
+const visStartFor = (map, raw) => {
+  let v = 0
+  for (const unit of map.units) {
+    if (unit.rawStart === raw) return v
+    v += unit.width
+  }
+  throw new Error(`no unit starts at raw ${raw}`)
+}
+const visEndFor = (map, raw) => {
+  let v = 0
+  for (const unit of map.units) {
+    v += unit.width
+    if (unit.rawEnd === raw) return v
+  }
+  throw new Error(`no unit ends at raw ${raw}`)
+}
+
+const blockSetup = (text, at) => {
+  const doc = createMarkdownDocument(text)
+  const index = buildSyntaxIndex(text)
+  const block = index.blockAt(at)
+  assert.ok(block, `no block at ${at} in ${JSON.stringify(text)}`)
+  return { doc, index, map: buildCharacterMap(text, block.node) }
+}
+
+// Wrap `needle` inside `src` with `kind`, assert the exact byte result and
+// selection, then unwrap it straight back from the wrapped text and assert
+// round-trip back to `src`.
+const wrapUnwrapRoundtrip = (kind, src, needle) => {
+  const marker = markerFor(kind)
+  const rawFrom = src.indexOf(needle)
+  assert.ok(rawFrom >= 0, `fixture missing needle: ${needle}`)
+  const rawTo = rawFrom + needle.length
+
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  const visFrom = visStartFor(map, rawFrom)
+  const visTo = visEndFor(map, rawTo)
+
+  const wrap = toggleInlineMark({ doc, index, map, visFrom, visTo, kind })
+  assert.equal(wrap.ok, true, `wrap(${kind}) failed: ${wrap.code}`)
+  const wrapped = applySourceTransaction(doc, wrap.transaction)
+  assert.equal(wrapped.ok, true)
+  const expectedWrapped = src.slice(0, rawFrom) + marker + needle + marker + src.slice(rawTo)
+  assert.equal(wrapped.doc.text, expectedWrapped, `wrap(${kind}) byte mismatch`)
+  assert.deepEqual(wrap.transaction.selection, {
+    anchor: rawFrom + marker.length,
+    head: rawTo + marker.length
+  }, `wrap(${kind}) selection mismatch`)
+
+  // Round-trip: build fresh doc/index/map over the WRAPPED text and unwrap
+  // straight back from the marked word (a realistic "select the rendered
+  // bold word, click bold again" scenario). inlineCode is an ATOM in the
+  // character map (character-map.js's ATOMS set) — its content bytes can
+  // never appear alone as a visible selection, only the whole span
+  // (backticks included) can be selected as one indivisible unit — so its
+  // round-trip selection targets the atom's OUTER bounds instead of the
+  // content-only bounds every other kind uses.
+  const doc2 = createMarkdownDocument(expectedWrapped)
+  const index2 = buildSyntaxIndex(expectedWrapped)
+  const selFrom = kind === 'inlineCode' ? rawFrom : rawFrom + marker.length
+  const selTo = kind === 'inlineCode' ? rawTo + 2 * marker.length : rawTo + marker.length
+  const { map: map2 } = blockSetup(expectedWrapped, selFrom)
+  const visFrom2 = visStartFor(map2, selFrom)
+  const visTo2 = visEndFor(map2, selTo)
+
+  const unwrap = toggleInlineMark({ doc: doc2, index: index2, map: map2, visFrom: visFrom2, visTo: visTo2, kind })
+  assert.equal(unwrap.ok, true, `unwrap(${kind}) failed: ${unwrap.code}`)
+  const restored = applySourceTransaction(doc2, unwrap.transaction)
+  assert.equal(restored.ok, true)
+  assert.equal(restored.doc.text, src, `unwrap(${kind}) did not round-trip`)
+  assert.deepEqual(unwrap.transaction.selection, { anchor: rawFrom, head: rawTo },
+    `unwrap(${kind}) selection mismatch`)
+}
+
+// Wrap + unwrap byte round-trip, one per mark kind.
+wrapUnwrapRoundtrip('strong', 'a bold b\n', 'bold')
+wrapUnwrapRoundtrip('emphasis', 'a ital b\n', 'ital')
+wrapUnwrapRoundtrip('delete', 'a strike b\n', 'strike')
+wrapUnwrapRoundtrip('inlineCode', 'a code b\n', 'code')
+wrapUnwrapRoundtrip('highlight', 'a light b\n', 'light')
+
+// Heading: the block's inline children start after "# ", so visible offset 0
+// is NOT raw offset 0 — proves the command doesn't assume block.start===0.
+wrapUnwrapRoundtrip('strong', '# a bold b\n', 'bold')
+
+// Quoted paragraph: mdast positions inside a blockquote are already absolute
+// raw offsets (no '>' prefix adjustment needed) — probed by mark-map.js.
+wrapUnwrapRoundtrip('emphasis', '> a ital b\n', 'ital')
+
+// CRLF document: line terminator never participates in the inline span.
+wrapUnwrapRoundtrip('delete', 'a strike b\r\n', 'strike')
+
+// Whitespace shrink: selecting " bold " (spaces included on both edges)
+// shrinks to just "bold" before mapping — the outer spaces are untouched by
+// either edit.
+{
+  const src = 'a bold b\n'
+  const rawFrom = src.indexOf(' bold ')
+  const rawTo = rawFrom + ' bold '.length
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  const r = toggleInlineMark({
+    doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'strong'
+  })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, 'a **bold** b\n')
+}
+
+// All-whitespace selection: nothing survives the shrink → reject.
+{
+  const src = 'a   b\n'
+  const rawFrom = src.indexOf('   ')
+  const rawTo = rawFrom + 3
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  assert.deepEqual(
+    toggleInlineMark({
+      doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'strong'
+    }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+}
+
+// Empty selection: also rejected (visFrom === visTo).
+{
+  const src = 'a bold b\n'
+  const raw = src.indexOf('bold')
+  const { doc, index, map } = blockSetup(src, raw)
+  const vis = visStartFor(map, raw)
+  assert.deepEqual(
+    toggleInlineMark({ doc, index, map, visFrom: vis, visTo: vis, kind: 'strong' }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+}
+
+// inlineCode wrap whose selection contains a literal backtick → reject
+// (fail-closed: no delimiter-run upgrade attempted).
+{
+  const src = 'a b`c b\n'
+  const needle = 'b`c'
+  const rawFrom = src.indexOf(needle)
+  const rawTo = rawFrom + needle.length
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  assert.deepEqual(
+    toggleInlineMark({
+      doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'inlineCode'
+    }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+}
+
+// Partial overlap: selection starts inside an existing strong's content and
+// ends past its closing marker — neither wrap-around nor sub-span → reject.
+// The selection's right edge must land on the non-whitespace 'c' (not the
+// space before it) — landing on whitespace would get trimmed away by the
+// step-1 shrink, silently pulling the selection back inside the strong's
+// content and turning this into a legal sub-span wrap instead.
+{
+  const src = 'a **bold** c\n'
+  const rawFrom = src.indexOf('ld** c') // inside "bold" content, through close marker + trailing text
+  const rawTo = rawFrom + 'ld** c'.length
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  assert.deepEqual(
+    toggleInlineMark({
+      doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'delete'
+    }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+}
+
+// Different-kind exact cover: selection exactly matches an existing strong's
+// content, but the requested kind is emphasis → reject (not a same-kind
+// unwrap, not a legal wrap over an untouched span).
+{
+  const src = 'a **bold** c\n'
+  const rawFrom = src.indexOf('bold')
+  const rawTo = rawFrom + 'bold'.length
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  assert.deepEqual(
+    toggleInlineMark({
+      doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'emphasis'
+    }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+}
+
+// Wrap-around nesting stays legal: a selection that STRICTLY CONTAINS an
+// existing strong node (not just its exact content) wraps around it rather
+// than rejecting — the selectionContainsNode branch of the overlap check.
+// Selecting the whole visible paragraph "a bold c" (which fully contains the
+// word "bold", itself already strong) and toggling `delete` wraps the entire
+// raw span, markers and all.
+{
+  const src = 'a **bold** c\n'
+  const rawFrom = 0
+  const rawTo = src.indexOf('c') + 1
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  const r = toggleInlineMark({
+    doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'delete'
+  })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '~~a **bold** c~~\n')
+}
+
+// A selection spanning the whole paragraph, including an inlineCode atom,
+// is a legal WRAP around the entire content (the atom sits strictly inside
+// the selection — full containment, not a straddle).
+{
+  const src = 'a `code` b\n'
+  const { doc, index, map } = blockSetup(src, 0)
+  const r = toggleInlineMark({ doc, index, map, visFrom: 0, visTo: map.visibleLength, kind: 'strong' })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '**a `code` b**\n')
+}
+
+console.log('PASS source-kernel commands (toggleInlineMark)')
