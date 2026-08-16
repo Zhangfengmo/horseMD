@@ -15,6 +15,7 @@
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
+import { toggleMark } from '@milkdown/prose/commands'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
 
 // `bullet_list`/`list_item` (with a `checked` attr, `list_item` content
@@ -33,6 +34,17 @@ const schema = new Schema({
     // Plan 3 Task 4 — needed for Case 12's code-block text-commit +
     // language-switch end-to-end path.
     code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } }
+  },
+  // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
+  // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
+  // "strike_through", editor-highlight.js 'highlight' (color default yellow).
+  marks: {
+    strong: {},
+    emphasis: {},
+    strike_through: {},
+    inlineCode: {},
+    highlight: { attrs: { color: { default: 'yellow' } } },
+    link: { attrs: { href: { default: '' } } }
   }
 })
 const p = (...c) => schema.node('paragraph', null, c)
@@ -86,7 +98,15 @@ const FIXTURE_DOCS = {
   // language and immediately accept a plain-text commit afterward.
   '```mermaid\ngraph TD\n```\n': () => doc(cb('mermaid', 'graph TD')),
   '```js\ngraph TD\n```\n': () => doc(cb('js', 'graph TD')),
-  '```js\nXgraph TD\n```\n': () => doc(cb('js', 'Xgraph TD'))
+  '```js\nXgraph TD\n```\n': () => doc(cb('js', 'Xgraph TD')),
+  // Plan 4 Task 3 fixtures: inline mark toggles. The live parse chain
+  // (Crepe's, WITH the highlight remark plugin) turns committed marker
+  // bytes into real marks — mirrored here exactly.
+  '甲乙丙\n': () => doc(p(text('甲乙丙'))),
+  '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
+  '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
+  '甲`乙`丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙'))),
+  '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')])))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1043,6 +1063,159 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
     0,
     'both the switch and the follow-up type must pass cheap-path verify cleanly'
   )
+}
+
+// ---- Plan 4 Task 3: inline mark toggles, end-to-end through the dispatch
+// protocol. Every toggle transaction is built by the REAL prosemirror
+// `toggleMark` (the function Crepe's toolbar commands / applyTextFormat /
+// the preset keymaps bottom out in) against the live view state — the exact
+// toolbar-shaped dispatch the gateway classifies.
+const toggleVia = (h, markType, from, to) => {
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, from, to)))
+  let captured = null
+  toggleMark(markType)(h.view.state, (tr) => { captured = tr })
+  return captured
+}
+
+// Case M1: strong wrap → source gains '**', the veto'd PM transaction is
+// replaced by the kernel's own reconcile whose doc carries a REAL strong
+// mark, and the content stays SELECTED (range restore — the toolbar must
+// stay up for an immediate second toggle).
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  const tr = toggleVia(h, schema.marks.strong, 2, 3) // select 乙
+  assert.ok(tr, 'toggleMark must dispatch')
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, 'the original PM mark transaction is always vetoed')
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n', 'source gains the ** markers, byte-exact')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙')))),
+    'the reconciled PM doc carries a real strong mark (reparse authority)')
+  assert.equal(h.view.state.selection.from, 2, 'content stays selected: from')
+  assert.equal(h.view.state.selection.to, 3, 'content stays selected: to')
+  assert.equal(h.view.state.selection.empty, false)
+  assert.deepEqual(h.changes.at(-1), ['甲**乙**丙\n', false], 'onChange publishes the kernel text')
+  assert.equal(h.notifications.length, before, 'a successful toggle never toasts')
+
+  // Case M2 (same session): toggling the SAME range again unwraps — the
+  // toolbar-shaped RemoveMarkStep routes to the kernel's exact-cover unwrap.
+  const tr2 = toggleVia(h, schema.marks.strong, 2, 3)
+  assert.equal(tr2.steps[0].constructor.name, 'RemoveMarkStep')
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.deepEqual(verdict2, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'unwrap removes both marker runs, byte-exact')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+  assert.equal(h.view.state.selection.from, 2)
+  assert.equal(h.view.state.selection.to, 3)
+
+  // Case M3 (same session): kernel history owns the toggles — each is its
+  // own undo group. Undo #1 restores the wrapped bytes; undo #2 the plain
+  // original; redo re-wraps.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n', 'undo #1 restores the wrap')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙')))))
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'undo #2 restores the original')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+  assert.equal(h.controller.historyHandlers.redo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n', 'redo re-wraps')
+}
+
+// Case M4 (ADR pin — the pre-commit map guard, `requireMap`): a toggle whose
+// RESULT document cannot rebuild a projection map refuses FAIL-CLOSED,
+// BEFORE any mutation — bytes, view, history all unchanged, with a
+// notification. Two shapes hit it today (probe evidence in the Task 3
+// report):
+//  - highlight (ANY selection): the committed `==` bytes are literal text
+//    to the kernel chain (no highlight plugin there) but invisible to the
+//    Crepe parse — the block's content-size identity check always fails.
+//  - inline code over a MULTI-char selection: PM keeps a marked text run of
+//    N chars while the kernel charMap collapses the whole span to ONE atom
+//    unit — sizes disagree for N > 1. (N == 1 coincides and genuinely
+//    works — pinned separately in Case M4b.)
+// When the projection map learns these pairings, these assertions are the
+// ones to flip.
+for (const [markName, from, to, label] of [
+  ['highlight', 2, 3, 'highlight'],
+  ['inlineCode', 2, 4, 'multi-char inline code']
+]) {
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  const tr = toggleVia(h, schema.marks[markName], from, to)
+  assert.ok(tr)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, label + ' toggle must veto')
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', label + ': kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))), label + ': view untouched')
+  assert.ok(h.notifications.length > before, label + ': refusal notifies')
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.some((entry) => entry.type === 'projection-unmappable-refused'),
+    label + ': the pre-commit map guard is the refusing party'
+  )
+}
+
+// Case M4b: a SINGLE-char inline-code wrap is genuinely sound — the PM run
+// width (1) equals the charMap atom width (1), the identity check holds,
+// and the rebound map stays live (no lock-up). Every boundary around the
+// atom maps consistently (the atom's raw span covers backticks + content,
+// interior positions are unmappable by design).
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tr = toggleVia(h, schema.marks.inlineCode, 2, 3)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲`乙`丙\n', 'single-char code wrap commits, byte-exact')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙')))),
+    'the reconciled doc carries a real inlineCode mark')
+  assert.ok(h.controller.kernel.map, 'the map rebinds — no post-toggle lock-up')
+  // Unwrap it again: the atom's full outer span [pmFrom,pmTo) resolves via
+  // mark-toggle.js's inlineCodeAtomAt.
+  const tr2 = toggleVia(h, schema.marks.inlineCode, 2, 3)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.deepEqual(verdict2, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'single-char code unwrap restores the original')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+}
+
+// Case M5: link toggle (no kernel kind) → blocked/veto, nothing changes.
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  const tr = toggleVia(h, schema.marks.link, 2, 3)
+  assert.ok(tr)
+  const verdict = dispatchThrough(h, tr)
+  assert.deepEqual(verdict, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+  assert.ok(h.notifications.length > before, 'link refusal notifies')
+}
+
+// Case M6 (stored-marks ADR): the empty-selection mark-shortcut guard.
+// Empty selection → swallowed (true) + "select text first" toast, so the
+// preset toggleMark never runs and no stored mark ever arms (the typing
+// trap: an armed stored mark makes every next keystroke a marked-slice
+// veto). Non-empty selection → pass-through (false) to the preset, whose
+// transaction the gateway owns (Case M1). Inactive controller → false.
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2, 2)))
+  const before = h.notifications.length
+  assert.equal(h.controller.markShortcutGuard(h.view.state), true, 'empty selection: swallowed')
+  assert.ok(h.notifications.length > before, 'empty selection: toasts "select text first"')
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2, 3)))
+  assert.equal(h.controller.markShortcutGuard(h.view.state), false, 'real selection: falls through to the preset')
+  assert.equal(typeof h.controller.marksKeymap, 'function', 'marksKeymap is exposed for registration')
+  assert.ok(h.controller.marksKeymap(), 'marksKeymap builds a plugin')
 }
 
 console.log('PASS kernel mode headless')

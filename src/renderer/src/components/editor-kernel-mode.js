@@ -31,7 +31,8 @@ import {
   createSourceHistory,
   exitCodeBlock,
   replaceVisibleText,
-  routeStructuralKey
+  routeStructuralKey,
+  toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from './editor-kernel-gateway.js'
@@ -379,6 +380,46 @@ export function createKernelMode({
         onChange?.(kernel.doc.text, false)
         return undefined
       }
+      case 'mark-toggle': {
+        // Toolbar/keymap/context-menu mark toggle (Plan 4 Task 3): the
+        // original PM AddMarkStep/RemoveMarkStep transaction is ALWAYS
+        // vetoed — on success because the kernel's own reconcile (below,
+        // via applyKernelTransaction) reparses the committed marker bytes
+        // into the REAL mark, and on failure because nothing may change.
+        // Routing through the reparse (instead of letting the PM mark
+        // transaction through like task-toggle does) is what makes the
+        // projection authoritative: whatever CommonMark actually does with
+        // the inserted markers — including Task 2's deferred
+        // highlight-overlap shapes — is exactly what the view shows.
+        if (!view) return { veto: true }
+        const pair = editablePairForRange(classified.pmFrom, classified.pmTo)
+        if (!pair) {
+          notifyBlocked(KERNEL_CODES.UNMAPPED)
+          return { veto: true }
+        }
+        const contentPos = pair.pmPos + 1
+        const routed = toggleInlineMark({
+          doc: kernel.doc,
+          index: buildSyntaxIndex(kernel.doc.text),
+          map: pair.charMap,
+          visFrom: classified.pmFrom - contentPos,
+          visTo: classified.pmTo - contentPos,
+          kind: classified.markKind
+        })
+        if (!routed.ok) {
+          notifyBlocked(routed.code)
+          return { veto: true }
+        }
+        // `requireMap` refuses (pre-commit, everything untouched) any toggle
+        // whose RESULT document cannot rebuild a projection map — today that
+        // is inlineCode (PM marked-run vs kernel atom-unit size mismatch)
+        // and highlight (`==` bytes visible to the kernel chain, invisible
+        // to the Crepe parse); see applyKernelTransaction's own comment and
+        // the Task 3 report ADR. applyKernelTransaction notifies on every
+        // failure path itself.
+        applyKernelTransaction(routed.transaction, view, { requireMap: true })
+        return { veto: true }
+      }
       case 'code-language': {
         // The language AttrStep (Plan 3 Task 4) has ALREADY flipped
         // `attrs.language` on the live PM doc by the time this runs
@@ -615,7 +656,26 @@ export function createKernelMode({
   // Apply one kernel transaction to the doc AND project it into the view:
   // parse-first so a projection failure refuses the whole key with every
   // state (kernel doc, history, PM view) untouched.
-  const applyKernelTransaction = (txn, view, { record = true } = {}) => {
+  //
+  // `requireMap` (Plan 4 Task 3): refuse the WHOLE transaction — before any
+  // kernel/history/view mutation — unless the post-transaction document
+  // provably rebuilds a projection map. The mark-toggle route demands this
+  // because a byte-successful toggle can produce a document the projection
+  // layer cannot pair: PM represents inline code as a MARKED TEXT RUN of N
+  // characters while the kernel's character map collapses the whole
+  // `` `code` `` span to ONE atom unit, and a highlight's `==` bytes are
+  // literal text to the kernel chain (no highlight plugin there) but
+  // invisible to the Crepe parse — either way `buildProjectionMap`'s
+  // content-size identity check rejects the block and the whole map comes
+  // back null (probe evidence in the Task 3 report). Without this guard the
+  // toggle would COMMIT, reconcile, then fail the rebind — leaving a
+  // byte-correct but unmappable document where every subsequent edit vetoes
+  // with UNMAPPED (a lock-up trap). Refusing up front keeps the toggle
+  // fail-closed: bytes, history and view all stay exactly as they were.
+  // Structural intents keep `requireMap: false` — their existing
+  // placeholder flows legitimately pass through transient states this
+  // strict guard would wrongly refuse.
+  const applyKernelTransaction = (txn, view, { record = true, requireMap = false } = {}) => {
     const result = applySourceTransaction(kernel.doc, txn)
     if (!result.ok) {
       notifyBlocked(result.code)
@@ -627,13 +687,6 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'structural-parse-failure', intent: txn.intent })
       return false
     }
-    // Any kernel transaction ends a split-placeholder session. If this
-    // transaction is the one that fills the placeholder (an insert exactly
-    // at its raw anchor), the reconcile below is a no-op there and the
-    // rebind aligns naturally; otherwise the reconcile removes the orphaned
-    // empty paragraph, because `parsed` never contains it.
-    kernel.doc = result.doc
-    if (record) recordHistory(result, txn)
     // Pre-compute the caret target against the PARSED doc: its content is
     // exactly what the view will hold after the reconcile, so its positions
     // transfer 1:1 — and the selection MUST ride on the same transaction
@@ -643,12 +696,40 @@ export function createKernelMode({
     // then drags the state selection back to it, which is exactly how a
     // continuation keystroke after Enter ended up typing into the PREVIOUS
     // block (Task 11 Bug 3's caret misplacement).
+    //
+    // A transaction whose selection carries a genuine RANGE (anchor != head
+    // — the mark-toggle commands' "keep the content selected" contract, so
+    // the selection toolbar stays up for an immediate second toggle) maps
+    // BOTH ends; a caret (or an unprovable head) keeps the single-position
+    // behavior.
     const anchor = result.selection?.anchor ?? result.selection?.head
+    const head = Number.isFinite(result.selection?.head) ? result.selection.head : anchor
+    let nextMap = null
+    if (requireMap || Number.isFinite(anchor)) {
+      nextMap = buildProjectionMap(result.doc.text, parsed)
+    }
+    if (requireMap && !nextMap) {
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      pushKernelDiagnostic({ type: 'projection-unmappable-refused', intent: txn.intent })
+      return false
+    }
+    // Any kernel transaction ends a split-placeholder session. If this
+    // transaction is the one that fills the placeholder (an insert exactly
+    // at its raw anchor), the reconcile below is a no-op there and the
+    // rebind aligns naturally; otherwise the reconcile removes the orphaned
+    // empty paragraph, because `parsed` never contains it.
+    kernel.doc = result.doc
+    if (record) recordHistory(result, txn)
     let target = null
-    if (Number.isFinite(anchor)) {
-      const nextMap = buildProjectionMap(kernel.doc.text, parsed)
-      const found = nextMap?.rawToPmPos?.(anchor)
-      if (found && Number.isFinite(found.pos)) target = found
+    if (Number.isFinite(anchor) && nextMap) {
+      const found = nextMap.rawToPmPos?.(anchor)
+      if (found && Number.isFinite(found.pos)) {
+        target = { pos: found.pos, headPos: null }
+        if (Number.isFinite(head) && head !== anchor) {
+          const foundHead = nextMap.rawToPmPos?.(head)
+          if (foundHead && Number.isFinite(foundHead.pos)) target.headPos = foundHead.pos
+        }
+      }
     }
     let reconciled = false
     try {
@@ -658,8 +739,18 @@ export function createKernelMode({
         decorateTransaction: target
           ? (tr) => {
               try {
-                const clamped = Math.max(0, Math.min(target.pos, tr.doc.content.size))
-                tr.setSelection(TextSelection.near(tr.doc.resolve(clamped), 1))
+                const size = tr.doc.content.size
+                const clamped = Math.max(0, Math.min(target.pos, size))
+                if (Number.isFinite(target.headPos)) {
+                  const clampedHead = Math.max(0, Math.min(target.headPos, size))
+                  try {
+                    tr.setSelection(TextSelection.create(tr.doc, clamped, clampedHead))
+                  } catch {
+                    tr.setSelection(TextSelection.near(tr.doc.resolve(clamped), 1))
+                  }
+                } else {
+                  tr.setSelection(TextSelection.near(tr.doc.resolve(clamped), 1))
+                }
                 if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
               } catch {
                 pushKernelDiagnostic({ type: 'caret-restore-failed', rawOffset: anchor })
@@ -783,21 +874,29 @@ export function createKernelMode({
     queueExternal: (fn) => compositionSession.queueExternal(fn)
   }
 
+  // Locate the single REAL (non-virtual) editable block pair whose CONTENT
+  // range [contentPos, contentPos + visibleLength] contains the whole PM
+  // range [from, to]. Shared by the Tab insert below and the mark-toggle
+  // route: both need the pair's charMap plus its contentPos to convert PM
+  // positions into the pair's visible offsets (`visible = pmPos -
+  // contentPos`, the same identity `buildProjectionMap`'s own
+  // `pmPosToRaw` relies on). Virtual pairs are excluded — a placeholder
+  // has no real bytes to mark or tab into; refusing is the fail-closed
+  // choice.
+  const editablePairForRange = (from, to) =>
+    (kernel.map?.blockPairs || []).find((candidate) => {
+      if (!candidate.charMap || candidate.virtual) return false
+      const contentPos = candidate.pmPos + 1
+      const end = contentPos + candidate.charMap.visibleLength
+      return from >= contentPos && to <= end
+    }) || null
+
   // Tab (and future plain inserts) on the not-structural path: source-first
   // character insertion through replaceVisibleText, scoped to the single
   // editable block pair that contains the selection.
   const insertPlainTextAtSelection = (insert, state, view) => {
     const { from, to } = state.selection
-    // Virtual pairs are excluded: a raw '\t' at a virtual block's anchor
-    // (line start after a list, or a blank line) would parse as an indented
-    // code block / continuation — not the tab the user meant. Refusing is
-    // the fail-closed choice.
-    const pair = (kernel.map?.blockPairs || []).find((candidate) => {
-      if (!candidate.charMap || candidate.virtual) return false
-      const contentPos = candidate.pmPos + 1
-      const end = contentPos + candidate.charMap.visibleLength
-      return from >= contentPos && to <= end
-    })
+    const pair = editablePairForRange(from, to)
     if (!pair) {
       notifyBlocked(KERNEL_CODES.UNMAPPED)
       return false
@@ -1039,10 +1138,50 @@ export function createKernelMode({
     'Shift-Mod-z': historyHandlers.redo
   })
 
+  // Empty-selection mark-shortcut guard (Plan 4 Task 3 ADR): PM's
+  // `toggleMark` on an EMPTY selection dispatches a stored-marks-only
+  // transaction — `docChanged: false`, so the dispatch channel
+  // (editor-source-transactions.js) never consults the gateway at all and
+  // the mark silently ARMS. The very next typed character then carries the
+  // mark in its insert slice, which `plainSliceText` refuses → every
+  // keystroke vetoes with a toast until the caret moves (storedMarks reset
+  // on selection change) — a typing trap with no visible cause. This keymap
+  // sits ahead of the preset keymaps (same registration slot as the
+  // structural/history keymaps in editor-crepe-setup.js) and swallows the
+  // five mark shortcuts ONLY when the selection is empty, with a "select
+  // text first" toast; a real selection falls through (`false`) to the
+  // preset's own toggleMark, whose transaction the gateway then owns as
+  // `mark-toggle`. Shortcut list per the live presets: Mod-b (strong),
+  // Mod-i (emphasis), Mod-e (inlineCode), Mod-Alt-x (strike_through, gfm),
+  // Mod-Alt-h (highlight, editor-highlight.js).
+  const markShortcutGuard = (state) => {
+    if (inactive()) return false
+    if (!state?.selection?.empty) return false
+    notify?.(tOr('kernelMode.selectTextFirst', 'Select some text first to format it'))
+    return true
+  }
+  const MARK_SHORTCUTS = ['Mod-b', 'Mod-i', 'Mod-e', 'Mod-Alt-x', 'Mod-Alt-h']
+  const marksKeymap = () => keymap(Object.fromEntries(
+    MARK_SHORTCUTS.map((key) => [key, markShortcutGuard])
+  ))
+
   const notifyUnsupportedApi = (api) => {
     notifyBlocked(KERNEL_CODES.INPUT_TYPE)
     pushKernelDiagnostic({ type: 'unsupported-api', api })
     return false
+  }
+
+  // Would this formatting request run on an EMPTY selection? An explicit
+  // selectionRange ({anchor, head} — the context menu's saved selection,
+  // restored by the legacy implementation before dispatching) is judged by
+  // its own ends; otherwise the live view's current selection decides.
+  // Unknowable (no view) counts as empty — fail-closed.
+  const selectionEmptyFor = (selectionRange) => {
+    if (Number.isFinite(selectionRange?.anchor) && Number.isFinite(selectionRange?.head)) {
+      return selectionRange.anchor === selectionRange.head
+    }
+    const view = getView?.()
+    return !view || !!view.state.selection.empty
   }
 
   // Editor.jsx calls this with the legacy createEditorApi() result BEFORE
@@ -1164,19 +1303,44 @@ export function createKernelMode({
         return false
       }
     },
-    // Rich formatting surfaces are not yet kernel-owned: refuse with a
-    // notification instead of producing an unowned structural transaction.
-    // (In degraded mode the legacy implementations own them again.)
-    applyTextFormat: (...args) => {
+    // Inline formatting (Plan 4 Task 3): route bold/italic/strike/code/
+    // highlight through the CAPTURED legacy implementation — it dispatches a
+    // plain PM `toggleMark` on the live view (after restoring the context
+    // menu's saved selection and focus), and that dispatch is exactly what
+    // the gateway now classifies as `mark-toggle` and the kernel routes
+    // (veto + source commit + reconcile). No parallel formatting
+    // implementation exists: legacy stays the single command path in BOTH
+    // modes; the only difference is who owns the resulting transaction.
+    // `link` keeps the refusal (URL-input UI flow, out of scope this plan);
+    // an EMPTY selection is refused up front with a "select text first"
+    // toast — the legacy path would silently return false, and letting a
+    // stored-marks toggle arm would set up the typing trap the marksKeymap
+    // guard above closes for the keyboard shortcuts.
+    applyTextFormat: (format, selectionRange = null) => {
       const delegate = legacy('applyTextFormat')
-      if (delegate) return delegate(...args)
-      return notifyUnsupportedApi('applyTextFormat')
+      if (delegate) return delegate(format, selectionRange)
+      if (format === 'link') return notifyUnsupportedApi('applyTextFormat:link')
+      const impl = legacyApi?.applyTextFormat
+      if (typeof impl !== 'function') return notifyUnsupportedApi('applyTextFormat')
+      if (selectionEmptyFor(selectionRange)) {
+        notify?.(tOr('kernelMode.selectTextFirst', 'Select some text first to format it'))
+        return false
+      }
+      return impl(format, selectionRange)
     },
     toggleHighlight: (...args) => {
       const delegate = legacy('toggleHighlight')
       if (delegate) return delegate(...args)
-      return notifyUnsupportedApi('toggleHighlight')
+      const impl = legacyApi?.toggleHighlight
+      if (typeof impl !== 'function') return notifyUnsupportedApi('toggleHighlight')
+      if (selectionEmptyFor(null)) {
+        notify?.(tOr('kernelMode.selectTextFirst', 'Select some text first to format it'))
+        return false
+      }
+      return impl(...args)
     },
+    // Review markup stays refused: CriticMarkup spans are not a kernel
+    // domain yet. (In degraded mode the legacy implementation owns it.)
     applyReviewMarkup: (...args) => {
       const delegate = legacy('applyReviewMarkup')
       if (delegate) return delegate(...args)
@@ -1195,6 +1359,11 @@ export function createKernelMode({
     handleTransactions,
     structuralKeymap,
     historyKeymap,
+    // Empty-selection mark-shortcut guard (Plan 4 Task 3): registered by
+    // editor-crepe-setup.js alongside the structural/history keymaps;
+    // `markShortcutGuard` is exposed for the headless suite.
+    marksKeymap,
+    markShortcutGuard,
     structuralHandlers,
     historyHandlers,
     runHistory,

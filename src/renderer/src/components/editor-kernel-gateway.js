@@ -205,6 +205,96 @@ function extractLanguageStep(transactions, oldState) {
   return { pmPos: step.pos, language: String(step.value ?? '') }
 }
 
+// PM mark name -> kernel inline-mark kind (Plan 4 Task 3). Names probed from
+// the LIVE schema sources, not guessed:
+//  - @milkdown/preset-commonmark: $markSchema("strong") / $markSchema("emphasis")
+//    / $markSchema("inlineCode") / $markSchema("link")
+//  - @milkdown/preset-gfm: $markSchema("strike_through")
+//  - editor-highlight.js: $markSchema('highlight') (attrs.color, default 'yellow')
+// `link` is deliberately ABSENT: `[text](url)` needs the URL-input UI flow
+// (plan Global Constraints) — a link toggle falls through to `blocked`/
+// INPUT_TYPE. A highlight whose color is not 'yellow' is also refused at
+// classification (see extractMarkToggle): only the pure `==text==` byte form
+// is kernel-ownable this phase; red/blue round-trip as `<mark class>` HTML,
+// which the kernel's mark-map fail-closes on (plan Global Constraints).
+const MARK_TOGGLE_KINDS = Object.freeze({
+  strong: 'strong',
+  emphasis: 'emphasis',
+  strike_through: 'delete',
+  inlineCode: 'inlineCode',
+  highlight: 'highlight'
+})
+
+// Detects the toolbar/keymap/context-menu mark-toggle shape (Plan 4 Task 3):
+// PM's `toggleMark` (Crepe toolbar buttons via toggleStrongCommand & friends,
+// HorseMD's own applyTextFormat/applyHighlightInView, the preset Mod-b/Mod-i/
+// Mod-e/Mod-Alt-x keymaps) dispatches ONE transaction whose steps are purely
+// AddMarkStep(s) OR purely RemoveMarkStep(s) of ONE mark type. Multiple steps
+// occur when the range spans text-node boundaries PM could not merge into a
+// single step; contiguous same-mark runs are coalesced into one [from, to)
+// range. Anything else — a gap between steps (toggleMark skipping an
+// already-marked middle segment, or a cross-block selection whose steps jump
+// the block boundary), mixed add+remove (applyHighlightInView's color-replace
+// shape), mixed mark types — returns null and falls through to `blocked`
+// (fail-closed; the kernel command can only prove a single contiguous span).
+//
+// Mark steps never displace positions (no content is inserted or removed),
+// so every step of the transaction shares ONE coordinate space — the
+// pre-batch doc's — and the single-textblock guard resolves the coalesced
+// range against `tr.docs[0]` (== oldState.doc for a lone transaction)
+// without any delta arithmetic. The parent textblock is NOT required to be
+// `isPlainTextblock`: toggling a mark in a paragraph that already carries
+// other marks is exactly the unwrap/nesting shape `toggleInlineMark` owns
+// (it re-proves everything against the raw bytes; a shape it cannot own
+// refuses with its own code).
+function extractMarkToggle(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || !tr.steps.length) return null
+  let stepType = null
+  let markName = null
+  let markAttrs = null
+  let from = null
+  let to = null
+  for (const step of tr.steps) {
+    const name = step?.constructor?.name
+    if (name !== 'AddMarkStep' && name !== 'RemoveMarkStep') return null
+    if (stepType && name !== stepType) return null
+    stepType = name
+    const mark = step.mark
+    const typeName = mark?.type?.name
+    if (!typeName) return null
+    if (markName && typeName !== markName) return null
+    markName = typeName
+    markAttrs = mark.attrs || null
+    if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+    if (from == null) {
+      from = step.from
+      to = step.to
+    } else if (step.from === to) {
+      to = step.to
+    } else {
+      return null // non-contiguous: a skipped segment or a cross-block jump
+    }
+  }
+  const kind = MARK_TOGGLE_KINDS[markName]
+  if (!kind) return null
+  if (markName === 'highlight' && markAttrs?.color && markAttrs.color !== 'yellow') return null
+  const docNode = tr.docs?.[0] || oldState?.doc
+  if (!docNode) return null
+  let $from
+  let $to
+  try {
+    $from = docNode.resolve(from)
+    $to = docNode.resolve(to)
+  } catch {
+    return null
+  }
+  if (!$from.sameParent($to) || !$from.parent.isTextblock) return null
+  return { pmFrom: from, pmTo: to, markName, markKind: kind, add: stepType === 'AddMarkStep' }
+}
+
 // Detects `@milkdown/plugin-trailing`'s own append: ONE transaction whose
 // single ReplaceStep inserts exactly one EMPTY paragraph at the very end of
 // the document (from === to === the step-doc's content size). Crepe ships
@@ -234,7 +324,7 @@ function extractTrailingAppend(transactions) {
   return { at: step.from }
 }
 
-// classifyTransactions: pure triage of a dispatch batch into one of seven
+// classifyTransactions: pure triage of a dispatch batch into one of eight
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
 //      FROM a kernel/raw commit (e.g. a projection reconciler replaying the
@@ -270,7 +360,16 @@ function extractTrailingAppend(transactions) {
 //   7. The trailing plugin's own empty-paragraph append (see
 //      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
 //      be vetoed.
-//   8. Otherwise, try the plain-text step guard; anything it can't prove is
+//   8. A pure AddMarkStep/RemoveMarkStep batch over one textblock range is
+//      the toolbar/keymap mark-toggle shape (see `extractMarkToggle` above)
+//      — tried BEFORE the plain-text guard (a mark step is never a
+//      ReplaceStep, so it would otherwise fall through to `blocked`), AFTER
+//      the projection/drop/composition rules and the docChanged gate (a
+//      stored-marks-only toggle on an empty selection has `docChanged:
+//      false` and stays `selection-only`; the dispatch channel never even
+//      consults the gateway for it — see editor-kernel-mode.js's
+//      `marksKeymap` guard for how empty-selection shortcuts are handled).
+//   9. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
 //      block reasons for the plain-text path; ProjectionReconciler/dispatch
@@ -297,6 +396,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const trailingAppend = extractTrailingAppend(trs)
   if (trailingAppend) return { kind: 'trailing-append', at: trailingAppend.at }
+
+  const markToggle = extractMarkToggle(trs, oldState)
+  if (markToggle) return { kind: 'mark-toggle', ...markToggle }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }

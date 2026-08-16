@@ -10,6 +10,8 @@
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
+import { toggleMark } from '@milkdown/prose/commands'
+import { AddMarkStep } from '@milkdown/prose/transform'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument } from '../src/renderer/src/lib/source-kernel/index.js'
@@ -31,7 +33,16 @@ const schema = new Schema({
     text: { group: 'inline' }
   },
   marks: {
-    strong: {}
+    // Mark NAMES mirror the LIVE schema exactly (probed, not guessed):
+    // preset-commonmark $markSchema("strong"/"emphasis"/"inlineCode"/"link"),
+    // preset-gfm $markSchema("strike_through"), editor-highlight.js
+    // $markSchema('highlight') with attrs.color default 'yellow'.
+    strong: {},
+    emphasis: {},
+    strike_through: {},
+    inlineCode: {},
+    highlight: { attrs: { color: { default: 'yellow' } } },
+    link: { attrs: { href: { default: '' } } }
   }
 })
 const p = (...c) => schema.node('paragraph', null, c)
@@ -740,6 +751,190 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   const committed2 = commitPlainText({ kernel: kernel2, map, transactions: [tr2], oldState: state })
   assert.equal(committed2.ok, true, committed2.code)
   assert.equal(committed2.applied.doc.text, 'a **** b\n')
+}
+
+// ---- Plan 4 Task 3: mark-toggle classification ----
+// Every "real toggleMark" below builds its transaction through the actual
+// prosemirror-commands `toggleMark` (the exact function Crepe's toolbar
+// commands, HorseMD's applyTextFormat, and the preset Mod-b/Mod-i/… keymaps
+// all bottom out in), captured via the command's dispatch callback — never a
+// hand-mocked step shape.
+const captureToggle = (state, markType, attrs = null) => {
+  let captured = null
+  toggleMark(markType, attrs)(state, (tr) => { captured = tr })
+  return captured
+}
+const withSelection = (state, from, to) =>
+  state.apply(state.tr.setSelection(TextSelection.create(state.doc, from, to)))
+
+// Case M1: strong ADD over plain text — real toggleMark, one AddMarkStep.
+{
+  const d = doc(p(text('abcd')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 2, 4)
+  const tr = captureToggle(state, schema.marks.strong)
+  assert.ok(tr, 'toggleMark must dispatch for a non-empty selection')
+  assert.equal(tr.steps.length, 1)
+  assert.equal(tr.steps[0].constructor.name, 'AddMarkStep')
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, {
+    kind: 'mark-toggle', pmFrom: 2, pmTo: 4, markName: 'strong', markKind: 'strong', add: true
+  })
+}
+
+// Case M2: strong REMOVE — toggleMark over a selection WIDER than the marked
+// run removes just the marked subrange (PM's own removeMark semantics); the
+// classification reports the STEP's range (the mark's own span), which is
+// exactly the exact-cover range the kernel's unwrap wants.
+{
+  const d = doc(p(text('a'), schema.text('bc', [schema.mark('strong')]), text('d')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 5)
+  const tr = captureToggle(state, schema.marks.strong)
+  assert.ok(tr)
+  assert.equal(tr.steps[0].constructor.name, 'RemoveMarkStep')
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, {
+    kind: 'mark-toggle', pmFrom: 2, pmTo: 4, markName: 'strong', markKind: 'strong', add: false
+  })
+}
+
+// Case M3: kind-mapping table — emphasis/strike_through/inlineCode/highlight
+// (yellow) all classify with their kernel kinds; strike_through maps to the
+// mdast name 'delete'.
+{
+  const expectations = [
+    ['emphasis', null, 'emphasis'],
+    ['strike_through', null, 'delete'],
+    ['inlineCode', null, 'inlineCode'],
+    ['highlight', { color: 'yellow' }, 'highlight']
+  ]
+  for (const [markName, attrs, markKind] of expectations) {
+    const d = doc(p(text('abcd')))
+    const state = withSelection(EditorState.create({ schema, doc: d }), 1, 3)
+    const tr = captureToggle(state, schema.marks[markName], attrs)
+    assert.ok(tr, markName + ' toggle must dispatch')
+    const classified = classifyTransactions([tr], state)
+    assert.equal(classified.kind, 'mark-toggle', markName + ' must classify as mark-toggle')
+    assert.equal(classified.markKind, markKind, markName + ' -> ' + markKind)
+    assert.equal(classified.add, true)
+  }
+}
+
+// Case M4: coalesce — two CONTIGUOUS AddMarkSteps of the same mark (the
+// split-text-node shape toggleMark can emit across an inner mark boundary;
+// constructed by hand since PM merges adjacent steps whenever it can) fold
+// into ONE [from, to) range.
+{
+  const d = doc(p(text('ab'), schema.text('cd', [schema.mark('emphasis')]), text('ef')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.step(new AddMarkStep(1, 3, schema.mark('strong')))
+  tr.step(new AddMarkStep(3, 5, schema.mark('strong')))
+  assert.equal(tr.steps.length, 2)
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, {
+    kind: 'mark-toggle', pmFrom: 1, pmTo: 5, markName: 'strong', markKind: 'strong', add: true
+  })
+}
+
+// Case M4b: NON-contiguous steps (a gap — e.g. toggleMark skipping an
+// already-marked middle segment) must NOT coalesce: fail-closed to blocked.
+{
+  const d = doc(p(text('abcdef')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.step(new AddMarkStep(1, 2, schema.mark('strong')))
+  tr.step(new AddMarkStep(4, 5, schema.mark('strong')))
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case M5: link toggle — a mark with NO kernel kind ([text](url) needs the
+// URL-input UI flow, out of scope this plan) → blocked, never mark-toggle.
+{
+  const d = doc(p(text('abcd')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 3)
+  const tr = captureToggle(state, schema.marks.link, { href: 'https://x.example' })
+  assert.ok(tr)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case M6: cross-block toggleMark (selection spanning two paragraphs) emits
+// per-block steps whose ranges jump the block boundary — non-contiguous →
+// blocked. The single-textblock guard is therefore never even reached, but
+// assert the outcome end-to-end with the real command.
+{
+  const d = doc(p(text('abc')), p(text('def')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 9)
+  const tr = captureToggle(state, schema.marks.strong)
+  assert.ok(tr)
+  assert.ok(tr.steps.length >= 2, 'cross-block toggleMark emits one step per block')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case M7: mixed Remove+Add in one transaction (applyHighlightInView's
+// color-REPLACE shape: removeMark then addMark over a partially-highlighted
+// range) → blocked, never misread as a single toggle.
+{
+  const d = doc(p(text('ab'), schema.text('cd', [schema.mark('highlight', { color: 'yellow' })])))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.removeMark(1, 5, schema.marks.highlight)
+  tr.addMark(1, 5, schema.mark('highlight', { color: 'yellow' }))
+  const names = tr.steps.map((step) => step.constructor.name)
+  assert.ok(names.includes('RemoveMarkStep') && names.includes('AddMarkStep'),
+    'fixture sanity: the replace shape carries both step types: ' + names.join(','))
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+}
+
+// Case M8: non-yellow highlight (red/blue round-trip as <mark class> HTML —
+// the byte form the kernel fail-closes on) → blocked even though the mark
+// name itself is in the kind table.
+{
+  const d = doc(p(text('abcd')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 3)
+  const tr = captureToggle(state, schema.marks.highlight, { color: 'red' })
+  assert.ok(tr)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case M9 (stored-marks ADR): toggleMark on an EMPTY selection dispatches a
+// stored-marks-only transaction — docChanged false. classifyTransactions
+// says selection-only (pass-through); the dispatch channel never consults
+// the gateway for it at all (editor-source-transactions.js gates on
+// docChanged), which is why the empty-selection guard lives in
+// editor-kernel-mode.js's marksKeymap, not here. Pinned so a future change
+// to either side shows up.
+{
+  const d = doc(p(text('abcd')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 2, 2)
+  const tr = captureToggle(state, schema.marks.strong)
+  assert.ok(tr, 'empty-selection toggleMark still dispatches (stored marks)')
+  assert.equal(tr.docChanged, false)
+  assert.ok(tr.storedMarks, 'fixture sanity: the transaction carries storedMarks')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'selection-only')
+}
+
+// Case M10: a toggle inside a textblock that ALREADY carries other marks is
+// still mark-toggle (the isPlainTextblock guard is a plain-TEXT-path rule;
+// unwrap/nesting shapes are exactly what the kernel command owns and
+// re-proves against the raw bytes).
+{
+  const d = doc(p(text('a'), schema.text('bc', [schema.mark('emphasis')]), text('d')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 5)
+  const tr = captureToggle(state, schema.marks.strong)
+  assert.ok(tr)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'mark-toggle')
+  assert.equal(classified.markKind, 'strong')
 }
 
 console.log('PASS kernel gateway')
