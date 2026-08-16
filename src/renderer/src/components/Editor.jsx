@@ -612,8 +612,9 @@ export default function Editor({
             })
           : null
         // The exact frontmatter block patch is the primary candidate; when it
-        // is unavailable or rejected by the acceptance gate, the generic
-        // preservation mapping still owns the fallback.
+        // is unavailable or rejected by the verified-source gate
+        // (`verifySourceDocument`), the generic preservation mapping still
+        // owns the fallback.
         const generic = preserveSource(
           lastMarkdownRef.current,
           canonicalMarkdownRef.current,
@@ -1106,8 +1107,9 @@ export default function Editor({
             ? convertSourceParagraphLineToList(sourceBeforeConversion, sourceOffset, targetType)
             : null
           // The exact-line patch is the primary candidate; when it is
-          // unavailable or rejected by the acceptance gate, the generic
-          // preservation mapping still owns the fallback.
+          // unavailable or rejected by the verified-source gate
+          // (`verifySourceDocument`), the generic preservation mapping still
+          // owns the fallback.
           const generic = preserveSource(
             sourceBeforeConversion,
             canonicalBeforeConversion,

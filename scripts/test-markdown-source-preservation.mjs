@@ -451,11 +451,13 @@ assert.equal(
 // canonical Milkdown produces is always LF. Every offset mapped from that LF
 // canonical onto a CRLF source therefore has to name the position where the
 // pair BEGINS. Naming the `\n` instead put an "end of this line's text"
-// insertion INSIDE the pair (`para one.\rZ\n`) — a lone `\r` plus a bare `\n`,
-// which the round-trip acceptance gate correctly refused, so the fail-closed
+// insertion INSIDE the pair (`para one.\rZ\n`) — a lone `\r` plus a bare `\n`.
+// That split pair failed the reparsed-PM comparison in the runtime gate
+// (`verifySourceDocument` in components/editor-source-verification.js, NOT the
+// `roundTripPreserved` oracle used below), so the fail-closed
 // rebuild respelled the WHOLE file's structural line endings to LF on the very
-// first edit of any CRLF document. Lock the byte-exact result AND the gate for
-// every block shape whose edit lands on a line end.
+// first edit of any CRLF document. Lock the byte-exact result AND the oracle
+// for every block shape whose edit lands on a line end.
 {
   const lineEndCases = [
     {

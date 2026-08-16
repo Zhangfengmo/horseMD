@@ -305,7 +305,7 @@ android/, ios/           Capacitor 原生壳
 
 **（原「遗留独立缺陷」已于 2026-08-17 修复，见 5.2f。注意该段原文把「round-trip 验收门」当作运行时闸门，这是错的——运行时闸门是 `editor-source-verification.js` 的 `verifySourceDocument`；`roundtrip.js` 自 247eee0 起已无生产调用方。详见 5.2f。）**完整证据链见 `.superpowers/codeblock-crlf-fix-report.md`；原调查见 `.superpowers/sdd/2026-08-16-source-kernel-codeblock-domain/task-4-report.md`「Fix-review round」。
 
-### 5.2f ✅ 已修复（2026-08-17）：canonical-diff 保真管线的 CRLF 插入算术与验收门的行尾盲区
+### 5.2f ✅ 已修复（2026-08-17）：canonical-diff 保真管线的 CRLF 插入算术与测试预言机的行尾盲区
 
 5.2e 调查中记录的「遗留独立缺陷」。Milkdown 的 canonical 永远是 LF，而作者源码可以是 CRLF；把 LF canonical 的偏移映射到 CRLF 源码时，**必须指向换行对开始的那个字节**。旧实现指向 `\n`（对的第二个字节），于是「插在这一行文本末尾」落进了 `\r` 和 `\n` 之间：
 

@@ -351,11 +351,21 @@ parse(preservedMarkdown) 的语义结构 == 当前 PM doc
 
 阶段 A 的以下项已在该分支实现（架构收敛，非补丁）：
 
-- **A.2 成功结果验收** → `lib/markdown-preservation/roundtrip.js`：每次
-  `preserved:true` 必须通过「结果 re-parse ≡ 当前 canonical」的语义等价关卡
-  （拼写不敏感：`-`/`*`、转义、松紧列表、`<br>` 拼写、块级 `<br />` 占位符均等价）。
-  验收失败降级为 fail-closed，不推进 baseline。§3.2 的“Enter 假成功”与真实用户文件
-  的 `\*\*}\*\*X` 损坏形态均被该关卡拒绝（`npm run test:roundtrip-acceptance` 锁定）。
+- **A.2 成功结果验收**：每次 `preserved:true` 必须通过「结果 re-parse ≡ 当前
+  canonical」的语义等价关卡（拼写不敏感：`-`/`*`、转义、松紧列表、`<br>` 拼写、
+  块级 `<br />` 占位符均等价）。验收失败降级为 fail-closed，不推进 baseline。
+  §3.2 的“Enter 假成功”与真实用户文件的 `\*\*}\*\*X` 损坏形态均被该关卡拒绝。
+  **注（2026-08-17 更正）**：本条最初落地在
+  `lib/markdown-preservation/roundtrip.js` 的 `roundTripPreserved`，但自 247eee0
+  （fix(editor): centralize verified source commits）起它在 `src/` 下已无任何生产
+  调用方——**运行时闸门**是 `components/editor-source-verification.js` 的
+  `verifySourceDocument` → `editor-durable-semantics.js` 的 `areDurablyEquivalent`
+  （用编辑器自己的解析器把候选字节重新解析成 **ProseMirror 文档**再比对），由
+  `commitCanonicalResult`/`flushMarkdown` 经 `selectVerifiedSource` 调用，
+  `npm run test:editor-source-verification` 锁定。`roundtrip.js` 现在的角色是
+  **headless 测试预言机**（`npm run test:roundtrip-acceptance`），其
+  `markdownComparisonKey` 另被 `core.js` 用作**单行**转义安全检查。
+  不要再把 roundtrip.js 当作运行时权威。
 - **提交点收敛**（A.4 的前半）：Editor.jsx `commitCanonicalResult` 成为
   markdownUpdated / frontmatter / inline code / 两个列表转换的唯一发布路径，
   `flushMarkdown` 是 API 侧对应物；frontmatter 路径缺失的 fail-closed 检查

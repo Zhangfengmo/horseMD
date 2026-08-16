@@ -1,6 +1,12 @@
-// Round-trip acceptance gate (lib/markdown-preservation/roundtrip.js).
+// Round-trip acceptance ORACLE (lib/markdown-preservation/roundtrip.js).
 //
-// The preservation heuristics prove "a mapper accepted the delta"; the gate
+// `roundTripPreserved` is this suite's test oracle, NOT the runtime gate:
+// since 247eee0 it has no production caller. The runtime authority is
+// `verifySourceDocument` (components/editor-source-verification.js →
+// editor-durable-semantics.js `areDurablyEquivalent`), locked by
+// `npm run test:editor-source-verification`.
+//
+// The preservation heuristics prove "a mapper accepted the delta"; the oracle
 // proves "the mapped bytes parse to the document the editor shows". These
 // cases lock the two directions:
 //   1. A wrong `preserved:true` (the ordered-list Backspace corruption family

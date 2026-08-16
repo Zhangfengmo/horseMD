@@ -381,8 +381,9 @@ export const canonicalTextToSource = (text, { restoreFreshPunctuation = false } 
     // Restoring a physical character is only safe when the un-escaped line
     // still MEANS the same thing: `2\.` → `2. ` creates a list marker, `\~` →
     // `~` can open GFM strikethrough, un-escaped backticks can open a fence.
-    // Those would change the document on reparse (the round-trip acceptance
-    // gate rejects the whole commit), so keep the canonical escape whenever
+    // Those would change the document on reparse (the runtime verified-source
+    // gate — `verifySourceDocument` in components/editor-source-verification.js
+    // — then rejects the whole commit), so keep the canonical escape whenever
     // the translation is not provably meaning-preserving. Fresh-typed regions
     // (`restoreFreshPunctuation`) keep their documented reinterpretation
     // semantics: there the user physically typed the characters.

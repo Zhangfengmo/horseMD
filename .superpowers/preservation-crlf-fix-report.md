@@ -2,10 +2,14 @@
 
 Date: 2026-08-17 · Branch: `fix/rich-source-sync-architecture`
 Defect: ai-handoff §5.2e "remaining open item" (now §5.2f) — the LEGACY
-canonical-diff preservation mapper split CRLF pairs on a line-end insert,
-returned a wrong `preserved:true`, and the round-trip acceptance gate's correct
-rejection made the fail-closed rebuild respell the WHOLE document's structural
-line endings to LF on the first edit of any CRLF file.
+canonical-diff preservation mapper split CRLF pairs on a line-end insert and
+returned a wrong `preserved:true`. The split pair then failed the reparsed-PM
+comparison in `verifySourceDocument` (`components/editor-source-verification.js`
+→ `editor-durable-semantics.js` `areDurablyEquivalent`, reached from
+`commitCanonicalResult`/`flushMarkdown` via `selectVerifiedSource`) — the real
+runtime gate, NOT `roundtrip.js` — and that correct rejection made the
+fail-closed rebuild respell the WHOLE document's structural line endings to LF
+on the first edit of any CRLF file.
 
 ## 1. Headless reproduction (unpatched tree)
 
