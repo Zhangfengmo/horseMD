@@ -48,7 +48,18 @@ export const rawInsertionAtCanonicalLineEnd = ({
   ) return null
 
   const sourceLine = lineAt(source, mappedSourceOffset)
-  const hiddenTail = source.slice(mappedSourceOffset, sourceLine.end)
+  // `lineAt` splits on `\n` only, so on a CRLF source its `end` points AT the
+  // `\n` — one byte INSIDE the two-byte line ending. Inserting there splits the
+  // pair (`para one.\rZ\n`): a lone `\r` plus a bare `\n`, which no longer means
+  // what the user sees. The authored text of the line stops before the `\r`, so
+  // that is the only offset an "end of this line's text" insertion may use.
+  const carriageReturn = sourceLine.end > sourceLine.start && source[sourceLine.end - 1] === '\r'
+  const sourceContentEnd = carriageReturn ? sourceLine.end - 1 : sourceLine.end
+  // The backward mapping is expected to land on or before the line's text end.
+  // If it did not, this is not the shape this rule describes — decline instead
+  // of inserting at a position that would move text across the line ending.
+  if (sourceContentEnd < mappedSourceOffset) return null
+  const hiddenTail = source.slice(mappedSourceOffset, sourceContentEnd)
   let low = 0
   let high = sourceVisibleMap.length
   while (low < high) {
@@ -56,13 +67,13 @@ export const rawInsertionAtCanonicalLineEnd = ({
     if (sourceVisibleMap[middle] < mappedSourceOffset) low = middle + 1
     else high = middle
   }
-  if (sourceVisibleMap[low] < sourceLine.end) return null
+  if (sourceVisibleMap[low] < sourceContentEnd) return null
 
   // Inline closers (``, **, ~~ and closing HTML) are not part of the visible
   // stream. At a line end the generic backward mapping lands before them.
   // Advance past syntax, but stay before authored hard-break whitespace.
   const trailingWhitespace = hiddenTail.match(/[ \t]*$/)?.[0] || ''
-  return sourceLine.end - trailingWhitespace.length
+  return sourceContentEnd - trailingWhitespace.length
 }
 
 const PREFIX_TOKENS = {

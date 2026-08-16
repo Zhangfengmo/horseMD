@@ -21,6 +21,15 @@ const BR_RE = /^<br\s*\/?>$/i
 // and an authored NBSP anywhere other than the first character remains data.
 const normalizePortableLeadingSpace = (value) => String(value || '').replace(/^\u00A0/, ' ')
 
+// A line ending is spelling, not content: CommonMark reads `\r\n`, `\r` and
+// `\n` as the same break, and the author's CRLF convention is precisely one of
+// the spellings preservation exists to protect. micromark nevertheless copies
+// the raw bytes into node values (a paragraph's soft break, a code block's
+// body), so an authored CRLF document could never compare equal to Milkdown's
+// LF-only canonical \u2014 every correctly mapped CRLF edit failed this gate and
+// the fail-closed rebuild respelled the whole file to LF.
+const normalizeLineEndings = (value) => String(value).replace(/\r\n|\r/g, '\n')
+
 const stableStringify = (value) => {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
   if (value && typeof value === 'object') {
@@ -52,6 +61,7 @@ const normalizeNode = (node, definitions) => {
     if (key === 'position' || key === 'children' || key === 'type') continue
     out[key] = node[key]
   }
+  if (typeof out.value === 'string') out.value = normalizeLineEndings(out.value)
   // The serializer flip-flops loose/tight list spacing without a user edit
   // (the façade already declares that non-semantic via formatting-only-drift);
   // spacing must not fail an otherwise correct mapping.

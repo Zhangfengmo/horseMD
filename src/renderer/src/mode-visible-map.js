@@ -279,7 +279,13 @@ const sourceVisibleIndex = (md) => {
     if (line === '\n') {
       if (inFence) {
         out.text += line
-        out.map.push(rawPos)
+        // A CRLF ending is ONE visible newline spelled with TWO raw bytes, and
+        // the map records where a visible character BEGINS. Anchoring it on the
+        // `\n` puts the anchor INSIDE the pair, so a mapped insertion splits it
+        // (`code;\rX\n`) and a mapped deletion strands a lone `\r`. The `\r` was
+        // already stripped from the preceding line's visible text, so it is the
+        // start of this newline, not content.
+        out.map.push(md[rawPos - 1] === '\r' ? rawPos - 1 : rawPos)
       }
       rawPos += 1
       continue
@@ -420,14 +426,24 @@ const sourceVisiblePositionAtRaw = (md, rawPos) => {
   }
 }
 
+// How many raw bytes the visible character starting at `rawIndex` occupies.
+// Everything is one byte except a CRLF line ending, which is a single visible
+// newline spelled with two. "Just after this visible character" must clear the
+// whole pair, otherwise the returned offset sits between `\r` and `\n`.
+const rawWidthAt = (md, rawIndex) =>
+  (md[rawIndex] === '\r' && md[rawIndex + 1] === '\n' ? 2 : 1)
+
 const sourceRawFromVisibleIndex = (md, visibleIndex, affinity = 'forward') => {
   const idx = sourceVisibleIndex(md)
   const map = idx.map
   if (!map.length) return 0
   const v = Math.max(0, Math.min(Math.round(visibleIndex || 0), map.length))
-  if (affinity === 'backward' && v > 0) return Math.min(md.length, map[v - 1] + 1)
+  if (affinity === 'backward' && v > 0) {
+    return Math.min(md.length, map[v - 1] + rawWidthAt(md, map[v - 1]))
+  }
   if (v < map.length) return map[v]
-  return Math.min(md.length, map[map.length - 1] + 1)
+  const last = map[map.length - 1]
+  return Math.min(md.length, last + rawWidthAt(md, last))
 }
 
 const richVisiblePositionAtPos = (doc, pmPos) => {
