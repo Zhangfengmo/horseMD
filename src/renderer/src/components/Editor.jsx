@@ -2115,12 +2115,15 @@ export default function Editor({
             left: Math.min(ctxMenu.x, window.innerWidth - 210),
             top: Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 360))
           }}>
-            {/* Source-kernel mode (Task 7 blocking matrix): inline text
-                formatting and review markup are not structural, but their
-                apiOverrides are toast-no-ops in kernel mode (Task 5) — hide
-                the submenu entirely rather than presenting live-looking
-                buttons that always refuse. */}
-            {!sourceKernelMode && ctxMenu.showTextFormatting && (
+            {/* Inline text formatting (Plan 4 Task 3): available in BOTH
+                modes — in kernel mode the apiOverrides route bold/italic/
+                strike/code/highlight through the legacy toggleMark dispatch,
+                which the gateway intercepts as `mark-toggle` and the kernel
+                commits as source bytes. The link item alone stays disabled
+                in kernel mode ([text](url) needs the URL-input UI flow —
+                out of scope this plan); clicking it still reaches the
+                override, whose refusal toast explains why. */}
+            {ctxMenu.showTextFormatting && (
               <>
                 <div className="block-menu-submenu-parent">
                   <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="format" aria-haspopup="menu">
@@ -2136,46 +2139,58 @@ export default function Editor({
                       ['code', 'tb.code'],
                       ['link', 'tb.link'],
                       ['highlight', 'tb.highlight']
-                    ].map(([format, labelKey]) => (
-                      <button
-                        key={format}
-                        className="block-menu-item block-text-format"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => pickTextFormat(format, ctxMenu.selection)}
-                      >
-                        <span className="block-menu-short">{format === 'bold' ? 'B' : format === 'italic' ? 'I' : format === 'strike' ? 'S' : format === 'code' ? '</>' : format === 'link' ? '↗' : '▰'}</span>
-                        <span className="block-menu-name">{t(labelKey)}</span>
-                      </button>
-                    ))}
+                    ].map(([format, labelKey]) => {
+                      const kernelDisabled = sourceKernelMode && format === 'link'
+                      return (
+                        <button
+                          key={format}
+                          className={'block-menu-item block-text-format' + (kernelDisabled ? ' disabled' : '')}
+                          aria-disabled={kernelDisabled || undefined}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => pickTextFormat(format, ctxMenu.selection)}
+                        >
+                          <span className="block-menu-short">{format === 'bold' ? 'B' : format === 'italic' ? 'I' : format === 'strike' ? 'S' : format === 'code' ? '</>' : format === 'link' ? '↗' : '▰'}</span>
+                          <span className="block-menu-name">{t(labelKey)}</span>
+                        </button>
+                      )
+                    })}
                   </div>
                 </div>
                 <div className="block-menu-divider" />
-                <div className="block-menu-submenu-parent">
-                  <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="review" aria-haspopup="menu">
-                    <span className="block-menu-short">↹</span>
-                    <span className="block-menu-name">{t('review.toolbar')}</span>
-                    <span className="block-menu-arrow" aria-hidden="true">›</span>
-                  </button>
-                  <div className="block-menu-submenu" data-context-submenu="review" role="menu">
-                    {[
-                      [REVIEW_KINDS.addition, 'review.add', '+'],
-                      [REVIEW_KINDS.deletion, 'review.delete', '-'],
-                      [REVIEW_KINDS.substitution, 'review.substitute', '→'],
-                      [REVIEW_KINDS.highlight, 'review.highlight', '▣']
-                    ].map(([kind, labelKey, symbol]) => (
-                      <button
-                        key={kind}
-                        className="block-menu-item block-review-action"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => pickReviewMarkup(kind, ctxMenu.selection)}
-                      >
-                        <span className="block-menu-short">{symbol}</span>
-                        <span className="block-menu-name">{t(labelKey)}</span>
+                {/* Review markup stays kernel-hidden: applyReviewMarkup's
+                    override is still a toast-no-op (CriticMarkup spans are
+                    not a kernel domain yet) — hide it rather than present
+                    live-looking buttons that always refuse. */}
+                {!sourceKernelMode && (
+                  <>
+                    <div className="block-menu-submenu-parent">
+                      <button className="block-menu-item block-menu-submenu-trigger" data-context-submenu-trigger="review" aria-haspopup="menu">
+                        <span className="block-menu-short">↹</span>
+                        <span className="block-menu-name">{t('review.toolbar')}</span>
+                        <span className="block-menu-arrow" aria-hidden="true">›</span>
                       </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="block-menu-divider" />
+                      <div className="block-menu-submenu" data-context-submenu="review" role="menu">
+                        {[
+                          [REVIEW_KINDS.addition, 'review.add', '+'],
+                          [REVIEW_KINDS.deletion, 'review.delete', '-'],
+                          [REVIEW_KINDS.substitution, 'review.substitute', '→'],
+                          [REVIEW_KINDS.highlight, 'review.highlight', '▣']
+                        ].map(([kind, labelKey, symbol]) => (
+                          <button
+                            key={kind}
+                            className="block-menu-item block-review-action"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => pickReviewMarkup(kind, ctxMenu.selection)}
+                          >
+                            <span className="block-menu-short">{symbol}</span>
+                            <span className="block-menu-name">{t(labelKey)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="block-menu-divider" />
+                  </>
+                )}
               </>
             )}
             {/* Source-kernel mode: block "turn into" (heading/paragraph/quote

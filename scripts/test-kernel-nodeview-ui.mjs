@@ -14,11 +14,13 @@
 //    its own header comment) — this script is the first thing that actually
 //    measures DOM node IDENTITY end-to-end rather than just asserting the
 //    resulting markdown bytes.
-// 2. Blocked matrix (阻止矩阵, Task 7): slash-menu structural items stay
-//    visible-but-`.disabled` and refuse to run (both via Enter and via a
-//    real pointer click); the right-click context menu never offers format/
-//    review/turn-into/list-conversion submenus; a fenced code block stays
-//    read-only; the floating selection toolbar never appears.
+// 2. Blocked matrix (阻止矩阵, Task 7, amended by Plan 4 Task 3): slash-menu
+//    structural items stay visible-but-`.disabled` and refuse to run (both
+//    via Enter and via a real pointer click); the right-click context menu
+//    offers the FORMAT submenu (mark toggles are kernel-routed now, link
+//    item disabled) but never review/turn-into/list-conversion; the
+//    floating selection toolbar APPEARS on selection (its mark buttons
+//    dispatch toggleMark, which the gateway owns).
 //
 // Fixture design note (see task-11-report.md "Bugs found" for the full
 // diagnosis — THREE real, pre-existing kernel-mode bugs were found while
@@ -427,12 +429,14 @@ async function run() {
     assert.equal(app.dialogs.length, 0, 'no dialog appeared from the blocked slash-menu interactions')
 
     // ============================================================
-    // 3) Blocked matrix — selection toolbar (never appears in kernel mode)
+    // 3) Selection toolbar APPEARS in kernel mode (Plan 4 Task 3 flip)
     // ============================================================
-    // With DEFAULT settings (selection toolbar enabled), the floating
-    // toolbar must still never appear in kernel mode: Task 5 disables
-    // Crepe's whole Toolbar FEATURE for kernel tabs ([Feature.Toolbar]:
-    // !kernelMode), independent of the user's settings toggle.
+    // Crepe's Toolbar feature is back on for kernel tabs: its mark buttons
+    // dispatch toggleMark, which the gateway classifies as `mark-toggle`
+    // and routes through the kernel. With DEFAULT settings (selection
+    // toolbar enabled), dragging a selection must therefore show the
+    // floating toolbar — the pre-Plan-4 assertion ("never appears") is
+    // deliberately inverted here.
     const dragSelection = async (text) => {
       // The visible-editor lookup has been observed to flip to a different
       // (kept-mounted, offscreen) tab for a single query in between two
@@ -469,24 +473,32 @@ async function run() {
     const selectedText = await evaluate(`window.getSelection()?.toString() || ''`)
     assert.ok(selectedText.length > 0, 'mouse drag did not create a text selection')
     await sleep(300)
-    const toolbarVisible = await evaluate(`(() => {
-      const toolbar = document.querySelector('.milkdown-toolbar')
-      if (!toolbar) return false
+    // NOTE: multiple kept-mounted editors (the pre-kernel instance survives
+    // the kernel remount, plus any welcome tab) each own a `.milkdown-toolbar`
+    // — a bare `document.querySelector` grabs the FIRST one, which is the
+    // hidden non-kernel instance's. Scan ALL of them for a visible one.
+    const toolbarVisible = await evaluate(`[...document.querySelectorAll('.milkdown-toolbar')].some((toolbar) => {
       const style = getComputedStyle(toolbar)
       const rect = toolbar.getBoundingClientRect()
       return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
-    })()`)
-    assert.equal(toolbarVisible, false, 'floating selection toolbar appeared in kernel mode')
+    })`)
+    assert.equal(toolbarVisible, true,
+      'floating selection toolbar must appear on selection in kernel mode (Plan 4 Task 3: mark toggles are kernel-routed)')
+    // Clear the selection so the toolbar goes away before the settings
+    // navigation below (a lingering floating toolbar could sit over the
+    // buttons the next section clicks).
+    await evaluate(`window.getSelection()?.removeAllRanges()`)
+    await sleep(200)
 
     // ============================================================
-    // 4) Blocked matrix — right-click context menu (format/turn-into/
-    //    list-conversion submenus must not exist)
+    // 4) Right-click context menu (Plan 4 Task 3 flip): the FORMAT submenu
+    //    now EXISTS (mark toggles are kernel-routed; its link item alone is
+    //    `.disabled`), while review/turn-into/list-conversion stay away.
     // ============================================================
-    // Disable the selection-toolbar SETTING too (same setup
+    // Disable the selection-toolbar SETTING (same setup
     // test-selection-toolbar-ui.mjs uses) so the fallback ctxMenu's
-    // `showTextFormatting` would normally be TRUE for a non-empty selection
-    // — proving the kernel-mode gate (`!sourceKernelMode &&`), not just the
-    // toolbar-setting default, is what keeps the submenu away.
+    // `showTextFormatting` is TRUE for a non-empty selection — the format
+    // submenu only renders as the toolbar's fallback.
     const settingsOpened = await evaluate(`(() => {
       const button = [...document.querySelectorAll('button')].find((node) => {
         const rect = node.getBoundingClientRect()
@@ -532,19 +544,21 @@ async function run() {
       hasListTrigger: !!document.querySelector('[data-context-submenu-trigger="list"]'),
       hasFormatSubmenu: !!document.querySelector('[data-context-submenu="format"]'),
       hasBlockTextFormat: document.querySelectorAll('.block-text-format').length,
+      disabledFormatItems: [...document.querySelectorAll('.block-text-format.disabled')].map((node) => node.textContent.trim()),
       hasListConversion: document.querySelectorAll('.block-list-conversion').length,
       menuVisible: !!document.querySelector('.block-ctxmenu')
     })`)
-    assert.deepEqual(ctxMenuAudit, {
-      hasFormatTrigger: false,
+    assert.deepEqual({ ...ctxMenuAudit, disabledFormatItems: ctxMenuAudit.disabledFormatItems.length }, {
+      hasFormatTrigger: true,
       hasReviewTrigger: false,
       hasBlockTrigger: false,
       hasListTrigger: false,
-      hasFormatSubmenu: false,
-      hasBlockTextFormat: 0,
+      hasFormatSubmenu: true,
+      hasBlockTextFormat: 6,
+      disabledFormatItems: 1,
       hasListConversion: 0,
       menuVisible: true
-    }, `kernel mode's right-click menu must offer NO format/review/turn-into/list-conversion surfaces: ${JSON.stringify(ctxMenuAudit)}`)
+    }, `kernel mode's right-click menu must offer the FORMAT submenu (6 items, link disabled) and nothing structural: ${JSON.stringify(ctxMenuAudit)}`)
 
     await evaluate(`document.querySelector('.menu-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`)
     await sleep(200)
@@ -786,7 +800,7 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click/code-block/selection-toolbar all refuse structural operations; save and cold reopen match the kernel-derived byte string')
+    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click refuse structural operations while the selection toolbar and format submenu are live (link disabled); save and cold reopen match the kernel-derived byte string')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

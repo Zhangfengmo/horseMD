@@ -129,10 +129,14 @@ export function createConfiguredCrepe({
       // toolbar at the same time creates two overlapping action surfaces and can
       // cover the selected text, so mobile keeps the native menu only.
       [Feature.SelectionTooltip]: !isMobile,
-      // Kernel mode: the selection toolbar's formatting commands produce
-      // structural transactions the kernel cannot own yet — they would all be
-      // vetoed, so the toolbar is disabled at the feature level instead.
-      [Feature.Toolbar]: !kernelMode,
+      // Kernel mode included (Plan 4 Task 3): the toolbar's mark commands
+      // (toggleStrongCommand & friends → PM toggleMark) dispatch transactions
+      // the gateway now classifies as `mark-toggle` and routes through the
+      // kernel (veto + source commit + reconcile), so the toolbar is back on
+      // in kernel mode. Buttons whose command the kernel does not own (link,
+      // inline latex) still dispatch and get a veto + toast — the fail-closed
+      // refusal path, not a silent no-op.
+      [Feature.Toolbar]: true,
       [Feature.SlashCommand]: true,
       [Feature.BlockEdit]: true,
       [Feature.CodeMirror]: true,
@@ -271,8 +275,18 @@ export function createConfiguredCrepe({
       // kernel next — these keymaps must sit at the head of the REMAINING
       // plugin order, before listBackspaceKeymap and every preset keymap, or
       // PM's own structural commands would fire and be vetoed after the fact.
+      // marksKeymap (Plan 4 Task 3) sits in the same slot: it swallows the
+      // five mark shortcuts (Mod-b/i/e, Mod-Alt-x/h) ONLY on an empty
+      // selection ("select text first" toast — a stored-marks toggle would
+      // otherwise arm a marked-slice typing trap the gateway then vetoes
+      // keystroke by keystroke); with a real selection it falls through to
+      // the preset's own toggleMark, whose transaction the gateway owns.
       ...(kernelMode && kernelPlugins
-        ? [kernelPlugins.structuralKeymap(), kernelPlugins.historyKeymap()]
+        ? [
+            kernelPlugins.structuralKeymap(),
+            kernelPlugins.historyKeymap(),
+            ...(typeof kernelPlugins.marksKeymap === 'function' ? [kernelPlugins.marksKeymap()] : [])
+          ]
         : []),
       // Markdown, not a rich-only list boundary, is the durable authority.
       // Merge an internally-created adjacent ordered list before downstream

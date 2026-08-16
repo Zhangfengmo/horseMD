@@ -3268,6 +3268,17 @@ body.dark .hm-hl-swatch.hm-hl-blue { background: #4a78b8; }
   font-weight: 600;
   background: var(--popover-selected);
 }
+/* Kernel-mode disabled entries (e.g. the format submenu's link item, Plan 4
+   Task 3): visibly inert — same convention as the slash menu's .disabled
+   items. Clicks still reach the handler, whose refusal toast explains why. */
+.block-menu-item.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.block-menu-item.disabled:hover {
+  background: transparent;
+  color: var(--text);
+}
 .block-menu-short {
   flex: 0 0 22px;
   font-size: 11px;
