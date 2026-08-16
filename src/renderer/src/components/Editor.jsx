@@ -7,6 +7,7 @@ import {
   serializerCtx
 } from '@milkdown/kit/core'
 import './editor-codeblock-eager.js' // side effect: root-fix #25 — eager, non-tearing code-block node view
+import './editor-codeblock-crlf.js' // side effect: CRLF-correct CM↔PM position math in code blocks (ai-handoff §5.2e)
 import './editor-table-click.js' // side effect: single click in a table cell places the caret
 import { TextSelection } from '@milkdown/prose/state'
 import { wrapIn } from '@milkdown/prose/commands'
