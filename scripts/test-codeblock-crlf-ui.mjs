@@ -26,14 +26,16 @@
 // next-line type (the inserted break must come out '\r\n', not bare
 // '\n'), (3) a within-line Backspace x2, (4) a caret-at-line-start
 // Backspace joining two lines (the deleted break must be the FULL '\r\n'
-// pair, not just the '\r'), and (5) a second Enter + line whose inserted
-// '\r\n' must survive to disk. After each stage the source view must show
-// the exact content (LF projection — see assertSource), then Save must
-// write the EXPECTED_DISK bytes (uniform CRLF — structure and code value
-// alike; see its note) and a
-// full-quit cold reopen must reproduce them. The CodeMirror view is also
-// asserted phantom-blank-line-free after the edits (the update() churn
-// shape above).
+// pair, not just the '\r'), (5) a second Enter + line whose inserted
+// '\r\n' must survive to disk, and (6) a plain PROSE edit at the LEADING
+// paragraph's line end — the ai-handoff §5.2f symptom shape, which involves
+// no code block at all and exercises the canonical-diff preservation mapper
+// instead of this module's CM↔PM subject. After each stage the source view
+// must show the exact content (LF projection — see assertSource), then Save
+// must write the EXPECTED_DISK bytes (uniform CRLF — structure and code
+// value alike; see its note) and a full-quit cold reopen must reproduce
+// them. The CodeMirror view is also asserted phantom-blank-line-free after
+// the edits (the update() churn shape above).
 //
 // Edit-site conventions copied from test-kernel-codeblock-ui.mjs: all
 // multi-line edits land at nesting depth 0 (end of the '}' line) so CM's
@@ -104,6 +106,21 @@ const AFTER_JOIN = AFTER_BACKSPACE.replace(`}TAIL${CRLF}NEXTLI`, '}TAILNEXTLI')
 // conversion end to end (stage A's inserted break is consumed by stage C).
 const AFTER_LASTLINE = AFTER_JOIN.replace('}TAILNEXTLI', `}TAILNEXTLI${CRLF}LASTLINE`)
 
+// Stage E: the ORIGINAL §5.2f symptom shape — a plain PROSE edit at a
+// paragraph's line end, no code block involved. This is the delta that made
+// the preservation mapper return `preserved:true` with a split pair
+// ('前置段落用于占位。\rPARA\n'); the real commit gate (verifySourceDocument's
+// reparsed-ProseMirror comparison) refused it and the fail-closed rebuild
+// respelled the WHOLE file's structural endings to LF. Locking it here proves
+// the user-visible fix through the production pipeline, not just against the
+// headless oracle.
+//
+// It MUST be the LEADING paragraph, not the trailing one: an edit at the end
+// of the document's LAST block is claimed by preserveDivergedTailBlockAppend,
+// which was always CRLF-correct, so a trailing-paragraph stage passes even on
+// the unfixed mapper and locks nothing. Verified by reverting core.js alone.
+const AFTER_PARAGRAPH = AFTER_LASTLINE.replace('前置段落用于占位。', '前置段落用于占位。PARA')
+
 // What the DEFAULT pipeline writes to disk: UNIFORM CRLF, byte-identical to
 // the staged source. Two independent layers have to be right for this to hold.
 // (1) The CM↔PM fix in this module's subject keeps the code VALUE coherent
@@ -111,12 +128,14 @@ const AFTER_LASTLINE = AFTER_JOIN.replace('}TAILNEXTLI', `}TAILNEXTLI${CRLF}LAST
 // at its true position). (2) The canonical-diff preservation mapper keeps the
 // STRUCTURAL line endings (heading/paragraph/fence lines): it used to map an
 // LF-canonical line end onto the '\n' of the source's CRLF pair, splitting it
-// ('para one.\rZ\n' with preserved:true), and the round-trip acceptance gate
-// then rejected that wrong success so the commit fell back to the canonical
-// serialization — respelling the whole file's structure to LF. Both the mapper
-// arithmetic and the gate's line-ending blindness are fixed, so a lone '\r' or
-// a bare '\n' anywhere in this file is a real regression, not a known gap.
-const EXPECTED_DISK = AFTER_LASTLINE
+// ('前置段落用于占位。\rPARA\n' with preserved:true). The real commit gate —
+// verifySourceDocument's reparsed-ProseMirror comparison in
+// editor-source-verification.js, NOT the roundtrip.js test oracle — refused
+// that wrong success, so the commit fell back to the canonical serialization
+// and respelled the whole file's structure to LF. The mapper arithmetic is
+// fixed, so a lone '\r' or a bare '\n' anywhere in this file is a real
+// regression, not a known gap.
+const EXPECTED_DISK = AFTER_PARAGRAPH
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -156,6 +175,28 @@ const cmContent = (evaluate) => evaluate(`(${BLOCK})?.querySelector('.cm-content
 const cmLineTexts = (evaluate) => evaluate(
   `JSON.stringify([...((${BLOCK})?.querySelectorAll('.cm-editor .cm-line') || [])].map((line) => line.textContent))`
 )
+
+// Click into a PROSE paragraph (not CodeMirror) whose text contains `needle`,
+// then End to land the caret at that line's end. A raw DOM selection does not
+// sync ProseMirror state, so this must be a real dispatched mouse event.
+async function clickProseParagraph(evaluate, send, needle) {
+  const point = await evaluate(`(() => {
+    const editor = ${VISIBLE_EDITOR}
+    const target = [...(editor?.querySelectorAll('p') || [])]
+      .find((node) => node.textContent.includes(${JSON.stringify(needle)}))
+    if (!target) return null
+    target.scrollIntoView({ block: 'center' })
+    const rect = target.getBoundingClientRect()
+    if (!rect || !rect.width) return null
+    return { x: rect.right - 4, y: rect.top + rect.height / 2 }
+  })()`)
+  assert.ok(point, `prose paragraph containing ${needle} is not hit-testable`)
+  await sleep(400)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+  await sleep(200)
+  await pressKey(send, { key: 'End', code: 'End', delayMs: delay })
+}
 
 // Click into the js block's CodeMirror at a line edge, then land the caret
 // exactly via Home/End — same off-screen-click guard as the kernel script.
@@ -272,6 +313,14 @@ async function run() {
     await sleep(300)
     await assertSource(evaluate, AFTER_LASTLINE, 'stage D (Enter + LASTLINE)')
 
+    // ---- Stage E: plain PROSE line-end edit (the §5.2e symptom shape) ----
+    await clickProseParagraph(evaluate, send, '前置段落用于占位。')
+    await typeTextLikeUser(send, 'PARA', { delayMs: delay })
+    await waitFor(async () => ((await mounted(evaluate)) || '').includes('前置段落用于占位。PARA'),
+      'PARA never landed in the leading paragraph')
+    await sleep(300)
+    await assertSource(evaluate, AFTER_PARAGRAPH, 'stage E (mid-document prose paragraph line end)')
+
     // ---- Save FAB → byte-exact disk write ----
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
@@ -296,7 +345,7 @@ async function run() {
     }, 'reopened document did not mount with the saved content')
     await toggleSourceMode(evaluate)
     const reopened = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
-    assert.equal(reopened, AFTER_LASTLINE.replace(/\r\n/g, '\n'),
+    assert.equal(reopened, AFTER_PARAGRAPH.replace(/\r\n/g, '\n'),
       'cold reopen source view must reproduce the saved content (LF projection)')
     assert.equal(app.dialogs.length, 0, 'no dialog may appear on cold reopen')
     assert.equal(await readFile(file, 'utf8'), EXPECTED_DISK,

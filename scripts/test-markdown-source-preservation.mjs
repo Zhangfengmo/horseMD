@@ -569,9 +569,13 @@ assert.equal(
       !/\r(?!\n)|(?<!\r)\n/.test(result.markdown),
       `${testCase.name}: the committed source must stay uniformly CRLF`
     )
+    // `roundTripPreserved` is this repository's TEST ORACLE, not the runtime
+    // gate (production verifies the reparsed ProseMirror document — see
+    // editor-source-verification.js). It is asserted here because the mapper's
+    // own `preserved:true` proves nothing on its own.
     assert.ok(
       roundTripPreserved(result.markdown, testCase.next),
-      `${testCase.name}: the committed CRLF source must pass the round-trip gate`
+      `${testCase.name}: the committed CRLF source must satisfy the semantic oracle`
     )
     // The same edit on the LF spelling of the same document must be
     // byte-identical apart from the line endings: this fix may not change LF.
@@ -580,9 +584,14 @@ assert.equal(
       testCase.previous,
       testCase.next
     )
+    assert.notEqual(
+      lfResult.preserved,
+      false,
+      `${testCase.name}: the LF control must map too (it is the oracle here)`
+    )
     assert.equal(
-      testCase.expected.replace(/\r\n/g, '\n'),
       lfResult.markdown,
+      testCase.expected.replace(/\r\n/g, '\n'),
       `${testCase.name}: CRLF and LF sources must agree apart from the line ending`
     )
   }
