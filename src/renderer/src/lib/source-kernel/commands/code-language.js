@@ -31,20 +31,27 @@ export function changeCodeLanguage({ doc, index, offset, language }) {
   const markerMatch = doc.text.slice(block.start, line.end).match(FENCE_MARKER_RE)
   if (!markerMatch) return { ok: false, code: 'unsupported-structure' }
 
-  // Fail-closed fence guard: a backtick-fenced block's info string may not
-  // contain a backtick (CommonMark's own restriction — a backtick there
-  // would be ambiguous with an inline code span and, verified against the
-  // real parser, silently un-fences the whole block: `'```js`ts\nabc\n```\n'`
-  // reparses as a paragraph followed by an EMPTY, unrelated code block, not
-  // a `js\`ts`-language fence). A tilde-fenced block's info string is NOT
-  // restricted the same way by the spec (verified against the real parser:
-  // both a tilde in a tilde-fenced info string and either marker char in the
-  // OTHER fence type's info string reparse to the exact same lang/value —
-  // `'~~~js~ts\nabc\n~~~\n'` and `'```js~ts\nabc\n```\n'` both round-trip
-  // correctly), so only the marker char matching THIS block's own fence type
-  // is refused, not the other one.
+  // Fail-closed fence guard, BACKTICK FENCES ONLY: a backtick-fenced
+  // block's info string may not contain a backtick (CommonMark's own
+  // restriction — a backtick there would be ambiguous with an inline code
+  // span and, verified against the real parser, silently un-fences the
+  // whole block: `'```js`ts\nabc\n```\n'` reparses as a paragraph followed
+  // by an EMPTY, unrelated code block, not a `js\`ts`-language fence). A
+  // TILDE-fenced block's info string has NO such restriction in CommonMark
+  // — re-verified directly against the real parser (remark-parse +
+  // remark-gfm) for this fix: `'~~~js~ts\nabc\n~~~\n'` parses as ONE clean
+  // `code` node, `lang: 'js~ts'`, byte-exact; even a language containing a
+  // tilde RUN as long as the fence's own marker (`'~~~js~~ts\nabc\n~~~\n'`,
+  // fence length 3) still parses cleanly, because the closing-fence check is
+  // a separate LINE-level rule (a line consisting of nothing but the marker
+  // char, of at least the opening length) that the single-line info string
+  // never reaches. So this guard applies ONLY when the block's own fence
+  // marker is a backtick — a tilde-fenced block's language may contain
+  // either marker char freely, and a backtick-fenced block's language may
+  // freely contain a tilde (also verified: `'```js~ts\nabc\n```\n'` round-
+  // trips correctly too).
   const fenceMarker = markerMatch[1]
-  if (lang.includes(fenceMarker)) return { ok: false, code: 'unsupported-structure' }
+  if (fenceMarker === '`' && lang.includes('`')) return { ok: false, code: 'unsupported-structure' }
 
   const markerEnd = block.start + markerMatch[0].length
   const infoEnd = line.end

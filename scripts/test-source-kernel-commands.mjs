@@ -464,12 +464,14 @@ console.log('PASS source-kernel commands (splitTextBlock final-review coverage g
     { ok: false, code: 'unsupported-structure' })
 }
 
-// Case H (final-review finding, 2026-08-16): fence-marker fail-closed guard.
-// A backtick in a language committed onto a BACKTICK fence provably breaks
-// the fence — verified against the real parser (remark-parse + remark-gfm):
-// '```js`ts\nabc\n```\n' reparses as a paragraph followed by an unrelated
-// EMPTY code block, not a 'js`ts'-language fence over 'abc'. Must reject
-// before ever producing those bytes.
+// Case H (final-review finding, 2026-08-16; SCOPE CORRECTED 2026-08-16 after
+// re-review — see the correction note in final-fix-report.md): fence-marker
+// fail-closed guard, BACKTICK FENCES ONLY. A backtick in a language
+// committed onto a BACKTICK fence provably breaks the fence — verified
+// against the real parser (remark-parse + remark-gfm): '```js`ts\nabc\n```\n'
+// reparses as a paragraph followed by an unrelated EMPTY code block, not a
+// 'js`ts'-language fence over 'abc'. Must reject before ever producing those
+// bytes. CommonMark places NO such restriction on tilde fences — see Case I.
 {
   const src = '```js\nabc\n```\n'
   const c = ctx(src)
@@ -478,14 +480,23 @@ console.log('PASS source-kernel commands (splitTextBlock final-review coverage g
     'a backtick in the language must be refused on a backtick fence')
 }
 
-// Case I: a tilde in a language committed onto a TILDE fence — same failure
-// class as Case H, just the other marker/fence pairing. Reject.
+// Case I (SCOPE CORRECTED 2026-08-16): a tilde in a language committed onto
+// a TILDE fence is VALID CommonMark and must be ACCEPTED, not refused — the
+// original version of this case asserted rejection, which an independent
+// re-review's own parse probe disproved: '~~~js~ts\nabc\n~~~\n' parses as
+// ONE clean `code` node (lang 'js~ts'), byte-exact; even a language whose
+// tilde run matches the fence's own length ('js~~ts' against a 3-tilde
+// fence) still parses cleanly, because the closing-fence test is a separate
+// whole-line rule the single-line info string never reaches. CommonMark's
+// marker restriction is documented for BACKTICK fences only (Case H); this
+// case now locks the tilde-fence side of that asymmetry instead of
+// over-restricting it.
 {
   const src = '~~~js\nabc\n~~~\n'
   const c = ctx(src)
-  assert.deepEqual(changeCodeLanguage({ ...c, offset: 7, language: 'js~ts' }),
-    { ok: false, code: 'unsupported-structure' },
-    'a tilde in the language must be refused on a tilde fence')
+  const r = changeCodeLanguage({ ...c, offset: 7, language: 'js~ts' })
+  assert.equal(r.ok, true, 'a tilde in the language is valid CommonMark on a tilde fence, must be accepted')
+  assert.equal(applySourceTransaction(c.doc, r.transaction).doc.text, '~~~js~ts\nabc\n~~~\n')
 }
 
 // Case J: the CROSS combinations are valid CommonMark and must stay allowed
