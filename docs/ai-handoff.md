@@ -303,7 +303,19 @@ android/, ios/           Capacitor 原生壳
 
 **修复（commit `1e8315f` fix(editor): correct CM position math for CRLF code blocks）**：新模块 `src/renderer/src/components/editor-codeblock-crlf.js`，沿用 `editor-codeblock-eager.js` 的 prototype 手术模式——按 `\r\n` 对索引建立双射位置映射（`cmToPm`/`pmToCm`），`forwardUpdate` 用编辑前文本映射 changeset A 区间（行合并因此删除完整 `\r\n` 对）、插入换行转成块主导行尾、编辑后选区用编辑后文本映射；`update()` 先把 PM 文本按 `/\r\n?/→'\n'` 归一化再 diff（坐标即 CM 坐标、幻影行消失、一次收敛）；`setSelection` 做 pmToCm 换算。文本不含 `\r` 时全部委托原实现（LF 文档零影响）。回归锁：`npm run test:codeblock-crlf-ui`（默认 legacy、RED 曾复现拆对+乱序损坏；已接入 `run-ui-regression` standalone）。**kernel-mode 的 CRLF fail-closed 收窄（5.2d ADR）现已解除阻塞**，取消收窄是独立后续任务（本次刻意未动）。
 
-**遗留独立缺陷（本次发现、未修）**：默认 canonical-diff 保真管线自己也有 CRLF 插入位置 off-by-one——`__hmPreserveLog` 实测在 CRLF 段落尾插字返回 `preserved:true` 但产物是 `para one.\rZ\n`（同样拆对，错误成功）；round-trip 验收门正确拒绝后回退全文 canonical，导致 CRLF 文档首次普通编辑后**结构性行尾整体改写为 LF**（代码块内容字节保持不变；未打补丁的旧构建对纯段落编辑逐字节同样表现，证明与本修复无关）。修复该 mapper 后应把 `test-codeblock-crlf-ui` 的磁盘期望收紧为全文统一 CRLF。字节级 CRLF 磁盘保证目前仅存在于 `__hmTransactionSourcePrimary` 实验路径。完整证据链见 `.superpowers/codeblock-crlf-fix-report.md`；原调查见 `.superpowers/sdd/2026-08-16-source-kernel-codeblock-domain/task-4-report.md`「Fix-review round」。
+**（原「遗留独立缺陷」已于 2026-08-17 修复，见 5.2f。）**完整证据链见 `.superpowers/codeblock-crlf-fix-report.md`；原调查见 `.superpowers/sdd/2026-08-16-source-kernel-codeblock-domain/task-4-report.md`「Fix-review round」。
+
+### 5.2f ✅ 已修复（2026-08-17）：canonical-diff 保真管线的 CRLF 插入算术与验收门的行尾盲区
+
+5.2e 调查中记录的「遗留独立缺陷」。Milkdown 的 canonical 永远是 LF，而作者源码可以是 CRLF；把 LF canonical 的偏移映射到 CRLF 源码时，**必须指向换行对开始的那个字节**。旧实现指向 `\n`（对的第二个字节），于是「插在这一行文本末尾」落进了 `\r` 和 `\n` 之间：
+
+- `rawInsertionAtCanonicalLineEnd`（`lib/markdown-preservation/core.js`）用 `lineAt().end`（只按 `\n` 切分）当作行文本末尾，CRLF 下它就是 `\n` 的下标 → 产物 `para one.\rZ\n`，`preserved:true` 的**错误成功**。段落、标题、列表行、任务行、引用行、软换行行尾全部命中。
+- `sourceVisibleIndex`（`mode-visible-map.js`）把围栏代码块内的换行当作**可见字符**并锚定在 `\n` 上；`sourceRawFromVisibleIndex` 的 backward 亲和又按「上一个可见字符 +1」算「其后位置」。CRLF 的换行是一个可见字符、两个字节，所以代码块内的行尾插入同样拆对、行尾删除会留下孤立 `\r`。现在换行锚定在 `\r`（字符开始处），`rawWidthAt()` 让「其后位置」跨过整对。
+- `roundtrip.js` 的验收门本身对行尾也不是拼写无关的：micromark 会把原始字节抄进节点 `value`（段落软换行、代码块正文、HTML 块），所以**任何含软换行或代码块的 CRLF 文档都无法与 LF canonical 比较相等**——即使 mapper 产出完全正确的字节也会被判失败。`normalizeLineEndings` 在构造比较键时把 `\r\n|\r` 归一为 `\n`（与模块声明的「CRLF 属于要保护的拼写」一致）；拆对产生的孤立 `\r` 仍然改变文档结构，依旧被拒绝。
+
+**影响面结论**：修复前的错误产物**全部**被验收门拦下（headless 扫描 11 份文档 × 全部可见字符位置的增/删共 558 例，0 例「错误但被门放行」），因此从未发生静默字节损坏；代价是 CRLF 文档**首次普通编辑**就会 fail-closed 回退全文 canonical，把结构性行尾整体改写成 LF。修复后同一扫描 558/558 字节正确，且与 LF 源码的结果仅差行尾拼写。
+
+**回归锁**：`npm run test:markdown-preservation`（13 种 CRLF 行尾编辑形态，逐字节期望 + `roundTripPreserved` + 「全文统一 CRLF」属性 + 「与 LF 结果仅差行尾」对照）、`npm run test:roundtrip-acceptance`（CRLF 必须通过门 / 拆对必须被拒）、`npm run test:codeblock-crlf-ui`（磁盘期望已收紧为 `AFTER_LASTLINE` 全文统一 CRLF，并新增「不得出现裸 `\n`」属性断言）。完整证据链见 `.superpowers/preservation-crlf-fix-report.md`。
 
 ### 5.3 PDF 导出
 
