@@ -120,6 +120,10 @@ function pmToCm(pairs, pmPos) {
 
 // The block's dominant line ending — what an inserted CM '\n' becomes so the
 // block's endings stay uniform. Only consulted when the text contains '\r'.
+// Tie behavior, precisely: '\r\n' wins any tie IT is part of (crlf >= both
+// lone counts), but a lone-'\r' vs lone-'\n' tie WITHOUT any pairs returns
+// '\n' (loneCr > loneLf is strict) — a mixed-lone-endings block with no
+// '\r\n' has no CRLF preference to honor.
 function dominantLineEnding(text) {
   const crlf = (text.match(/\r\n/g) || []).length
   const loneCr = (text.match(/\r(?!\n)/g) || []).length
@@ -214,6 +218,12 @@ proto.initializeCodeMirror = function crlfAwareInitialize() {
       // Same fast-path guards as the original (kept OUTSIDE the CRLF branch
       // so the LF delegate keeps its exact semantics too).
       if (this.updating || !this.cm.hasFocus) return
+      // Bare call is deliberate and only safe because the vendor assigns
+      // forwardUpdate as a constructor ARROW — its `this` is lexical, so a
+      // call-site receiver is ignored. Do not "fix" this into
+      // `.call(this, update)`: it changes nothing today, but if a vendor
+      // bump ever turns forwardUpdate into a prototype method this wrapper
+      // must be revisited as a whole, not patched at the call site.
       if (!hasCarriageReturn(this.node.textContent)) return originalForwardUpdate(update)
       crlfForwardUpdate(this, update)
     }

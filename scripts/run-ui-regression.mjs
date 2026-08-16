@@ -170,6 +170,10 @@ const standalone = [
     script: 'scripts/test-literal-triple-backtick-source-ui.mjs'
   },
   {
+    name: 'CRLF code blocks: legacy CM position math keeps edits and endings coherent',
+    script: 'scripts/test-codeblock-crlf-ui.mjs'
+  },
+  {
     name: 'Issue 98: native code copy, Markdown copy, undo, and session restore preference',
     script: 'scripts/test-issue-98-copy-undo-ui.mjs'
   },
