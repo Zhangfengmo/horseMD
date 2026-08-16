@@ -41,6 +41,11 @@ const schema = new Schema({
     table_row: { content: 'table_cell+' },
     table_cell: { content: 'paragraph+' },
     image: { group: 'inline', inline: true, atom: true, attrs: { src: { default: '' } } },
+    // Crepe's latex feature: `math_inline` is an inline ATOM carrying the TeX
+    // source in `attrs.value` (node_modules/@milkdown/crepe/lib/esm/feature/
+    // latex/index.js:98-104) — content.size counts it as 1, exactly like the
+    // kernel charMap's width-1 `inlineMath` atom unit.
+    math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
     // Crepe's standalone-image block (@milkdown/components image-block): a
     // block-level ATOM whose mdast counterpart (in the kernel's plugin-free
     // parse) is the plain `paragraph > image` wrapper.
@@ -921,6 +926,146 @@ console.log('--- kernel projection map ---')
   // paragraph2 pmPos 10, contentPos 11; raw: 甲=12 乙=13.
   assert.equal(map.pmPosToRaw(11), 12) // before 甲
   assert.equal(map.pmPosToRaw(12), 13) // between 甲 and 乙
+}
+
+// ---- Math domain (Plan 5 Task 1): the degradation-healing headline ----
+//
+// Before the kernel chain gained remark-math, a document containing math
+// could not be mapped AT ALL:
+//   - `an $x^2$ formula` parsed to ONE text node (visibleLength 16) while PM
+//     had [text, math_inline atom, text] (content.size 12) -> the
+//     `content.size !== charMap.visibleLength` check nulled the WHOLE map.
+//   - `$$\nE=mc^2\n$$` parsed to a single PARAGRAPH (the `$$` lines don't
+//     break a paragraph without the extension) while PM had a `code_block`
+//     (language 'LaTeX') -> `PM_TO_MD.code_block` has no 'paragraph' entry,
+//     so the allowed-type check nulled the WHOLE map.
+// Both healed by pairing the real math nodes. Block math stays NON-EDITABLE
+// (charMap null) — it occupies a structural slot so every OTHER block in the
+// document keeps its own map.
+const mi = (value) => schema.node('math_inline', { value })
+const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s)] : [])
+
+// Case M1: one document with BOTH inline and block math plus ordinary
+// paragraphs. Raw offsets of 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲乙\n':
+//   a0 sp1 $2 x3 $4 sp5 b6 \n7 | \n8 | $9 $10 \n11 | E12..^17 2^18? -> the
+//   math node's own position is [9,21]; blank \n22; 甲23 乙24 \n25.
+// PM: paragraph1 pos 0 (content 'a '(2) + atom(1) + ' b'(2) = 5, nodeSize 7);
+// code_block pos 7 (content 'E=mc^2' = 6, nodeSize 8); paragraph2 pos 15
+// (content start 16).
+{
+  const md = 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲乙\n'
+  const d = doc(
+    p(text('a '), mi('x'), text(' b')),
+    cbl('LaTeX', 'E=mc^2'),
+    p(text('甲乙'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'math-bearing document must map (this is the degradation fix)')
+  assert.equal(map.blockPairs.length, 3)
+
+  // Block math: paired, but never editable.
+  assert.equal(map.blockPairs[1].mdBlock.type, 'math')
+  assert.equal(map.blockPairs[1].pmNode.type.name, 'code_block')
+  assert.equal(map.blockPairs[1].charMap, null, 'block math stays non-editable')
+  assert.equal(map.pmPosToRaw(8), null, 'no offset inside block math resolves')
+
+  // Inline math paragraph: fully mapped, the `$...$` bytes are ONE atom.
+  assert.equal(map.pmPosToRaw(1), 0)   // before 'a'
+  assert.equal(map.pmPosToRaw(3), 2)   // atom left edge (before the opening $)
+  assert.equal(map.pmPosToRaw(4), 5)   // atom right edge (after the closing $)
+  assert.equal(map.pmPosToRaw(6), 7)   // end of the paragraph
+  // raw 2 is simultaneously the PRECEDING char unit's end and the atom's
+  // start; the units walk resolves it through whichever unit it reaches
+  // first, so the boundary reports `atom:false` (same long-standing
+  // convention as an inline image preceded by text — the PM position is
+  // identical either way).
+  assert.deepEqual(map.rawToPmPos(2), { pos: 3, atom: false })
+  assert.deepEqual(map.rawToPmPos(3), { pos: 3, atom: true }) // interior snaps to the atom
+  assert.deepEqual(map.rawToPmPos(5), { pos: 4, atom: false })
+
+  // The paragraph AFTER the math block is editable — the whole point.
+  assert.equal(map.pmPosToRaw(16), 23)
+  assert.equal(map.pmPosToRaw(17), 24)
+  assert.equal(map.pmPosToRaw(18), 25)
+  assert.deepEqual(map.rawToPmPos(24), { pos: 17, atom: false })
+}
+
+// Case M2: quoted block math. mdast `blockquote > math` [2,18] pairs against
+// PM `blockquote > code_block(LaTeX)`; the quote occupies a slot, the math a
+// non-editable one, and a following paragraph still maps.
+{
+  const md = '> $$\n> E=mc^2\n> $$\n\n甲\n'
+  const d = doc(
+    schema.node('blockquote', null, [cbl('LaTeX', 'E=mc^2')]),
+    p(text('甲'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'quoted block math must map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[1].mdBlock.type, 'math')
+  assert.equal(map.blockPairs[1].charMap, null)
+  // '> $$\n> E=mc^2\n> $$\n' is 19 bytes, blank line 19, 甲 20.
+  assert.equal(map.pmPosToRaw(map.blockPairs[2].pmPos + 1), 20)
+}
+
+// Case M3: list-embedded INLINE math. '- item $x$ math\n':
+//   '-'0 sp1 i2..m6 sp7? -> paragraph [2,15]; text 'item ' [2,7], atom
+//   [7,10), text ' math' [10,15].
+// PM: bullet_list 0, list_item 1, paragraph 2 (content start 3).
+{
+  const md = '- item $x$ math\n'
+  const d = doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(text('item '), mi('x'), text(' math'))])
+  ]))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'list-embedded inline math must map')
+  assert.equal(map.pmPosToRaw(3), 2)   // before 'i'
+  assert.equal(map.pmPosToRaw(8), 7)   // atom left edge
+  assert.equal(map.pmPosToRaw(9), 10)  // atom right edge
+  assert.equal(map.pmPosToRaw(14), 15) // end of the item's paragraph
+}
+
+// Case M4: heading + strong containing inline math — the atom coexists with
+// marker gaps (`**`) inside the same charMap.
+{
+  const md = '# head $x$ tail\n\n**bold $y$ end**\n'
+  const d = doc(
+    schema.node('heading', { level: 1 }, [text('head '), mi('x'), text(' tail')]),
+    p(text('bold '), mi('y'), text(' end'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'heading/strong with inline math must map')
+  assert.equal(map.pmPosToRaw(1), 2)   // heading content start (after '# ')
+  assert.equal(map.pmPosToRaw(6), 7)   // atom left edge
+  assert.equal(map.pmPosToRaw(7), 10)  // atom right edge
+  // paragraph2 pos 13 (heading nodeSize 1+11+1 = 13), content start 14.
+  // raw: '**bold $y$ end**' starts at 17; strong content 'bold ' at 19.
+  assert.equal(map.pmPosToRaw(14), 19)
+  assert.equal(map.pmPosToRaw(19), 24) // atom left edge ($y$ at [24,27))
+  assert.equal(map.pmPosToRaw(20), 27) // atom right edge
+}
+
+// Case M5: the `$5 and $6` currency shape. remark-math (default options, the
+// SAME instance and options Crepe's latex feature mounts) reads it as inline
+// math, so PM has a math_inline atom there too — the kernel must agree, or
+// the document degrades. Pinned as a pairing, not as "currency is text".
+{
+  const md = '$5 and $6\n'
+  const d = doc(p(mi('5 and '), text('6')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'currency-shaped inline math must still map (kernel follows the editor chain)')
+  assert.equal(map.pmPosToRaw(1), 0)
+  assert.equal(map.pmPosToRaw(2), 8)
+  assert.equal(map.pmPosToRaw(3), 9)
+}
+
+// Case M6: fail-closed is preserved — a PM doc that DISAGREES with the
+// kernel's math parse (a plain text node where the kernel proved an atom)
+// still rejects the whole map rather than guessing.
+{
+  const md = 'a $x$ b\n'
+  const map = buildProjectionMap(md, doc(p(text('a $x$ b'))))
+  assert.equal(map, null, 'PM/kernel disagreement about math still fails closed')
 }
 
 console.log('PASS kernel projection map')

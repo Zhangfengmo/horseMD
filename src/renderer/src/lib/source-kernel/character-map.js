@@ -19,8 +19,18 @@ import { rangeFromInlineCode } from './mark-map.js'
 // one `code span` in a paragraph degraded the WHOLE document's projection map
 // at attach. It gets per-value-char units instead (see inlineCodeUnits below);
 // the backtick runs become marker gaps, exactly like `**`/`*`/`~~`.
+//
+// `inlineMath` IS here (Plan 5 Task 1): ProseMirror represents `$x^2$` as a
+// single `math_inline` ATOM node (Crepe's latex feature — the TeX source
+// lives in `attrs.value`, not as text children), so PM's `content.size`
+// counts it as exactly 1. A width-1 atom unit whose raw span is the node's
+// own position (both `$` delimiters included) is the only shape that keeps
+// `content.size === visibleLength` true — the identity the projection map
+// requires. Unlike `inlineCode` (whose PM shape is a marked TEXT RUN, hence
+// per-char units), there is no PM interior to address here: a caret can sit
+// on either edge of the formula but never inside it.
 const ATOMS = new Set([
-  'image', 'imageReference', 'break', 'footnoteReference', 'html'
+  'image', 'imageReference', 'break', 'footnoteReference', 'html', 'inlineMath'
 ])
 
 const ENTITY_RE = /^&(#x[0-9a-fA-F]{1,6}|#\d{1,7}|[a-zA-Z][a-zA-Z0-9]{0,31});/

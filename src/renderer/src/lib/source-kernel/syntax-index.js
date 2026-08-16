@@ -7,9 +7,31 @@
 import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
 import { QUOTE_PREFIX } from '../markdown-preservation/block-prefix.js'
 
-const processor = unified().use(remarkParse).use(remarkGfm)
+// remark-math (Plan 5 Task 1) — the kernel chain must recognize EXACTLY the
+// syntax the editor chain recognizes, because ProjectionMap zips the two
+// trees node-for-node. Crepe's latex feature mounts `remark-math` with its
+// DEFAULT options (node_modules/@milkdown/crepe/lib/esm/feature/latex/
+// index.js:16 + :365-367) and then rewrites the mdast `math` block to
+// `{type:'code', lang:'LaTeX'}` (:370-382) before ProseMirror parses it. So
+// on the PM side `$x$` is a `math_inline` ATOM and `$$..$$` is a
+// `code_block` with `attrs.language === 'LaTeX'`.
+//
+// Without this plugin the kernel saw `an $x^2$ formula` as ONE text node
+// (16 visible chars vs PM's content.size 12) and `$$\nE=mc^2\n$$` as a
+// PARAGRAPH (vs PM's code_block) — both mismatches rejected the WHOLE
+// projection map, so ANY document containing math degraded entirely to the
+// legacy path. Mounting the same plugin with the same options is what makes
+// the two parses agree; it is deliberately NOT a place to be stricter than
+// the editor (e.g. remark-math reads `$5 and $6` as inline math — so does
+// Crepe, so the kernel must too, or the document degrades again).
+//
+// remark-math only contributes micromark/mdast-util extensions (no tree
+// TRANSFORM), so the "parse only, never runSync" rule above is unaffected:
+// every node it produces carries a real `position`.
+const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath)
 
 export function scanLines(text) {
   const lines = []

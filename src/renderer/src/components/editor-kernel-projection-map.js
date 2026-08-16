@@ -42,6 +42,16 @@ const PM_TO_MD = {
   bullet_list: ['list'],
   ordered_list: ['list'],
   list_item: ['listItem'],
+  // `math` (Plan 5 Task 1): Crepe's latex feature rewrites the mdast `math`
+  // block to `{type:'code', lang:'LaTeX'}` before the PM parse, so a
+  // `$$..$$` block is a PM `code_block` with `attrs.language === 'LaTeX'`.
+  // The kernel's own parse keeps it as mdast `math` (its remark chain has
+  // remark-math but not Crepe's rewrite visitor) — hence this pairing. It
+  // was declared here from the start but UNREACHABLE until the kernel chain
+  // gained remark-math: before that, `$$\nE=mc^2\n$$` parsed to a plain
+  // `paragraph`, `allowed.includes('paragraph')` was false, and the WHOLE
+  // document's map was rejected. Block math pairs but is never editable —
+  // see the `codeReadOnly` branch below.
   code_block: ['code', 'math'],
   table: ['table'],
   hr: ['thematicBreak'],
@@ -380,12 +390,34 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       !OPAQUE_TYPES.has(pmType)
     let charMap = null
     if (editable && pmType === 'code_block') {
-      // mdast `math` shares the PM `code_block` type but is TeX source, not
-      // the char-per-char code contract `buildCodeMap` proves — never claim
-      // a charMap for it. Otherwise, a language Crepe renders as a
-      // preview-only diagram/formula (mermaid/latex, checked
-      // case-insensitively on the PM node's own `attrs.language`) also stays
-      // non-editable, regardless of what buildCodeMap could prove.
+      // mdast `math` shares the PM `code_block` type but stays NON-EDITABLE
+      // (Plan 5 Task 1 keeps this deliberately; the task's goal was healing
+      // the whole-document degradation, not editing TeX). Two independent
+      // reasons, either of which alone is sufficient:
+      //  1. the PM node's `attrs.language` for a `$$..$$` block is always
+      //     'LaTeX' (Crepe's remarkMathBlock sets it), which is already in
+      //     READONLY_CODE_LANGUAGES — Crepe renders these as a preview, so
+      //     the block's text is not an ordinary editing surface. Lifting the
+      //     math case alone would change nothing without ALSO removing
+      //     'latex' from that set, which would equally unblock a literal
+      //     ```latex fence — a different domain, and one the gateway's
+      //     `extractLanguageStep` also consults.
+      //  2. `commitCodeLanguage` (commands/code-language.js) resolves a
+      //     language switch through the block's FENCE bytes and refuses any
+      //     block whose kernel type isn't `code` — a `$$` delimiter pair has
+      //     no place to spell a language at all. Keeping this branch force-
+      //     read-only also covers the transient where a PM code_block's
+      //     language has been switched away from 'LaTeX' while the raw
+      //     source is still spelled `$$..$$`.
+      // (Measured, for the record: `buildCodeMap` DOES map an mdast `math`
+      // node byte-exactly for the plain and `> `-quoted forms — visibleLength
+      // 6 / linePrefix '' and '> ' for `$$\nE=mc^2\n$$\n` — and fails closed
+      // on the list-indented form. So the remaining blocker is the language/
+      // command semantics above, not the character mapping.)
+      // Otherwise, a language Crepe renders as a preview-only
+      // diagram/formula (mermaid/latex, checked case-insensitively on the PM
+      // node's own `attrs.language`) also stays non-editable, regardless of
+      // what buildCodeMap could prove.
       const language = String(pm.node.attrs?.language || '').toLowerCase()
       const codeReadOnly = md.type === 'math' || READONLY_CODE_LANGUAGES.has(language)
       if (!codeReadOnly) {

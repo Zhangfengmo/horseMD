@@ -241,4 +241,81 @@ const mapOf = (src, findText = null) => {
   assert.equal(buildCharacterMap('plain\n', fake), null)
 }
 
+// ---- 行内数学（计划五 Task 1）：inlineMath 是宽度 1 的 atom unit ----
+//
+// PM 侧 `math_inline` 是 atom（node_modules/@milkdown/crepe/lib/esm/feature/
+// latex/index.js:98-104），content.size 记 1。内核侧必须同样记 1，否则
+// `content.size === visibleLength` 不成立 → projection map 整图 null → 含行内
+// 数学的文档整篇降级。raw 跨度必须覆盖两侧 `$`（光标不得落进 `$...$` 内部）。
+{
+  const src = 'an $x^2$ formula\n'
+  const { map } = mapOf(src)
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd, u.width]), [
+    ['char', 0, 1, 1], ['char', 1, 2, 1], ['char', 2, 3, 1],
+    ['atom', 3, 8, 1],
+    ['char', 8, 9, 1], ['char', 9, 10, 1], ['char', 10, 11, 1], ['char', 11, 12, 1],
+    ['char', 12, 13, 1], ['char', 13, 14, 1], ['char', 14, 15, 1], ['char', 15, 16, 1]
+  ])
+  assert.equal(map.visibleLength, 12)      // 'an ' + 1 + ' formula'
+  assert.equal(map.visibleToRaw(3), 3)     // atom 左边界（`$` 之前）
+  assert.equal(map.visibleToRaw(4), 8)     // atom 右边界（闭 `$` 之后）
+  // 4..7 是 `$x^2$` 的内部字节：没有任何可见下标映射到它们
+  assert.deepEqual([4, 5, 6, 7].filter((raw) =>
+    [...Array(map.visibleLength + 1).keys()].some((v) => map.visibleToRaw(v) === raw)), [])
+  // 选中整个公式 → raw 恰好是 `$x^2$`
+  assert.deepEqual(map.rawRangeForVisibleRange(3, 4), { from: 3, to: 8 })
+  assert.equal(src.slice(3, 8), '$x^2$')
+}
+
+// atom 位于块首/块尾、以及连续两个公式：边界不塌陷
+{
+  const { map } = mapOf('$x_1$ and $x^2$\n')
+  assert.deepEqual(map.units.map((u) => u.kind),
+    ['atom', 'char', 'char', 'char', 'char', 'char', 'atom'])
+  assert.equal(map.visibleLength, 7)
+  assert.equal(map.visibleToRaw(0), 0)
+  assert.equal(map.visibleToRaw(1), 5)
+  assert.equal(map.visibleToRaw(7), 15)
+  // 块首 atom 之前的零宽插入落在 `$` 之前（atom 不是 mark，没有 gap 可跳）
+  assert.equal(map.rawNeutralInsert(0), 0)
+  assert.equal(map.rawNeutralInsert(7), 15)
+}
+
+// 数学嵌在 strong 里：容器递归 + atom 共存，gap（`**`）语义不变
+{
+  const src = '**bold $x$ end**\n'
+  const { map } = mapOf(src)
+  assert.equal(map.visibleLength, 10)      // 'bold ' + 1 + ' end'
+  assert.equal(map.visibleToRaw(5), 7)     // atom 左边界
+  assert.equal(map.visibleToRaw(6), 10)    // atom 右边界
+  assert.equal(map.rawNeutralInsert(10), 16) // 块尾插入落在闭 `**` 之外
+}
+
+// CRLF：atom 与 linebreak unit 共存
+{
+  const { map } = mapOf('a $x$ b\r\nsecond\r\n')
+  assert.equal(map.visibleLength, 13)      // 'a ' + 1 + ' b\r\nsecond'
+  assert.equal(map.visibleToRaw(2), 2)
+  assert.equal(map.visibleToRaw(3), 5)     // 跳过整个 `$x$`
+  assert.deepEqual(map.units.filter((u) => u.kind === 'linebreak')
+    .map((u) => [u.rawStart, u.rawEnd]), [[8, 9]]) // '\r' 是普通 char，'\n' 才跨行
+}
+
+// 货币形状（`$5 and $6`）：内核跟随编辑器链，同样是 atom + 文本（见
+// test-source-kernel-index.mjs 的负面集合说明）——两侧一致才不会整图 null
+{
+  const { map } = mapOf('$5 and $6\n')
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]),
+    [['atom', 0, 8], ['char', 8, 9]])
+  assert.equal(map.visibleLength, 2)
+}
+
+// 转义的 `\$x\$`：仍是 escape unit，不是 atom（形状未变）
+{
+  const { map } = mapOf('a \\$x\\$ b\n')
+  assert.deepEqual(map.units.map((u) => u.kind),
+    ['char', 'char', 'escape', 'char', 'escape', 'char', 'char'])
+  assert.equal(map.visibleLength, 7)
+}
+
 console.log('PASS source-kernel character map')

@@ -36,7 +36,12 @@ const schema = new Schema({
     code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } },
     // Plan 4 Task 4 — needed for the quote-toggle end-to-end cases (mirrors
     // preset-commonmark's real `blockquote` shape: one-or-more block content).
-    blockquote: { content: 'block+', group: 'block' }
+    blockquote: { content: 'block+', group: 'block' },
+    // Plan 5 Task 1 — Crepe's latex feature: inline math is an ATOM carrying
+    // its TeX source in `attrs.value`; BLOCK math is a `code_block` whose
+    // `attrs.language` is 'LaTeX' (crepe's remarkMathBlock rewrites the mdast
+    // `math` node to `{type:'code', lang:'LaTeX'}` before the PM parse).
+    math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } }
   },
   // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
   // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
@@ -57,6 +62,7 @@ const li = (checked, ...c) => schema.node('list_item', { checked }, c)
 const bl = (...c) => schema.node('bullet_list', null, c)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
+const mif = (value) => schema.node('math_inline', { value })
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -123,7 +129,17 @@ const FIXTURE_DOCS = {
   // above): a doc whose last top-level child is not paragraph/heading always
   // gains one, so the fixture bakes it in directly rather than relying on
   // the (here bypassed for a hand-built parse) append to add it again.
-  '> 甲乙\n': () => doc(bq(p(text('甲乙'))), p())
+  '> 甲乙\n': () => doc(bq(p(text('甲乙'))), p()),
+  // Plan 5 Task 1 fixtures: a document carrying BOTH inline and block math.
+  // Before the kernel chain gained remark-math this whole document degraded
+  // to legacy at attach (projection map null), so NOTHING in it was
+  // kernel-editable — including its ordinary paragraphs. These fixtures
+  // mirror the live Crepe parse exactly: `$x$` -> math_inline atom,
+  // `$$..$$` -> code_block(language 'LaTeX').
+  'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲乙\n': () => doc(
+    p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲乙'))),
+  'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲X乙\n': () => doc(
+    p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲X乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1407,6 +1423,40 @@ for (const [markName, from, to, label] of [
   assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n', 'kernel bytes untouched')
   assert.ok(h.view.state.doc.eq(doc(cb('js', 'ab'))), 'view untouched')
   assert.ok(h.notifications.length > before, 'refusal notifies')
+}
+
+// ---- Plan 5 Task 1: math domain, degradation healed at the controller
+// level. The proof is end-to-end and byte-level: attach succeeds on a
+// math-bearing document (it used to return false -> full legacy degradation),
+// and a keystroke in an ORDINARY paragraph of that document commits the exact
+// expected bytes with the math left untouched.
+{
+  const md = 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲乙\n'
+  const h = makeHarness(md, doc(
+    p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true,
+    'a document containing inline AND block math attaches (no degradation)')
+
+  // Block math is paired but non-editable (charMap null) — it occupies a
+  // structural slot so the rest of the document stays mapped.
+  const pairs = h.controller.kernel.map.blockPairs
+  assert.equal(pairs.length, 3)
+  assert.equal(pairs[1].mdBlock.type, 'math')
+  assert.equal(pairs[1].charMap, null, 'block math stays read-only for now')
+
+  // Type 'X' between 甲 and 乙. PM: paragraph1 nodeSize 7, code_block
+  // nodeSize 8 -> paragraph3 at pos 15, content start 16, caret 17.
+  const tr = h.view.state.tr.insertText('X', 17)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in a plain paragraph of a math document is allowed')
+  assert.equal(h.controller.kernel.doc.text, 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲X乙\n',
+    'commit is byte-exact and leaves both math shapes untouched')
+  assert.deepEqual(h.changes.at(-1), ['a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲X乙\n', false])
+  // Map rebound on the new revision: the inline-math atom still resolves to
+  // its own `$...$` byte span, unmoved.
+  assert.equal(h.controller.kernel.map.pmPosToRaw(3), 2)
+  assert.equal(h.controller.kernel.map.pmPosToRaw(4), 5)
 }
 
 console.log('PASS kernel mode headless')
