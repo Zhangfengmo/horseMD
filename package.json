@@ -201,6 +201,7 @@
     "test:quoted-block-source-ui": "node scripts/test-quoted-block-source-ui.mjs",
     "test:trailing-space-source-ui": "node scripts/test-trailing-space-source-ui.mjs",
     "test:authored-ordered-delimiter-ui": "node scripts/test-authored-ordered-delimiter-ui.mjs",
+    "test:codeblock-crlf-ui": "node scripts/test-codeblock-crlf-ui.mjs",
     "test:kernel-mode-ui": "node scripts/test-kernel-mode-ui.mjs",
     "test:kernel-ime-ui": "node scripts/test-kernel-ime-ui.mjs",
     "test:kernel-nodeview-ui": "node scripts/test-kernel-nodeview-ui.mjs",
