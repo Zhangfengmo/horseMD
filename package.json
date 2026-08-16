@@ -185,7 +185,7 @@
     "test:step-source-mapper": "node scripts/test-step-source-mapper.mjs",
     "test:source-transaction-sync": "node scripts/test-source-transaction-sync.mjs",
     "test:source-transaction-sync-ui": "node scripts/test-transaction-source-sync-ui.mjs && TRANSACTION_CRLF=1 CDP_PORT=10135 node scripts/test-transaction-source-sync-ui.mjs && TRANSACTION_CRLF=1 TRANSACTION_BOM=1 CDP_PORT=10136 node scripts/test-transaction-source-sync-ui.mjs",
-    "test:source-kernel": "node scripts/test-source-kernel-document.mjs && node scripts/test-source-kernel-index.mjs && node scripts/test-source-kernel-charmap.mjs && node scripts/test-source-kernel-codemap.mjs && node scripts/test-source-kernel-commands.mjs && node scripts/test-source-kernel-indent.mjs && node scripts/test-source-kernel-history.mjs && node scripts/test-source-kernel-statemachine.mjs",
+    "test:source-kernel": "node scripts/test-source-kernel-document.mjs && node scripts/test-source-kernel-index.mjs && node scripts/test-source-kernel-charmap.mjs && node scripts/test-source-kernel-codemap.mjs && node scripts/test-source-kernel-commands.mjs && node scripts/test-source-kernel-indent.mjs && node scripts/test-source-kernel-history.mjs && node scripts/test-source-kernel-statemachine.mjs && node scripts/test-source-kernel-markmap.mjs",
     "test:list-intent-cross-block-ui": "node scripts/test-list-intent-cross-block-ui.mjs",
     "test:save-reopen-smoke-ui": "node scripts/test-save-reopen-smoke-ui.mjs",
     "test:family-matrix-ui": "FAMILY_FILES=\"scripts/fixtures/family/long-mixed.md,scripts/fixtures/family/quote-heavy.md,scripts/fixtures/family/literal-shapes.md,scripts/fixtures/family/simple-mixed.md\" node scripts/test-family-matrix-ui.mjs",
