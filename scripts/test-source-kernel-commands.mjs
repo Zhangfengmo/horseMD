@@ -759,16 +759,13 @@ const wrapUnwrapRoundtrip = (kind, src, needle) => {
 
   // Round-trip: build fresh doc/index/map over the WRAPPED text and unwrap
   // straight back from the marked word (a realistic "select the rendered
-  // bold word, click bold again" scenario). inlineCode is an ATOM in the
-  // character map (character-map.js's ATOMS set) — its content bytes can
-  // never appear alone as a visible selection, only the whole span
-  // (backticks included) can be selected as one indivisible unit — so its
-  // round-trip selection targets the atom's OUTER bounds instead of the
-  // content-only bounds every other kind uses.
+  // bold word, click bold again" scenario). Since P4-3.5 inlineCode maps as
+  // per-value-char units (no more atom), so its round-trip selection targets
+  // the content-only bounds exactly like every other kind.
   const doc2 = createMarkdownDocument(expectedWrapped)
   const index2 = buildSyntaxIndex(expectedWrapped)
-  const selFrom = kind === 'inlineCode' ? rawFrom : rawFrom + marker.length
-  const selTo = kind === 'inlineCode' ? rawTo + 2 * marker.length : rawTo + marker.length
+  const selFrom = rawFrom + marker.length
+  const selTo = rawTo + marker.length
   const { map: map2 } = blockSetup(expectedWrapped, selFrom)
   const visFrom2 = visStartFor(map2, selFrom)
   const visTo2 = visEndFor(map2, selTo)
@@ -930,8 +927,8 @@ wrapUnwrapRoundtrip('delete', 'a strike b\r\n', 'strike')
   assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '~~a **bold** c~~\n')
 }
 
-// A selection spanning the whole paragraph, including an inlineCode atom,
-// is a legal WRAP around the entire content (the atom sits strictly inside
+// A selection spanning the whole paragraph, including an inlineCode span,
+// is a legal WRAP around the entire content (the span sits strictly inside
 // the selection — full containment, not a straddle).
 {
   const src = 'a `code` b\n'
@@ -939,6 +936,61 @@ wrapUnwrapRoundtrip('delete', 'a strike b\r\n', 'strike')
   const r = toggleInlineMark({ doc, index, map, visFrom: 0, visTo: map.visibleLength, kind: 'strong' })
   assert.equal(r.ok, true, r.code)
   assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '**a `code` b**\n')
+}
+
+// ---- P4-3.5: per-char inlineCode units ----
+
+// Padded span unwrap: `` ` x ` `` renders as value 'x'; selecting that value
+// and toggling code off must remove backticks AND the stripped padding
+// spaces (paddedInlineCodeAt), restoring the bare value.
+{
+  const src = 'a ` x ` b\n'
+  const rawFrom = src.indexOf('x')
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  assert.ok(map, 'padded span must map')
+  const r = toggleInlineMark({
+    doc, index, map,
+    visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawFrom + 1),
+    kind: 'inlineCode'
+  })
+  assert.equal(r.ok, true, r.code)
+  const restored = applySourceTransaction(doc, r.transaction)
+  assert.equal(restored.doc.text, 'a x b\n')
+  assert.deepEqual(r.transaction.selection, { anchor: 2, head: 3 })
+}
+
+// Sub-span of an existing code span's content (newly selectable now that the
+// span is per-char units): wrapping it with ANY kind would inject literal
+// marker bytes into the code content → refuse for every kind.
+{
+  const src = 'a `abcd` b\n'
+  const rawFrom = src.indexOf('bc')
+  const rawTo = rawFrom + 2
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  for (const kind of ['strong', 'inlineCode']) {
+    assert.deepEqual(
+      toggleInlineMark({
+        doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind
+      }),
+      { ok: false, code: 'unsupported-structure' },
+      `sub-span wrap inside code content must refuse (${kind})`
+    )
+  }
+}
+
+// Exact-cover unwrap of a MULTI-char span through the normal inlineMarkAt
+// path (the atom fallback is gone): select the rendered 'code' of 'a `code`
+// b', toggle code → backticks removed.
+{
+  const src = 'a `code` b\n'
+  const rawFrom = src.indexOf('code')
+  const rawTo = rawFrom + 4
+  const { doc, index, map } = blockSetup(src, rawFrom)
+  const r = toggleInlineMark({
+    doc, index, map, visFrom: visStartFor(map, rawFrom), visTo: visEndFor(map, rawTo), kind: 'inlineCode'
+  })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, 'a code b\n')
 }
 
 console.log('PASS source-kernel commands (toggleInlineMark)')

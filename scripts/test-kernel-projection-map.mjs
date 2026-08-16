@@ -815,4 +815,47 @@ console.log('--- kernel projection map ---')
   assert.equal(map.pmPosToRaw(paraPair.pmPos + 1), md.indexOf('尾'), 'the paragraph maps correctly')
 }
 
+// --- P4-3.5 headline regression: a document CONTAINING a multi-char inline
+// code span must map end-to-end. Before the fix, character-map.js collapsed
+// the whole `` `code` `` span to ONE width-1 atom unit while PM keeps a
+// 4-char marked text run — `content.size === visibleLength` failed for the
+// paragraph and the WHOLE document degraded at attach (reviewer-probed,
+// pre-existing since Plan 2). Raw 'a `code` b\n': a=0 sp=1 `=2 c=3 o=4 d=5
+// e=6 `=7 sp=8 b=9 \n=10. Visible 'a code b' (8 chars, contentPos 1).
+{
+  const md = 'a `code` b\n'
+  const d = doc(p(text('a code b'))) // marks don't affect content.size; the
+  // schema here has none — the identity check is a pure size comparison.
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'doc with a multi-char code span must map (attach-degradation fix)')
+  // PM pos 3 = visible boundary 2 (right before rendered 'c'). The
+  // gap-before caret convention resolves it to raw 2 (before the opening
+  // backtick); the gap-aware range START resolves to raw 3 (the content
+  // itself) — same split as strong/emphasis markers.
+  assert.equal(map.pmPosToRaw(3), 2)
+  assert.equal(map.pmPosToRawStart(3), 3)
+  assert.equal(map.pmPosToRaw(7), 7) // after 'e' (code content end, before `)
+  assert.equal(map.pmPosToRaw(8), 9) // after the space following the span
+  assert.equal(map.pmPosToRaw(9), 10) // content end (after 'b')
+  // caret restore into the code content works per-char
+  assert.deepEqual(map.rawToPmPos(5), { pos: 5, atom: false })
+  // both edges of the opening-backtick gap collapse onto the same PM
+  // boundary (pos 3) — the marker has no PM interior.
+  assert.deepEqual(map.rawToPmPos(2), { pos: 3, atom: false })
+  assert.deepEqual(map.rawToPmPos(3), { pos: 3, atom: false })
+}
+
+// Same, with a second real paragraph after it — the doc-wide degradation was
+// the bug, so pin that OTHER blocks stay mapped too.
+{
+  const md = 'a `code` b\n\n甲乙\n'
+  const d = doc(p(text('a code b')), p(text('甲乙')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map)
+  assert.equal(map.blockPairs.length, 2)
+  // paragraph2 pmPos 10, contentPos 11; raw: 甲=12 乙=13.
+  assert.equal(map.pmPosToRaw(11), 12) // before 甲
+  assert.equal(map.pmPosToRaw(12), 13) // between 甲 and 乙
+}
+
 console.log('PASS kernel projection map')

@@ -63,33 +63,67 @@ function collectOverlapRanges(node, out) {
   return out
 }
 
-// inlineCode is an ATOM in the character map (character-map.js's ATOMS set)
-// — the whole `` `code` `` span collapses to ONE indivisible visible unit,
-// so its content bytes (excluding backticks) can never be independently
-// selected via visFrom/visTo the way strong/emphasis/delete content can. A
-// real "select this existing inline-code span, toggle code off" selection
-// therefore always resolves rawFrom/rawTo to the ATOM's full outer bounds
-// (backticks included), which `inlineMarkAt`'s content-only exact match will
-// never see. Detect that specific shape directly — an inlineCode child whose
-// own [start,end) equals [rawFrom,rawTo) exactly — then derive its
-// open/close/content split via mark-map.js's exported `rangeFromInlineCode`
-// (the same backtick-run-counting algorithm `inlineMarkAt` itself uses; not
-// duplicated here).
-function inlineCodeAtomAt(block, text, rawFrom, rawTo) {
+// Since P4-3.5 an inlineCode span maps as per-VALUE-char units (no more
+// width-1 atom — see character-map.js's inlineCodeUnits), so selecting the
+// rendered code text resolves rawFrom/rawTo to the value's own byte range and
+// `inlineMarkAt`'s exact content match handles the common unwrap directly.
+// One shape it can't see: a PADDED span (`` ` x ` `` — CommonMark strips one
+// leading+trailing space, the everyday case being a literal backtick shown
+// via `` `` ` `` ``), where the char map's units cover only the VALUE bytes,
+// so the selection resolves one byte inside the raw content on each edge.
+// Accept that as a same-kind exact cover too: open/close ranges are widened
+// to swallow the padding spaces along with the backtick runs, restoring the
+// bare value on unwrap.
+function paddedInlineCodeAt(block, text, rawFrom, rawTo) {
   if (!block?.node) return null
-  let node = null
+  let found = null
   const visit = (n) => {
     for (const child of n.children || []) {
-      if (child.type === 'inlineCode' &&
-          child.position?.start?.offset === rawFrom &&
-          child.position?.end?.offset === rawTo) {
-        node = child
+      if (child.type === 'inlineCode') {
+        const range = rangeFromInlineCode(child, text)
+        if (range &&
+            range.contentRange.from + 1 === rawFrom &&
+            range.contentRange.to - 1 === rawTo &&
+            text[range.contentRange.from] === ' ' &&
+            text[range.contentRange.to - 1] === ' ') {
+          found = {
+            type: 'inlineCode',
+            openRange: { from: range.openRange.from, to: rawFrom },
+            closeRange: { from: rawTo, to: range.closeRange.to },
+            contentRange: { from: rawFrom, to: rawTo }
+          }
+        }
       }
       if (child.children) visit(child)
     }
   }
   visit(block.node)
-  return node ? rangeFromInlineCode(node, text) : null
+  return found
+}
+
+// True if [rawFrom, rawTo) sits entirely inside an existing inline-code
+// span's content. Newly REACHABLE since P4-3.5 (an atom's interior could
+// never be selected; per-char units make sub-span selections real): wrapping
+// a sub-span of literal code content with ANY marker would just inject
+// marker bytes into the code span (rendered literally, or worse, a nested-
+// backtick mess for kind inlineCode) — refuse for every kind. Exact/padded
+// covers are handled (unwrap or different-kind reject) before this check.
+function insideInlineCodeContent(block, text, rawFrom, rawTo) {
+  if (!block?.node) return false
+  let inside = false
+  const visit = (n) => {
+    for (const child of n.children || []) {
+      if (child.type === 'inlineCode') {
+        const range = rangeFromInlineCode(child, text)
+        if (range && rawFrom >= range.contentRange.from && rawTo <= range.contentRange.to) {
+          inside = true
+        }
+      }
+      if (child.children) visit(child)
+    }
+  }
+  visit(block.node)
+  return inside
 }
 
 // True if [rawFrom, rawTo) straddles some existing mark node's byte span
@@ -142,11 +176,12 @@ export function toggleInlineMark({ doc, index, map, visFrom, visTo, kind }) {
     return { ok: false, code: 'unmapped-selection' }
   }
 
-  // Step 3: exact-cover match against an existing mark. inlineCode's atom
-  // shape needs the fallback above (see inlineCodeAtomAt) since its content
-  // can never appear as rawFrom/rawTo on its own.
+  // Step 3: exact-cover match against an existing mark. A PADDED inline-code
+  // span needs the fallback (see paddedInlineCodeAt): its stripped padding
+  // spaces sit between the selectable value bytes and the backtick runs, so
+  // `inlineMarkAt`'s raw-content exact match never sees the selection.
   const existing = inlineMarkAt(index, rawFrom, rawTo) ||
-    (kind === 'inlineCode' ? inlineCodeAtomAt(block, doc.text, rawFrom, rawTo) : null)
+    (kind === 'inlineCode' ? paddedInlineCodeAt(block, doc.text, rawFrom, rawTo) : null)
   if (existing) {
     if (existing.type !== kind) return { ok: false, code: 'unsupported-structure' }
     const { openRange, closeRange, contentRange } = existing
@@ -168,8 +203,11 @@ export function toggleInlineMark({ doc, index, map, visFrom, visTo, kind }) {
   }
 
   // Step 3b: no exact cover — reject any selection that partially straddles
-  // an existing mark's byte span (neither wrap-around nor sub-span).
-  if (hasPartialOverlap(block, rawFrom, rawTo)) {
+  // an existing mark's byte span (neither wrap-around nor sub-span), and any
+  // sub-span of an inline-code span's literal content (see
+  // insideInlineCodeContent above).
+  if (hasPartialOverlap(block, rawFrom, rawTo) ||
+      insideInlineCodeContent(block, doc.text, rawFrom, rawTo)) {
     return { ok: false, code: 'unsupported-structure' }
   }
 

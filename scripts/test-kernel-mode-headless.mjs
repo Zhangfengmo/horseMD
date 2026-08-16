@@ -1127,20 +1127,17 @@ const toggleVia = (h, markType, from, to) => {
 // Case M4 (ADR pin — the pre-commit map guard, `requireMap`): a toggle whose
 // RESULT document cannot rebuild a projection map refuses FAIL-CLOSED,
 // BEFORE any mutation — bytes, view, history all unchanged, with a
-// notification. Two shapes hit it today (probe evidence in the Task 3
+// notification. One shape still hits it today (probe evidence in the Task 3
 // report):
 //  - highlight (ANY selection): the committed `==` bytes are literal text
 //    to the kernel chain (no highlight plugin there) but invisible to the
 //    Crepe parse — the block's content-size identity check always fails.
-//  - inline code over a MULTI-char selection: PM keeps a marked text run of
-//    N chars while the kernel charMap collapses the whole span to ONE atom
-//    unit — sizes disagree for N > 1. (N == 1 coincides and genuinely
-//    works — pinned separately in Case M4b.)
-// When the projection map learns these pairings, these assertions are the
-// ones to flip.
+// (Multi-char inline code used to be pinned here too — P4-3.5's per-char
+// inlineCode units healed it; it now COMMITS, see Case M4b below.)
+// When the projection map learns the highlight pairing, this assertion is
+// the one to flip.
 for (const [markName, from, to, label] of [
-  ['highlight', 2, 3, 'highlight'],
-  ['inlineCode', 2, 4, 'multi-char inline code']
+  ['highlight', 2, 3, 'highlight']
 ]) {
   const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
@@ -1159,11 +1156,9 @@ for (const [markName, from, to, label] of [
   )
 }
 
-// Case M4b: a SINGLE-char inline-code wrap is genuinely sound — the PM run
-// width (1) equals the charMap atom width (1), the identity check holds,
-// and the rebound map stays live (no lock-up). Every boundary around the
-// atom maps consistently (the atom's raw span covers backticks + content,
-// interior positions are unmappable by design).
+// Case M4b: inline-code wrap/unwrap commits end-to-end — single-char AND,
+// since P4-3.5's per-char inlineCode units, multi-char too (the old atom
+// unit made `requireMap` refuse any N>1 wrap; the flipped pin lives here).
 {
   const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
@@ -1175,13 +1170,37 @@ for (const [markName, from, to, label] of [
   assert.ok(h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙')))),
     'the reconciled doc carries a real inlineCode mark')
   assert.ok(h.controller.kernel.map, 'the map rebinds — no post-toggle lock-up')
-  // Unwrap it again: the atom's full outer span [pmFrom,pmTo) resolves via
-  // mark-toggle.js's inlineCodeAtomAt.
+  // Unwrap it again: the marked run's content range resolves through the
+  // normal inlineMarkAt exact-cover path (the atom fallback is gone).
   const tr2 = toggleVia(h, schema.marks.inlineCode, 2, 3)
   const verdict2 = dispatchThrough(h, tr2)
   await flushMicrotasks()
   assert.deepEqual(verdict2, { veto: true })
   assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'single-char code unwrap restores the original')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+
+  // Multi-char wrap (P4-3.5 flipped pin): select 乙丙, toggle code →
+  // requireMap passes because the reparse now maps (per-char units), the
+  // source gains the backticks byte-exactly, selection stays on the content.
+  const before = h.notifications.length
+  const tr3 = toggleVia(h, schema.marks.inlineCode, 2, 4)
+  const verdict3 = dispatchThrough(h, tr3)
+  await flushMicrotasks()
+  assert.deepEqual(verdict3, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲`乙丙`\n', 'multi-char code wrap commits, byte-exact')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')])))),
+    'the reconciled doc carries a real multi-char inlineCode run')
+  assert.ok(h.controller.kernel.map, 'the rebound map is live (no lock-up)')
+  assert.equal(h.view.state.selection.from, 2, 'content stays selected: from')
+  assert.equal(h.view.state.selection.to, 4, 'content stays selected: to')
+  assert.equal(h.notifications.length, before, 'a successful multi-char wrap never toasts')
+
+  // …and unwrap straight back.
+  const tr4 = toggleVia(h, schema.marks.inlineCode, 2, 4)
+  const verdict4 = dispatchThrough(h, tr4)
+  await flushMicrotasks()
+  assert.deepEqual(verdict4, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'multi-char code unwrap restores the original')
   assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
 }
 

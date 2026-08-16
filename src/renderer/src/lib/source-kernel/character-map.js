@@ -7,12 +7,20 @@
 // Fail-closed contract: any block this module can't PROVE a lossless mapping
 // for returns `null` from buildCharacterMap — callers must not guess.
 import { decodeNamedCharacterReference } from 'decode-named-character-reference'
+import { rangeFromInlineCode } from './mark-map.js'
 
 // Inline "atom" nodes: entire node is one indivisible visible unit — a caret
 // may sit on either edge but never inside. Phase 1 needs only nodes whose
 // raw span is meaningfully different from a simple decoded-text run.
+//
+// `inlineCode` is deliberately NOT here (P4-3.5 fix): ProseMirror represents
+// an inline-code span as a MARKED TEXT RUN of N characters, so a width-1 atom
+// unit made `content.size === visibleLength` fail for every multi-char span —
+// one `code span` in a paragraph degraded the WHOLE document's projection map
+// at attach. It gets per-value-char units instead (see inlineCodeUnits below);
+// the backtick runs become marker gaps, exactly like `**`/`*`/`~~`.
 const ATOMS = new Set([
-  'inlineCode', 'image', 'imageReference', 'break', 'footnoteReference', 'html'
+  'image', 'imageReference', 'break', 'footnoteReference', 'html'
 ])
 
 const ENTITY_RE = /^&(#x[0-9a-fA-F]{1,6}|#\d{1,7}|[a-zA-Z][a-zA-Z0-9]{0,31});/
@@ -114,6 +122,50 @@ function textUnits(text, node) {
   return r <= end ? units : null
 }
 
+// Per-value-char units for an mdast `inlineCode` node (P4-3.5). The node has
+// no children — its text lives in `.value` — and its position spans the
+// backtick runs. Open/close run widths come from counting the literal
+// backtick runs off the raw slice (mark-map.js's exported
+// `rangeFromInlineCode`, the same algorithm `inlineMarkAt` uses). CommonMark
+// can normalize the value relative to the raw content bytes; probed against
+// this repo's real parser (2026-08-16):
+//   `code`      -> value 'code'  (raw content === value, the common case)
+//   ` x `       -> value 'x'     (ONE leading + trailing space stripped when
+//                                 both edges are spaces and the content has
+//                                 non-space — `` ` `` (literal backtick via
+//                                 padding) is the everyday instance)
+//   `  x  `     -> value ' x '   (still exactly one space per edge)
+//   `  ` (all-space) -> kept verbatim (no strip)
+//   `x\ny`      -> value 'x\ny'  (line endings are KEPT in the mdast value,
+//                                 NOT converted to spaces — raw === value)
+//   `\nx `      -> value 'x'     (an EDGE line ending strips like a space;
+//                                 this shape diverges from the space-pad rule
+//                                 below and fails closed)
+// Proof contract: the raw content slice must equal the value exactly, or
+// equal ' ' + value + ' ' (the one verifiable CommonMark space-strip). Any
+// other divergence returns null — the block (and, per the projection map's
+// convention for prose blocks, the whole map) fails closed rather than
+// guessing an alignment.
+function inlineCodeUnits(text, node) {
+  const range = rangeFromInlineCode(node, text)
+  if (!range) return null
+  const value = String(node.value ?? '')
+  const slice = text.slice(range.contentRange.from, range.contentRange.to)
+  let r
+  if (slice === value) r = range.contentRange.from
+  else if (slice === ' ' + value + ' ') r = range.contentRange.from + 1
+  else return null
+  const units = []
+  let v = 0
+  while (v < value.length) {
+    const ch = String.fromCodePoint(value.codePointAt(v))
+    units.push({ rawStart: r, rawEnd: r + ch.length, width: ch.length, kind: 'char' })
+    r += ch.length
+    v += ch.length
+  }
+  return units
+}
+
 function collectUnits(text, node) {
   const units = []
   for (const child of node.children || []) {
@@ -124,6 +176,10 @@ function collectUnits(text, node) {
       units.push({ rawStart: s, rawEnd: e, width: 1, kind: 'atom' })
     } else if (child.type === 'text') {
       const t = textUnits(text, child)
+      if (!t) return null
+      units.push(...t)
+    } else if (child.type === 'inlineCode') {
+      const t = inlineCodeUnits(text, child)
       if (!t) return null
       units.push(...t)
     } else if (child.children) {
@@ -145,12 +201,13 @@ function collectUnits(text, node) {
 // `boundaries` records, for each visible index, the rawEnd of whatever unit
 // was JUST consumed — correct whenever the next unit's raw bytes pick up
 // exactly where the last one left off, but AMBIGUOUS the moment a gap of
-// unit-less raw bytes sits between two units. The only place such a gap
-// exists in this schema is a strong/emphasis/delete node's own opening OR
-// closing delimiter: `collectUnits` recurses into these nodes' children
-// without ever emitting a unit for the marker itself, so entering (or
-// leaving) one from/to adjacent content leaves the marker's bytes belonging
-// to no unit. `boundaries` resolves that visible index to the position
+// unit-less raw bytes sits between two units. Such gaps exist in this schema
+// for a strong/emphasis/delete (or link/…) node's own opening OR closing
+// delimiter — `collectUnits` recurses into these nodes' children without
+// ever emitting a unit for the marker itself — and, since P4-3.5, for an
+// inlineCode span's backtick runs (plus its stripped padding space, when
+// present): entering (or leaving) one from/to adjacent content leaves the
+// marker's bytes belonging to no unit. `boundaries` resolves that visible index to the position
 // BEFORE the gap (end of whatever came before) — correct as a range END
 // (content genuinely ends there, the gap is irrelevant to what was just
 // consumed) but WRONG as a range START: naively used as `from`, it silently

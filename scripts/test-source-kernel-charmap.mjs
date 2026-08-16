@@ -62,13 +62,68 @@ const mapOf = (src, findText = null) => {
   assert.equal(map.visibleToRaw(2), 6)
 }
 
-// 行内 atom（inlineCode/image）：整体一个不可拆单元
+// 行内 atom（image 等）：整体一个不可拆单元
 {
-  const src = '前 `code` 后\n'
+  const src = '前 ![a](x.png) 后\n'
   const { map } = mapOf(src)
   const atom = map.units.find((u) => u.kind === 'atom')
   assert.ok(atom)
-  assert.equal(src.slice(atom.rawStart, atom.rawEnd), '`code`')
+  assert.equal(src.slice(atom.rawStart, atom.rawEnd), '![a](x.png)')
+}
+
+// inlineCode 逐字符单元（P4-3.5 attach 退化修复）：多字符 code span 不再是
+// width-1 atom —— PM 侧是 N 字符的 marked text run，旧 atom 单元使
+// content.size === visibleLength 恒等式对 N>1 失败，整篇文档在 attach 时
+// 退化。现在 value 每字符一个 kind:'char' 单元（raw:visible 1:1），反引号
+// run 是 marker 缺口（与 ** 同机制）。
+{
+  const src = '前 `code` 后\n'
+  const { map } = mapOf(src)
+  assert.equal(map.visibleLength, 8) // 前 sp c o d e sp 后
+  const codeUnits = map.units.slice(2, 6)
+  assert.deepEqual(codeUnits.map((u) => src.slice(u.rawStart, u.rawEnd)), ['c', 'o', 'd', 'e'])
+  assert.ok(codeUnits.every((u) => u.kind === 'char' && u.width === 1))
+  // 选中渲染出的 code 内容 → 精确落在 value 字节上（缺口感知起点跳过开
+  // 反引号；终点停在闭反引号前）。
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 6), { from: 3, to: 7 })
+  assert.equal(src.slice(3, 7), 'code')
+}
+
+// 双反引号 run + 内容含单反引号：``a`b`` → value 'a`b'，raw 1:1
+{
+  const src = 'x ``a`b`` y\n'
+  const { map } = mapOf(src)
+  assert.equal(map.visibleLength, 7) // x sp a ` b sp y
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 5), { from: 4, to: 7 })
+  assert.equal(src.slice(4, 7), 'a`b')
+}
+
+// CommonMark 空格剥离：` x ` → value 'x'（两端各剥一个空格）。剥离的空格是
+// 可证明的（slice === ' '+value+' '），按 marker 缺口处理，value 字节仍逐
+// 字符映射 —— 展示字面反引号的 `` ` `` 是日常实例，不能让它整篇退化。
+{
+  const src = 'a ` x ` b\n'
+  const { map } = mapOf(src)
+  assert.ok(map, 'padded code span must still map')
+  assert.equal(map.visibleLength, 5) // a sp x sp b
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 3), { from: 4, to: 5 })
+  assert.equal(src.slice(4, 5), 'x')
+}
+{
+  const src = 'a `` ` `` b\n' // 字面反引号
+  const { map } = mapOf(src)
+  assert.ok(map)
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 3), { from: 5, to: 6 })
+  assert.equal(src.slice(5, 6), '`')
+}
+
+// raw↔value 其他分歧（边缘换行也参与剥离：`\nx ` → value 'x'，slice 既不
+// 等于 value 也不等于 ' '+value+' '）→ 整块 fail-closed（null）
+{
+  const src = 'a `\nx ` b\n'
+  const idx = buildSyntaxIndex(src)
+  const block = idx.blockAt(0)
+  assert.equal(buildCharacterMap(src, block.node), null)
 }
 
 // 缺口感知的选区起点（Plan 4 Task 2 复审修复）：strong/emphasis/delete 递归

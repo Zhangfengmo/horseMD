@@ -412,11 +412,12 @@ export function createKernelMode({
         }
         // `requireMap` refuses (pre-commit, everything untouched) any toggle
         // whose RESULT document cannot rebuild a projection map — today that
-        // is inlineCode (PM marked-run vs kernel atom-unit size mismatch)
-        // and highlight (`==` bytes visible to the kernel chain, invisible
+        // is highlight (`==` bytes visible to the kernel chain, invisible
         // to the Crepe parse); see applyKernelTransaction's own comment and
-        // the Task 3 report ADR. applyKernelTransaction notifies on every
-        // failure path itself.
+        // the Task 3 report ADR. (inlineCode used to hit it too — P4-3.5's
+        // per-char inlineCode units healed that pairing, so code toggles of
+        // any length now pass the guard.) applyKernelTransaction notifies
+        // on every failure path itself.
         applyKernelTransaction(routed.transaction, view, { requireMap: true })
         return { veto: true }
       }
@@ -661,13 +662,12 @@ export function createKernelMode({
   // kernel/history/view mutation — unless the post-transaction document
   // provably rebuilds a projection map. The mark-toggle route demands this
   // because a byte-successful toggle can produce a document the projection
-  // layer cannot pair: PM represents inline code as a MARKED TEXT RUN of N
-  // characters while the kernel's character map collapses the whole
-  // `` `code` `` span to ONE atom unit, and a highlight's `==` bytes are
-  // literal text to the kernel chain (no highlight plugin there) but
-  // invisible to the Crepe parse — either way `buildProjectionMap`'s
-  // content-size identity check rejects the block and the whole map comes
-  // back null (probe evidence in the Task 3 report). Without this guard the
+  // layer cannot pair: a highlight's `==` bytes are literal text to the
+  // kernel chain (no highlight plugin there) but invisible to the Crepe
+  // parse, so `buildProjectionMap`'s content-size identity check rejects
+  // the block and the whole map comes back null (probe evidence in the
+  // Task 3 report; inline code used to be the second such shape until
+  // P4-3.5 gave it per-char units). Without this guard the
   // toggle would COMMIT, reconcile, then fail the rebind — leaving a
   // byte-correct but unmappable document where every subsequent edit vetoes
   // with UNMAPPED (a lock-up trap). Refusing up front keeps the toggle
