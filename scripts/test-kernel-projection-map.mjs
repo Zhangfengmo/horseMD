@@ -1059,7 +1059,32 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
   assert.equal(map.pmPosToRaw(3), 9)
 }
 
-// Case M6: fail-closed is preserved — a PM doc that DISAGREES with the
+// Case M6: list-embedded BLOCK math still rejects the WHOLE map — pinned as
+// today's behavior, not folklore. The cause is NOT math-specific: Milkdown's
+// `list_item` content is `'paragraph block*'`, so ProseMirror's parse runs
+// `createAndFill` and inserts an EMPTY filler paragraph before the block —
+// PM has 4 structural nodes (list, item, filler paragraph, code_block) where
+// mdast has 3 (list, listItem, math). The identical mismatch happens for a
+// plain ```js fence in a list item (asserted below), so Task 7 must not
+// misdiagnose this as a math-domain failure; it belongs to whatever task
+// teaches flattenMd about the filler paragraph.
+{
+  const mdMath = '- $$\n  E=mc^2\n  $$\n'
+  const dMath = doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(), cbl('LaTeX', 'E=mc^2')])
+  ]))
+  assert.equal(buildProjectionMap(mdMath, dMath), null,
+    'list-embedded block math still degrades the whole map (filler-paragraph mismatch)')
+
+  const mdCode = '- ```js\n  ab\n  ```\n'
+  const dCode = doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(), cbl('js', 'ab')])
+  ]))
+  assert.equal(buildProjectionMap(mdCode, dCode), null,
+    'the SAME mismatch exists for a plain fenced code block in a list item')
+}
+
+// Case M7: fail-closed is preserved — a PM doc that DISAGREES with the
 // kernel's math parse (a plain text node where the kernel proved an atom)
 // still rejects the whole map rather than guessing.
 {

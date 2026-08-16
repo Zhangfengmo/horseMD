@@ -183,11 +183,11 @@ const shape = (node) => {
 //
 // remark-math 的默认 `singleDollarTextMath` 语法**只**要求成对的、非转义的
 // `$`，不实现 Pandoc 的"开定界符后不得跟空白 / 闭定界符前不得有空白"规则。所以
-// `$5 and $6`、`a $ b $ c`、`$$x$$`（同一行）都会被识别成 inlineMath。
+// `$5 and $6`、`a $ b $ c`、行内的 `text $$x$$ text` 都会被识别成 inlineMath。
 // 这些形状此前在内核链里是纯 text——但在**编辑器链里一直就是数学**（同一个
-// remark-math、同一套默认选项），PM 侧一直渲染成 math_inline。内核跟随编辑器
-// 才是正确的：不跟随 = 两棵树节点数不等 = 整图 null = 整篇降级。故这里把
-// "跟随"钉死，而不是把"货币不得成数学"钉死。
+// remark-math、同一套默认选项、同一份字节），PM 侧一直渲染成 math_inline。
+// 内核跟随编辑器才是正确的：不跟随 = 两棵树节点数不等 = 整图 null = 整篇降级。
+// 故这里把"跟随"钉死，而不是把"货币不得成数学"钉死。
 {
   assert.deepEqual(childrenOf('$5 and $6\n')[0].children.map(shape), [
     { type: 'inlineMath', value: '5 and ', pos: [0, 8] },
@@ -195,13 +195,40 @@ const shape = (node) => {
   ])
   assert.deepEqual(childrenOf('a $ b $ c\n')[0].children.map((c) => c.type),
     ['text', 'inlineMath', 'text'])
-  // 同一行上的 `$$x$$` 是行内数学（不是块级）
+  // 行**中**的 `$$x$$`：编辑器与内核一致（normalizeDisplayMath 只重写整行形态，
+  // 见下方独立小节），两侧都是行内数学 → 对齐。
   assert.deepEqual(childrenOf('inline $$x$$ here\n')[0].children.map((c) => c.type),
     ['text', 'inlineMath', 'text'])
-  assert.deepEqual(childrenOf('$$E=mc^2$$\n')[0].children.map((c) => c.type), ['inlineMath'])
   // 跨行的未闭合 `$` 会吞掉中间的 emphasis（同编辑器链）
   assert.deepEqual(childrenOf('$x\n_y_\n$\n')[0].children.map(shape),
     [{ type: 'inlineMath', value: 'x\n_y_\n', pos: [0, 8] }])
+}
+
+// ---- 已知残留限制：**独占一行**的 `$$…$$` 两侧仍不对齐（文档整篇降级）----
+//
+// 这不是"跟随编辑器"能解决的：两条链**看到的字节就不一样**。
+//   - 编辑器链在 parse 之前先跑 `prepareEditorMarkdown`
+//     （`editor-parse-adapter.js:6` → `editor-math.js` 的 `normalizeDisplayMath`），
+//     把独占一行的 `$$E=mc^2$$` **改写**成多行块形态 `$$\nE=mc^2\n$$`，
+//     于是 PM 得到 `code_block(language='LaTeX')`；
+//   - 内核 `kernel.doc` 刻意持有**原始未 prepare 的字节**
+//     （`editor-kernel-mode.js` 的 `createMarkdownDocument(source)`），
+//     所以内核侧看到的仍是 `$$E=mc^2$$` 一行 → `paragraph > inlineMath`。
+// 结果：块序 `code_block` vs `paragraph` 无法配对 → buildProjectionMap 返回 null
+// → 该文档整篇降级到 legacy 路径（fail-closed，无字节风险，但**不是**已治好）。
+//
+// 下面钉住的是**内核侧的真相**（内核就该按它拿到的字节解析），同时把"这一形状
+// 仍降级"这件事显式记录下来，免得阶段 3 的验收误以为数学域已经全治。
+// 两条原则性修法（留给后续任务，二选一）：
+//   (a) 让内核也持有 PREPARED 字节（则保存/导出的字节语义随之改变，需单独论证）；
+//   (b) 内核模式下不跑 `normalizeDisplayMath`（则单行 `$$…$$` 在内核模式下按
+//       remark-math 的原义渲染成行内数学，与 legacy 模式的观感不同）。
+{
+  assert.deepEqual(childrenOf('$$E=mc^2$$\n')[0].children.map((c) => c.type), ['inlineMath'])
+  assert.equal(childrenOf('$$E=mc^2$$\n')[0].type, 'paragraph')
+  // 对照：编辑器 prepare 之后的字节，内核解析出的才是 math 块——证明分歧的
+  // 唯一来源是 prepare 改写，而不是两条 remark 链的选项差异。
+  assert.equal(childrenOf('$$\nE=mc^2\n$$\n')[0].type, 'math')
 }
 
 console.log('PASS source-kernel syntax index')

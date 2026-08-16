@@ -94,12 +94,13 @@ const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 // editing that source through the kernel's character-level machinery isn't
 // wired up (a later Plan 3 task). Matched case-insensitively against the PM
 // node's own `attrs.language` (Milkdown's codeBlockSchema attr).
-// Exported (Plan 3 Task 4): editor-kernel-gateway.js's `extractLanguageStep`
-// consults the same set — NOT to refuse switching languages (that guard was
-// lifted, final-review fix, 2026-08-16: a switch OUT of mermaid/latex is now
-// allowed, `commitCodeLanguage` resolves it via the pair's `mdBlock` fence
-// start when `charMap` is null), only so a language picker can tell whether
-// the block it is about to switch FROM is currently preview-only. Once a
+// Exported for reuse, but note (correction, Plan 5 Task 1 — the previous
+// wording here was stale): NOTHING outside this module currently reads it.
+// editor-kernel-gateway.js used to refuse a language switch OUT of
+// mermaid/latex, but that guard was lifted (final-review fix, 2026-08-16:
+// `commitCodeLanguage` resolves such a switch via the pair's `mdBlock` fence
+// start when `charMap` is null) and the gateway no longer imports this set —
+// only a stale comment there still names it. Once a
 // switch commits, `editor-kernel-mode.js` unconditionally rebinds the
 // projection map, so a block newly switched AWAY from one of these
 // languages gets a real `charMap` (editable) and a block newly switched
@@ -400,8 +401,11 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       //     the block's text is not an ordinary editing surface. Lifting the
       //     math case alone would change nothing without ALSO removing
       //     'latex' from that set, which would equally unblock a literal
-      //     ```latex fence — a different domain, and one the gateway's
-      //     `extractLanguageStep` also consults.
+      //     ```latex fence — a different domain (preview-only code blocks),
+      //     decided by the same set on THIS module's own authority. (The
+      //     gateway does NOT consult this set: its `extractLanguageStep`
+      //     refusal was lifted 2026-08-16 and only a stale comment there
+      //     still names it — verified, there is no import.)
       //  2. `commitCodeLanguage` (commands/code-language.js) resolves a
       //     language switch through the block's FENCE bytes and refuses any
       //     block whose kernel type isn't `code` — a `$$` delimiter pair has
