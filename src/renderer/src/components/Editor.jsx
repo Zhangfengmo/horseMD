@@ -1289,14 +1289,37 @@ export default function Editor({
       const blockquoteType = workingState.schema.nodes.blockquote
       if (!blockquoteType) return false
       const $pos = workingState.selection.$from
-      // Same lookup for both directions: the nearest blockquote ancestor's
-      // NodeRange (its children, spanning $pos) — if one exists, unwrap it;
-      // otherwise wrap the clicked block in a fresh blockquote.
-      const quoteRange = $pos.blockRange($pos, (node) => node.type === blockquoteType)
+      // Find the nearest blockquote ancestor, if any.
+      let quoteDepth = -1
+      for (let depth = $pos.depth; depth > 0; depth -= 1) {
+        if ($pos.node(depth).type === blockquoteType) {
+          quoteDepth = depth
+          break
+        }
+      }
       let transaction = null
-      if (quoteRange) {
-        const target = liftTarget(quoteRange)
-        if (target != null) transaction = workingState.tr.lift(quoteRange, target)
+      if (quoteDepth >= 0) {
+        // Unwrap: lift the blockquote's ENTIRE content in ONE step, not just
+        // the single child $pos happens to sit in. `$pos.blockRange($pos, …)`
+        // only ranges over $pos's own child — lifting THAT alone splits a
+        // multi-paragraph blockquote in two around the freed middle child
+        // (verified live: '> P1\n>\n> P2\n>\n> P3' unquote-P2 produced two
+        // separate quotes with P2 freed between them, instead of peeling the
+        // whole layer — kernel's `toggleBlockquote` always peels the entire
+        // top-level quote in one call, so legacy must match). Build a
+        // NodeRange spanning from the START of the blockquote's first child
+        // to the END of its last child instead — both boundary positions
+        // resolve at the blockquote's own depth (verified via a direct
+        // prosemirror-model probe), so `blockRange` still finds the
+        // blockquote as the shared parent, but now covers every child.
+        const quoteNode = $pos.node(quoteDepth)
+        const contentStart = $pos.before(quoteDepth) + 1
+        const contentEnd = contentStart + quoteNode.content.size
+        const $from = workingState.doc.resolve(contentStart)
+        const $to = workingState.doc.resolve(contentEnd)
+        const quoteRange = $from.blockRange($to, (node) => node.type === blockquoteType)
+        const target = quoteRange ? liftTarget(quoteRange) : null
+        if (quoteRange && target != null) transaction = workingState.tr.lift(quoteRange, target)
       } else {
         let tr = null
         if (wrapIn(blockquoteType)(workingState, (t) => { tr = t })) transaction = tr

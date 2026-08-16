@@ -5,13 +5,33 @@ import { isReadOnlyMutationKey } from './editor-read-only.js'
 import { readMermaidCodeSource, refreshMermaidPreviewFromCodeBlock } from './editor-mermaid.js'
 
 // Blockquote wrap/unwrap ctxmenu gating (Plan 4 Task 5.5). Walk ancestors
-// from the clicked position INWARD-OUT (innermost first): a code_block or
-// table ancestor closer to the click than any blockquote means the click
-// landed inside content the quote command can't own (fenced code interior,
-// table cells) — hide the item entirely. Otherwise it's quotable, and
-// `quoted` reports whether the nearest ancestor found is a blockquote (so
-// the caller can flip the label between "quote"/"unquote").
-function resolveQuoteMenuState(state, pos) {
+// from the clicked position INWARD-OUT (innermost first): a table ancestor
+// closer to the click than any blockquote means the click landed inside
+// content the quote command can't own (table cells) — hide the item
+// entirely. Otherwise it's quotable, and `quoted` reports whether the
+// nearest ancestor found is a blockquote (so the caller can flip the label
+// between "quote"/"unquote").
+//
+// A fenced code block is deliberately NOT detected here via PM ancestry:
+// CodeMirror's node view renders its content in a SEPARATE CodeMirror
+// EditorView, opaque to ProseMirror's own `posAtCoords` — a right-click
+// physically inside the code content resolves `pos` to a NEIGHBORING block
+// (whatever ProseMirror position happens to be nearest in its own DOM), not
+// anything inside the code_block node itself. Walking that wrong resolved
+// position's ancestry can never see a `code_block` type to refuse against.
+// The caller must detect this by DOM ancestry instead (`inCodeBlockDom`,
+// resolved at the real click target before `posAtCoords` is even consulted
+// — same idiom as this file's own `tableBlock` scroll-preservation lookup)
+// and force the refusal from outside.
+//
+// `readOnly` is a belt-and-suspenders duplicate of `onContextMenu`'s own
+// early `isReadOnly` return (this file, above) — same defensive-caller
+// precedent as `canConvertBlockToList` in Editor.jsx, which independently
+// bakes in `!readOnlyRef.current` despite the same upstream guard already
+// existing, so a future direct call (or an upstream guard change) can never
+// leave the item visible-but-inert in a read-only tab.
+function resolveQuoteMenuState(state, pos, { readOnly = false, inCodeBlockDom = false } = {}) {
+  if (readOnly || inCodeBlockDom) return { quotable: false, quoted: false }
   if (!state || !Number.isFinite(pos)) return { quotable: false, quoted: false }
   const safePos = Math.max(0, Math.min(pos, state.doc.content.size))
   const $pos = state.doc.resolve(safePos)
@@ -138,6 +158,11 @@ export function mountEditorInteractionBindings({
     const tableBlock = event.target.closest?.('.milkdown-table-block')
     const tableWrapper = tableBlock?.querySelector('.table-wrapper')
     const scrollLeft = tableWrapper?.scrollLeft
+    // Quote ctxmenu gating (Plan 4 Task 5.5): resolved from the REAL click
+    // target, not from `posAtCoords` — see resolveQuoteMenuState's comment
+    // for why a CodeMirror-rendered code block needs this DOM-anchored
+    // check instead of a ProseMirror-ancestry one.
+    const inCodeBlockDom = !!event.target.closest?.('.milkdown-code-block')
     // Selecting a column can replace the whole Crepe table node view. Keep its
     // stable ordinal under this editor root, rather than restoring a detached
     // wrapper from the old node view.
@@ -165,7 +190,10 @@ export function mountEditorInteractionBindings({
       if (at) {
         blockPos = at.pos
         blockListConvertible = canConvertBlockToList?.(blockPos) === true
-        ;({ quotable, quoted } = resolveQuoteMenuState(currentView.state, blockPos))
+        ;({ quotable, quoted } = resolveQuoteMenuState(currentView.state, blockPos, {
+          readOnly: isReadOnly?.() === true,
+          inCodeBlockDom
+        }))
         // ProseMirror can report the outer list boundary for a click on an
         // indented item. Resolve the actual DOM list item as a fallback so the
         // context menu can explain why a nested conversion is unavailable.

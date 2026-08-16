@@ -26,6 +26,14 @@ const file = join(root, 'marks.md')
 const port = Number(process.env.CDP_PORT || 10024)
 const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
 
+// Isolated fixture for the legacy multi-paragraph unquote regression
+// (reviewer Important #2) — a standalone app session/file, not the main
+// FIXTURE above, so the unwrap doesn't have to be reverted to keep the rest
+// of this script's byte checkpoints valid.
+const multiQuoteFile = join(root, 'multi-quote.md')
+const MULTI_QUOTE_FIXTURE = '> 引一\n>\n> 引二\n>\n> 引三\n'
+const MULTI_QUOTE_UNWRAPPED = '引一\n\n引二\n\n引三\n'
+
 const FIXTURE = [
   '# 标题',
   '',
@@ -52,6 +60,10 @@ const FIXTURE = [
   '- 列项一',
   '',
   '- 列项二',
+  '',
+  '```js',
+  'const 代码 = 1;',
+  '```',
   '',
   '尾段落。',
   ''
@@ -87,6 +99,9 @@ const LEGACY_AFTER_QUOTE = FIXTURE.replace('首段落用于占位说明。', '> 
 // becomes a BARE '>' so the reparse stays one blockquote, not two.
 const KERNEL_PARA_QUOTED = AFTER_QUOTE_QUERY.replace('尾段落。', '> 尾段落。')
 const KERNEL_LIST_QUOTED = AFTER_QUOTE_QUERY.replace('- 列项一\n\n- 列项二', '> - 列项一\n>\n> - 列项二')
+// Heading (minor ride-along): same shape as test-source-kernel-quote.mjs's
+// heading case ('# 头\n' -> '> # 头\n').
+const KERNEL_HEADING_QUOTED = AFTER_QUOTE_QUERY.replace('# 标题', '> # 标题')
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -160,14 +175,14 @@ async function toggleKernelMode(evaluate) {
   assert.ok(clicked, 'kernel-toggle menu item missing')
 }
 
-// Character-offset Range lookup within a paragraph located by its CURRENT
-// full rendered (visible, marker-free) text — walks all of the paragraph's
-// text nodes (a marked run splits it into several), so this works whether
-// the paragraph is plain or already contains marks.
+// Character-offset Range lookup within a paragraph OR heading located by its
+// CURRENT full rendered (visible, marker-free) text — walks all of the
+// block's text nodes (a marked run splits it into several), so this works
+// whether the block is plain or already contains marks.
 async function charRect(evaluate, paragraphText, from, to) {
   return evaluate(`(() => {
     const editor = ${VISIBLE_EDITOR}
-    const node = [...(editor?.querySelectorAll('p') || [])].find((n) => n.textContent === ${JSON.stringify(paragraphText)})
+    const node = [...(editor?.querySelectorAll('p, h1, h2, h3, h4, h5, h6') || [])].find((n) => n.textContent === ${JSON.stringify(paragraphText)})
     if (!node) return null
     node.scrollIntoView({ block: 'center' })
     const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
@@ -348,16 +363,51 @@ async function run() {
     //    other scenario in this file. A plain PM wrapIn/lift dispatch goes
     //    through the ordinary markdownUpdated/preservation pipeline, same
     //    as any other rich edit — no kernel involved at all yet.
+    //
+    //    Ownership-proof convention (same idiom as
+    //    test-diverged-delete-source-ui.mjs / test-empty-paragraph-source-ui.mjs):
+    //    reset __hmGateLog/__hmPreserveLog right before each action, then
+    //    assert the gate log stayed EMPTY (the round-trip-acceptance gate
+    //    never rejected a candidate — no silent retry/rebuild happened) and
+    //    the preserve log's last entry is a genuine `preserved: true` with a
+    //    real reason (not the 'unknown' placeholder pushed when
+    //    `result.reason` is missing — see markdown-source-preservation.js).
     // ============================================================
     {
+      await evaluate(`(() => { window.__hmGateLog = []; window.__hmPreserveLog = [] })()`)
       const point = await pointAt(evaluate, '首段落用于占位说明。', 0)
       await clickQuoteMenuItem(evaluate, send, point, 'quote')
       assert.equal(app.dialogs.length, 0, 'no dialog from the legacy ctxmenu quote')
+      const quoteDiagnostics = await evaluate(`({
+        gate: window.__hmGateLog || [],
+        preserve: (window.__hmPreserveLog || []).slice(-1)
+      })`)
+      assert.deepEqual(quoteDiagnostics.gate, [],
+        `legacy ctxmenu quote must never hit the round-trip-acceptance gate: ${JSON.stringify(quoteDiagnostics)}`)
+      const quotePreserved = quoteDiagnostics.preserve.at(-1)
+      assert.ok(quotePreserved, `no preserve-log entry was captured for the legacy ctxmenu quote: ${JSON.stringify(quoteDiagnostics)}`)
+      assert.equal(quotePreserved.preserved, true,
+        `legacy ctxmenu quote must be a genuine preserve, not a fallback: ${JSON.stringify(quotePreserved)}`)
+      assert.notEqual(quotePreserved.reason, 'unknown',
+        `legacy ctxmenu quote must record a real preservation reason, not the missing-reason placeholder: ${JSON.stringify(quotePreserved)}`)
       await assertSourceLegacy(evaluate, LEGACY_AFTER_QUOTE, 'legacy ctxmenu Quote must wrap the paragraph with "> "')
 
+      await evaluate(`(() => { window.__hmGateLog = []; window.__hmPreserveLog = [] })()`)
       const point2 = await pointAt(evaluate, '首段落用于占位说明。', 0)
       await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
       assert.equal(app.dialogs.length, 0, 'no dialog from the legacy ctxmenu unquote')
+      const unquoteDiagnostics = await evaluate(`({
+        gate: window.__hmGateLog || [],
+        preserve: (window.__hmPreserveLog || []).slice(-1)
+      })`)
+      assert.deepEqual(unquoteDiagnostics.gate, [],
+        `legacy ctxmenu unquote must never hit the round-trip-acceptance gate: ${JSON.stringify(unquoteDiagnostics)}`)
+      const unquotePreserved = unquoteDiagnostics.preserve.at(-1)
+      assert.ok(unquotePreserved, `no preserve-log entry was captured for the legacy ctxmenu unquote: ${JSON.stringify(unquoteDiagnostics)}`)
+      assert.equal(unquotePreserved.preserved, true,
+        `legacy ctxmenu unquote must be a genuine preserve, not a fallback: ${JSON.stringify(unquotePreserved)}`)
+      assert.notEqual(unquotePreserved.reason, 'unknown',
+        `legacy ctxmenu unquote must record a real preservation reason, not the missing-reason placeholder: ${JSON.stringify(unquotePreserved)}`)
       await assertSourceLegacy(evaluate, FIXTURE, 'legacy ctxmenu Unquote must revert to the exact original bytes')
     }
 
@@ -639,6 +689,56 @@ async function run() {
     }
 
     // ============================================================
+    // 9c) KERNEL ctxmenu quote/unquote on a HEADING (minor ride-along) —
+    //     same shape as test-source-kernel-quote.mjs's heading case.
+    // ============================================================
+    {
+      const point = await pointAt(evaluate, '标题', 0)
+      await clickQuoteMenuItem(evaluate, send, point, 'quote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu heading quote')
+      await assertSource(evaluate, KERNEL_HEADING_QUOTED, 'kernel ctxmenu Quote on a heading must wrap the whole "# " line with "> "')
+
+      const point2 = await pointAt(evaluate, '标题', 0)
+      await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
+      assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu heading unquote')
+      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote on the heading must revert to the exact original bytes')
+    }
+
+    // ============================================================
+    // 9d) CODE-BLOCK interior ctxmenu gating (reviewer Critical #1): a
+    //     right-click INSIDE a fenced code block's CodeMirror content must
+    //     hide the quote item entirely. CodeMirror's node view renders its
+    //     content in a SEPARATE EditorView, opaque to ProseMirror's own
+    //     `posAtCoords` — a click physically inside the code content
+    //     resolves to a NEIGHBORING block instead of anything inside the
+    //     code_block node, so this can only be caught by DOM ancestry (see
+    //     resolveQuoteMenuState's comment in editor-dom-interactions.js),
+    //     never by walking the (wrongly resolved) position's PM ancestry.
+    // ============================================================
+    {
+      const beforeCode = await paragraphTexts(evaluate)
+      const point = await evaluate(`(() => {
+        const block = (${VISIBLE_EDITOR})?.querySelector('.milkdown-code-block')
+        if (!block) return null
+        block.scrollIntoView({ block: 'center' })
+        const line = block.querySelector('.cm-editor .cm-line')
+        const rect = line?.getBoundingClientRect()
+        return rect && rect.width ? { x: rect.left + 2, y: rect.top + rect.height / 2 } : null
+      })()`)
+      assert.ok(point, 'code block CM line is not hit-testable')
+      await openCtxMenuAt(send, point)
+      await waitFor(() => evaluate(`!!document.querySelector('.block-ctxmenu')`), 'ctxmenu did not open over the code block')
+      const quoteItemPresent = await evaluate(`!!document.querySelector('[data-quote-toggle]')`)
+      assert.equal(quoteItemPresent, false,
+        'quote ctxmenu item must be hidden inside a code block (posAtCoords resolves to a neighboring block, not the code block itself)')
+      await closeCtxMenu(evaluate)
+      const afterCode = await paragraphTexts(evaluate)
+      assert.deepEqual(afterCode, beforeCode,
+        'right-clicking inside a code block must never mutate the document, even when the menu is dismissed without a click')
+      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'the code-block ctxmenu gating check must leave source bytes byte-identical')
+    }
+
+    // ============================================================
     // 10) Save FAB -> disk bytes exact; dialogs empty; full quit; cold
     //     reopen -> bytes intact.
     // ============================================================
@@ -660,7 +760,36 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight/link refusals, the /quote fail-closed fix, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
+    // ============================================================
+    // 11) ISOLATED regression (reviewer Important #2): legacy multi-
+    //     paragraph unquote must lift the ENTIRE blockquote in one step, not
+    //     just the single paragraph the caret sits in — a right-click inside
+    //     the MIDDLE paragraph of a 3-paragraph blockquote, then Unquote,
+    //     must free all three (byte-identical to the whole quote peeled),
+    //     never split into two quotes around a freed middle paragraph. Its
+    //     own isolated app session/file (same "stop, write, relaunch"
+    //     pattern test-empty-paragraph-source-ui.mjs's Scenario G/H use) so
+    //     this fixture never has to be reconciled back into the main
+    //     FIXTURE's byte-checkpoint chain above.
+    // ============================================================
+    await stopBuiltElectron(app, { removeProfile: true })
+    await writeFile(multiQuoteFile, MULTI_QUOTE_FIXTURE)
+    app = await launchBuiltElectron({
+      profileDir: join(root, 'profile-multiquote'),
+      port: port + 1,
+      appArgs: [multiQuoteFile]
+    })
+    ;({ evaluate, send } = app)
+    await waitFor(async () => (await mounted(evaluate) || '').includes('引二'), 'multi-paragraph quote fixture did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on the multi-quote fixture mount')
+
+    const middlePoint = await pointAt(evaluate, '引二', 0)
+    await clickQuoteMenuItem(evaluate, send, middlePoint, 'unquote')
+    assert.equal(app.dialogs.length, 0, 'no dialog from the multi-paragraph legacy unquote')
+    await assertSourceLegacy(evaluate, MULTI_QUOTE_UNWRAPPED,
+      'unquoting the MIDDLE paragraph must lift the WHOLE blockquote (all three paragraphs freed), never split it into two quotes around a freed middle paragraph')
+
+    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight/link refusals, the /quote fail-closed fix, code-block ctxmenu gating, whole-blockquote legacy unwrap, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
