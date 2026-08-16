@@ -183,7 +183,7 @@ boundary-crossing loop (already CRLF-aware).
 | `npm run test:core` | PASS (exit 0) |
 | `npm run test:mode-switch-raw-offset-ui` (extra — visible map) | PASS |
 | `npm run test:source-transaction-sync-ui` (extra — LF/CRLF/BOM+CRLF) | PASS |
-| `npm run test:ui-regression` (extra) | see below |
+| `npm run test:ui-regression` (extra) | PASS — 6 sessions + 48 standalone, exit 0 |
 
 ## 6. Notes / residual risk
 
