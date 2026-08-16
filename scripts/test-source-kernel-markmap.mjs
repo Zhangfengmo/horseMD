@@ -282,4 +282,39 @@ const at = (src, findText) => {
   assert.equal(inlineMarkAt(idx, 0, src.length + 100), null)
 }
 
+// --- GFM table cell: out of declared scope -> null even for a byte-correct
+// strong node. blockAt(offset) inside a table cell resolves to the 'table'
+// block (not 'paragraph'/'heading'), so findExactMark must never even be
+// invoked for it — a naive unconditional recursion into the table's mdast
+// subtree WOULD find this strong node with byte-correct offsets (verified by
+// probe), which is exactly why the gate must sit in front of the lookup
+// itself, not just in front of the highlight flank check.
+{
+  const src = '| a | b |\n| --- | --- |\n| **bold** | x |\n'
+  const idx = buildSyntaxIndex(src)
+  const rawFrom = src.indexOf('bold')
+  const rawTo = rawFrom + 'bold'.length
+  const block = idx.blockAt(rawFrom)
+  assert.equal(block.type, 'table', 'fixture sanity: offset must resolve to a table block')
+  assert.equal(inlineMarkAt(idx, rawFrom, rawTo), null)
+}
+
+// --- highlight flank guard is scoped to the BLOCK's own bounds, not just the
+// whole document's length. This can't be forced through genuine CommonMark
+// parsing (a line terminator, never '=', always separates adjacent blocks),
+// so we prove the guard directly: hand inlineMarkAt a narrowed synthetic
+// block whose `.start` sits AFTER the query's left flank, even though the
+// document text still literally contains '==' there.
+{
+  const src = 'a ==hl== b\n'
+  const idx = buildSyntaxIndex(src)
+  const rawFrom = src.indexOf('hl')
+  const rawTo = rawFrom + 'hl'.length
+  const realBlock = idx.blockAt(rawFrom)
+  assert.ok(inlineMarkAt(idx, rawFrom, rawTo), 'fixture sanity: unnarrowed query must resolve')
+  const narrowedBlock = { ...realBlock, start: rawFrom }
+  const narrowedIndex = { ...idx, blockAt: () => narrowedBlock }
+  assert.equal(inlineMarkAt(narrowedIndex, rawFrom, rawTo), null)
+}
+
 console.log('PASS source-kernel mark map')

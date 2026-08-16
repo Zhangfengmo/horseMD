@@ -145,8 +145,17 @@ function findExactMark(root, text, rawFrom, rawTo) {
   return found
 }
 
-function highlightAt(text, rawFrom, rawTo) {
-  if (rawFrom < 2 || rawTo + 2 > text.length) return null
+// Bounds are checked against the BLOCK's own [start,end), not just the whole
+// document's length. Given today's line-based CommonMark block structure a
+// flank crossing a block boundary can't actually spell literal '==' (a line
+// terminator, which is never '=', always sits at the crossing point) — but
+// that is a property of the *parser*, not of this function, and this
+// function must not rely on it. The block-bound check makes "never resolve
+// bytes outside the block that produced this query" a structural invariant
+// of `highlightAt` itself, independent of whatever CommonMark happens to
+// guarantee about adjacent blocks today.
+function highlightAt(text, rawFrom, rawTo, block) {
+  if (rawFrom - 2 < block.start || rawTo + 2 > block.end) return null
   const openFlank = text.slice(rawFrom - 2, rawFrom)
   const closeFlank = text.slice(rawTo, rawTo + 2)
   if (openFlank !== '==' || closeFlank !== '==') return null
@@ -170,13 +179,21 @@ export function inlineMarkAt(index, rawFrom, rawTo) {
   if (rawFrom < 0 || rawTo > text.length) return null
 
   const block = index.blockAt(rawFrom)
-  if (block?.node) {
-    const exact = findExactMark(block.node, text, rawFrom, rawTo)
-    if (exact) return exact
-  }
+  // Single gate for BOTH lookup paths: a block outside paragraph/heading is
+  // out of scope for this task in its entirety, not just for the highlight
+  // flank check. `findExactMark` recurses through the ENTIRE block subtree
+  // (e.g. a GFM `table` block's rows/cells), so without this gate it would
+  // happily return a byte-correct strong/emphasis/delete/inlineCode match
+  // sitting inside a table cell — correct offsets, but table domain is
+  // explicitly deferred (unprobed) per the plan, so it must not be resolved
+  // here at all. Table cells are ALSO opaque to the projection map at a
+  // higher layer (double protection), but this gate is the structural
+  // guarantee that THIS module never answers outside its declared scope,
+  // regardless of what any caller layer does or forgets to do.
+  if (!block || !INLINE_CONTENT_BLOCKS.has(block.type)) return null
 
-  if (block && INLINE_CONTENT_BLOCKS.has(block.type)) {
-    return highlightAt(text, rawFrom, rawTo)
-  }
-  return null
+  const exact = block.node ? findExactMark(block.node, text, rawFrom, rawTo) : null
+  if (exact) return exact
+
+  return highlightAt(text, rawFrom, rawTo, block)
 }
