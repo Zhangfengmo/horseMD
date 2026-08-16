@@ -15,8 +15,11 @@
 import { keymap } from '@milkdown/prose/keymap'
 import { tableCellSchema, tableHeaderSchema } from '@milkdown/kit/preset/gfm'
 import { defaultHandlers } from 'mdast-util-to-markdown'
-
-const BR_RE = /^<br\s*\/?>$/i
+// Shared with the source kernel: the kernel's inline-HTML coalescer must know
+// which html nodes this plugin will have already turned into `break` nodes, or
+// the two chains disagree on where a merged fragment ends (see
+// lib/source-kernel/inline-html.js).
+import { isInlineBreakHtml } from '../lib/source-kernel/inline-html.js'
 // Node types whose children are phrasing content — the only places an inline
 // <br> legitimately appears, so we only rewrite there (never at block level,
 // which would produce an invalid mdast break).
@@ -43,7 +46,7 @@ export function brToBreakRemarkPlugin() {
       if (!node || !Array.isArray(node.children)) return
       if (PHRASING_PARENTS.has(node.type)) {
         node.children = node.children.map((c) =>
-          c && c.type === 'html' && BR_RE.test((c.value || '').trim())
+          c && c.type === 'html' && isInlineBreakHtml(c.value)
             ? {
                 type: 'break',
                 ...(c.position ? { position: { ...c.position } } : {})

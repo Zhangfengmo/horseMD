@@ -46,6 +46,14 @@ const schema = new Schema({
     // latex/index.js:98-104) — content.size counts it as 1, exactly like the
     // kernel charMap's width-1 `inlineMath` atom unit.
     math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // preset-commonmark's `html` node (node/html.ts): an INLINE atom carrying
+    // the raw fragment in `attrs.value`. There is no block-level html node in
+    // the live schema — `remarkHtmlTransformer` wraps a block-level mdast
+    // `html` in a paragraph holding this same inline atom.
+    html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // preset-commonmark's hard break — `brToBreakRemarkPlugin`
+    // (editor-tablebreak.js) rewrites every inline `<br>` html node into one.
+    hard_break: { group: 'inline', inline: true, atom: true },
     // Crepe's standalone-image block (@milkdown/components image-block): a
     // block-level ATOM whose mdast counterpart (in the kernel's plugin-free
     // parse) is the plain `paragraph > image` wrapper.
@@ -1094,3 +1102,152 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
 }
 
 console.log('PASS kernel projection map')
+
+// ---- 行内 HTML（计划五 Task 2）----
+//
+// 这里的 PM 形状不是猜的：Milkdown 的 `html` schema 是 **行内原子**
+// (@milkdown/preset-commonmark/src/node/html.ts: `atom:true, group:'inline'`)，
+// 编辑器链的 `remarkMergeInlineHtml` 把 `<span>`/`x`/`</span>` 三个 mdast 节点
+// 合成一个（无 position 的）html 节点 → PM 里就是 **一个** 原子；而块级 html
+// 由 preset 自带的 `remarkHtmlTransformer` 包进一个 paragraph
+// (plugin/remark-html-transformer.ts: parent 是 root/blockquote/listItem 时
+// 改写为 paragraph 包住该 html 节点)。
+//
+// 治降级前：`a <span>x</span> b` 的 pmBlocks 是 [paragraph, html] 而 mdBlocks 是
+// [paragraph, html, html] → `mdIndex !== mdBlocks.length` → **整篇文档 null**。
+// 任何含行内 HTML 的文档都用不了内核模式。
+const inlineHtml = (value) => schema.node('html', { value })
+const br = () => schema.node('hard_break')
+
+// Case H1（头条）：含行内 HTML 的文档必须建图成功，且其余块照常可编辑。
+// 'a <span>x</span> b\n\nplain\n' 的 raw 下标：
+//   'a <span>x</span> b' = 0..17（片段 [2,16)），'\n'=18 '\n'=19，'plain'=20..24，'\n'=25
+// PM: paragraph1 pos 0（内容 'a ' + 原子 + ' b' = 5）→ nodeSize 7；paragraph2 pos 7。
+{
+  const md = 'a <span>x</span> b\n\nplain\n'
+  const d = doc(
+    p(text('a '), inlineHtml('<span>x</span>'), text(' b')),
+    p(text('plain'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'inline HTML must no longer degrade the whole document')
+  assert.equal(map.blockPairs.length, 2)
+  assert.ok(map.blockPairs[0].charMap, 'the inline-HTML paragraph itself is mappable')
+  assert.ok(map.blockPairs[1].charMap, 'the plain paragraph stays editable')
+  assert.equal(map.pmPosToRaw(1), 0)   // before 'a'
+  assert.equal(map.pmPosToRaw(3), 2)   // atom left edge  ('<' of <span>)
+  assert.equal(map.pmPosToRaw(4), 16)  // atom right edge (right after </span>)
+  assert.equal(map.pmPosToRaw(6), 18)  // end of paragraph1 content
+  assert.equal(map.pmPosToRaw(8), 20)  // paragraph2 content start
+  assert.equal(map.pmPosToRaw(13), 25) // paragraph2 content end
+  // raw offsets INSIDE the fragment snap to the atom's own boundary, exactly
+  // like an image/inline-math atom — there is no PM position inside it.
+  const inside = map.rawToPmPos(9)
+  assert.ok(inside)
+  assert.equal(inside.pos, 3)
+  assert.equal(inside.atom, true)
+}
+
+// Case H2: 不平衡片段 `<span>x b` —— 编辑器链放弃合并，PM 侧是「开标签原子 +
+// 文本」。内核用同一条规则，因此同样不合并 → 仍然建图成功（不是降级）。
+{
+  const md = 'a <span>x b\n'
+  const d = doc(p(text('a '), inlineHtml('<span>'), text('x b')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'an unbalanced inline-HTML run must still map')
+  assert.equal(map.pmPosToRaw(3), 2)  // '<span>' 原子左边界
+  assert.equal(map.pmPosToRaw(4), 8)  // 原子右边界
+  assert.equal(map.pmPosToRaw(7), 11) // 段末
+}
+
+// Case H3: 片段里含 `<br/>`。`brToBreakRemarkPlugin` 在 merge 之前就把它换成
+// break 节点，合并因此断开 → PM 是 7 个行内节点（尺寸 9）。内核必须用同一判据
+// 断开；否则会跨过 void 标签合成一个原子（尺寸 5）→ 整图 null。
+{
+  const md = 'a <span>x<br/>y</span> b\n'
+  const d = doc(p(
+    text('a '), inlineHtml('<span>'), text('x'), br(), text('y'),
+    inlineHtml('</span>'), text(' b')
+  ))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a run cut by <br/> must map on both sides identically')
+  assert.equal(map.blockPairs[0].charMap.visibleLength, 9)
+  assert.equal(map.pmPosToRaw(3), 2)   // '<span>' 左
+  assert.equal(map.pmPosToRaw(4), 8)   // '<span>' 右 / 'x' 左
+  assert.equal(map.pmPosToRaw(5), 9)   // '<br/>' 左
+  assert.equal(map.pmPosToRaw(6), 14)  // '<br/>' 右 / 'y' 左
+  assert.equal(map.pmPosToRaw(7), 15)  // '</span>' 左
+  assert.equal(map.pmPosToRaw(8), 22)  // '</span>' 右
+}
+
+// Case H4: 片段里含 emphasis —— coalesceChildren 遇到非 html/text 兄弟就放弃，
+// 两侧都是「开标签原子 + 强调文本 + 闭标签原子」。
+{
+  const md = 'a <span>*x*</span> b\n'
+  const d = doc(p(
+    text('a '), inlineHtml('<span>'), text('x'), inlineHtml('</span>'), text(' b')
+  ))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a run containing emphasis must map (both chains give up merging)')
+  assert.equal(map.pmPosToRaw(4), 8)   // '<span>' 右边界 == emphasis 的 '*' 之前
+  assert.equal(map.pmPosToRaw(5), 10)  // 'x' 之后（右侧 '*' 是 mark gap）
+  assert.equal(map.pmPosToRaw(6), 18)  // '</span>' 右边界
+}
+
+// Case H5（块级 HTML）：`<div>block</div>` 在 PM 里是 **paragraph 包一个行内
+// html 原子**（remarkHtmlTransformer），与 mdast 的根级 `html` 节点配对，作为
+// 不可编辑叶（charMap null）。文档的其余部分仍然可编辑 —— 这正是「治降级」：
+// 从前这份文档整篇拿不到映射。
+{
+  const md = '<div>block</div>\n\nafter\n'
+  const d = doc(p(inlineHtml('<div>block</div>')), p(text('after')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a document containing block HTML must map')
+  assert.equal(map.blockPairs.length, 2)
+  assert.equal(map.blockPairs[0].mdBlock.type, 'html')
+  assert.equal(map.blockPairs[0].charMap, null, 'block HTML stays a non-editable leaf')
+  assert.ok(map.blockPairs[1].charMap)
+  assert.equal(map.pmPosToRaw(1), null) // 块级 HTML 内部没有可用位置
+  assert.equal(map.pmPosToRaw(4), 18)   // 'after' 段落照常可编辑
+  assert.equal(map.pmPosToRaw(9), 23)
+}
+
+// Case H6: 块级 HTML 的配对是 fail-closed —— PM 侧若不是「单个 html 原子的
+// paragraph」（这里是纯文本），说明两棵树已经结构性分家 → 整图拒绝。
+{
+  const md = '<div>x</div>\n'
+  assert.equal(buildProjectionMap(md, doc(p(text('<div>x</div>')))), null)
+}
+
+// Case H7: fail-closed 仍然成立 —— PM 说是一整段纯文本、内核证明的是合并原子，
+// 尺寸不一致（18 vs 5）→ 整图拒绝，绝不猜。
+{
+  const md = 'a <span>x</span> b\n'
+  assert.equal(buildProjectionMap(md, doc(p(text('a <span>x</span> b')))), null)
+}
+
+// Case H8: 标题 + 相邻片段 + 列表项里的片段，一份文档里同时出现。
+// '# h <span>x</span>\n\n- item <span>y</span>\n' 的 raw 下标：
+//   heading: '# ' = 0..1, 'h ' = 2..3, 片段 [4,18)，'\n'=18 '\n'=19
+//   list: '- ' = 20..21, 'item ' = 22..26, 片段 [27,41)
+{
+  const md = '# h <span>x</span>\n\n- item <span>y</span>\n'
+  const d = doc(
+    schema.node('heading', { level: 1 }, [text('h '), inlineHtml('<span>x</span>')]),
+    schema.node('bullet_list', null, [
+      schema.node('list_item', null, [p(text('item '), inlineHtml('<span>y</span>'))])
+    ])
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'heading + list item with inline HTML must map')
+  assert.equal(map.pmPosToRaw(1), 2)   // 标题内容起点（'# ' 之后）
+  assert.equal(map.pmPosToRaw(3), 4)   // 标题里片段的左边界
+  assert.equal(map.pmPosToRaw(4), 18)  // 右边界
+  // heading nodeSize = 1 + 3 + 1 = 5；bullet_list pos 5，list_item pos 6，
+  // paragraph pos 7，内容起点 8。
+  assert.equal(map.pmPosToRaw(8), 22)  // 'item ' 起点
+  assert.equal(map.pmPosToRaw(13), 27) // 列表项里片段的左边界
+  assert.equal(map.pmPosToRaw(14), 41) // 右边界
+}
+
+console.log('PASS kernel projection map (inline html)')

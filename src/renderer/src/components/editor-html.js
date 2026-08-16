@@ -1,4 +1,11 @@
 // Raw-HTML rendering for Milkdown's `html` node + block-type conversion.
+//
+// The inline-HTML COALESCING RULE itself lives in
+// lib/source-kernel/inline-html.js — the source kernel has to recognize the
+// exact same runs on its own (positioned) mdast, and one shared
+// implementation is the only way the two chains provably agree. See that
+// module's header for the full rationale.
+import { inlineHtmlRunAt } from '../lib/source-kernel/inline-html.js'
 
 // Tags we render as real DOM instead of escaped source. Split into block vs
 // inline so the node view returns the right wrapper element (a block <div> or an
@@ -74,41 +81,6 @@ export function renderHtmlNodeView(node) {
   return { dom, ignoreMutation: () => true, stopEvent: () => false }
 }
 
-// HTML void elements (no closing tag) — don't push them on the balance stack.
-const VOID_TAGS = new Set([
-  'br', 'img', 'hr', 'input', 'wbr', 'meta', 'link', 'area', 'base',
-  'col', 'embed', 'source', 'track', 'param'
-])
-
-// Does a raw HTML fragment have all its tags closed? Used to decide when a run of
-// inline-HTML nodes forms one complete, renderable fragment (so `<span>红字</span>`
-// becomes a single node instead of open / text / close).
-function isBalancedFragment(s) {
-  const re = /<\/?([a-zA-Z][\w-]*)([^>]*)>/g
-  const stack = []
-  let m
-  while ((m = re.exec(s)) !== null) {
-    const tag = m[1].toLowerCase()
-    const closing = m[0].charAt(1) === '/'
-    const selfClosing = /\/\s*$/.test(m[2])
-    if (closing) {
-      if (stack[stack.length - 1] !== tag) return false
-      stack.pop()
-    } else if (selfClosing || VOID_TAGS.has(tag)) {
-      /* void / self-closed: nothing to close */
-    } else {
-      stack.push(tag)
-    }
-  }
-  return stack.length === 0
-}
-
-// An inline `html` node that opens a tag (not a closer, comment, or void tag),
-// i.e. the likely start of a `<tag>…</tag>` fragment worth merging.
-function isOpeningInlineTag(s) {
-  return typeof s === 'string' && /^<[a-zA-Z][\w-]*\b[^>]*>$/.test(s) && !/^<\//.test(s) && !/^<!--/.test(s)
-}
-
 // Merge consecutive `html` + `text` mdast siblings that form a balanced inline
 // HTML fragment into a single `html` node. Commonmark parses `<span>x</span>`
 // as three nodes (open tag / text / close tag); Milkdown turns each into an
@@ -116,6 +88,12 @@ function isOpeningInlineTag(s) {
 // span around its text. We only coalesce runs of plain html+text — if markdown
 // marks (emphasis, links…) sit inside the HTML we leave it alone (rare, and
 // merging would drop their formatting).
+//
+// The run-detection itself is `inlineHtmlRunAt` (lib/source-kernel/inline-html.js),
+// shared verbatim with the kernel's character map. The merged node deliberately
+// carries NO `position` (its value is the concatenation of DECODED child
+// values, which no single raw span describes) — that is exactly why the kernel
+// cannot reuse this plugin and derives its own positioned atom unit instead.
 function coalesceChildren(node) {
   if (!Array.isArray(node.children)) return
   for (const c of node.children) coalesceChildren(c)
@@ -123,28 +101,13 @@ function coalesceChildren(node) {
   const next = []
   let i = 0
   while (i < kids.length) {
-    const c = kids[i]
-    if (c.type === 'html' && isOpeningInlineTag(c.value)) {
-      let raw = ''
-      let j = i
-      let balanced = false
-      while (j < kids.length) {
-        const k = kids[j]
-        if (k.type !== 'html' && k.type !== 'text') break
-        raw += k.value
-        j += 1
-        if (isBalancedFragment(raw)) {
-          balanced = true
-          break
-        }
-      }
-      if (balanced && j > i + 1) {
-        next.push({ type: 'html', value: raw })
-        i = j
-        continue
-      }
+    const run = inlineHtmlRunAt(kids, i)
+    if (run) {
+      next.push({ type: 'html', value: run.value })
+      i = run.end
+      continue
     }
-    next.push(c)
+    next.push(kids[i])
     i += 1
   }
   node.children = next

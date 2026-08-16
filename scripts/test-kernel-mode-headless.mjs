@@ -41,7 +41,11 @@ const schema = new Schema({
     // its TeX source in `attrs.value`; BLOCK math is a `code_block` whose
     // `attrs.language` is 'LaTeX' (crepe's remarkMathBlock rewrites the mdast
     // `math` node to `{type:'code', lang:'LaTeX'}` before the PM parse).
-    math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } }
+    math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // Plan 5 Task 2 — preset-commonmark's `html` node (src/node/html.ts) is an
+    // INLINE atom; the editor chain's `remarkMergeInlineHtml` collapses a
+    // balanced `<span>x</span>` run into exactly one of them.
+    html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } }
   },
   // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
   // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
@@ -63,6 +67,7 @@ const bl = (...c) => schema.node('bullet_list', null, c)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
 const mif = (value) => schema.node('math_inline', { value })
+const ih = (value) => schema.node('html', { value })
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -139,7 +144,13 @@ const FIXTURE_DOCS = {
   'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲乙\n': () => doc(
     p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲乙'))),
   'a $x$ b\n\n$$\nE=mc^2\n$$\n\n甲X乙\n': () => doc(
-    p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲X乙')))
+    p(text('a '), mif('x'), text(' b')), cb('LaTeX', 'E=mc^2'), p(text('甲X乙'))),
+  // Plan 5 Task 2 — inline HTML: the editor chain's merged `<span>x</span>`
+  // is ONE inline `html` atom in the parsed doc.
+  'a <span>x</span> b\n\n甲乙\n': () => doc(
+    p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))),
+  'a <span>x</span> b\n\n甲丙乙\n': () => doc(
+    p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲丙乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1457,6 +1468,58 @@ for (const [markName, from, to, label] of [
   // its own `$...$` byte span, unmoved.
   assert.equal(h.controller.kernel.map.pmPosToRaw(3), 2)
   assert.equal(h.controller.kernel.map.pmPosToRaw(4), 5)
+}
+
+// Case 15 (Plan 5 Task 2): a document containing INLINE HTML attaches, and a
+// plain paragraph elsewhere in it commits byte-exactly. Before the inline-HTML
+// coalescing, `flattenPm`/`flattenMd` counted the fragment differently on each
+// side (PM: one merged `html` atom; kernel mdast: `<span>` and `</span>` as two
+// separate positioned nodes) and `buildProjectionMap` rejected the WHOLE map —
+// so ANY document with an inline `<span>`/`<u>`/`<mark>` degraded to legacy.
+//
+// Raw offsets of 'a <span>x</span> b\n\n甲乙\n':
+//   'a <span>x</span> b' = 0..17 (the fragment is [2,16)), '\n'=18 '\n'=19,
+//   甲=20 乙=21 '\n'=22.
+// PM: paragraph1 content = text('a ') + html atom + text(' b') = size 5 ->
+// nodeSize 7; paragraph2 at pos 7, content start 8, caret between 甲 and 乙 = 9.
+{
+  const md = 'a <span>x</span> b\n\n甲乙\n'
+  const h = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true,
+    'a document containing inline HTML attaches (no degradation)')
+
+  const pairs = h.controller.kernel.map.blockPairs
+  assert.equal(pairs.length, 2)
+  assert.ok(pairs[0].charMap, 'the inline-HTML paragraph is itself mappable')
+  assert.equal(pairs[0].charMap.visibleLength, 5, 'the whole fragment counts as ONE visible unit')
+
+  const tr = h.view.state.tr.insertText('丙', 9)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in a plain paragraph of an inline-HTML document is allowed')
+  assert.equal(h.controller.kernel.doc.text, 'a <span>x</span> b\n\n甲丙乙\n',
+    'commit is byte-exact and leaves the HTML fragment untouched')
+  assert.deepEqual(h.changes.at(-1), ['a <span>x</span> b\n\n甲丙乙\n', false])
+  // Map rebound on the new revision: the fragment still resolves to its own
+  // byte span [2,16), unmoved.
+  assert.equal(h.controller.kernel.map.pmPosToRaw(3), 2)
+  assert.equal(h.controller.kernel.map.pmPosToRaw(4), 16)
+}
+
+// Case 16: fail-closed is preserved INSIDE the fragment-bearing paragraph.
+// `textblockProfile` (editor-kernel-gateway.js) only admits textblocks whose
+// every inline child is TEXT — an html atom's raw syntax span makes byte-level
+// step translation unprovable there — so a keystroke in THAT paragraph is
+// vetoed with a toast while the rest of the document keeps typing normally.
+{
+  const md = 'a <span>x</span> b\n\n甲乙\n'
+  const h = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('Z', 1))
+  assert.deepEqual(verdict, { veto: true }, 'typing inside the HTML-bearing paragraph is refused')
+  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
 }
 
 console.log('PASS kernel mode headless')

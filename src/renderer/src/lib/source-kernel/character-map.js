@@ -8,6 +8,7 @@
 // for returns `null` from buildCharacterMap — callers must not guess.
 import { decodeNamedCharacterReference } from 'decode-named-character-reference'
 import { rangeFromInlineCode } from './mark-map.js'
+import { inlineHtmlRunAt } from './inline-html.js'
 
 // Inline "atom" nodes: entire node is one indivisible visible unit — a caret
 // may sit on either edge but never inside. Phase 1 needs only nodes whose
@@ -195,7 +196,33 @@ function collectUnits(text, node, gaps = null) {
       gaps.ends.set(inner[inner.length - 1].rawEnd, e)
     }
   }
-  for (const child of node.children || []) {
+  const children = node.children || []
+  let i = 0
+  while (i < children.length) {
+    // Coalesced inline-HTML fragment (Plan 5 Task 2): the editor chain's
+    // `remarkMergeInlineHtml` turns `<span>`,`x`,`</span>` into ONE inline
+    // `html` atom, so ProseMirror counts the whole fragment as 1. Emit the
+    // matching single width-1 atom unit here, spanning the FIRST node's
+    // position.start to the LAST node's position.end — the run's members are
+    // contiguous siblings in the raw source, so that span is exactly the
+    // fragment's bytes (verified per shape in
+    // scripts/test-source-kernel-charmap.mjs). Shapes the editor does NOT
+    // merge (a lone `<br/>`, an unbalanced `<span>x`, a run containing
+    // emphasis/inline math/a hard break) return `null` from `inlineHtmlRunAt`
+    // and fall through to the per-child path below, where each `html` node is
+    // its own atom — which is also what the editor leaves in PM. One shared
+    // rule, so the two chains cannot drift.
+    const run = inlineHtmlRunAt(children, i)
+    if (run) {
+      const s = children[i].position?.start?.offset
+      const e = children[run.end - 1].position?.end?.offset
+      if (!Number.isInteger(s) || !Number.isInteger(e)) return null
+      units.push({ rawStart: s, rawEnd: e, width: 1, kind: 'atom' })
+      i = run.end
+      continue
+    }
+    const child = children[i]
+    i += 1
     if (ATOMS.has(child.type)) {
       const s = child.position?.start?.offset
       const e = child.position?.end?.offset

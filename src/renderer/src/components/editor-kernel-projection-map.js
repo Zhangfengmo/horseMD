@@ -36,7 +36,20 @@ import { buildSyntaxIndex, buildCharacterMap, buildCodeMap } from '../lib/source
 // included so they occupy a slot in the sequence just like leaves) and
 // zipped index-for-index — see flattenPm/flattenMd below.
 const PM_TO_MD = {
-  paragraph: ['paragraph'],
+  // `html` (Plan 5 Task 2): preset-commonmark's own `remarkHtmlTransformer`
+  // (node_modules/@milkdown/preset-commonmark/src/plugin/
+  // remark-html-transformer.ts) rewrites every mdast `html` node whose parent
+  // is root/blockquote/listItem into a `paragraph` WRAPPING that html node,
+  // because Milkdown's `html` schema is inline-only (`atom:true,
+  // group:'inline'` — node/html.ts). So on the PM side a BLOCK-level
+  // `<div>x</div>` is a `paragraph` holding one inline `html` atom, never a
+  // block `html` node — hence this pairing (the `image-block: ['paragraph']`
+  // precedent below, mirrored). The pairing loop verifies the paragraph
+  // really is a single-html-atom wrapper and forces it NON-EDITABLE (block
+  // HTML is opaque prose with no character-level decode contract), so a
+  // document containing a raw `<table>`/`<div>` block still maps every OTHER
+  // block instead of degrading entirely.
+  paragraph: ['paragraph', 'html'],
   heading: ['heading'],
   blockquote: ['blockquote'],
   bullet_list: ['list'],
@@ -55,6 +68,10 @@ const PM_TO_MD = {
   code_block: ['code', 'math'],
   table: ['table'],
   hr: ['thematicBreak'],
+  // Kept for schemas that model block html as a real block-level NODE; the
+  // live Crepe schema never produces one (see the `paragraph` entry above),
+  // and INLINE html atoms are excluded from block pairing entirely by
+  // `flattenPm`/`flattenMd`.
   html: ['html'],
   // Crepe's `@milkdown/components` image-block: a standalone (own-line) image
   // is rendered as a block-level `image-block` ATOM, not a paragraph wrapping
@@ -122,9 +139,21 @@ const OPAQUE_TYPES = new Set(['table'])
 // order. `descendants` is guaranteed pre-order (parent before children,
 // siblings in order), matching the mdast walk below. Opaque types are
 // recorded but their subtree is skipped (`return false`).
+//
+// INLINE nodes never participate in BLOCK pairing (Plan 5 Task 2). Milkdown's
+// `html` node is inline (`atom:true, group:'inline'`), so before this guard a
+// paragraph containing `<span>x</span>` pushed TWO entries (the paragraph and
+// the html atom) while the kernel's mdast pushed the paragraph plus its two
+// separate `<span>`/`</span>` html nodes — a 2-vs-3 zip that rejected the
+// WHOLE document's map, i.e. any document with inline HTML degraded entirely.
+// Inline html is now the paragraph's charMap business (one coalesced atom
+// unit, see character-map.js + lib/source-kernel/inline-html.js), never a
+// block slot. `isInline` covers text/image/math_inline/html alike and skipping
+// their (non-existent) subtrees is free.
 function flattenPm(pmDoc) {
   const result = []
   pmDoc.descendants((node, pos) => {
+    if (node.isInline) return false
     if (PM_TO_MD[node.type.name]) {
       result.push({ node, pos })
       if (OPAQUE_TYPES.has(node.type.name)) return false
@@ -133,6 +162,14 @@ function flattenPm(pmDoc) {
   })
   return result
 }
+
+// mdast types whose children are PHRASING content only (Plan 5 Task 2): the
+// block walk must stop here, exactly as `flattenPm` stops at PM's inline
+// boundary. `html` is the only phrasing type that also appears in
+// MD_BLOCK_TYPES, so this changes nothing else — but without it every INLINE
+// html node was recorded as a block pair. `tableCell` needs no entry: `table`
+// is opaque and never descended into.
+const MD_PHRASING_PARENTS = new Set(['paragraph', 'heading'])
 
 // Walk the mdast tree the kernel parsed, collecting the same recognized
 // structural set, same pre-order convention (a node is recorded before its
@@ -156,6 +193,7 @@ function flattenMd(tree, index) {
     if (MD_BLOCK_TYPES.has(node.type)) {
       result.push(node)
       if (OPAQUE_TYPES.has(node.type)) return
+      if (MD_PHRASING_PARENTS.has(node.type)) return
       if (node.type === 'listItem' && (!node.children || node.children.length === 0)) {
         const start = node.position?.start?.offset
         const item = Number.isInteger(start) ? index.listItemAt(start) : null
@@ -373,6 +411,22 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     if (pmType === 'image-block') {
       const children = md.children || []
       if (children.length !== 1 || children[0].type !== 'image') return null
+    }
+
+    // BLOCK-level mdast `html` paired with its PM `paragraph` wrapper (Plan 5
+    // Task 2, see the PM_TO_MD `paragraph` entry): accept it only in the exact
+    // shape `remarkHtmlTransformer` produces — a paragraph whose SINGLE child
+    // is the inline `html` atom — and never as an editable surface. mdast
+    // `html` has no `children` (its text is `.value`), so letting it fall
+    // through to the generic branch below would hand `buildCharacterMap` a
+    // zero-child node and get an EMPTY units array back: a false "proof" of
+    // alignment against a PM paragraph whose content.size is 1 (the atom).
+    if (md.type === 'html' && pmType !== 'html') {
+      const content = pm.node.content
+      const only = content.childCount === 1 ? content.firstChild : null
+      if (!only || only.type.name !== 'html') return null
+      blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap: null })
+      continue
     }
 
     // `bullet_list`/`ordered_list` both structurally pair with mdast

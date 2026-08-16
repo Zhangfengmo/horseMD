@@ -319,3 +319,180 @@ const mapOf = (src, findText = null) => {
 }
 
 console.log('PASS source-kernel character map')
+
+// ---- 行内 HTML 合并（计划五 Task 2）----
+//
+// 编辑器链的 `remarkMergeInlineHtml`（editor-html.js）把
+// html("<span>")/text("x")/html("</span>") 合成 **一个** 无 position 的 html
+// 节点；PM 侧因此只有一个 inline `html` 原子（preset-commonmark node/html.ts：
+// `atom:true, group:'inline'`），content.size 记 1。内核链不引入该插件（合成
+// 节点没有 position，违反 unit 契约），改在这里用同一条规则
+// （lib/source-kernel/inline-html.js `inlineHtmlRunAt`，两条链共用同一份实现）
+// 识别同样的连续段，产出 **一个** 宽度 1 的 atom unit，raw = 首节点 start →
+// 末节点 end（全部有 position，可证明）。
+//
+// 下面每条的 units/visibleLength 都由真实解析器跑出来（见任务报告的探查记录），
+// 且与「编辑器链跑完 brToBreak+merge 后的 PM 尺寸」逐条对账（本文件末尾的
+// 跨链一致性用例）。
+//
+// 注意：本节一律取 `idx.tree.children[i]` 而不是 `idx.blockAt()` —— syntax-index
+// 的 BLOCKS 集合含 'html'，而行内 html 节点也是 html，blockAt 的「start 最大者
+// 胜」会把行内 html 当成块返回。charMap 的入口是块节点，必须是 paragraph。
+const topBlock = (src, i = 0) => buildSyntaxIndex(src).tree.children[i]
+const unitsOf = (src, i = 0) => {
+  const map = buildCharacterMap(src, topBlock(src, i))
+  return { map, shape: map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]) }
+}
+
+// 基础形状 `<span>x</span>`：三个 mdast 节点 → 一个 atom，raw 覆盖完整片段
+{
+  const src = 'a <span>x</span> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 16], ['char', 16, 17], ['char', 17, 18]
+  ])
+  assert.equal(map.visibleLength, 5)
+  assert.equal(src.slice(2, 16), '<span>x</span>')
+  assert.equal(map.visibleToRaw(2), 2)   // atom 左边界
+  assert.equal(map.visibleToRaw(3), 16)  // atom 右边界（跳过整个片段）
+}
+
+// 嵌套 `<b><i>x</i></b>`：四个 html + 一个 text → 仍是一个 atom
+{
+  const src = 'a <b><i>x</i></b> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 17], ['char', 17, 18], ['char', 18, 19]
+  ])
+  assert.equal(src.slice(2, 17), '<b><i>x</i></b>')
+  assert.equal(map.visibleLength, 5)
+}
+
+// 自闭合 `<br/>`：单节点本来就平衡，编辑器链 **不合并**（`j > i + 1` 不成立），
+// 而且 `brToBreakRemarkPlugin` 早已把它换成 mdast `break`。内核侧照旧是它自己
+// 的一个 atom（宽度 1，与 PM 的 hard break 原子相等）。
+{
+  const src = 'a<br/>b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['char', 0, 1], ['atom', 1, 6], ['char', 6, 7]])
+  assert.equal(map.visibleLength, 3)
+}
+
+// `<br/>` 落在片段内部：编辑器链在 merge 之前就把它变成了 break 节点，合并因此
+// 在 break 处断开 → PM 是 7 个行内节点。内核必须用同一判据断开（否则会跨过
+// void 标签直接平衡成一个 atom，5 vs 9 的尺寸差会把整图打成 null）。
+{
+  const src = 'a <span>x<br/>y</span> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 8], ['char', 8, 9], ['atom', 9, 14],
+    ['char', 14, 15], ['atom', 15, 22], ['char', 22, 23], ['char', 23, 24]
+  ])
+  assert.equal(map.visibleLength, 9)
+}
+
+// 不平衡 `<span>x b`：两条链都不合并 → 开标签自己一个 atom，其余是普通字符
+{
+  const src = 'a <span>x b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 8],
+    ['char', 8, 9], ['char', 9, 10], ['char', 10, 11]
+  ])
+  assert.equal(map.visibleLength, 6)
+}
+
+// 片段内含 emphasis：编辑器链的 coalesceChildren 在非 html/text 兄弟处放弃合并
+// → PM 侧是 开标签原子 + emphasis 文本 + 闭标签原子。内核同形（`*` 是 mark gap）。
+{
+  const src = 'a <span>*x*</span> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 8], ['char', 9, 10], ['atom', 11, 18],
+    ['char', 18, 19], ['char', 19, 20]
+  ])
+  assert.equal(map.visibleLength, 7)
+}
+
+// 片段内含行内数学：两条链都有 remark-math（计划五 Task 1），inlineMath 同样是
+// 非 html/text 兄弟 → 两侧都不合并
+{
+  const src = 'a <span>$x$</span> b\n'
+  const { shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 8], ['atom', 8, 11], ['atom', 11, 18],
+    ['char', 18, 19], ['char', 19, 20]
+  ])
+}
+
+// 相邻片段：合并是「最短平衡前缀」，所以是两个 atom，不是一个
+{
+  const src = 'a <span>x</span><span>y</span> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 16], ['atom', 16, 30],
+    ['char', 30, 31], ['char', 31, 32]
+  ])
+  assert.equal(map.visibleLength, 6)
+}
+
+// 带属性的开标签
+{
+  const src = 'a <span class="k">x</span> b\n'
+  const { shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 26], ['char', 26, 27], ['char', 27, 28]
+  ])
+  assert.equal(src.slice(2, 26), '<span class="k">x</span>')
+}
+
+// 片段内含反斜杠转义：合并节点的 value 是 **解码后** 的（`a*b`），但 raw 跨度
+// 仍是原始字节（含 `\`）——这正是内核不能复用编辑器合并节点的原因。
+{
+  const src = 'a <span>a\\*b</span> c\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 19], ['char', 19, 20], ['char', 20, 21]
+  ])
+  assert.equal(src.slice(2, 19), '<span>a\\*b</span>')
+  assert.equal(map.visibleLength, 5)
+}
+
+// HTML 注释：不是开标签（isOpeningInlineTag 排除 `<!--`）→ 不合并
+{
+  const src = 'a <!-- c --> b\n'
+  const { shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 12], ['char', 12, 13], ['char', 13, 14]
+  ])
+}
+
+// 整段就是一个片段：paragraph 的唯一 unit 是这个 atom
+{
+  const src = '<span>x</span>\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['atom', 0, 14]])
+  assert.equal(map.visibleLength, 1)
+}
+
+// CRLF：合并段之后仍能正常继续（linebreak unit 只吞 '\n'，'\r' 是普通 char）
+{
+  const src = 'a <span>x</span> b\r\nnext\r\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 16], ['char', 16, 17], ['char', 17, 18],
+    ['char', 18, 19], ['linebreak', 19, 20],
+    ['char', 20, 21], ['char', 21, 22], ['char', 22, 23], ['char', 23, 24]
+  ])
+  assert.equal(map.visibleLength, 11)
+}
+
+// 标题里的片段（heading 也是 phrasing 容器）
+{
+  const src = '# h <span>x</span>\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['char', 2, 3], ['char', 3, 4], ['atom', 4, 18]])
+  assert.equal(map.visibleLength, 3)
+}
+
+console.log('PASS source-kernel character map (inline html)')
