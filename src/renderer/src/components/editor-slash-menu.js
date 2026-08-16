@@ -297,6 +297,14 @@ class SlashMenu {
     // `onCommand`, but the menu itself keeps working (query/filter/nav).
     this.isBlocked = options.isBlocked || null
     this.notify = options.notify || null
+    // Source-kernel mode (Plan 4 Task 4): when set, the 'quote' item's `run`
+    // is swapped for this callback instead of dispatching PM's
+    // `wrapInBlockTypeCommand` — the kernel owns quote wrap/unwrap as a
+    // source transaction (editor-kernel-mode.js's `runQuoteToggle`), so the
+    // menu must never produce the legacy PM transaction for it. Every other
+    // item keeps its normal `run` (still blocked via `isBlocked` in kernel
+    // mode — only 'quote' is unblocked, see editor-crepe-setup.js).
+    this.quoteRun = options.quoteToggle || null
     this.items = buildItems(getT, '')
     this.filtered = []
     this.selectedIndex = 0
@@ -334,7 +342,11 @@ class SlashMenu {
   // like Feishu's narrowing.
   render(query) {
     const q = (query || '').trim().toLowerCase()
-    const all = buildItems(this.getT, query)
+    let all = buildItems(this.getT, query)
+    if (this.quoteRun) {
+      const quoteRun = this.quoteRun
+      all = all.map((it) => (it.id === 'quote' ? { ...it, run: (ctx, view) => quoteRun(view) } : it))
+    }
     const t = this.getT
     if (q) {
       const ranked = all
@@ -361,6 +373,8 @@ class SlashMenu {
         (blocked ? ' disabled' : '') +
         '" data-index="' +
         idx +
+        '" data-id="' +
+        esc(it.id) +
         '" role="option"' +
         (blocked ? ' aria-disabled="true"' : '') +
         '>' +

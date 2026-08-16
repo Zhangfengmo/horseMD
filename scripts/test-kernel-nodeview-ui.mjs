@@ -250,7 +250,13 @@ const paragraphTexts = (evaluate) => evaluate(`(() => {
 
 const slashItems = (evaluate) => evaluate(`[
   ...document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item')
-].map((node) => ({ disabled: node.classList.contains('disabled'), index: node.dataset.index }))`)
+].map((node) => ({ disabled: node.classList.contains('disabled'), index: node.dataset.index, id: node.dataset.id }))`)
+
+// Plan 4 Task 4: 'quote' is the ONE slash item the kernel owns (routed
+// through runQuoteToggle, never PM's wrapInBlockTypeCommand) — every other
+// structural item stays refused. This predicate is the "disabled matrix"
+// every other item must match; 'quote' must match the opposite.
+const isStructurallyBlocked = (item) => item.id !== 'quote'
 
 async function click(send, point) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
@@ -390,7 +396,10 @@ async function run() {
       'slash menu never opened')
     let items = await slashItems(evaluate)
     assert.ok(items.length > 5, `slash menu opened with too few items: ${JSON.stringify(items)}`)
-    assert.ok(items.every((item) => item.disabled), `every structural slash item must be .disabled in kernel mode: ${JSON.stringify(items)}`)
+    assert.ok(
+      items.every((item) => item.disabled === isStructurallyBlocked(item)),
+      `every structural slash item must be .disabled except 'quote' (kernel-routed) in kernel mode: ${JSON.stringify(items)}`
+    )
 
     // (a) Enter on the highlighted (first) disabled item: menu closes,
     // document bytes unchanged, no command ran.
@@ -411,7 +420,10 @@ async function run() {
     await waitFor(() => evaluate(`document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item').length > 0`),
       'slash menu never reopened for the click-based check')
     items = await slashItems(evaluate)
-    assert.ok(items.every((item) => item.disabled), `reopened slash menu items must still be .disabled: ${JSON.stringify(items)}`)
+    assert.ok(
+      items.every((item) => item.disabled === isStructurallyBlocked(item)),
+      `reopened slash menu items must still match the disabled matrix (quote excepted): ${JSON.stringify(items)}`
+    )
 
     const firstItemPoint = await evaluate(`(() => {
       const li = document.querySelector('.milkdown-slash-menu[data-show="true"] .hm-slash-item[data-index="0"]')

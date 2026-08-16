@@ -255,7 +255,16 @@ export function createConfiguredCrepe({
       // Source-kernel mode: every slash item is a structural insert the
       // kernel can't own yet (phase 1 of the blocking matrix) — block all
       // ids, keep them visible-but-disabled (handled in editor-slash-menu.js).
-      kernelMode ? { isBlocked: () => 'kernelMode.unsupported', notify } : undefined
+      // 'quote' is the one exception (Plan 4 Task 4): it stays enabled and
+      // its `run` is swapped (via `quoteToggle`) to route through the
+      // kernel's own `runQuoteToggle` instead of PM's `wrapInBlockTypeCommand`.
+      kernelMode
+        ? {
+            isBlocked: (id) => (id === 'quote' ? null : 'kernelMode.unsupported'),
+            notify,
+            quoteToggle: (view) => kernelPlugins?.runQuoteToggle?.(view)
+          }
+        : undefined
     )
 
     ctx.update(prosePluginsCtx, (plugins) => [

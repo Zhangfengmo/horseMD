@@ -32,6 +32,7 @@ import {
   exitCodeBlock,
   replaceVisibleText,
   routeStructuralKey,
+  toggleBlockquote,
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
@@ -1123,6 +1124,47 @@ export function createKernelMode({
     return true
   }
 
+  // Slash `/quote` entry point (Plan 4 Task 4): unlike every other slash item
+  // (still refused, `isBlocked: () => 'kernelMode.unsupported'`), the quote
+  // item is enabled in kernel mode and its `run` is swapped (see
+  // editor-slash-menu.js's `quoteRun` / editor-crepe-setup.js's `quoteToggle`
+  // option) to call straight into this function instead of dispatching PM's
+  // `wrapInBlockTypeCommand`. No PM blockquote-wrap transaction is ever
+  // produced for this path — the gateway never needs to classify/veto it.
+  // Caret-based (not selection-based), same contract as `structuralHandler`:
+  // the live caret resolves to a raw offset, `toggleBlockquote` proves the
+  // wrap/unwrap transaction against `kernel.doc`, and `applyKernelTransaction`
+  // commits + reconciles + restores the caret exactly like any other
+  // structural kernel command (Enter/Tab/…). `requireMap` stays the default
+  // `false`: a blockquote-wrapped/unwrapped paragraph/heading/list is an
+  // ordinary PM node shape (unlike highlight's invisible-to-Crepe `==`
+  // bytes), so the result always rebuilds a projection map.
+  const runQuoteToggle = (viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    if (!kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const offset = kernel.map.pmPosToRaw(view.state.selection.head)
+    if (!Number.isFinite(offset)) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const routed = toggleBlockquote({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    applyKernelTransaction(routed.transaction, view)
+    return true
+  }
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -1372,6 +1414,10 @@ export function createKernelMode({
     // createKernelCmExtensions' `isEditable`/`runExitCode` callbacks.
     isCmBlockEditable,
     runExitCode,
+    // Slash `/quote` entry point (Plan 4 Task 4): consumed by
+    // editor-crepe-setup.js's `quoteToggle` slash-plugin option, which wires
+    // it into editor-slash-menu.js's per-item `run` override.
+    runQuoteToggle,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's

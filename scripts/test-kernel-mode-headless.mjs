@@ -33,7 +33,10 @@ const schema = new Schema({
     },
     // Plan 3 Task 4 — needed for Case 12's code-block text-commit +
     // language-switch end-to-end path.
-    code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } }
+    code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } },
+    // Plan 4 Task 4 — needed for the quote-toggle end-to-end cases (mirrors
+    // preset-commonmark's real `blockquote` shape: one-or-more block content).
+    blockquote: { content: 'block+', group: 'block' }
   },
   // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
   // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
@@ -53,6 +56,7 @@ const text = (s) => schema.text(s)
 const li = (checked, ...c) => schema.node('list_item', { checked }, c)
 const bl = (...c) => schema.node('bullet_list', null, c)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
+const bq = (...c) => schema.node('blockquote', null, c)
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -109,7 +113,15 @@ const FIXTURE_DOCS = {
   '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')]))),
   // P4-3.5 Fix B fixtures: plain typing inside the already-marked paragraph.
   '甲**乙**丙X\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙X'))),
-  '甲**乙**X丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('X丙')))
+  '甲**乙**X丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('X丙'))),
+  // Plan 4 Task 4 fixture: quote-toggle wrap/unwrap round trip. Reused for
+  // both directions ('甲乙\n' -> wrap -> this, and this -> unwrap -> '甲乙\n',
+  // which already has its own fixture above). Trailing `p()` mirrors
+  // `withTrailingParagraph`'s own append (see e.g. the mermaid fixtures
+  // above): a doc whose last top-level child is not paragraph/heading always
+  // gains one, so the fixture bakes it in directly rather than relying on
+  // the (here bypassed for a hand-built parse) append to add it again.
+  '> 甲乙\n': () => doc(bq(p(text('甲乙'))), p())
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1289,6 +1301,84 @@ for (const [markName, from, to, label] of [
   assert.equal(h.controller.markShortcutGuard(h.view.state), false, 'real selection: falls through to the preset')
   assert.equal(typeof h.controller.marksKeymap, 'function', 'marksKeymap is exposed for registration')
   assert.ok(h.controller.marksKeymap(), 'marksKeymap builds a plugin')
+}
+
+// ---- Plan 4 Task 4: quote toggle. `runQuoteToggle` is NOT reached via
+// dispatchThrough (no PM `wrapInBlockTypeCommand`/AddMarkStep transaction is
+// ever built) — the slash menu's 'quote' item calls straight into
+// `controller.runQuoteToggle(view)` (see editor-slash-menu.js's `quoteRun` /
+// editor-crepe-setup.js's `quoteToggle` option), so these cases call it
+// directly, mirroring runExitCode's own direct-call pattern (Case T5c-T5f)
+// rather than toggleVia's PM-dispatch shape (Case M1 and friends).
+
+// Case Q1: wrap a plain paragraph. Caret at PM pos 2 (raw offset 1, between
+// 甲 and 乙) in '甲乙\n' — the kernel gains a blockquote wrapping the SAME
+// paragraph, the view reconciles to it, and the caret is restored at the
+// equivalent raw position (still between 甲 and 乙, shifted by the 2 inserted
+// bytes) — same "stay on the same character" contract every other structural
+// command here locks (splitTextBlock's own 段首 Enter cases, indentListItem).
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const handled = h.controller.runQuoteToggle(h.view)
+  assert.equal(handled, true)
+  assert.equal(h.controller.kernel.doc.text, '> 甲乙\n')
+  // withTrailingParagraph appends an empty trailing paragraph: the doc's
+  // only top-level child is now `blockquote`, not paragraph/heading — same
+  // append @milkdown/plugin-trailing performs live (see the mermaid/code
+  // fixtures above for the same convention).
+  assert.ok(h.view.state.doc.eq(doc(bq(p(text('甲乙'))), p())), 'view reconciled to the quoted paragraph')
+  assert.equal(h.view.state.selection.head, 3, 'caret restored between 甲 and 乙, inside the new blockquote')
+  assert.deepEqual(h.changes.at(-1), ['> 甲乙\n', false])
+
+  // Case Q2: toggling AGAIN at the same (now-quoted) content unwraps it back
+  // to the exact original bytes and PM shape — the round-trip this command's
+  // whole ADR rests on (see quote-toggle.js's header comment).
+  const handled2 = h.controller.runQuoteToggle(h.view)
+  assert.equal(handled2, true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')))), 'view reconciled back to the plain paragraph')
+  assert.equal(h.view.state.selection.head, 2, 'caret restored to the original PM position')
+  assert.deepEqual(h.changes.at(-1), ['甲乙\n', false])
+
+  // Case Q3: undo grouping — each toggle is its own history group (default
+  // `record: true` via applyKernelTransaction), so one undo exactly reverses
+  // the unwrap (back to quoted) and a second undo exactly reverses the wrap
+  // (back to the original plain paragraph), never merging the two.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '> 甲乙\n', 'first undo restores the quoted form')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'second undo restores the original plain paragraph')
+}
+
+// Case Q4: refusal — no projection map (pre-attach) swallows the call with a
+// notification and leaves the kernel doc untouched, same fail-closed shape
+// every other kernel entry point uses when `kernel.map` isn't proven yet.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  // Deliberately no attachAfterCreate(): kernel.map stays null.
+  const before = h.notifications.length
+  const handled = h.controller.runQuoteToggle(h.view)
+  assert.equal(handled, false, 'inactive controller (never attached) does not intercept the call')
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'kernel bytes untouched')
+  assert.equal(h.notifications.length, before, 'inactive controller does not notify either')
+}
+
+// Case Q5: a top-level node type this command does not own (a code block —
+// its own domain, plan 3) refuses end-to-end: `toggleBlockquote` returns
+// `unsupported-structure`, `runQuoteToggle` notifies and swallows (true), and
+// neither the kernel bytes nor the view move at all.
+{
+  const h = makeHarness('```js\nab\n```\n', doc(cb('js', 'ab')))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const before = h.notifications.length
+  const handled = h.controller.runQuoteToggle(h.view)
+  assert.equal(handled, true, 'refusal still swallows the call')
+  assert.equal(h.controller.kernel.doc.text, '```js\nab\n```\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(cb('js', 'ab'))), 'view untouched')
+  assert.ok(h.notifications.length > before, 'refusal notifies')
 }
 
 console.log('PASS kernel mode headless')
