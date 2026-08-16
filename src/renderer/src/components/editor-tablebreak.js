@@ -19,19 +19,15 @@ import { defaultHandlers } from 'mdast-util-to-markdown'
 // which html nodes this plugin will have already turned into `break` nodes, or
 // the two chains disagree on where a merged fragment ends (see
 // lib/source-kernel/inline-html.js).
-import { isInlineBreakHtml } from '../lib/source-kernel/inline-html.js'
+import { isInlineBreakHtml, BREAK_REWRITE_PARENTS } from '../lib/source-kernel/inline-html.js'
 // Node types whose children are phrasing content — the only places an inline
 // <br> legitimately appears, so we only rewrite there (never at block level,
-// which would produce an invalid mdast break).
-const PHRASING_PARENTS = new Set([
-  'paragraph',
-  'heading',
-  'tableCell',
-  'emphasis',
-  'strong',
-  'delete',
-  'link'
-])
+// which would produce an invalid mdast break). The set itself now lives in
+// lib/source-kernel/inline-html.js as BREAK_REWRITE_PARENTS: the inline-HTML
+// coalescer (both chains) has to answer the very same question — "has this
+// container's `<br>` already become a `break` node?" — and two copies of the
+// list could drift apart silently.
+const PHRASING_PARENTS = BREAK_REWRITE_PARENTS
 
 // --- 2. serialize: break → <br> inside a table cell ---
 export function tableCellBreakHandler(node, parent, state, info) {

@@ -1250,4 +1250,43 @@ const br = () => schema.node('hard_break')
   assert.equal(map.pmPosToRaw(14), 41) // 右边界
 }
 
+// Case H9（已知残留，钉住当前行为）：`remarkMergeInlineHtml` 也会合并 **根级**
+// 的 html 兄弟。`<div>\n\n</div>\n` 在内核侧是两个根级 `html` 块（[0,5) 与
+// [7,13)），在编辑器侧被合成一个 html 节点 → `remarkHtmlTransformer` 包成 **一个**
+// paragraph → pmBlocks 1 vs mdBlocks 2 → 整图 null。
+//
+// 这是「HTML 包裹层」的真实写法，本任务 **未** 治理：治它需要在 flattenMd 侧同样
+// 合并根级 html 兄弟，而合并跨越了块边界（两块之间的空行属于谁没有定义），与
+// 「块级 HTML 是不可编辑叶」的现有契约冲突。此处钉住 null，防止将来有人以为它已
+// 经工作；若日后治理，本用例应翻转为 map 非 null。
+{
+  const md = '<div>\n\n</div>\n'
+  assert.equal(
+    buildProjectionMap(md, doc(p(inlineHtml('<div></div>')))), null,
+    'a merged ROOT-LEVEL block-HTML wrapper still degrades the whole map (known residual)'
+  )
+}
+
+// Case H10（对照）：中间夹一个段落时，合并被段落打断 —— 两侧都是
+// [html, paragraph, html] → 建图成功，中间段落可编辑。
+// '<div>\n\ntext\n\n</div>\n' 的 raw 下标：'<div>'=[0,5) '\n'=5 '\n'=6
+// 'text'=[7,11) '\n'=11 '\n'=12 '</div>'=[13,19)
+{
+  const md = '<div>\n\ntext\n\n</div>\n'
+  const d = doc(
+    p(inlineHtml('<div>')),
+    p(text('text')),
+    p(inlineHtml('</div>'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a block-HTML wrapper interrupted by a paragraph must map')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[0].charMap, null)
+  assert.equal(map.blockPairs[2].charMap, null)
+  assert.ok(map.blockPairs[1].charMap, 'the wrapped paragraph stays editable')
+  // paragraph1 nodeSize 3 -> paragraph2 pos 3, content start 4.
+  assert.equal(map.pmPosToRaw(4), 7)
+  assert.equal(map.pmPosToRaw(8), 11)
+}
+
 console.log('PASS kernel projection map (inline html)')

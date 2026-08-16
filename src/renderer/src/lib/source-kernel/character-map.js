@@ -8,7 +8,7 @@
 // for returns `null` from buildCharacterMap — callers must not guess.
 import { decodeNamedCharacterReference } from 'decode-named-character-reference'
 import { rangeFromInlineCode } from './mark-map.js'
-import { inlineHtmlRunAt } from './inline-html.js'
+import { inlineHtmlRunAt, BREAK_REWRITE_PARENTS } from './inline-html.js'
 
 // Inline "atom" nodes: entire node is one indivisible visible unit — a caret
 // may sit on either edge but never inside. Phase 1 needs only nodes whose
@@ -197,6 +197,15 @@ function collectUnits(text, node, gaps = null) {
     }
   }
   const children = node.children || []
+  // Same question the editor's coalescer asks of each container: has
+  // `brToBreakRemarkPlugin` already turned this node's `<br>` html children
+  // into `break` nodes? Every container the kernel reaches here (paragraph /
+  // heading / tableCell, then emphasis / strong / delete / link on recursion)
+  // is in the set, so this is `true` in practice — but `linkReference` is not,
+  // and passing the flag rather than hardcoding `true` keeps the kernel's runs
+  // identical to the editor's for that shape too, instead of relying on
+  // "Milkdown throws on linkReference anyway".
+  const breakHtmlCuts = BREAK_REWRITE_PARENTS.has(node.type)
   let i = 0
   while (i < children.length) {
     // Coalesced inline-HTML fragment (Plan 5 Task 2): the editor chain's
@@ -212,7 +221,7 @@ function collectUnits(text, node, gaps = null) {
     // and fall through to the per-child path below, where each `html` node is
     // its own atom — which is also what the editor leaves in PM. One shared
     // rule, so the two chains cannot drift.
-    const run = inlineHtmlRunAt(children, i)
+    const run = inlineHtmlRunAt(children, i, breakHtmlCuts)
     if (run) {
       const s = children[i].position?.start?.offset
       const e = children[run.end - 1].position?.end?.offset

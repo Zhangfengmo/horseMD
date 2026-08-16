@@ -5,7 +5,7 @@
 // exact same runs on its own (positioned) mdast, and one shared
 // implementation is the only way the two chains provably agree. See that
 // module's header for the full rationale.
-import { inlineHtmlRunAt } from '../lib/source-kernel/inline-html.js'
+import { inlineHtmlRunAt, BREAK_REWRITE_PARENTS } from '../lib/source-kernel/inline-html.js'
 
 // Tags we render as real DOM instead of escaped source. Split into block vs
 // inline so the node view returns the right wrapper element (a block <div> or an
@@ -99,9 +99,16 @@ function coalesceChildren(node) {
   for (const c of node.children) coalesceChildren(c)
   const kids = node.children
   const next = []
+  // Whether `brToBreakRemarkPlugin` (which runs BEFORE this plugin) has
+  // already replaced this container's `<br>` html nodes with `break` nodes.
+  // For every container it covers the flag is a no-op here (there is no `<br>`
+  // html node left to meet); for the ones it does NOT cover — the mdast root's
+  // block-HTML siblings and `linkReference` — `<br>` is still html and the run
+  // must keep balancing across it, exactly as it always did.
+  const breakHtmlCuts = BREAK_REWRITE_PARENTS.has(node.type)
   let i = 0
   while (i < kids.length) {
-    const run = inlineHtmlRunAt(kids, i)
+    const run = inlineHtmlRunAt(kids, i, breakHtmlCuts)
     if (run) {
       next.push({ type: 'html', value: run.value })
       i = run.end
