@@ -345,6 +345,18 @@ class SlashMenu {
     let all = buildItems(this.getT, query)
     if (this.quoteRun) {
       const quoteRun = this.quoteRun
+      // No `clearThen()` here (unlike every other item): `shouldShow` only
+      // ever fires when the WHOLE current block's text IS the typed "/quote"
+      // query, and the kernel-mode entry point this calls into
+      // (`runQuoteToggleFromQuery`, editor-kernel-mode.js) strips those query
+      // bytes and wraps atomically in ONE kernel transaction itself — a
+      // separate PM `clearTextInCurrentBlockCommand` dispatch first would
+      // leave the paragraph in an intermediate, un-representable "fully
+      // empty" raw state that the kernel's own self-heal then silently
+      // prunes before the wrap ever runs (see that function's own ADR
+      // comment for the full probe transcript; a real bug found while
+      // building this item's first genuine end-to-end UI regression, Plan 4
+      // Task 5).
       all = all.map((it) => (it.id === 'quote' ? { ...it, run: (ctx, view) => quoteRun(view) } : it))
     }
     const t = this.getT

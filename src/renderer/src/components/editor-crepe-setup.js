@@ -257,12 +257,18 @@ export function createConfiguredCrepe({
       // ids, keep them visible-but-disabled (handled in editor-slash-menu.js).
       // 'quote' is the one exception (Plan 4 Task 4): it stays enabled and
       // its `run` is swapped (via `quoteToggle`) to route through the
-      // kernel's own `runQuoteToggle` instead of PM's `wrapInBlockTypeCommand`.
+      // kernel instead of PM's `wrapInBlockTypeCommand`. `runQuoteToggleFromQuery`
+      // (not the plain `runQuoteToggle`, Plan 4 Task 5 fix) — the slash item's
+      // `shouldShow` guarantees the current block's ENTIRE raw text is the
+      // typed "/quote" query, so this entry point strips those query bytes
+      // and wraps atomically in one kernel transaction (see its own ADR
+      // comment in editor-kernel-mode.js for why a separate clear-then-wrap
+      // doesn't work).
       kernelMode
         ? {
             isBlocked: (id) => (id === 'quote' ? null : 'kernelMode.unsupported'),
             notify,
-            quoteToggle: (view) => kernelPlugins?.runQuoteToggle?.(view)
+            quoteToggle: (view) => kernelPlugins?.runQuoteToggleFromQuery?.(view)
           }
         : undefined
     )

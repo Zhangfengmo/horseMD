@@ -1165,6 +1165,91 @@ export function createKernelMode({
     return true
   }
 
+  // Slash-only entry point (Plan 4 Task 5, real-bug fix — found while
+  // building this item's first genuine end-to-end UI regression; probe
+  // transcript in the task report). `shouldShow` (editor-slash-menu.js) only
+  // ever fires when the ENTIRE current paragraph/heading's raw text IS the
+  // typed "/query" (`atEndOfBlock` + `text.startsWith('/')` together force
+  // this — there is no reachable invocation where "/quote" is typed after
+  // real content), so routing straight into `runQuoteToggle` would wrap the
+  // LITERAL query bytes ('> /quote' instead of an empty '> ' the user can
+  // type into).
+  //
+  // A separate PM `clearTextInCurrentBlockCommand` dispatch BEFORE the wrap
+  // does not fix this either (probed): a fully-emptied top-level paragraph
+  // has NO raw representation (CommonMark: a blank line is a block
+  // separator, not a node) — `bindMap`'s synchronous rebuild fails for the
+  // same reason a fresh empty doc-region always does, and the async
+  // `verifyPlainTextProjection` repair that would normally reconcile a
+  // legitimate split-placeholder is scheduled via `queueMicrotask`, so an
+  // immediate same-tick `runQuoteToggle` call sees `kernel.map` already null
+  // and refuses. The net effect of "clear, then toggle" is neither a clean
+  // wrap nor the old '> /quote' fallback — the paragraph just silently
+  // vanishes once the microtask's reconcile catches up.
+  //
+  // Fix: never let that unrepresentable intermediate state exist. A first
+  // attempt tried "strip the query bytes from a throwaway copy, then
+  // delegate to `toggleBlockquote` against that copy" — but `toggleBlockquote`
+  // ALSO resolves its target through `topLevelNodeAt`, an mdast NODE lookup,
+  // and a genuinely blank stretch produces no node either (same root cause,
+  // one level up: probed, `toggleBlockquote` itself then refuses with
+  // 'unsupported-structure'). There is no node to find here BY CONSTRUCTION —
+  // the target is always exactly one blank line — so this command does not
+  // try to find one. It builds the ONE edit directly: replace
+  // `[queryStart, queryEnd)` (the query bytes, proven above to be the
+  // block's entire raw content) with a bare `'>'`, the same "blank owned
+  // line" marker convention `quote-toggle.js`'s own `wrapEdits` already uses
+  // for a loose list's internal blank line — a single atomic commit straight
+  // from "/quote" text to a real (empty, ready-to-type-into) blockquote
+  // line, with no separate PM dispatch and no intermediate empty-paragraph
+  // state ever reaching the view.
+  const runQuoteToggleFromQuery = (viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    if (!kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const headRaw = kernel.map.pmPosToRaw(view.state.selection.head)
+    if (!Number.isFinite(headRaw) || headRaw < 1) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const index = buildSyntaxIndex(kernel.doc.text)
+    // blockAt is exclusive-end and the caret sits AT the block's own end
+    // (shouldShow's atEndOfBlock) — probe one raw byte back, same recovery
+    // idiom quote-toggle.js's own topLevelNodeAt uses.
+    const block = index.blockAt(headRaw - 1)
+    if (!block || !['paragraph', 'heading'].includes(block.type) || block.end !== headRaw) {
+      notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+      return true
+    }
+    const queryStart = block.start
+    const queryEnd = headRaw
+    const combined = {
+      baseRevision: kernel.doc.revision,
+      edits: [{ from: queryStart, to: queryEnd, insert: '>' }],
+      intent: 'wrap-blockquote',
+      selection: { anchor: queryStart + 1, head: queryStart + 1 }
+    }
+    // `requireMap: true` (deeper architectural finding, probed): a bare '>'
+    // marker with nothing else on its line reparses to a blockquote mdast
+    // node with ZERO children (`processor.parse('> \n')` — confirmed
+    // directly) — but ProseMirror's blockquote schema is `content: "block+"`
+    // and can never hold zero children, so this ONE shape (a blockquote
+    // whose ENTIRE content is empty) can never round-trip through the
+    // projection map no matter how the edit is built; legacy's
+    // `wrapInBlockTypeCommand` never hits this because it wraps the LIVE PM
+    // node directly (an empty paragraph already satisfies "block+"), with no
+    // byte reparse involved. Refusing here (fail-closed, same pattern as
+    // highlight's M4 pin) keeps this command's failure mode "nothing
+    // happens, toast shown" instead of committing byte-correct-but-then
+    // silently degrading `kernel.map` to null.
+    applyKernelTransaction(combined, view, { requireMap: true })
+    return true
+  }
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -1418,6 +1503,7 @@ export function createKernelMode({
     // editor-crepe-setup.js's `quoteToggle` slash-plugin option, which wires
     // it into editor-slash-menu.js's per-item `run` override.
     runQuoteToggle,
+    runQuoteToggleFromQuery,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's
