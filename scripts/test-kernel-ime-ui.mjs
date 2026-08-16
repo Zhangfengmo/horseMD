@@ -205,6 +205,131 @@ async function pressEscape(send) {
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
 }
 
+// Copied from scripts/test-kernel-marks-ui.mjs (charRect / selectRange /
+// selectionNonEmpty): character-offset Range lookup + real mouse-drag
+// selection, needed here for the final-review IME-over-marked-selection
+// segment below (this file's other scenarios only ever compose at a
+// collapsed caret, never over an existing selection).
+async function charRect(evaluate, paragraphText, from, to) {
+  return evaluate(`(() => {
+    const editor = [...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)
+    const node = [...(editor?.querySelectorAll('p, h1, h2, h3, h4, h5, h6') || [])].find((n) => n.textContent === ${JSON.stringify(paragraphText)})
+    if (!node) return null
+    node.scrollIntoView({ block: 'center' })
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    let count = 0
+    let startNode = null, startOffset = 0, endNode = null, endOffset = 0
+    let n
+    while ((n = walker.nextNode())) {
+      const len = n.textContent.length
+      if (startNode === null && count + len >= ${from}) { startNode = n; startOffset = ${from} - count }
+      if (endNode === null && count + len >= ${to}) { endNode = n; endOffset = ${to} - count }
+      count += len
+      if (startNode && endNode) break
+    }
+    if (!startNode || !endNode) return null
+    const range = document.createRange()
+    range.setStart(startNode, startOffset)
+    range.setEnd(endNode, endOffset)
+    const rect = range.getBoundingClientRect()
+    if (!rect) return null
+    return { left: rect.left, right: rect.right, top: rect.top, height: rect.height }
+  })()`)
+}
+
+async function selectionNonEmpty(evaluate) {
+  return evaluate(`(() => { const s = window.getSelection(); return !!s && s.toString().length > 0 })()`)
+}
+
+async function selectRange(evaluate, send, paragraphText, from, to) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rect = await waitFor(() => charRect(evaluate, paragraphText, from, to),
+      `could not locate range [${from},${to}) in ${JSON.stringify(paragraphText)}`)
+    const y = rect.top + Math.min(12, rect.height / 2)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: rect.left + 1, y, button: 'left', clickCount: 1 })
+    for (let step = 1; step <= 4; step += 1) {
+      const x = rect.left + ((rect.right - rect.left) * step) / 4
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 })
+    }
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: Math.max(rect.right - 1, rect.left + 1), y, button: 'left', clickCount: 1 })
+    await sleep(250)
+    if (await selectionNonEmpty(evaluate)) return
+    await sleep(200)
+  }
+  assert.fail(`drag-select never produced a non-empty selection for [${from},${to}) in ${JSON.stringify(paragraphText)}`)
+}
+
+// Final-review regression segment: IME composition OVER a selected,
+// already-MARKED (bold) span — same corruption family 2e3036b fixed for the
+// plain-typing path (editor-kernel-gateway.js commitPlainText). Before this
+// fix, editor-kernel-composition.js's commit() resolved a non-empty diff's
+// `from` edge through plain `pmPosToRaw` (gap-before), which — for a
+// selection that exactly covers an existing strong/emphasis/... node's
+// content — resolves to a raw offset INSIDE the opening delimiter, silently
+// eating it and orphaning the closing delimiter.
+//
+// Fixture: '甲**乙丙丁戊**己\n' — "乙丙丁戊" renders bold. Selecting the
+// rendered bold word and composing 'ceshi'->'测试' over it replaces the
+// bold content only; the fix must commit raw [3,7) ("乙丙丁戊", content-only,
+// derived the same way test-source-kernel-charmap.mjs's `rawStartForVisible`
+// case derives it for this exact shape), never [1,7) (which would include
+// the opening '**'). Own isolated app session (same pattern as this file's
+// other scenarios' shared session would risk, but here isolated so a
+// regression in this one segment can't cascade into the (a)-(d) byte chain
+// above).
+async function runImeOverMarkedSelectionSegment() {
+  const segRoot = `/tmp/horsemd-kernel-ime-marksel-${process.pid}`
+  const file = join(segRoot, 'marksel.md')
+  const initial = '甲**乙丙丁戊**己\n'
+  const AFTER_COMPOSE = '甲**测试**己\n'
+
+  await rm(segRoot, { recursive: true, force: true })
+  await mkdir(segRoot, { recursive: true })
+  await writeFile(file, initial)
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(segRoot, 'profile'), port: port + 1, appArgs: [file] })
+    const { evaluate, send } = app
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('乙丙丁戊') ? text : null
+    }, 'ime-over-marked-selection document did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on plain mount (ime-over-marked-selection)')
+
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'kernel mode did not remount the ime-over-marked-selection tab')
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('乙丙丁戊') ? text : null
+    }, 'ime-over-marked-selection document did not remount after enabling kernel mode')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy for the ime-over-marked-selection fixture: ${attachDiagnostics}`
+    )
+
+    // Select the rendered bold word "乙丙丁戊" (visible offsets [1,5) within
+    // "甲乙丙丁戊己") and compose over it.
+    await selectRange(evaluate, send, '甲乙丙丁戊己', 1, 5)
+    assert.ok(await selectionNonEmpty(evaluate), 'drag selection over the bold word did not select any text')
+    await imeType(send, 'ceshi', '测试')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('甲测试己'),
+      'composed 测试 never replaced the selected bold word')
+
+    await toggleSourceMode(evaluate)
+    const shown = await waitFor(() => visibleSource(evaluate),
+      'source view did not appear after composing over the marked selection')
+    assert.equal(shown, AFTER_COMPOSE,
+      'IME composition over a selected bold word must replace only the content, keeping the ** pair intact')
+
+    console.log('PASS kernel-mode IME UI ime-over-marked-selection segment: composing over a selected bold word keeps the ** markers intact')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+  }
+}
+
 async function run() {
   await rm(root, { recursive: true, force: true })
   await mkdir(root, { recursive: true })
@@ -341,7 +466,12 @@ async function run() {
   }
 }
 
-run().catch((error) => {
+async function main() {
+  await run()
+  await runImeOverMarkedSelectionSegment()
+}
+
+main().catch((error) => {
   console.error(error)
   process.exit(1)
 })

@@ -56,6 +56,32 @@ const FORBIDDEN = /&#x20;|&nbsp;|<!--|​|﻿/
 // Kept permanently (COVERAGE=1 env gate) rather than deleted after use, per
 // review instruction — cheap, and useful the next time offset-selection bias
 // needs re-checking.
+// Final-review pin (plan-4 regression): the fuzz loop below (line ~156-160)
+// tolerates ANY `!result.ok` refusal by design — most random offsets land
+// somewhere legitimately unmappable (mid-escape, mid-entity, inside a
+// mark's own delimiter run), so a bare "refusal happened" is not itself a
+// signal. That same blanket tolerance previously hid a real bug: a
+// zero-width insert exactly at a PLAIN paragraph's own block end
+// (visFrom === visTo === map.visibleLength) used to refuse outright
+// (`startBoundaries` has no entry past the last unit — see
+// character-map.js's `rawRangeForVisibleRange`), which is exactly the shape
+// kernel-mode Tab hits at the end of a line. Pin that this one shape must
+// always SUCCEED, so a regression that reintroduces the block-end refusal
+// fails loudly here instead of blending into "refusal is normal, fuzz
+// continues".
+{
+  const src = '甲乙\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const block = index.blockAt(0)
+  const map = buildCharacterMap(src, block.node)
+  const r = replaceVisibleText({
+    doc, map, visFrom: map.visibleLength, visTo: map.visibleLength, insert: 'x'
+  })
+  assert.equal(r.ok, true, 'zero-width insert at a plain paragraph block end must succeed')
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '甲乙x\n')
+}
+
 const stats = { attempted: {}, applied: {} }
 const bump = (bucket, action) => {
   if (!action) return

@@ -395,9 +395,70 @@ async function runSplitPolishSegment() {
   }
 }
 
+// Final-review regression segment: Tab at a PLAIN paragraph's end (not a
+// list item — routeStructuralKey's `item ? indentListItem(ctx) : NOT_STRUCTURAL`
+// branch, so this falls to editor-kernel-mode.js's `insertPlainTextAtSelection`
+// not-structural path). Commit 2e3036b's `startBoundaries` table has no entry
+// at `visibleLength` (nothing "starts" past the last unit), so
+// `rawRangeForVisibleRange(N, N)` at block end used to return null and the
+// live UI toasted KERNEL_CODES.UNMAPPED instead of inserting a literal tab
+// (pre-plan-4 behavior, and ordinary PM/legacy behavior everywhere else).
+// Own isolated app session (same pattern as runSplitPolishSegment) so this
+// one extra keystroke never disturbs the main run()'s carefully-chained undo/
+// checkbox/save byte assertions.
+async function runTabAtBlockEndSegment() {
+  const segRoot = `/tmp/horsemd-kernel-tabend-${process.pid}`
+  const file = join(segRoot, 'tabend.md')
+  const initial = '段落甲\n'
+  const AFTER_TAB = '段落甲\t\n'
+
+  await rm(segRoot, { recursive: true, force: true })
+  await mkdir(segRoot, { recursive: true })
+  await writeFile(file, initial)
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(segRoot, 'profile'), port, appArgs: [file] })
+    const { evaluate, send } = app
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('段落甲') ? text : null
+    }, 'tab-at-block-end document did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on plain mount (tab-at-block-end)')
+
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'kernel mode did not remount the tab-at-block-end tab')
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('段落甲') ? text : null
+    }, 'tab-at-block-end document did not remount after enabling kernel mode')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(
+      !attachDiagnostics.includes('attach-unmappable'),
+      `kernel mode degraded to legacy for the tab-at-block-end fixture: ${attachDiagnostics}`
+    )
+
+    await clickTextEnd(evaluate, send, '段落甲')
+    await pressKey(send, { key: 'Tab', code: 'Tab', delayMs: delay + 30 })
+    await sleep(250)
+    assert.equal(app.dialogs.length, 0, 'Tab at a plain paragraph end must not toast unmapped')
+
+    await toggleSourceMode(evaluate)
+    const shown = await waitFor(() => visibleSource(evaluate),
+      'source view did not appear after Tab at the paragraph end')
+    assert.equal(shown, AFTER_TAB, 'Tab at a plain paragraph end must insert a literal tab, byte-exact')
+
+    console.log('PASS kernel-mode UI tab-at-block-end segment: Tab at a plain paragraph end inserts a literal tab')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+  }
+}
+
 async function main() {
   await run()
   await runSplitPolishSegment()
+  await runTabAtBlockEndSegment()
 }
 
 main().catch((error) => {

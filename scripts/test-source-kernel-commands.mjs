@@ -698,6 +698,25 @@ console.log('PASS source-kernel commands (exitCodeBlock)')
 
 console.log('PASS source-kernel commands (review fix: replaceVisibleText over marked content)')
 
+// ---- final-review fix: zero-width replaceVisibleText at block end ----
+//
+// Kernel-mode Tab at a paragraph's end (editor-kernel-mode.js
+// insertPlainTextAtSelection, routed here as visFrom===visTo===
+// map.visibleLength) used to fail-closed with 'unmapped-selection' because
+// character-map.js's `startBoundaries` table has no entry at
+// `visibleLength` (nothing "starts" past the last unit). Pre-plan-4 this
+// inserted a literal tab; the fix restores that by resolving a zero-width
+// range through the insert-neutral resolver on both ends.
+{
+  const src = 'hello\n'
+  const { doc, map } = setup(src, 0)
+  const r = replaceVisibleText({ doc, map, visFrom: 5, visTo: 5, insert: '\t' })
+  assert.equal(r.ok, true, r.code)
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, 'hello\t\n')
+}
+
+console.log('PASS source-kernel commands (final-review: zero-width insert at block end)')
+
 // ---- Task 2 (Plan 4): toggleInlineMark ----
 
 // Test-only helpers that walk a character map's `units` directly to find the

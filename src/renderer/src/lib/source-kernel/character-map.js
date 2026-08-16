@@ -289,6 +289,24 @@ export function buildCharacterMap(text, blockNode) {
   const rawStartForVisible = (vis) => (startBoundaries.has(vis) ? startBoundaries.get(vis) : null)
 
   const rawRangeForVisibleRange = (visFrom, visTo) => {
+    if (visFrom === visTo) {
+      // Zero-width range (a bare caret insert, e.g. Tab at a paragraph's
+      // end or mid-typing at any boundary): neither `rawStartForVisible`
+      // (undefined past the LAST unit's own start — nothing "starts" at
+      // `visibleLength`, so an end-of-block insert used to refuse outright)
+      // nor plain `visibleToRaw` (gap-BEFORE, would land an unmarked insert
+      // INSIDE an adjacent mark's closing delimiter) is the right resolver
+      // for a genuinely empty range. Resolve BOTH ends through the same
+      // insert-neutral point `commitPlainText`'s zero-width path already
+      // uses (`rawNeutralInsert`, see its own comment below) — degenerates
+      // to the ordinary `visibleToRaw` value at every gap-free boundary
+      // (including every interior offset, which always has a unit starting
+      // there too), so this only changes behavior exactly at the two shapes
+      // that used to fail: block end, and a mark-gap boundary.
+      const point = rawNeutralInsert(visFrom)
+      if (point === null) return null
+      return { from: point, to: point }
+    }
     const from = rawStartForVisible(visFrom)
     const to = visibleToRaw(visTo)
     if (from === null || to === null || from > to) return null

@@ -387,4 +387,75 @@ console.log('--- kernel composition headless ---')
     'the composition itself still committed normally — the external apply did not preempt it')
 }
 
+// Case (m): IME composing OVER a selected, already-MARKED span
+// (final-review fix — same corruption family 2e3036b fixed for the plain-
+// typing path in editor-kernel-gateway.js's commitPlainText). A genuine
+// replaced range (`diff.from < diff.to`, not a bare caret insert) must
+// resolve its LEFT edge through the gap-aware `pmPosToRawStart`, never plain
+// `pmPosToRaw` — see character-map.js's ADR comment on `buildCharacterMap`
+// for the byte corruption this specific resolver exists to prevent.
+//
+// Fixture mirrors the real 'a **bold** b\n' character map (see
+// scripts/test-source-kernel-charmap.mjs's `rawStartForVisible` case): PM
+// content positions 1..9 hold the visible text "a bold b" (content.size 8);
+// "bold" is PM range [3,7). `pmPosToRaw` (gap-BEFORE boundary table) would
+// resolve position 3 to raw 2 — INSIDE the opening `**` — while
+// `pmPosToRawStart` (gap-skipping start table) correctly resolves it to raw
+// 4, right after the marker. `pmPosToRaw`'s own value at position 7 (raw 8,
+// right before the closing `**`) is unaffected — only the START edge of a
+// non-empty diff needs the different resolver.
+{
+  const pmBaseDoc = doc(p('a bold b'))
+  const view = makeView(pmBaseDoc, { from: 3, to: 7 }) // "bold" selected
+  // index = pos - 1 (contentPos 1); values derived from the real charmap.
+  const visibleToRaw = [0, 1, 2, 5, 6, 7, 8, 11, 12]
+  const rawStartForVisible = [0, 1, 4, 5, 6, 7, 10, 11]
+  const map = {
+    pmPosToRaw: (pos) => {
+      const v = pos - 1
+      return v >= 0 && v < visibleToRaw.length ? visibleToRaw[v] : null
+    },
+    pmPosToRawStart: (pos) => {
+      const v = pos - 1
+      return v >= 0 && v < rawStartForVisible.length ? rawStartForVisible[v] : null
+    }
+  }
+  const h = makeHarness(view, map)
+
+  h.session.onStart()
+  // Composition replaces the selected word "bold" with "BOLD" (e.g. an IME
+  // candidate committed over the selection).
+  view.state.doc = doc(p('a BOLD b'))
+  h.session.onEnd()
+  await tick()
+
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 4, rawTo: 8, text: 'BOLD', pmFrom: 3 }],
+    'a marked-selection composition commit must resolve its LEFT edge past the opening marker (raw 4, not 2)')
+  assert.deepEqual(h.revertCalls, [])
+  assert.deepEqual(h.notifications, [])
+}
+
+// Case (n): a stub map exposing ONLY `pmPosToRaw` (no `pmPosToRawStart` —
+// e.g. an older hand-built test map, or `virtualCharMap`/`buildCodeMap`
+// shapes that never have marker gaps) must still resolve a non-empty diff's
+// start edge, falling back to the same `pmPosToRaw` it always used. This is
+// the "no fallback branch, no crash, no silent unmapped-refusal" regression
+// guard for the `?? kernel?.map?.pmPosToRaw` fallback in commit().
+{
+  const pmBaseDoc = doc(p('ab'))
+  const view = makeView(pmBaseDoc, { from: 2, to: 3 })
+  const map = linearMap(1, 3) // no pmPosToRawStart on this stub
+  const h = makeHarness(view, map)
+
+  h.session.onStart()
+  // A genuine replace (not a bare insert): 'b' -> 'X', so the diff has
+  // diff.from(2) < diff.to(3).
+  view.state.doc = doc(p('aX'))
+  h.session.onEnd()
+  await tick()
+
+  assert.deepEqual(h.commitCalls, [{ rawFrom: 1, rawTo: 2, text: 'X', pmFrom: 2 }])
+  assert.deepEqual(h.revertCalls, [])
+}
+
 console.log('PASS kernel composition headless')

@@ -210,6 +210,28 @@ const mapOf = (src, findText = null) => {
   assert.equal(map.rawNeutralInsert(2), 2) // x 之前：开反引号之前
 }
 
+// rawRangeForVisibleRange 零宽选区（final-review 修复）：块尾（visFrom ===
+// visTo === visibleLength）之前 rawStartForVisible 在此处无条目（没有任何
+// unit 从 visibleLength 处"开始"）→ 直接拒绝，导致内核模式下段落末尾按 Tab
+// 报 unmapped。现在零宽两端都改经 rawNeutralInsert（与 commitPlainText 的
+// 零宽路径同一个解析器），块尾退化为普通 visibleToRaw 值。
+{
+  const src = 'hello\n'
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.deepEqual(map.rawRangeForVisibleRange(5, 5), { from: 5, to: 5 })
+}
+// 同一处 mark-gap 边界的零宽：'a **bold** b\n' 的 vis6（"bold" 之后、闭
+// marker 内部的 boundaries 值是 8）——零宽插入必须落在 marker 之外（10），
+// 与 rawNeutralInsert(6) 已验证的值一致，而不是 from>to 被拒绝。
+{
+  const src = 'a **bold** b\n'
+  const idx = buildSyntaxIndex(src)
+  const map = buildCharacterMap(src, idx.blockAt(0).node)
+  assert.deepEqual(map.rawRangeForVisibleRange(6, 6), { from: 10, to: 10 })
+  assert.equal(map.rawRangeForVisibleRange(6, 6).from, map.rawNeutralInsert(6))
+}
+
 // raw 与 value 无法对齐 → 整块 null（fail-closed）
 {
   const idx = buildSyntaxIndex('plain\n')

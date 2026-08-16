@@ -199,7 +199,26 @@ export function createCompositionSession({
     // blockRange, checked above) instead captures whatever the composition
     // really changed, so a collapsed start-of-session cursor can still
     // legitimately produce a wide committed range.
-    const rawFrom = kernel?.map?.pmPosToRaw?.(diff.from)
+    // Gap-aware start (final-review fix, same family 2e3036b fixed for the
+    // plain-typing path in editor-kernel-gateway.js commitPlainText): a
+    // non-empty diff range (`diff.from < diff.to`, e.g. composing over a
+    // selected already-marked word) must resolve its LEFT edge through
+    // `pmPosToRawStart`, not plain `pmPosToRaw` — see character-map.js's ADR
+    // comment on `buildCharacterMap` for the byte corruption this specific
+    // resolver exists to prevent (a boundary "consumed-so-far" table walks
+    // BACKWARD into an existing mark's own opening delimiter when used as a
+    // range start, silently folding it into the replaced content and
+    // orphaning the closing delimiter). A zero-width diff (`diff.from ===
+    // diff.to`, the ordinary "insert composed text at the caret" case) has
+    // no left edge of a replaced span to reason about, so it keeps the
+    // original bare-position resolver — `pmPosToRawStart` falls back to it
+    // anyway whenever `diff.from` isn't a genuine range start (see its own
+    // comment in editor-kernel-projection-map.js), but staying on
+    // `pmPosToRaw` here for the zero-width case is the same "unchanged
+    // unless proven necessary" posture as commitPlainText's own branch.
+    const rawFrom = diff.from < diff.to
+      ? (kernel?.map?.pmPosToRawStart ?? kernel?.map?.pmPosToRaw)?.(diff.from)
+      : kernel?.map?.pmPosToRaw?.(diff.from)
     const rawTo = kernel?.map?.pmPosToRaw?.(diff.to)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       revert(COMPOSITION_INVALIDATED)
