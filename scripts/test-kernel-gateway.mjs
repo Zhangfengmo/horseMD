@@ -30,6 +30,15 @@ const schema = new Schema({
     // structure against mdast structure 1:1, so a quoted-fence PM fixture
     // needs this wrapper node too, not just the bare code_block.
     blockquote: { content: 'block+', group: 'block' },
+    // Plan 5 Task 4 — mirrors @milkdown/preset-gfm's real table nodes
+    // (lib/index.js:88-280): `table_header_row table_row+`, `(table_header)*`
+    // / `(table_cell)*`, `cellContent: 'paragraph'`. The `table` content
+    // expression is widened only so a header-less fixture can be BUILT.
+    table: { content: '(table_header_row | table_row)+', group: 'block' },
+    table_header_row: { content: '(table_header)*' },
+    table_row: { content: '(table_cell)*' },
+    table_header: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
+    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
     text: { group: 'inline' }
   },
   marks: {
@@ -50,6 +59,11 @@ const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
+// rows: array of rows; each row an array of cell TEXT strings ('' = empty cell).
+const tbl = (rows) => schema.node('table', null, rows.map((cells, rowIndex) =>
+  schema.node(rowIndex === 0 ? 'table_header_row' : 'table_row', null,
+    cells.map((s) => schema.node(rowIndex === 0 ? 'table_header' : 'table_cell', null,
+      [s ? p(text(s)) : p()])))))
 
 console.log('--- kernel gateway ---')
 
@@ -1292,6 +1306,201 @@ const withSelection = (state, from, to) =>
   const classified = classifyTransactions([tr], state)
   assert.equal(classified.kind, 'mark-toggle')
   assert.equal(classified.markKind, 'strong')
+}
+
+// ===========================================================================
+// Plan 5 Task 4 — GFM table CELL text editing through the ordinary plain-text
+// path. No new classification kind: a step confined to ONE cell's paragraph
+// already satisfies `extractPlainTextSteps`' single-textblock guard, and a
+// step spanning two cells already fails it (`$from.sameParent($to)`).
+// `commitPlainText` gains exactly one table-specific rule: a literal `|` may
+// not be inserted into a cell (it would split the column).
+// ===========================================================================
+
+// Case T1: in-cell insert + delete, byte-exact.
+// md '| a | b |\n| - | - |\n| c | d |\n' — cells' text at raw 2 / 6 / 22 / 26.
+// PM: table@0, header row [1,13), body row [13,25); cell paragraphs at
+// 3 / 8 / 15 / 20, so content positions 4 / 9 / 16 / 21.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n'
+  const d = doc(tbl([['a', 'b'], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'table doc must map')
+  assert.equal(map.blockPairs.length, 4)
+  assert.ok(map.blockPairs.every((pair) => pair.charMap), 'every cell is editable')
+
+  // (a) type 'X' after 'a' (PM 5 -> raw 3).
+  {
+    const tr = state.tr.insertText('X', 5)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '| aX | b |\n| - | - |\n| c | d |\n')
+  }
+  // (b) type before 'd' in the LAST body cell (PM 21 -> raw 26).
+  {
+    const tr = state.tr.insertText('Z', 21)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '| a | b |\n| - | - |\n| c | Zd |\n')
+  }
+  // (c) delete the cell's only character (PM [4,5) -> raw [2,3)) — the `|`
+  // delimiters and padding are untouched, the table keeps its shape.
+  {
+    const tr = state.tr.delete(4, 5)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '|  | b |\n| - | - |\n| c | d |\n')
+  }
+  // (d) replace a selection inside one cell.
+  {
+    const tr = state.tr.replaceWith(4, 5, text('YY'))
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '| YY | b |\n| - | - |\n| c | d |\n')
+  }
+}
+
+// Case T2: a step spanning TWO cells is refused at classification — the
+// gateway never sees a cross-cell edit as plain text.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n'
+  const d = doc(tbl([['a', 'b'], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.delete(4, 10) // cell0 content .. cell1 content
+  assert.equal(tr.docChanged, true, 'fixture sanity: the delete changed the doc')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked', 'a cross-cell range must be refused')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+// …and a cross-ROW range too.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n'
+  const d = doc(tbl([['a', 'b'], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr.delete(4, 17)
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked', 'a cross-row range must be refused')
+  void md
+}
+
+// Case T3: inserting a literal `|` into a cell is refused by
+// `commitPlainText` — the byte would split the column, i.e. change the
+// table's STRUCTURE, which is out of this phase's scope.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n'
+  const d = doc(tbl([['a', 'b'], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const tr = state.tr.insertText('|', 5)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text',
+    'it classifies as plain text — the refusal is a byte-level rule, not a shape rule')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, false)
+  assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+  // The same byte typed into an ORDINARY paragraph is still fine.
+  const plain = doc(p(text('ab')))
+  const plainState = EditorState.create({ schema, doc: plain })
+  const plainMap = buildProjectionMap('ab\n', plainState.doc)
+  const plainCommit = commitPlainText({
+    kernel: { doc: createMarkdownDocument('ab\n') },
+    map: plainMap,
+    transactions: [plainState.tr.insertText('|', 2)],
+    oldState: plainState
+  })
+  assert.equal(plainCommit.ok, true, plainCommit.code)
+  assert.equal(plainCommit.applied.doc.text, 'a|b\n')
+}
+
+// Case T4: a QUOTED table. The '> ' prefix sits before every row's own start
+// offset, so it is never inside a cell — the commit only rewrites cell bytes.
+// md '> | a | b |\n> | - | - |\n> | c | d |\n': texts at raw 4 / 8 / 32 / 36.
+// PM: blockquote@0, table@1, header row [2,14), cell paragraphs at 4 / 9 /
+// 16 / 21 -> content positions 5 / 10 / 17 / 22.
+{
+  const md = '> | a | b |\n> | - | - |\n> | c | d |\n'
+  const d = doc(bq(tbl([['a', 'b'], ['c', 'd']])))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'quoted table doc must map')
+  const cells = map.blockPairs.filter((pair) => pair.tableCell)
+  assert.equal(cells.length, 4)
+  assert.equal(map.pmPosToRaw(5), 4)
+  const tr = state.tr.insertText('X', 6)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '> | aX | b |\n> | - | - |\n> | c | d |\n')
+}
+
+// Case T5: a CRLF table. Line endings only ever sit between rows, so a cell
+// edit can never touch one — and the file stays uniformly CRLF.
+// md '| ab | cd |\r\n| --- | --- |\r\n| ef | gh |\r\n': texts at raw [2,4)
+// [7,9) [30,32) [35,37).
+{
+  const md = '| ab | cd |\r\n| --- | --- |\r\n| ef | gh |\r\n'
+  const d = doc(tbl([['ab', 'cd'], ['ef', 'gh']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'CRLF table doc must map')
+  assert.ok(map.blockPairs.every((pair) => pair.charMap))
+  // A 2-char cell: paragraph nodeSize 4, cell 6, row 14 -> cell0's paragraph
+  // is at 3, content position 4, so PM 5 sits between 'a' and 'b' (raw 3).
+  const tr = state.tr.insertText('X', 5)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text,
+    '| aXb | cd |\r\n| --- | --- |\r\n| ef | gh |\r\n')
+  assert.equal(/\r(?!\n)/.test(committed.applied.doc.text), false, 'no lone \\r')
+  assert.equal(/(?<!\r)\n/.test(committed.applied.doc.text), false, 'no bare \\n')
+}
+
+// Case T6: typing into an EMPTY cell. mdast gives the cell no children at all
+// and its own `position.start` is the leading `|`; table-map.js derives the
+// anchor from the padding bytes so the insert lands INSIDE the cell.
+// md '| a |  |\n| - | - |\n| c | d |\n' — the empty header cell is raw [4,8),
+// anchor 6. PM: cell0 nodeSize 5, cell1 (empty paragraph) nodeSize 4 -> cell1
+// paragraph @8, content position 9.
+{
+  const md = '| a |  |\n| - | - |\n| c | d |\n'
+  const d = doc(tbl([['a', ''], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'table with an empty cell must map')
+  assert.ok(map.blockPairs.every((pair) => pair.charMap), 'the empty cell is editable too')
+  assert.equal(map.blockPairs[1].charMap.visibleLength, 0)
+  const tr = state.tr.insertText('X', 9)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '| a | X |\n| - | - |\n| c | d |\n')
+}
+
+// Case T7: a DEGRADED table (ragged) refuses every write into it, and the
+// delimiter row is unreachable in every table.
+{
+  const md = '| a | b |\n| - | - |\n| c |\n'
+  const d = doc(tbl([['a', 'b'], ['c']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a ragged table must not null the map')
+  assert.equal(map.blockPairs.length, 1)
+  assert.equal(map.blockPairs[0].charMap, null)
+  const tr = state.tr.insertText('X', 5)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, false, 'a write into a degraded table must fail closed')
+  assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
 }
 
 console.log('PASS kernel gateway')

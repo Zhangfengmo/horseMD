@@ -37,9 +37,17 @@ const schema = new Schema({
     ordered_list: { content: 'list_item+', group: 'block' },
     list_item: { content: 'paragraph block*' },
     code_block: { content: 'text*', group: 'block', code: true, attrs: { language: { default: '' } } },
-    table: { content: 'table_row+', group: 'block' },
-    table_row: { content: 'table_cell+' },
-    table_cell: { content: 'paragraph+' },
+    // Mirrors @milkdown/preset-gfm's real table nodes (lib/index.js:88-280):
+    // `table_header_row table_row+`, `(table_header)*` / `(table_cell)*`, and
+    // `cellContent: 'paragraph'` — the 4th container level that mdast's
+    // 3-level table has no counterpart for. The `table` content expression is
+    // widened to `(table_header_row | table_row)+` only so this file can also
+    // BUILD the header-less shape it pins as a refusal.
+    table: { content: '(table_header_row | table_row)+', group: 'block' },
+    table_header_row: { content: '(table_header)*' },
+    table_row: { content: '(table_cell)*' },
+    table_header: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
+    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
     image: { group: 'inline', inline: true, atom: true, attrs: { src: { default: '' } } },
     // Crepe's latex feature: `math_inline` is an inline ATOM carrying the TeX
     // source in `attrs.value` (node_modules/@milkdown/crepe/lib/esm/feature/
@@ -299,39 +307,150 @@ console.log('--- kernel projection map ---')
   assert.equal(charMap.visibleToRaw(0), 0) // == the fabricated paragraph's own start offset, correctly
 }
 
-// Case 9: 2x2 GFM table treated as one opaque pair, plus a trailing
-// paragraph. Raw '| a | b |\n| - | - |\n| c | d |\n\nP\n':
-// row1 [0,10) row2 [10,20) row3 [20,30) blank \n@30 'P'@31 \n@32.
-// mdast (kernel run): table[0,29) (rows/cells nested inside, not walked),
-// paragraph[31,32) "P".
-// PM (descendants would normally walk table_row/table_cell/paragraph
-// inside the table, but flattenPm stops descending once it records the
-// `table` pair) -> table@0 (opaque, charMap null), paragraph@26 (content
-// start 27, size 1) — position 26 is whatever ProseMirror's own node
-// numbering gives the table's full subtree; irrelevant to pairing since we
-// never try to look inside it.
+// Case 9 (HEADLINE, Plan 5 Task 4): a 2x2 GFM table's CELLS are editable, and
+// the trailing paragraph keeps its own map. Raw
+// '| a | b |\n| - | - |\n| c | d |\n\nP\n':
+//   header row [0,9)  cells [0,4)'| a ' [4,9)'| b |'  texts [2,3) [6,7)
+//   delimiter  [10,19) '| - | - |' — NO mdast node, recovered from the bytes
+//   body row  [20,29) cells [20,24) [24,29)          texts [22,23) [26,27)
+//   blank \n@30, 'P'@31, \n@32
+// PM (4 levels): table@0; header row [1,13), body row [13,25); each cell's
+// PARAGRAPH at 3 / 8 / 15 / 20 (content positions 4 / 9 / 16 / 21); the table
+// node itself is [0,26), so the trailing paragraph is at 26 (content 27).
+// The document-level zip still records the table as ONE slot on each side —
+// the interior is zipped by lib/source-kernel/table-map.js, which consumes the
+// extra PM `paragraph` level by pairing it with the mdast `tableCell`.
 {
   const md = '| a | b |\n| - | - |\n| c | d |\n\nP\n'
+  const cell = (name, s) => schema.node(name, null, [p(text(s))])
   const d = doc(
     schema.node('table', null, [
-      schema.node('table_row', null, [
-        schema.node('table_cell', null, [p(text('a'))]),
-        schema.node('table_cell', null, [p(text('b'))])
+      schema.node('table_header_row', null, [cell('table_header', 'a'), cell('table_header', 'b')]),
+      schema.node('table_row', null, [cell('table_cell', 'c'), cell('table_cell', 'd')])
+    ]),
+    p(text('P'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, '2x2 table + paragraph must map')
+  assert.equal(map.blockPairs.length, 5, 'four cell pairs + the trailing paragraph')
+  assert.deepEqual(map.blockPairs.slice(0, 4).map((pair) => pair.pmPos), [3, 8, 15, 20])
+  assert.deepEqual(map.blockPairs.slice(0, 4).map((pair) => pair.mdBlock.type),
+    ['tableCell', 'tableCell', 'tableCell', 'tableCell'])
+  for (const pair of map.blockPairs.slice(0, 4)) {
+    assert.ok(pair.charMap, 'every cell pair must be EDITABLE')
+    assert.equal(pair.tableCell, true)
+    assert.equal(pair.charMap.visibleLength, 1)
+  }
+  // Cell content positions resolve to the cell's own bytes.
+  assert.equal(map.pmPosToRaw(4), 2) // before 'a'
+  assert.equal(map.pmPosToRaw(5), 3) // after 'a'
+  assert.equal(map.pmPosToRaw(9), 6) // before 'b'
+  assert.equal(map.pmPosToRaw(16), 22) // before 'c'
+  assert.equal(map.pmPosToRaw(21), 26) // before 'd'
+  assert.equal(map.rawToPmPos(2).pos, 4)
+  assert.equal(map.rawToPmPos(26).pos, 21)
+  // The `|` delimiters and padding are GAP bytes: no PM position at all.
+  assert.equal(map.rawToPmPos(5), null)
+  assert.equal(map.rawToPmPos(0), null)
+  // The delimiter row is untouchable — no pair covers any of its bytes.
+  for (let raw = 10; raw <= 19; raw += 1) assert.equal(map.rawToPmPos(raw), null)
+  // …and the rest of the document is unchanged.
+  assert.equal(map.pmPosToRaw(27), 31) // before P
+  assert.equal(map.pmPosToRaw(28), 32) // after P
+}
+
+// Case 9b: a table shape the cell zip does NOT recognize (here: a PM table
+// whose first row is a plain `table_row`, i.e. not the header row preset-gfm
+// always produces) degrades to the pre-Task-4 single opaque pair — and the
+// rest of the document keeps its map.
+{
+  const md = '| a | b |\n| - | - |\n| c | d |\n\nP\n'
+  const row = (...cells) => schema.node('table_row', null, cells)
+  const cell = (s) => schema.node('table_cell', null, [p(text(s))])
+  const d = doc(
+    schema.node('table', null, [row(cell('a'), cell('b')), row(cell('c'), cell('d'))]),
+    p(text('P'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'an unrecognized table shape must not null the whole map')
+  assert.equal(map.blockPairs.length, 2, 'the table degrades back to ONE opaque pair')
+  assert.equal(map.blockPairs[0].pmNode.type.name, 'table')
+  assert.equal(map.blockPairs[0].charMap, null, 'table pair is opaque/non-editable')
+  assert.ok(map.blockPairs[1].charMap, 'the rest of the document stays editable')
+  assert.equal(map.pmPosToRaw(27), 31)
+  assert.equal(map.rawToPmPos(5), null)
+}
+
+// Case 9c: a RAGGED table (a body row with fewer cells than the delimiter row
+// declares) degrades the whole table — ProseMirror's table model is
+// rectangular by intent, so this module refuses to claim it knows the PM
+// shape. The rest of the document stays editable.
+{
+  const md = '| a | b |\n| - | - |\n| c |\n\nP\n'
+  const d = doc(
+    schema.node('table', null, [
+      schema.node('table_header_row', null, [
+        schema.node('table_header', null, [p(text('a'))]),
+        schema.node('table_header', null, [p(text('b'))])
+      ]),
+      schema.node('table_row', null, [schema.node('table_cell', null, [p(text('c'))])])
+    ]),
+    p(text('P'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a ragged table must not null the whole map')
+  assert.equal(map.blockPairs.length, 2)
+  assert.equal(map.blockPairs[0].charMap, null, 'the ragged table is non-editable')
+  assert.ok(map.blockPairs[1].charMap, 'the rest of the document stays editable')
+}
+
+// Case 9d: PER-CELL degradation. A `<br>` cell and an escaped-`\|` cell are
+// each kept read-only (Plan 5 Task 4 scope), but their SIBLING cells — and
+// every other block — stay editable. The table itself is NOT degraded.
+{
+  const md = '| a<br>b | c |\n| - | - |\n| d | e |\n\nP\n'
+  const d = doc(
+    schema.node('table', null, [
+      schema.node('table_header_row', null, [
+        schema.node('table_header', null, [p(text('a'), schema.node('hard_break'), text('b'))]),
+        schema.node('table_header', null, [p(text('c'))])
       ]),
       schema.node('table_row', null, [
-        schema.node('table_cell', null, [p(text('c'))]),
-        schema.node('table_cell', null, [p(text('d'))])
+        schema.node('table_cell', null, [p(text('d'))]),
+        schema.node('table_cell', null, [p(text('e'))])
       ])
     ]),
     p(text('P'))
   )
   const map = buildProjectionMap(md, d)
-  assert.ok(map, '2x2 table + paragraph must still map')
-  assert.equal(map.blockPairs.length, 2, 'table subtree must not be descended into')
-  assert.equal(map.blockPairs[0].charMap, null, 'table pair must be opaque/non-editable')
-  assert.equal(map.pmPosToRaw(27), 31) // before P
-  assert.equal(map.pmPosToRaw(28), 32) // after P
-  assert.equal(map.rawToPmPos(5), null) // inside the table's raw span
+  assert.ok(map, '<br> table must map')
+  assert.equal(map.blockPairs.length, 5)
+  assert.equal(map.blockPairs[0].charMap, null, 'the <br> cell degrades')
+  assert.ok(map.blockPairs[1].charMap, 'its sibling stays editable')
+  assert.ok(map.blockPairs[2].charMap)
+  assert.ok(map.blockPairs[3].charMap)
+  assert.ok(map.blockPairs[4].charMap, 'the trailing paragraph stays editable')
+}
+{
+  const md = '| a\\|b | c |\n| - | - |\n| d | e |\n\nP\n'
+  const d = doc(
+    schema.node('table', null, [
+      schema.node('table_header_row', null, [
+        schema.node('table_header', null, [p(text('a|b'))]),
+        schema.node('table_header', null, [p(text('c'))])
+      ]),
+      schema.node('table_row', null, [
+        schema.node('table_cell', null, [p(text('d'))]),
+        schema.node('table_cell', null, [p(text('e'))])
+      ])
+    ]),
+    p(text('P'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'escaped-pipe table must map')
+  assert.equal(map.blockPairs[0].charMap, null, 'the escaped cell degrades')
+  assert.ok(map.blockPairs[1].charMap, 'its sibling stays editable')
+  assert.ok(map.blockPairs[4].charMap, 'the trailing paragraph stays editable')
 }
 
 // Case 10: bullet_list PM paired against ORDERED markdown -> whole map

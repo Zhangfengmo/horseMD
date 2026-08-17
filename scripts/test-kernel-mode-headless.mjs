@@ -48,7 +48,16 @@ const schema = new Schema({
     // Plan 5 Task 2 — preset-commonmark's `html` node (src/node/html.ts) is an
     // INLINE atom; the editor chain's `remarkMergeInlineHtml` collapses a
     // balanced `<span>x</span>` run into exactly one of them.
-    html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } }
+    html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // Plan 5 Task 4 — @milkdown/preset-gfm's real table nodes
+    // (lib/index.js:88-280): four container levels (table / row / cell /
+    // paragraph) against mdast's three. `alignment` is the cell attr
+    // preset-gfm declares; nothing in this phase writes it.
+    table: { content: 'table_header_row table_row+', group: 'block' },
+    table_header_row: { content: '(table_header)*' },
+    table_row: { content: '(table_cell)*' },
+    table_header: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
+    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } }
   },
   // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
   // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
@@ -71,6 +80,14 @@ const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) 
 const bq = (...c) => schema.node('blockquote', null, c)
 const mif = (value) => schema.node('math_inline', { value })
 const ih = (value) => schema.node('html', { value })
+// Plan 5 Task 4 — rows: array of rows, each an array of [cellText, alignment].
+const tbl = (rows) => schema.node('table', null, rows.map((cells, rowIndex) =>
+  schema.node(rowIndex === 0 ? 'table_header_row' : 'table_row', null,
+    cells.map(([s, alignment]) => schema.node(
+      rowIndex === 0 ? 'table_header' : 'table_cell',
+      { alignment },
+      [s ? p(text(s)) : p()]
+    )))))
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -183,7 +200,23 @@ const FIXTURE_DOCS = {
   'a\n\n<span>x</span> b\n': () => doc(
     p(text('a')), p(ih('<span>x</span>'), text(' b'))),
   'a\n<span>x</span> b\n': () => doc(
-    p(text('a\n'), ih('<span>x</span>'), text(' b')))
+    p(text('a\n'), ih('<span>x</span>'), text(' b'))),
+  // Plan 5 Task 4 fixtures: a GFM table with per-column alignment, plus a
+  // paragraph after it. Crepe's parse puts each column's alignment on every
+  // cell of that column (preset-gfm's parseMarkdown runners read
+  // `table.align`), which is exactly what must survive a cell TEXT edit.
+  '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n': () => doc(
+    tbl([[['a', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
+    p(text('甲乙'))),
+  '| aX | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n': () => doc(
+    tbl([[['aX', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
+    p(text('甲乙'))),
+  '| aX | b |\n| :-- | --: |\n| c | dY |\n\n甲乙\n': () => doc(
+    tbl([[['aX', 'left'], ['b', 'right']], [['c', 'left'], ['dY', 'right']]]),
+    p(text('甲乙'))),
+  '| aX | b |\n| :-- | --: |\n| c | dY |\n\n甲丙乙\n': () => doc(
+    tbl([[['aX', 'left'], ['b', 'right']], [['c', 'left'], ['dY', 'right']]]),
+    p(text('甲丙乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1852,6 +1885,97 @@ const toggleVia = (h, markType, from, to) => {
       entry.type === 'projection-unmappable-refused' && entry.intent === 'wrap-blockquote'),
     'the pre-commit map guard is the refusing party'
   )
+}
+
+// Case 21 (Plan 5 Task 4): typing inside a GFM table CELL commits byte-exact
+// source, and the delimiter row + alignment are never touched. Before this
+// task the whole table was ONE opaque non-editable pair, so every keystroke
+// in a cell was vetoed with a "read-only block" toast.
+//
+// Raw '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n':
+//   header row [0,9)   cells [0,4) [4,9)   texts 'a'@2 'b'@6
+//   delimiter  [10,23) '| :-- | --: |'     — NO mdast node
+//   body row   [24,33) cells [24,28) [28,33) texts 'c'@26 'd'@30
+//   blank \n@34, '甲乙' [35,37)
+// PM: table@0 (nodeSize 26; header row [1,13), body row [13,25)), cell
+// paragraphs at 3 / 8 / 15 / 20 -> content positions 4 / 9 / 16 / 21; the
+// trailing paragraph at 26 -> content position 27.
+{
+  const md = '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true, 'a table document must map')
+  const cellPairs = h.controller.kernel.map.blockPairs.filter((pair) => pair.tableCell)
+  assert.equal(cellPairs.length, 4, 'one editable pair per cell')
+  assert.deepEqual(cellPairs.map((pair) => pair.pmPos), [3, 8, 15, 20])
+  assert.ok(cellPairs.every((pair) => pair.charMap), 'every cell carries a charMap')
+
+  // (a) type 'X' after 'a' (PM 5 -> raw 3).
+  {
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 5))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, 'an in-cell insert is allowed')
+    assert.equal(h.controller.kernel.doc.text,
+      '| aX | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n')
+    assert.deepEqual(h.changes.at(-1),
+      ['| aX | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n', false])
+  }
+  // (b) …and again in a BODY cell. After (a) the header row is one PM char
+  //     wider ([1,14)), so the body row is [14,26) and the LAST cell's
+  //     paragraph is at 21 -> content [22,23]; PM 23 is right after 'd'.
+  {
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText('Y', 23))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, 'a body-cell insert is allowed')
+    assert.equal(h.controller.kernel.doc.text,
+      '| aX | b |\n| :-- | --: |\n| c | dY |\n\n甲乙\n')
+  }
+  // The delimiter row is byte-identical and every cell's alignment attr
+  // survived — nothing in this phase writes either.
+  assert.ok(h.controller.kernel.doc.text.includes('\n| :-- | --: |\n'),
+    'the delimiter row is untouched, byte for byte')
+  {
+    const alignments = []
+    h.view.state.doc.descendants((node) => {
+      if (node.type.name === 'table_cell' || node.type.name === 'table_header') {
+        alignments.push(node.attrs.alignment)
+      }
+      return true
+    })
+    assert.deepEqual(alignments, ['left', 'right', 'left', 'right'])
+  }
+  // The rest of the document is still editable too.
+  {
+    const before = h.controller.kernel.doc.text
+    const paragraphPos = h.view.state.doc.content.size - 2 // between 甲 and 乙
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', paragraphPos))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, 'the paragraph after the table still types')
+    assert.equal(h.controller.kernel.doc.text, before.replace('甲乙', '甲丙乙'))
+  }
+}
+
+// Case 21b (Plan 5 Task 4): the two structural writes this phase refuses —
+// a literal `|` (it would split the column) and a cross-cell range — are
+// vetoed, notify, and leave the kernel bytes untouched.
+{
+  const md = '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.controller.kernel.doc.text
+  const revision = h.controller.kernel.doc.revision
+
+  const pipe = dispatchThrough(h, h.view.state.tr.insertText('|', 5))
+  await flushMicrotasks()
+  assert.equal(pipe?.veto, true, 'a literal `|` in a cell must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, before, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+
+  const cross = dispatchThrough(h, h.view.state.tr.delete(4, 10))
+  await flushMicrotasks()
+  assert.equal(cross?.veto, true, 'a cross-cell range must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, before, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.ok(h.notifications.length >= 2, 'both refusals notify')
 }
 
 console.log('PASS kernel mode headless')
