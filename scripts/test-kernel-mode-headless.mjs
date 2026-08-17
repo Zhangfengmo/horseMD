@@ -317,7 +317,23 @@ const FIXTURE_DOCS = {
   '前![a](x.png\n"t")后\n\n甲乙\n': () =>
     doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: 't' }), text('后')), p(text('甲乙'))),
   '前![a](x.png\n"t")后\n\n甲丙乙\n': () =>
-    doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: 't' }), text('后')), p(text('甲丙乙')))
+    doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: 't' }), text('后')), p(text('甲丙乙'))),
+  // Plan 5 Task 6 (link domain). A `link` is a MARK on both sides, so the PM
+  // fixture is just a marked text run — the `[`/`](url)` bytes are gaps in
+  // the character map, exactly like `**`/`==`.
+  '甲[乙](https://x.example)丙\n': () =>
+    doc(p(text('甲'), schema.text('乙', [schema.mark('link', { href: 'https://x.example' })]), text('丙'))),
+  '甲[乙](https://y.example)丙\n': () =>
+    doc(p(text('甲'), schema.text('乙', [schema.mark('link', { href: 'https://y.example' })]), text('丙'))),
+  '甲[https://q.example](https://q.example)乙\n': () =>
+    doc(p(
+      text('甲'),
+      schema.text('https://q.example', [schema.mark('link', { href: 'https://q.example' })]),
+      text('乙')
+    ))
+  // (A GFM autolink literal — the same `link` MARK in ProseMirror over a
+  // `link` mdast node with NO syntax bytes — already has its fixture above,
+  // registered for Case M4c; Case M5 below reuses it.)
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1589,18 +1605,95 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(h.notifications.length > notifBefore, 'marked-slice refusal notifies')
 }
 
-// Case M5: link toggle (no kernel kind) → blocked/veto, nothing changes.
+// Case M5 (FLIPPED by P5-6 — the link flow works): this used to pin "link has
+// no kernel mark kind, so a link toggle is blocked". It still has no kind
+// (`toggleInlineMark` wraps MARKERS, and `[text](url)` has no marker pair),
+// but Plan 5 Task 6 gave it its own gateway classification + command. What
+// remains pinned here is the ONE link shape the kernel still refuses on
+// principle: a GFM autolink literal, whose `link` node has no `[`…`](…)`
+// bytes to rewrite. The end-to-end wrap/edit/unwrap flow is Case L1 below.
+{
+  const md = 'see www.a.com ok\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  // The tooltip's remove shape, targeting the autolink literal's mark run.
+  const tr = h.view.state.tr.removeMark(5, 14, schema.marks.link)
+  const verdict = dispatchThrough(h, tr)
+  assert.deepEqual(verdict, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, md, 'an autolink literal is never rewritten')
+  assert.ok(h.view.state.doc.eq(stubParse(md)))
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
+}
+
+// Case L1 (Plan 5 Task 6): the LinkTooltip flow end-to-end through the
+// dispatch protocol — wrap, then change the URL, then remove — each step
+// byte-exact and each its OWN undo group. Every transaction below is built
+// the way @milkdown/components' `#confirmEdit` / `removeLink` build theirs
+// (link-tooltip/edit/edit-view.ts:102-129, :188-196).
 {
   const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
-  const before = h.notifications.length
-  const tr = toggleVia(h, schema.marks.link, 2, 3)
-  assert.ok(tr)
-  const verdict = dispatchThrough(h, tr)
-  assert.deepEqual(verdict, { veto: true })
-  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n')
+  const linked = (href) => doc(p(text('甲'), schema.text('乙', [schema.mark('link', { href })]), text('丙')))
+
+  // (1) WRAP — `addLink(2,3)` then confirm: one AddMarkStep.
+  const wrap = h.view.state.tr.addMark(2, 3, schema.mark('link', { href: 'https://x.example' }))
+  assert.deepEqual(wrap.steps.map((s) => s.constructor.name), ['AddMarkStep'])
+  assert.deepEqual(dispatchThrough(h, wrap), { veto: true },
+    'the tooltip transaction is always vetoed; the kernel reconciles from the reparsed bytes')
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲[乙](https://x.example)丙\n')
+  assert.ok(h.view.state.doc.eq(linked('https://x.example')), 'the view shows the REPARSED link mark')
+  assert.equal(h.view.state.selection.from, 2, 'the label stays selected')
+  assert.equal(h.view.state.selection.to, 3)
+
+  // (2) EDIT — `editLink(mark,2,3)` then confirm: removeMark + addMark in ONE
+  // transaction (the mixed shape `extractMarkToggle` refuses by design).
+  const edit = h.view.state.tr
+  edit.removeMark(2, 3, schema.mark('link', { href: 'https://x.example' }))
+  edit.addMark(2, 3, schema.mark('link', { href: 'https://y.example' }))
+  assert.deepEqual(edit.steps.map((s) => s.constructor.name), ['RemoveMarkStep', 'AddMarkStep'])
+  assert.deepEqual(dispatchThrough(h, edit), { veto: true })
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲[乙](https://y.example)丙\n',
+    'only the destination segment moved')
+  assert.ok(h.view.state.doc.eq(linked('https://y.example')))
+
+  // (3) UNWRAP — `removeLink(2,3)`: a lone RemoveMarkStep.
+  const remove = h.view.state.tr.removeMark(2, 3, schema.marks.link)
+  assert.deepEqual(remove.steps.map((s) => s.constructor.name), ['RemoveMarkStep'])
+  assert.deepEqual(dispatchThrough(h, remove), { veto: true })
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'both syntax runs are deleted, label bytes kept')
   assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
-  assert.ok(h.notifications.length > before, 'link refusal notifies')
+
+  // Three commits -> THREE undo groups, unwound one at a time.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲[乙](https://y.example)丙\n', 'undo #1 restores the link')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲[乙](https://x.example)丙\n', 'undo #2 restores the old URL')
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'undo #3 restores the plain original')
+  assert.equal(h.controller.historyHandlers.redo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲[乙](https://x.example)丙\n', 'redo re-wraps')
+}
+
+// Case L2: an EMPTY selection is the tooltip's "type the URL and mark it"
+// shape (ReplaceStep + AddMarkStep) — `[url](url)`.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const href = 'https://q.example'
+  const tr = h.view.state.tr
+  tr.insertText(href, 2)
+  tr.addMark(2, 2 + href.length, schema.mark('link', { href }))
+  assert.deepEqual(tr.steps.map((s) => s.constructor.name), ['ReplaceStep', 'AddMarkStep'])
+  assert.deepEqual(dispatchThrough(h, tr), { veto: true })
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲[https://q.example](https://q.example)乙\n')
+  assert.ok(h.view.state.doc.eq(
+    doc(p(text('甲'), schema.text(href, [schema.mark('link', { href })]), text('乙')))
+  ))
 }
 
 // Case M6 (stored-marks ADR): the empty-selection mark-shortcut guard.

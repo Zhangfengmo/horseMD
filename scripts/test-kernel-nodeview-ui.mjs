@@ -567,10 +567,13 @@ async function run() {
       hasListTrigger: false,
       hasFormatSubmenu: true,
       hasBlockTextFormat: 6,
-      disabledFormatItems: 1,
+      // P5-6 flipped this from 1 to 0: `link` was the last format item that
+      // kernel mode disabled. The LinkTooltip flow now routes through the
+      // gateway's `link-edit` classification, so every format item is live.
+      disabledFormatItems: 0,
       hasListConversion: 0,
       menuVisible: true
-    }, `kernel mode's right-click menu must offer the FORMAT submenu (6 items, link disabled) and nothing structural: ${JSON.stringify(ctxMenuAudit)}`)
+    }, `kernel mode's right-click menu must offer the FORMAT submenu (6 live items) and nothing structural: ${JSON.stringify(ctxMenuAudit)}`)
 
     await evaluate(`document.querySelector('.menu-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`)
     await sleep(200)
@@ -812,7 +815,7 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click refuse structural operations while the selection toolbar and format submenu are live (link disabled); save and cold reopen match the kernel-derived byte string')
+    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click refuse structural operations while the selection toolbar and format submenu are live (no item disabled); save and cold reopen match the kernel-derived byte string')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

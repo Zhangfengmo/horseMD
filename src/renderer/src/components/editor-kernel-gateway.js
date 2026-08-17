@@ -20,7 +20,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage, setImageAttrs } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -419,6 +419,152 @@ function extractMarkToggle(transactions, oldState) {
   return { pmFrom: from, pmTo: to, markName, markKind: kind, add: stepType === 'AddMarkStep' }
 }
 
+// Link editing (Plan 5 Task 6) — the ONE flow `extractMarkToggle` above must
+// NOT be relaxed for. `link` is absent from `MARK_TOGGLE_KINDS` on purpose,
+// and the tooltip's commit is a MIXED batch that `extractMarkToggle` refuses
+// by design (that refusal is what keeps `applyHighlightInView`'s
+// remove-then-add color replace out of the toggle path — Case M7 in
+// scripts/test-kernel-gateway.mjs). So links get their own classifier, keyed
+// on the `link` mark type, and the highlight shape can never reach it.
+//
+// WHAT THE REAL TOOLTIP DISPATCHES (probed in @milkdown/components'
+// link-tooltip, not guessed — `#confirmEdit` in edit/edit-view.ts:102-129 and
+// `removeLink` at :188-196 are the only dispatch sites; `toggleLinkCommand`
+// in command.ts carries NO payload, it just routes the selection into one of
+// them). All four shapes are ONE transaction:
+//
+//   wrap    addLink(from<to)   -> AddMarkStep(link{href}, from, to)
+//   edit    editLink(mark,f,t) -> RemoveMarkStep(link{oldHref}, f, t)
+//                                 + AddMarkStep(link{href}, f, t)
+//   unwrap  removeLink(f, t)   -> RemoveMarkStep(link, f, t)
+//   insert  addLink(from===to) -> ReplaceStep(text=href at from)
+//                                 + AddMarkStep(link{href}, from, from+len)
+//
+// Step ORDER is part of the proof, not a convenience: `#confirmEdit` always
+// removes before it inserts and inserts before it adds, so any other ordering
+// is a batch this classifier did not probe and refuses. Mark steps never
+// displace positions, so the remove/add ranges share the pre-batch doc's
+// coordinate space; the `insert` shape's AddMarkStep is expressed AFTER its
+// own ReplaceStep, which is why its range is required to be exactly
+// [insertPos, insertPos + text.length) and the reported PM range collapses
+// back to the (zero-width) insert point in old-doc coordinates.
+//
+// A `title` is never reported: the tooltip only ever supplies `href`
+// (`type.create({ href })`), so an `edit` leaves the existing title BYTES
+// alone rather than deleting a title the user never touched — the source is
+// authoritative, so the reparse hands the title straight back to the mark.
+function extractLinkEdit(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || !tr.steps.length) return null
+
+  const removes = []
+  const adds = []
+  let insert = null
+  let phase = 0 // 0 = removes, 1 = the lone insert, 2 = adds
+  for (const step of tr.steps) {
+    const name = step?.constructor?.name
+    if (name === 'RemoveMarkStep') {
+      if (phase !== 0) return null
+      removes.push(step)
+    } else if (name === 'ReplaceStep') {
+      if (phase > 1 || insert) return null
+      phase = 1
+      if (step.from !== step.to) return null
+      const text = plainSliceText(step.slice)
+      if (!text) return null
+      insert = { from: step.from, text }
+    } else if (name === 'AddMarkStep') {
+      phase = 2
+      adds.push(step)
+    } else {
+      return null
+    }
+  }
+  if (!removes.length && !adds.length) return null
+  if (insert && removes.length) return null // never dispatched together
+
+  // Every mark step must carry the `link` mark type, and each side must
+  // coalesce into ONE contiguous range (the same rule extractMarkToggle
+  // applies: a gap means a skipped segment or a cross-block jump).
+  const coalesce = (steps) => {
+    if (!steps.length) return null
+    let from = null
+    let to = null
+    let attrs = null
+    for (const step of steps) {
+      if (step.mark?.type?.name !== 'link') return null
+      if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+      attrs = step.mark.attrs || null
+      if (from == null) {
+        from = step.from
+        to = step.to
+      } else if (step.from === to) {
+        to = step.to
+      } else {
+        return null
+      }
+    }
+    return { from, to, attrs }
+  }
+  const removed = removes.length ? coalesce(removes) : null
+  const added = adds.length ? coalesce(adds) : null
+  if (removes.length && !removed) return null
+  if (adds.length && !added) return null
+
+  let op
+  let pmFrom
+  let pmTo
+  let href = null
+  let insertedText
+
+  if (!added) {
+    op = 'unwrap'
+    pmFrom = removed.from
+    pmTo = removed.to
+  } else if (insert) {
+    op = 'insert'
+    if (added.from !== insert.from || added.to !== insert.from + insert.text.length) return null
+    pmFrom = insert.from
+    pmTo = insert.from
+    insertedText = insert.text
+    href = added.attrs?.href
+  } else if (removed) {
+    op = 'edit'
+    if (removed.from !== added.from || removed.to !== added.to) return null
+    pmFrom = added.from
+    pmTo = added.to
+    href = added.attrs?.href
+  } else {
+    op = 'wrap'
+    pmFrom = added.from
+    pmTo = added.to
+    href = added.attrs?.href
+  }
+  if (op !== 'unwrap' && typeof href !== 'string') return null
+
+  // Single-textblock guard, resolved against the PRE-batch doc (mark steps
+  // never displace positions; for the `insert` shape the reported range is
+  // the zero-width insert point, which is a valid pre-batch position too).
+  const docNode = tr.docs?.[0] || oldState?.doc
+  if (!docNode) return null
+  let $from
+  let $to
+  try {
+    $from = docNode.resolve(pmFrom)
+    $to = docNode.resolve(pmTo)
+  } catch {
+    return null
+  }
+  if (!$from.sameParent($to) || !$from.parent.isTextblock) return null
+
+  const result = { op, pmFrom, pmTo }
+  if (op !== 'unwrap') result.href = href
+  if (op === 'insert') result.insertedText = insertedText
+  return result
+}
+
 // Detects `@milkdown/plugin-trailing`'s own append: ONE transaction whose
 // single ReplaceStep inserts exactly one EMPTY paragraph at the very end of
 // the document (from === to === the step-doc's content size). Crepe ships
@@ -497,6 +643,12 @@ function extractTrailingAppend(transactions) {
 //      false` and stays `selection-only`; the dispatch channel never even
 //      consults the gateway for it — see editor-kernel-mode.js's
 //      `marksKeymap` guard for how empty-selection shortcuts are handled).
+//   8b. The link tooltip's own four shapes (see `extractLinkEdit` above) —
+//      checked right after the mark toggle and, critically, as a SEPARATE
+//      classifier: `extractMarkToggle`'s refusal of mixed Add+Remove batches
+//      is what keeps `applyHighlightInView`'s color-replace out of the toggle
+//      path, so it is not loosened; links get their own `link` -mark-keyed
+//      rule instead.
 //   9. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
@@ -530,6 +682,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const markToggle = extractMarkToggle(trs, oldState)
   if (markToggle) return { kind: 'mark-toggle', ...markToggle }
+
+  const linkEdit = extractLinkEdit(trs, oldState)
+  if (linkEdit) return { kind: 'link-edit', ...linkEdit }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
@@ -900,4 +1055,40 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
   const result = applySourceTransaction(kernel.doc, routed.transaction)
   if (!result.ok) return { ok: false, code: result.code }
   return { ok: true, applied: result, transaction: routed.transaction }
+}
+
+// routeLinkEdit: turns a `link-edit`-classified batch (see `extractLinkEdit`
+// above) into ONE `applyLinkEdit` kernel transaction — and, unlike every
+// other commit function in this file, deliberately does NOT apply it.
+//
+// The PM transaction the tooltip dispatched is ALWAYS vetoed for links (the
+// mark-toggle posture, not the AttrStep posture): the committed `[text](url)`
+// bytes have to be REPARSED for the view to show what CommonMark actually
+// makes of them — an escaped label, a title the user never touched, a
+// destination that had to take the `<...>` form. So the caller
+// (editor-kernel-mode.js's `link-edit` case) needs the transaction itself, to
+// push through `applyKernelTransaction(..., { requireMap: true })`, which is
+// what proves the RESULT document still maps before anything is committed.
+//
+// The PM->visible conversion is the same identity the mark-toggle route uses:
+// a block pair's content starts at `pmPos + 1`, so `visible = pmPos -
+// contentPos`. Virtual pairs (trailing/split placeholders, empty list items)
+// have no real bytes and are excluded by the caller's `editablePairForRange`.
+export function routeLinkEdit({ kernel, index, pair, op, pmFrom, pmTo, href, insertedText }) {
+  if (!kernel?.doc || !pair?.charMap) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  if (!Number.isFinite(pmFrom) || !Number.isFinite(pmTo)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  const contentPos = pair.pmPos + 1
+  const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)
+  const routed = applyLinkEdit({
+    doc: kernel.doc,
+    index: syntaxIndex,
+    map: pair.charMap,
+    visFrom: pmFrom - contentPos,
+    visTo: pmTo - contentPos,
+    op,
+    href,
+    insertedText
+  })
+  if (!routed.ok) return { ok: false, code: routed.code }
+  return { ok: true, transaction: routed.transaction }
 }

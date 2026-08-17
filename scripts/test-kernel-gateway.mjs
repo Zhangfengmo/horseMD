@@ -12,9 +12,9 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
-import { KERNEL_CODES, createMarkdownDocument } from '../src/renderer/src/lib/source-kernel/index.js'
+import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction } from '../src/renderer/src/lib/source-kernel/index.js'
 
 const schema = new Schema({
   nodes: {
@@ -1220,16 +1220,21 @@ const withSelection = (state, from, to) =>
   assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
 }
 
-// Case M5: link toggle — a mark with NO kernel kind ([text](url) needs the
-// URL-input UI flow, out of scope this plan) → blocked, never mark-toggle.
+// Case M5: link is NOT a `mark-toggle` kind — `MARK_TOGGLE_KINDS` has no
+// `link` entry, so a link AddMarkStep can never be routed through
+// `toggleInlineMark`'s marker-wrapping command (there is no `[text](url)`
+// marker pair to wrap with). Plan 5 Task 6 gave it its OWN classification
+// instead (`link-edit`, Cases L1-L10 below), so the outcome flipped from
+// `blocked` to `link-edit` — what this case still pins is that it never
+// becomes a mark toggle.
 {
   const d = doc(p(text('abcd')))
   const state = withSelection(EditorState.create({ schema, doc: d }), 1, 3)
   const tr = captureToggle(state, schema.marks.link, { href: 'https://x.example' })
   assert.ok(tr)
   const classified = classifyTransactions([tr], state)
-  assert.equal(classified.kind, 'blocked')
-  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.notEqual(classified.kind, 'mark-toggle')
+  assert.equal(classified.kind, 'link-edit')
 }
 
 // Case M6: cross-block toggleMark (selection spanning two paragraphs) emits
@@ -1730,3 +1735,254 @@ const imgText = (s) => imgSchema.text(s)
 }
 
 console.log('PASS kernel gateway (image attrs: src/alt/title route, caption/ratio refused, ratio-in-alt preserved)')
+
+// ---- Link editing (Plan 5 Task 6) ----
+//
+// Every transaction below is built the way @milkdown/components' LinkTooltip
+// builds it (`#confirmEdit` / `removeLink`, link-tooltip/edit/edit-view.ts:
+// 102-129 and :188-196) — same step ORDER, same `type.create({ href })`
+// (title defaults to null), same "insert the href text then mark it" for an
+// empty selection. Nothing is hand-shaped into the classifier's expectations.
+const linkMark = (href) => schema.mark('link', { href })
+
+// The tooltip's four dispatch shapes, as functions of (state, from, to, href).
+const tooltipWrap = (state, from, to, href) => {
+  const tr = state.tr
+  tr.addMark(from, to, linkMark(href))
+  return tr
+}
+const tooltipEdit = (state, from, to, oldHref, href) => {
+  const tr = state.tr
+  tr.removeMark(from, to, linkMark(oldHref))
+  tr.addMark(from, to, linkMark(href))
+  return tr
+}
+const tooltipRemove = (state, from, to) => {
+  const tr = state.tr
+  tr.removeMark(from, to, schema.marks.link)
+  return tr
+}
+const tooltipInsert = (state, at, href) => {
+  const tr = state.tr
+  tr.insertText(href, at)
+  tr.addMark(at, at + href.length, linkMark(href))
+  return tr
+}
+
+// The kernel-mode route's own pair lookup (editor-kernel-mode.js
+// `editablePairForRange`), reproduced here so the commit assertions exercise
+// the same PM->visible conversion the live route performs.
+const pairForRange = (map, from, to) =>
+  (map?.blockPairs || []).find((candidate) => {
+    if (!candidate.charMap || candidate.virtual) return false
+    const contentPos = candidate.pmPos + 1
+    return from >= contentPos && to <= contentPos + candidate.charMap.visibleLength
+  }) || null
+
+const commitLink = (md, pmDoc, classified) => {
+  const map = buildProjectionMap(md, pmDoc)
+  assert.ok(map, 'fixture must build a projection map')
+  const pair = pairForRange(map, classified.pmFrom, classified.pmTo)
+  assert.ok(pair, 'fixture must resolve an editable pair')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const routed = routeLinkEdit({ kernel, pair, ...classified })
+  if (!routed.ok) return { ok: false, code: routed.code }
+  const applied = applySourceTransaction(kernel.doc, routed.transaction)
+  assert.equal(applied.ok, true, applied.code)
+  return { ok: true, text: applied.doc.text, intent: routed.transaction.intent }
+}
+
+// Case L1: WRAP — `addLink` on a non-empty selection is one AddMarkStep.
+{
+  const md = 'hello world\n'
+  const d = doc(p(text('hello world')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 6)
+  const tr = tooltipWrap(state, 1, 6, 'https://x.example')
+  assert.deepEqual(tr.steps.map((s) => s.constructor.name), ['AddMarkStep'])
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, { kind: 'link-edit', op: 'wrap', pmFrom: 1, pmTo: 6, href: 'https://x.example' })
+  const committed = commitLink(md, d, classified)
+  assert.equal(committed.text, '[hello](https://x.example) world\n')
+  assert.equal(committed.intent, 'link-wrap')
+}
+
+// Case L2: EDIT — `editLink` removes the old mark and adds the new one in ONE
+// transaction. This is precisely the mixed Add+Remove shape `extractMarkToggle`
+// refuses; the link classifier owns it instead (Case M7 below still refuses
+// the highlight version — that regression guard is asserted in Case L6).
+{
+  const md = '[hello](https://old.example) world\n'
+  const d = doc(p(schema.text('hello', [linkMark('https://old.example')]), text(' world')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 6)
+  const tr = tooltipEdit(state, 1, 6, 'https://old.example', 'https://new.example')
+  assert.deepEqual(tr.steps.map((s) => s.constructor.name), ['RemoveMarkStep', 'AddMarkStep'])
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, { kind: 'link-edit', op: 'edit', pmFrom: 1, pmTo: 6, href: 'https://new.example' })
+  const committed = commitLink(md, d, classified)
+  assert.equal(committed.text, '[hello](https://new.example) world\n')
+  assert.equal(committed.intent, 'link-edit')
+}
+
+// Case L3: UNWRAP — `removeLink` is a lone RemoveMarkStep, and carries no
+// href (there is nothing to write).
+{
+  const md = '[hello](https://x.example) world\n'
+  const d = doc(p(schema.text('hello', [linkMark('https://x.example')]), text(' world')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 1, 6)
+  const tr = tooltipRemove(state, 1, 6)
+  assert.deepEqual(tr.steps.map((s) => s.constructor.name), ['RemoveMarkStep'])
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, { kind: 'link-edit', op: 'unwrap', pmFrom: 1, pmTo: 6 })
+  const committed = commitLink(md, d, classified)
+  assert.equal(committed.text, 'hello world\n')
+  assert.equal(committed.intent, 'link-unwrap')
+}
+
+// Case L4: INSERT — an EMPTY selection makes the tooltip type the href into
+// the document and mark it. The AddMarkStep's range is expressed AFTER the
+// ReplaceStep, so the classification collapses back to the zero-width insert
+// point in pre-batch coordinates.
+{
+  const md = 'ab\n'
+  const d = doc(p(text('ab')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 2, 2)
+  const tr = tooltipInsert(state, 2, 'https://q.example')
+  assert.deepEqual(tr.steps.map((s) => s.constructor.name), ['ReplaceStep', 'AddMarkStep'])
+  const classified = classifyTransactions([tr], state)
+  assert.deepEqual(classified, {
+    kind: 'link-edit', op: 'insert', pmFrom: 2, pmTo: 2,
+    href: 'https://q.example', insertedText: 'https://q.example'
+  })
+  const committed = commitLink(md, d, classified)
+  assert.equal(committed.text, 'a[https://q.example](https://q.example)b\n')
+  assert.equal(committed.intent, 'link-insert')
+}
+
+// Case L5: contiguous multi-step coalescing (the split-text-node shape) folds
+// into ONE range, exactly like `extractMarkToggle` does for ordinary marks.
+{
+  const d = doc(p(text('ab'), schema.text('cd', [schema.mark('emphasis')]), text('ef')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.step(new AddMarkStep(1, 3, linkMark('u')))
+  tr.step(new AddMarkStep(3, 5, linkMark('u')))
+  assert.deepEqual(classifyTransactions([tr], state), {
+    kind: 'link-edit', op: 'wrap', pmFrom: 1, pmTo: 5, href: 'u'
+  })
+}
+
+// Case L6: REGRESSION GUARD — the mixed Remove+Add rule `extractMarkToggle`
+// enforces is NOT loosened by the link classifier. `applyHighlightInView`'s
+// color-replace shape (removeMark then addMark of the HIGHLIGHT mark) still
+// falls through to `blocked`, and so does any mixed batch of two different
+// mark types.
+{
+  const d = doc(p(text('ab'), schema.text('cd', [schema.mark('highlight', { color: 'yellow' })])))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.removeMark(1, 5, schema.marks.highlight)
+  tr.addMark(1, 5, schema.mark('highlight', { color: 'yellow' }))
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+
+  const mixed = state.tr
+  mixed.removeMark(1, 5, schema.marks.highlight)
+  mixed.addMark(1, 5, linkMark('u'))
+  const mixedClass = classifyTransactions([mixed], state)
+  assert.equal(mixedClass.kind, 'blocked', 'a remove of one mark + an add of link is not a link edit')
+  assert.equal(mixedClass.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case L7: cross-block and non-contiguous shapes refuse.
+{
+  const d = doc(p(text('abc')), p(text('def')))
+  const state = EditorState.create({ schema, doc: d })
+  const cross = state.tr
+  cross.step(new AddMarkStep(1, 4, linkMark('u')))
+  cross.step(new AddMarkStep(6, 9, linkMark('u')))
+  assert.equal(classifyTransactions([cross], state).kind, 'blocked', 'a cross-block jump never coalesces')
+
+  const gap = EditorState.create({ schema, doc: doc(p(text('abcdef'))) })
+  const tr = gap.tr
+  tr.step(new AddMarkStep(1, 2, linkMark('u')))
+  tr.step(new AddMarkStep(4, 5, linkMark('u')))
+  assert.equal(classifyTransactions([tr], gap).kind, 'blocked')
+}
+
+// Case L8: shapes the tooltip never dispatches are refused rather than
+// guessed at — steps out of order, an add whose range does not match the
+// insert, a second ReplaceStep riding along, a non-link mark type.
+{
+  const d = doc(p(text('abcd')))
+  const state = EditorState.create({ schema, doc: d })
+
+  const addThenRemove = state.tr
+  addThenRemove.step(new AddMarkStep(1, 3, linkMark('u')))
+  addThenRemove.removeMark(1, 3, schema.marks.link)
+  assert.equal(classifyTransactions([addThenRemove], state).kind, 'blocked', 'removes must precede adds')
+
+  const badRange = state.tr
+  badRange.insertText('uu', 2)
+  badRange.step(new AddMarkStep(1, 3, linkMark('uu')))
+  assert.equal(classifyTransactions([badRange], state).kind, 'blocked',
+    "the marked range must be exactly the inserted text's")
+
+  const twoInserts = state.tr
+  twoInserts.insertText('u', 2)
+  twoInserts.insertText('v', 4)
+  twoInserts.step(new AddMarkStep(2, 3, linkMark('u')))
+  assert.equal(classifyTransactions([twoInserts], state).kind, 'blocked')
+
+  // A strong toggle is still a `mark-toggle`, never a link edit.
+  const strong = captureToggle(withSelection(state, 1, 3), schema.marks.strong)
+  assert.equal(classifyTransactions([strong], state).kind, 'mark-toggle')
+}
+
+// Case L9: `routeLinkEdit` fails closed on inputs it cannot resolve, and
+// surfaces the COMMAND's own refusal code rather than a generic one.
+{
+  const md = 'see www.a.com ok\n'
+  const d = doc(p(text('see '), schema.text('www.a.com', [linkMark('http://www.a.com')]), text(' ok')))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a paragraph holding a GFM autolink literal still maps')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const pair = pairForRange(map, 5, 14)
+
+  // The autolink literal has no `[`…`](…)` bytes — every direction refuses.
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair, op: 'unwrap', pmFrom: 5, pmTo: 14 }),
+    { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  )
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair, op: 'edit', pmFrom: 5, pmTo: 14, href: 'u' }),
+    { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  )
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair, op: 'wrap', pmFrom: 5, pmTo: 14, href: 'u' }),
+    { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  )
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair: null, op: 'wrap', pmFrom: 1, pmTo: 4, href: 'u' }),
+    { ok: false, code: KERNEL_CODES.UNMAPPED }
+  )
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair, op: 'wrap', pmFrom: NaN, pmTo: 4, href: 'u' }),
+    { ok: false, code: KERNEL_CODES.UNMAPPED }
+  )
+  assert.equal(kernel.doc.text, md, 'no refusal path mutated the document')
+}
+
+// Case L10: the autolink literal's PM shape reaches the classifier as a real
+// `link` mark, so the REFUSAL has to happen in the kernel command (Case L9),
+// not by the batch failing to classify. Pin that it does classify.
+{
+  const d = doc(p(text('see '), schema.text('www.a.com', [linkMark('http://www.a.com')]), text(' ok')))
+  const state = withSelection(EditorState.create({ schema, doc: d }), 5, 14)
+  const tr = tooltipRemove(state, 5, 14)
+  assert.deepEqual(classifyTransactions([tr], state), {
+    kind: 'link-edit', op: 'unwrap', pmFrom: 5, pmTo: 14
+  })
+}
+
+console.log('PASS kernel gateway (link tooltip: wrap/edit/unwrap/insert classified, mixed-batch guard intact)')

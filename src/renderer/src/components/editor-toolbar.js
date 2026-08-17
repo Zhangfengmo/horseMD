@@ -168,14 +168,22 @@ export function createToolbarScanner({ liveEditors, self, t, getKeybindings, upd
   // window is occluded, which would skip injection). The scan is cheap and each
   // injector early-returns once its button is present.
   // Crepe's toolbar buttons carry no label/identifier in the DOM, so we add
-  // tooltips by their fixed order: bold, italic, strikethrough, inline code,
-  // link. Our injected items are excluded (titled above).
+  // tooltips by their fixed order. That order is
+  // node_modules/@milkdown/crepe/src/feature/toolbar/config.ts's `getGroups`:
+  // bold, italic, strikethrough, inline code, **latex**, link — the latex item
+  // is emitted whenever `CrepeFeature.Latex` is on, which this app sets
+  // UNCONDITIONALLY (editor-crepe-setup.js `[Feature.Latex]: true`), so it is
+  // always present. It used to be missing from this list, which shifted every
+  // tooltip after `tb.code` by one: the formula button read "链接/Link" and the
+  // real link button had no tooltip at all. Our own injected items are
+  // excluded by the selector below (they are titled where they are built).
   const addToolbarTitles = (toolbar) => {
     const tips = [
       labelWithShortcut(t('tb.bold'), 'editor.bold', getKeybindings?.()),
       labelWithShortcut(t('tb.italic'), 'editor.italic', getKeybindings?.()),
       t('tb.strike'),
       t('tb.code'),
+      t('slash.math'),
       t('tb.link')
     ]
     toolbar

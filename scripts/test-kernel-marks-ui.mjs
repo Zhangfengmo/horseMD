@@ -81,10 +81,16 @@ const AFTER_TYPING = AFTER_F.replace('前**午未申酉**后段尾', '前X**午�
 // Wrap then unwrap nets to zero change, so every later checkpoint is
 // unaffected — same shape as the Bold wrap/unwrap in step 2.
 const AFTER_HIGHLIGHT = FIXTURE.replace('壹贰叁肆', '==壹贰叁肆==')
-// Link refusal (no kernel kind) and the /quote
-// placeholder refusal (empty-blockquote projection guard, this task's fix)
-// are all byte-neutral EXCEPT the "/quote" text itself, which the TYPING of
-// the query commits as ordinary plain text (only the WRAP click is refused).
+// P5-6: the link toolbar button now COMMITS (it used to be refused). Wrap ->
+// change URL -> remove nets to zero change, so every later checkpoint is
+// unaffected — same shape as the Bold and highlight wrap/unwrap pairs.
+const LINK_URL = 'https://x.example'
+const LINK_URL_2 = 'https://y.example'
+const AFTER_LINK = FIXTURE.replace('伍陆柒捌', `[伍陆柒捌](${LINK_URL})`)
+const AFTER_LINK_EDIT = FIXTURE.replace('伍陆柒捌', `[伍陆柒捌](${LINK_URL_2})`)
+// The /quote placeholder refusal (empty-blockquote projection guard) is
+// byte-neutral EXCEPT the "/quote" text itself, which the TYPING of the query
+// commits as ordinary plain text (only the WRAP click is refused).
 const AFTER_QUOTE_QUERY = AFTER_TYPING.replace('\n\nz\n\n', '\n\n/quote\n\n')
 const SAVED = AFTER_QUOTE_QUERY
 
@@ -281,6 +287,55 @@ async function clickToolbarButton(evaluate, send, index) {
   await sleep(300)
 }
 
+// Crepe's toolbar buttons carry no identifier, only the title HorseMD's own
+// scanner injects (editor-toolbar.js `addToolbarTitles`). The LINK button is
+// addressed by that title rather than by index on purpose: the index depends
+// on whether `CrepeFeature.Latex` contributes a formula button (it does), and
+// getting that wrong is exactly the bug that made this script's previous
+// "link is refused" pin click the FORMULA button instead.
+async function clickToolbarButtonTitled(evaluate, send, pattern) {
+  const rect = await waitFor(() => evaluate(`(() => {
+    const b = [...((${VISIBLE_TOOLBAR})?.querySelectorAll('.toolbar-item') || [])]
+      .find((n) => ${pattern}.test(n.title || ''))
+    if (!b) return null
+    const r = b.getBoundingClientRect()
+    return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null
+  })()`), `toolbar button matching ${pattern} not found/visible`)
+  await click(send, rect)
+  await sleep(300)
+}
+
+// Milkdown's LinkTooltip mounts its edit popover on `document.body` as
+// `.milkdown-link-edit[data-show]` (the same handle its own upstream test
+// uses — @milkdown/crepe/src/feature/link-tooltip/link-tooltip.spec.ts).
+// Returns null while it is hidden, so `waitFor` can poll it.
+async function linkEditTooltipState(evaluate) {
+  return evaluate(`(() => {
+    const t = [...document.querySelectorAll('.milkdown-link-edit')].find((n) => n.getAttribute('data-show') === 'true')
+    const input = t?.querySelector('input.input-area')
+    if (!input) return null
+    return { value: input.value, focused: document.activeElement === input }
+  })()`)
+}
+
+// The preview tooltip opens from a real mousemove over a rendered link
+// (preview-configure.ts debounces 50ms and requires `view.hasFocus()`), so
+// this moves the pointer onto the `<a>` and holds it there.
+async function hoverLink(evaluate, send, href) {
+  const rect = await waitFor(() => evaluate(`(() => {
+    const a = (${VISIBLE_EDITOR})?.querySelector('a[href=${JSON.stringify(href)}]')
+    if (!a) return null
+    a.scrollIntoView({ block: 'center' })
+    const r = a.getBoundingClientRect()
+    return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null
+  })()`), `link ${href} is not rendered in the view`)
+  for (let step = 0; step < 4; step += 1) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x + step, y: rect.y })
+    await sleep(80)
+  }
+  return rect
+}
+
 async function clickHighlightYellow(evaluate, send) {
   const itemRect = await waitFor(() => evaluate(`(() => {
     const it = (${VISIBLE_TOOLBAR})?.querySelector('.hm-highlight-item')
@@ -469,17 +524,80 @@ async function run() {
     await assertSource(evaluate, AFTER_B, 'clicking highlight again must unwrap back to the original bytes')
 
     // ============================================================
-    // 7) Link toolbar button -> blocked, bytes unchanged
+    // 7) LINK (P5-6 flipped pin — this used to assert a REFUSAL):
+    //    select -> toolbar link -> Milkdown's LinkTooltip opens -> type the
+    //    URL -> Enter -> the `[text](url)` bytes are committed. Then the
+    //    preview tooltip's edit button changes the URL, and the toolbar link
+    //    button (whose command sees an existing link mark) removes it.
+    //    Positive controls throughout: the tooltip must really be shown with
+    //    a FOCUSED input, and (for the edit step) prefilled with the current
+    //    URL — so none of these steps can pass vacuously.
     // ============================================================
     await selectRange(evaluate, send, '伍陆柒捌', 0, 4)
-    const beforeLink = await paragraphTexts(evaluate)
-    await clickToolbarButton(evaluate, send, 4) // link
-    const afterLink = await paragraphTexts(evaluate)
-    assert.deepEqual(afterLink, beforeLink, 'link toggle must be blocked (bytes unchanged)')
+    // Positive control on the tooltip-title fix itself: the link button must
+    // be findable BY ITS TITLE (before this task it had none — the formula
+    // button carried it).
+    await clickToolbarButtonTitled(evaluate, send, '/^(链接|Link)$/') // -> opens the edit tooltip
+    const editOpened = await waitFor(() => linkEditTooltipState(evaluate),
+      'the link edit tooltip did not open')
+    assert.equal(editOpened.focused, true, 'the link tooltip input must be focused (positive control)')
+    assert.equal(editOpened.value, '', 'a NEW link starts with an empty URL field')
 
-    // Prove the kernel map is STILL live after the refusal: a real,
-    // successful byte-assert round trip.
-    await assertSource(evaluate, AFTER_B, 'kernel.map must still be intact after the link refusal (no byte drift)')
+    await typeTextLikeUser(send, LINK_URL, { delayMs: delay })
+    const typed = await linkEditTooltipState(evaluate)
+    assert.equal(typed.value, LINK_URL, 'the typed URL really reached the tooltip input')
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(400)
+    assert.equal(app.dialogs.length, 0, 'no dialog from the link confirm')
+
+    // The link really is live in the view (not just bytes on disk).
+    const linkRendered = await waitFor(() => evaluate(`(() => {
+      const el = (${VISIBLE_EDITOR})?.querySelector('a[href=${JSON.stringify(LINK_URL)}]')
+      return el ? el.textContent : null
+    })()`), 'the committed link did not render as an <a> in the view')
+    assert.equal(linkRendered, '伍陆柒捌', 'the rendered link covers exactly the selected word')
+    await assertSource(evaluate, AFTER_LINK, 'the toolbar link flow must commit [伍陆柒捌](url) byte-exactly')
+
+    // ---- change the URL through the preview tooltip's edit button ----
+    // The preview only opens while the EditorView has focus, and the byte
+    // assert above round-tripped through source mode — so re-focus the view
+    // with a click in a neighbouring paragraph before hovering.
+    await clickAt(evaluate, send, '壹贰叁肆', 0)
+    await hoverLink(evaluate, send, LINK_URL)
+    const previewShown = await waitFor(() => evaluate(`(() => {
+      const t = [...document.querySelectorAll('.milkdown-link-preview')].find((n) => n.getAttribute('data-show') === 'true')
+      const a = t?.querySelector('a.link-display')
+      return a ? a.getAttribute('href') : null
+    })()`), 'hovering the link did not open the preview tooltip')
+    assert.equal(previewShown, LINK_URL, 'the preview tooltip shows the current URL (positive control)')
+    const editBtn = await waitFor(() => evaluate(`(() => {
+      const t = [...document.querySelectorAll('.milkdown-link-preview')].find((n) => n.getAttribute('data-show') === 'true')
+      const r = t?.querySelector('.link-edit-button')?.getBoundingClientRect()
+      return r && r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null
+    })()`), 'the preview tooltip has no edit button')
+    await click(send, editBtn)
+    await sleep(400)
+    const prefilled = await waitFor(() => linkEditTooltipState(evaluate),
+      'the edit tooltip did not reopen from the preview')
+    assert.equal(prefilled.value, LINK_URL, 'editing prefills the CURRENT url (positive control)')
+    assert.equal(prefilled.focused, true, 'the reopened tooltip input must be focused')
+    for (let index = 0; index < LINK_URL.length; index += 1) {
+      await pressKey(send, { key: 'Backspace', code: 'Backspace', delayMs: 6 })
+    }
+    assert.equal((await linkEditTooltipState(evaluate)).value, '', 'the URL field was really cleared')
+    await typeTextLikeUser(send, LINK_URL_2, { delayMs: delay })
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(400)
+    await assertSource(evaluate, AFTER_LINK_EDIT, 'the tooltip edit must rewrite ONLY the destination segment')
+
+    // ---- remove it: the toolbar link button on an existing link routes
+    //      through toggleLinkCommand -> removeLink (a lone RemoveMarkStep).
+    await selectRange(evaluate, send, '伍陆柒捌', 0, 4)
+    await clickToolbarButtonTitled(evaluate, send, '/^(链接|Link)$/')
+    await sleep(400)
+    const stillLinked = await evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('a[href=${JSON.stringify(LINK_URL_2)}]')`)
+    assert.equal(stillLinked, false, 'the link mark is gone from the view')
+    await assertSource(evaluate, AFTER_B, 'removing the link must restore the original bytes exactly')
 
     // ============================================================
     // 3a) ctxmenu Italic on a second word (needs the selection-toolbar
@@ -523,6 +641,11 @@ async function run() {
     })()`), 'format submenu trigger missing')
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...triggerRect })
     await sleep(200)
+    // P5-6: NO format item is kernel-disabled any more — the link item was
+    // the last one carrying `.disabled` in kernel mode.
+    const disabledFormats = await evaluate(`[...document.querySelectorAll('[data-context-submenu="format"] .block-text-format')]
+      .filter((n) => n.classList.contains('disabled')).length`)
+    assert.equal(disabledFormats, 0, 'no ctxmenu format item may be disabled in kernel mode')
     const italicItemRect = await waitFor(() => evaluate(`(() => {
       const items = [...document.querySelectorAll('[data-context-submenu="format"] .block-text-format')]
       const it = items[1]
@@ -802,7 +925,7 @@ async function run() {
     await assertSourceLegacy(evaluate, MULTI_QUOTE_UNWRAPPED,
       'unquoting the MIDDLE paragraph must lift the WHOLE blockquote (all three paragraphs freed), never split it into two quotes around a freed middle paragraph')
 
-    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight wrap/unwrap, the link refusal, the /quote fail-closed fix, code-block ctxmenu gating, whole-blockquote legacy unwrap, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight wrap/unwrap, the link tooltip wrap/edit/remove flow, the /quote fail-closed fix, code-block ctxmenu gating, whole-blockquote legacy unwrap, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

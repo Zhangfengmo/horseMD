@@ -2213,10 +2213,10 @@ export default function Editor({
                 modes — in kernel mode the apiOverrides route bold/italic/
                 strike/code/highlight through the legacy toggleMark dispatch,
                 which the gateway intercepts as `mark-toggle` and the kernel
-                commits as source bytes. The link item alone stays disabled
-                in kernel mode ([text](url) needs the URL-input UI flow —
-                out of scope this plan); clicking it still reaches the
-                override, whose refusal toast explains why. */}
+                commits as source bytes. `link` works the same way since
+                Plan 5 Task 6 — it opens Milkdown's LinkTooltip, whose
+                confirm/remove dispatch the gateway classifies as
+                `link-edit`. Nothing here is kernel-disabled any more. */}
             {ctxMenu.showTextFormatting && (
               <>
                 <div className="block-menu-submenu-parent">
@@ -2233,21 +2233,17 @@ export default function Editor({
                       ['code', 'tb.code'],
                       ['link', 'tb.link'],
                       ['highlight', 'tb.highlight']
-                    ].map(([format, labelKey]) => {
-                      const kernelDisabled = sourceKernelMode && format === 'link'
-                      return (
-                        <button
-                          key={format}
-                          className={'block-menu-item block-text-format' + (kernelDisabled ? ' disabled' : '')}
-                          aria-disabled={kernelDisabled || undefined}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => pickTextFormat(format, ctxMenu.selection)}
-                        >
-                          <span className="block-menu-short">{format === 'bold' ? 'B' : format === 'italic' ? 'I' : format === 'strike' ? 'S' : format === 'code' ? '</>' : format === 'link' ? '↗' : '▰'}</span>
-                          <span className="block-menu-name">{t(labelKey)}</span>
-                        </button>
-                      )
-                    })}
+                    ].map(([format, labelKey]) => (
+                      <button
+                        key={format}
+                        className="block-menu-item block-text-format"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => pickTextFormat(format, ctxMenu.selection)}
+                      >
+                        <span className="block-menu-short">{format === 'bold' ? 'B' : format === 'italic' ? 'I' : format === 'strike' ? 'S' : format === 'code' ? '</>' : format === 'link' ? '↗' : '▰'}</span>
+                        <span className="block-menu-name">{t(labelKey)}</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
                 <div className="block-menu-divider" />

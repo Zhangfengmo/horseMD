@@ -44,7 +44,7 @@ import {
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -507,6 +507,44 @@ export function createKernelMode({
         // the paragraph's phrasing positionless). Pinned as Case M4c in
         // scripts/test-kernel-mode-headless.mjs.
         // applyKernelTransaction notifies on every failure path itself.
+        applyKernelTransaction(routed.transaction, view, { requireMap: true })
+        return { veto: true }
+      }
+      case 'link-edit': {
+        // The LinkTooltip's own commit (Plan 5 Task 6). Same posture as
+        // `mark-toggle` right above and for the same reason: the PM
+        // transaction is ALWAYS vetoed, because what the view must end up
+        // showing is whatever CommonMark makes of the committed
+        // `[text](url)` BYTES — an escaped label, a destination that had to
+        // take the `<...>` form, a title the rewrite deliberately left in
+        // place. Letting the tooltip's own mark transaction through would
+        // paint a link the source may not spell that way.
+        //
+        // `requireMap: true` is what refuses (pre-commit, everything
+        // untouched) any link edit whose RESULT document cannot rebuild a
+        // projection map or whose own anchor no longer resolves through it.
+        // `applyLinkEdit` has already proven the bytes reparse to the
+        // intended document; this is the projection-side half.
+        if (!view) return { veto: true }
+        const pair = editablePairForRange(classified.pmFrom, classified.pmTo)
+        if (!pair) {
+          notifyRefusal(KERNEL_CODES.UNMAPPED, classified.pmFrom)
+          return { veto: true }
+        }
+        const routed = routeLinkEdit({
+          kernel,
+          index: buildSyntaxIndex(kernel.doc.text),
+          pair,
+          op: classified.op,
+          pmFrom: classified.pmFrom,
+          pmTo: classified.pmTo,
+          href: classified.href,
+          insertedText: classified.insertedText
+        })
+        if (!routed.ok) {
+          notifyBlocked(routed.code)
+          return { veto: true }
+        }
         applyKernelTransaction(routed.transaction, view, { requireMap: true })
         return { veto: true }
       }
@@ -1630,15 +1668,17 @@ export function createKernelMode({
     // (veto + source commit + reconcile). No parallel formatting
     // implementation exists: legacy stays the single command path in BOTH
     // modes; the only difference is who owns the resulting transaction.
-    // `link` keeps the refusal (URL-input UI flow, out of scope this plan);
-    // an EMPTY selection is refused up front with a "select text first"
-    // toast — the legacy path would silently return false, and letting a
-    // stored-marks toggle arm would set up the typing trap the marksKeymap
-    // guard above closes for the keyboard shortcuts.
+    // `link` joined them in Plan 5 Task 6: the legacy path calls Milkdown's
+    // `toggleLinkCommand`, which opens the LinkTooltip, and the tooltip's own
+    // confirm/remove dispatch is what the gateway now classifies as
+    // `link-edit` (see the `link-edit` case in handleTransactions). An EMPTY
+    // selection is refused up front with a "select text first" toast — the
+    // legacy path would silently return false, and letting a stored-marks
+    // toggle arm would set up the typing trap the marksKeymap guard above
+    // closes for the keyboard shortcuts.
     applyTextFormat: (format, selectionRange = null) => {
       const delegate = legacy('applyTextFormat')
       if (delegate) return delegate(format, selectionRange)
-      if (format === 'link') return notifyUnsupportedApi('applyTextFormat:link')
       const impl = legacyApi?.applyTextFormat
       if (typeof impl !== 'function') return notifyUnsupportedApi('applyTextFormat')
       if (selectionEmptyFor(selectionRange)) {
