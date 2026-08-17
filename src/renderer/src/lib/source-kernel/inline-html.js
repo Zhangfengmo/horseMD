@@ -100,6 +100,36 @@ export const BREAK_REWRITE_PARENTS = new Set([
   'link'
 ])
 
+// The SAME set, under the name its third consumer asks it by: "is this node's
+// children phrasing content?" — i.e. "is an `html` child of this node an INLINE
+// fragment rather than a block?".
+//
+// An alias, not a copy, deliberately: the two questions have one answer, and a
+// second literal list would drift. (`BREAK_REWRITE_PARENTS` is the same
+// predicate seen from `brToBreakRemarkPlugin`'s side — it rewrites `<br>` in
+// exactly the containers whose children are phrasing.)
+export const PHRASING_PARENTS = BREAK_REWRITE_PARENTS
+
+// Is this mdast `html` node an INLINE fragment (as opposed to block-level HTML)?
+//
+// This is the one discriminator for the inline-vs-block question, shared by
+// `character-map.js`/`syntax-index.js` (kernel chain) and mirrored by the
+// projection map's own phrasing guard. Its ground truth is
+// preset-commonmark's `remark-html-transformer.ts`: an mdast `html` whose
+// parent is a BLOCK container (`root`/`blockquote`/`listItem`) is wrapped into
+// `paragraph > html` before ProseMirror parses it, so it behaves as a block;
+// every OTHER html node stays where it is and becomes an inline atom
+// (`htmlSchema`: `atom:true, group:'inline', inline:true`).
+//
+// Answered from the PHRASING side rather than the block side so that an
+// unrecognized parent (e.g. `footnoteDefinition`, `linkReference` — shapes
+// Milkdown cannot parse at all) keeps the pre-existing "treat as block"
+// behavior: that is the fail-closed direction, since a block-typed html makes
+// structural commands REFUSE rather than act.
+export function isInlineHtml(node, parent) {
+  return node?.type === 'html' && !!parent && PHRASING_PARENTS.has(parent.type)
+}
+
 // Can this child be swallowed into a merged inline-HTML fragment? Mirrors
 // `coalesceChildren`'s `if (k.type !== 'html' && k.type !== 'text') break`,
 // minus (when `breakHtmlCuts`) the `<br>` nodes that are already `break` nodes

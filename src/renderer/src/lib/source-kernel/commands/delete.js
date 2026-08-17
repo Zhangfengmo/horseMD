@@ -58,6 +58,17 @@ export function joinParagraphBackward({ doc, index, offset }) {
   if (index.listItemAt(block.start) || index.listItemAt(previous.start)) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // Fragment-bisection guard on the RANGE this command replaces (the inter-
+  // block gap). Like the list-item check above it is a second net rather than
+  // the primary defence: both endpoints are block boundaries, and an inline
+  // HTML fragment lives strictly inside one block's children, so today no
+  // fragment can straddle them. It is asserted here anyway because this file
+  // owns the bytes it writes — the same reason `blockAt`'s pre-fix
+  // mis-resolution was the ONLY thing stopping this command from running, and
+  // that turned out to be an accident rather than a contract.
+  if (index.bisectsInlineHtml(previous.end, block.start)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
   const line = index.lineAt(offset)
   const prefix = quotePrefixOfLine(line)
   const prevLine = index.lineAt(previous.end - 1)

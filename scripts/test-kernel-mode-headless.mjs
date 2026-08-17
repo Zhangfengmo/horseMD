@@ -17,6 +17,9 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
+import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
+import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
 
 // `bullet_list`/`list_item` (with a `checked` attr, `list_item` content
 // `'paragraph block*'`) mirror @milkdown/preset-commonmark + preset-gfm's
@@ -157,7 +160,16 @@ const FIXTURE_DOCS = {
   'a <span>x</span> b\n\n甲乙\n': () => doc(
     p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))),
   'a <span>x</span> b\n\n甲丙乙\n': () => doc(
-    p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲丙乙')))
+    p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲丙乙'))),
+  // blockAt-inline-html fixtures: a paragraph that STARTS with a fragment,
+  // and the result of joining it backward into the previous paragraph (the
+  // soft break survives as a literal '\n' inside the merged paragraph's
+  // leading text node — the same lazy-continuation shape every other
+  // join-block-backward commit produces).
+  'a\n\n<span>x</span> b\n': () => doc(
+    p(text('a')), p(ih('<span>x</span>'), text(' b'))),
+  'a\n<span>x</span> b\n': () => doc(
+    p(text('a\n'), ih('<span>x</span>'), text(' b')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -1632,6 +1644,100 @@ for (const [markName, from, to, label] of [
   await flushMicrotasks()
   assert.equal(verdict2, undefined)
   assert.equal(h.controller.kernel.doc.text, '甲丁丙乙\n\n==高亮==\n')
+}
+
+// Case 18 (blockAt inline html): the review's exact UX regression, cured
+// end-to-end. `a\n\n<span>x</span> b\n` — the SECOND paragraph starts with an
+// inline HTML fragment, so `index.blockAt(3)` used to answer the html node
+// instead of the paragraph; the Backspace branch of `router.js` handed that to
+// `joinParagraphBackward`, which refused on its own type re-check. Result: an
+// ordinary "merge this paragraph into the one above" was rejected with a toast
+// in kernel mode, where legacy merged it. Now the paragraph is resolved and the
+// join commits byte-exactly.
+//
+// Raw offsets: 'a'=0 '\n'=1 '\n'=2, paragraph2 = [3,19), fragment = [3,17).
+// PM: paragraph1 nodeSize 3 -> paragraph2 at pos 3, content start 4; the html
+// atom occupies 4..5, text ' b' 5..7.
+{
+  const md = 'a\n\n<span>x</span> b\n'
+  const h = makeHarness(md, doc(p(text('a')), p(ih('<span>x</span>'), text(' b'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.equal(h.controller.kernel.map.pmPosToRaw(4), 3,
+    'the fragment paragraph\'s content start maps to its own raw start')
+
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  const notifBefore = h.notifications.length
+  const handled = h.controller.structuralHandlers.Backspace(
+    h.view.state, h.view.dispatch, h.view
+  )
+  await flushMicrotasks()
+  assert.equal(handled, true, 'the join is owned by the kernel, not delegated to PM')
+  assert.equal(h.controller.kernel.doc.text, 'a\n<span>x</span> b\n',
+    'the two paragraphs merged, byte-exactly, with the fragment untouched')
+  assert.equal(h.notifications.length, notifBefore, 'no refusal toast — it simply worked')
+  assert.ok(
+    h.view.state.doc.eq(doc(p(text('a\n'), ih('<span>x</span>'), text(' b')))),
+    'view reconciled to the parse of the merged bytes'
+  )
+  assert.deepEqual(h.changes.at(-1), ['a\n<span>x</span> b\n', false])
+}
+
+// Case 19: the bisect guard. Now that structural commands REACH the paragraph,
+// a split strictly inside the fragment would commit `a <span>x` + `</span> b` —
+// two unbalanced fragments the editor renders as escaped text, i.e. bytes that
+// reparse into a different document than the one on screen. Refused, zero byte
+// change, same fail-closed shape as the gateway's `bisectsLineEnding` CRLF-pair
+// guard.
+//
+// Also proven here: today's ProseMirror model cannot even PRODUCE such a caret
+// (the whole fragment is one atom, so no PM position maps strictly inside its
+// raw span). The guard is a byte-contract defence owned by the command layer
+// rather than inherited from the schema — exactly the reasoning
+// `bisectsLineEnding` states for its own unreachable-through-the-UI shapes.
+{
+  const md = 'a <span>x</span> b\n\n甲乙\n'
+  const h = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+
+  // (a) no PM position inside the fragment paragraph maps strictly into the
+  //     fragment's raw span [2,16).
+  const index = buildSyntaxIndex(h.controller.kernel.doc.text)
+  assert.deepEqual(index.inlineHtmlSpans, [{ start: 2, end: 16 }])
+  for (let pos = 1; pos <= 6; pos += 1) {
+    const raw = h.controller.kernel.map.pmPosToRaw(pos)
+    if (raw === null) continue
+    assert.equal(index.bisectsInlineHtml(raw), false,
+      `PM pos ${pos} -> raw ${raw} must not land inside the fragment`)
+  }
+
+  // (b) the command layer refuses an interior offset outright, and nothing in
+  //     the live kernel moves.
+  const bytesBefore = h.controller.kernel.doc.text
+  const revisionBefore = h.controller.kernel.doc.revision
+  for (const offset of [3, 8, 15]) {
+    assert.deepEqual(
+      routeStructuralKey('Enter', { doc: h.controller.kernel.doc, index, offset }),
+      { ok: false, code: 'unsupported-structure' },
+      `Enter at raw ${offset} must refuse`
+    )
+  }
+  assert.equal(h.controller.kernel.doc.text, bytesBefore, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'no revision advance')
+
+  // (c) positive control on the SAME live document: the fragment's own edges
+  //     are legal split points and produce balanced bytes on both sides.
+  for (const [offset, expected] of [
+    [2, 'a \n\n<span>x</span> b\n\n甲乙\n'],
+    [16, 'a <span>x</span>\n\n b\n\n甲乙\n']
+  ]) {
+    const routed = routeStructuralKey('Enter', { doc: h.controller.kernel.doc, index, offset })
+    assert.equal(routed.ok, true, routed.code)
+    assert.equal(
+      applySourceTransaction(h.controller.kernel.doc, routed.transaction).doc.text,
+      expected
+    )
+  }
+  assert.equal(h.controller.kernel.doc.text, bytesBefore, 'the controls committed nothing either')
 }
 
 console.log('PASS kernel mode headless')

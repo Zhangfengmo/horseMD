@@ -94,6 +94,12 @@ export function splitTextBlock({ doc, index, offset }) {
   if (block.type === 'heading' && offset < headingContentStart(block)) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // Fail-closed: never split INSIDE an inline HTML fragment (see
+  // syntax-index.js `bisectsInlineHtml`). `a <span>x</span> b` split at the `x`
+  // would commit two unbalanced fragments that reparse as escaped text — a
+  // different document than the one on screen. Splitting AT either edge of a
+  // fragment is fine and is exactly what this guard leaves reachable.
+  if (index.bisectsInlineHtml(offset)) return { ok: false, code: 'unsupported-structure' }
   const contentStart = block.type === 'heading' ? headingContentStart(block) : block.start
   if (offset === contentStart) {
     // 段首 Enter (Task 2, plan 3): insert exactly ONE `ending` (plus a bare
@@ -136,6 +142,9 @@ export function splitListItem({ doc, index, offset }) {
   if (!item || item.empty || offset < item.contentStart) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // Same fragment-bisection guard as splitTextBlock: a list item's content is
+  // phrasing too, so `- a <span>x</span> b` must refuse a split at the `x`.
+  if (index.bisectsInlineHtml(offset)) return { ok: false, code: 'unsupported-structure' }
   const ending = endingAt(index, offset)
   const marker = item.ordered
     ? String(item.ordered.number + 1) + item.ordered.delimiter

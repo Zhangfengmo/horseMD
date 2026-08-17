@@ -9,6 +9,12 @@ import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { QUOTE_PREFIX } from '../markdown-preservation/block-prefix.js'
+import {
+  BREAK_REWRITE_PARENTS,
+  PHRASING_PARENTS,
+  inlineHtmlRunAt,
+  isInlineHtml
+} from './inline-html.js'
 
 // remark-math (Plan 5 Task 1) — the kernel chain must recognize EXACTLY the
 // syntax the editor chain recognizes, because ProjectionMap zips the two
@@ -52,6 +58,14 @@ export function scanLines(text) {
   return lines
 }
 
+// `html` is in this set for BLOCK-level HTML only (`<div>x</div>` as a
+// root/blockquote/listItem child). An INLINE html fragment is also an mdast
+// `html` node, and used to be collected here too — which made `blockAt` answer
+// `{type:'html'}` for every offset inside `a <span>x</span> b`, so Enter /
+// Delete / Backspace / mark-toggle all refused (`unsupported-structure`)
+// anywhere near a fragment even though the enclosing paragraph is a perfectly
+// ordinary, editable block. `isInlineHtml` (inline-html.js) is the shared
+// discriminator that keeps those out; see the `walk` call site.
 const BLOCKS = new Set([
   'paragraph', 'heading', 'blockquote', 'list', 'listItem',
   'code', 'table', 'thematicBreak', 'html', 'math'
@@ -131,15 +145,56 @@ export function buildSyntaxIndex(text) {
     }
   }
 
+  // Raw spans of the INLINE HTML fragments a caret must never split (see
+  // `bisectsInlineHtml`). Recorded per phrasing container with the SAME shared
+  // rule `character-map.js` uses to emit its width-1 atom units, so a span here
+  // is exactly one ProseMirror inline atom:
+  //  - a coalesced run (`<span>` + `x` + `</span>` -> one atom) spans the FIRST
+  //    node's start to the LAST node's end, interior text included;
+  //  - an html node the editor does NOT merge (a lone `<br/>`, an unbalanced
+  //    `<span>x`) is still an inline atom on its own, so its own span counts.
+  const inlineHtmlSpans = []
+  const collectInlineHtmlSpans = (node) => {
+    const children = node.children || []
+    // Same question `character-map.js`'s `collectUnits` asks, answered from the
+    // same set — every container reached here is a phrasing parent, so this is
+    // `true` in practice; asking rather than hardcoding keeps the two scans
+    // literally identical.
+    const breakHtmlCuts = BREAK_REWRITE_PARENTS.has(node.type)
+    let i = 0
+    while (i < children.length) {
+      const run = inlineHtmlRunAt(children, i, breakHtmlCuts)
+      if (run) {
+        const s = offsetOf(children[i].position?.start)
+        const e = offsetOf(children[run.end - 1].position?.end)
+        if (Number.isInteger(s) && Number.isInteger(e)) inlineHtmlSpans.push({ start: s, end: e })
+        i = run.end
+        continue
+      }
+      const child = children[i]
+      i += 1
+      if (child.type !== 'html') continue
+      const s = offsetOf(child.position?.start)
+      const e = offsetOf(child.position?.end)
+      if (Number.isInteger(s) && Number.isInteger(e)) inlineHtmlSpans.push({ start: s, end: e })
+    }
+  }
+
   const blocks = [] // { type, start, end, node, ancestors }
   const items = [] // 列表项记录（可能含 null，构建失败的项）
   const walk = (node, ancestors) => {
     const start = offsetOf(node.position?.start)
     const end = offsetOf(node.position?.end)
-    if (BLOCKS.has(node.type) && Number.isInteger(start) && Number.isInteger(end)) {
+    // An inline html fragment is NOT a block candidate — the enclosing
+    // paragraph/heading/tableCell is the block, and it is what every structural
+    // command must resolve to. Block-level html (root/blockquote/listItem
+    // child) is unaffected and keeps behaving exactly as before.
+    const inline = isInlineHtml(node, ancestors[ancestors.length - 1])
+    if (BLOCKS.has(node.type) && !inline && Number.isInteger(start) && Number.isInteger(end)) {
       blocks.push({ type: node.type, start, end, node, ancestors: [...ancestors] })
       if (node.type === 'listItem') items.push(buildItem(node, ancestors, start, end))
     }
+    if (PHRASING_PARENTS.has(node.type)) collectInlineHtmlSpans(node)
     const nextAncestors = [...ancestors, node]
     for (const child of node.children || []) walk(child, nextAncestors)
   }
@@ -173,6 +228,41 @@ export function buildSyntaxIndex(text) {
     return best
   }
 
+  // The inline HTML fragment STRICTLY containing `offset`, or null. Both edges
+  // are "outside": a caret may sit before `<span>` or after `</span>`, never
+  // between them — mirroring the character map, where the whole fragment is a
+  // single width-1 atom with no addressable interior.
+  const inlineHtmlSpanAt = (offset) => {
+    for (const span of inlineHtmlSpans) {
+      if (offset > span.start && offset < span.end) return span
+    }
+    return null
+  }
+
+  // Bisection guard for STRUCTURAL commands, the same shape as the gateway's
+  // `bisectsLineEnding` (editor-kernel-gateway.js) CRLF-pair guard: some raw
+  // offsets are byte-legal but structurally indivisible, and a command that
+  // writes there must refuse rather than produce bytes that reparse into a
+  // different document.
+  //
+  // Why it became necessary: with inline html no longer masquerading as a
+  // block, `blockAt` finally resolves the enclosing paragraph, so Enter /
+  // Backspace / Delete are REACHABLE at offsets that previously refused by
+  // accident. Most of those offsets should now work — but the ones INSIDE a
+  // fragment must not: splitting `a <span>x</span> b` at the `x` would commit
+  // `a <span>x` and `</span> b`, two UNBALANCED fragments that the editor
+  // renders as escaped text, i.e. a document that no longer matches the
+  // ProseMirror doc the user was looking at.
+  //
+  // Range form: a range bisects when EITHER endpoint sits strictly inside a
+  // fragment. A range that COVERS a whole fragment (`from <= span.start` and
+  // `to >= span.end`) does not — deleting an entire fragment is well-defined
+  // and stays allowed.
+  const bisectsInlineHtml = (from, to = from) => {
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return false
+    return !!(inlineHtmlSpanAt(from) || inlineHtmlSpanAt(to))
+  }
+
   const lineRange = (start, end) => {
     const first = lines[lineIndexAt(start)]
     const last = lines[lineIndexAt(Math.max(start, end - 1))]
@@ -201,6 +291,9 @@ export function buildSyntaxIndex(text) {
     lineAt: (offset) => lines[lineIndexAt(offset)],
     blockAt,
     listItemAt,
-    containerRange
+    containerRange,
+    inlineHtmlSpans,
+    inlineHtmlSpanAt,
+    bisectsInlineHtml
   }
 }

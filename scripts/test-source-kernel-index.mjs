@@ -232,3 +232,120 @@ const shape = (node) => {
 }
 
 console.log('PASS source-kernel syntax index')
+
+// ---- Inline HTML resolves as PHRASING, not as a block ----
+//
+// Regression (Plan 5 Task 2 report §6.1): `BLOCKS` contains 'html', and
+// `blockAt` is "largest start wins", so an INLINE html node — `<span>` inside
+// an ordinary paragraph — used to win over its own paragraph. Every structural
+// command resolves its block through `blockAt`, so Enter / Delete / Backspace /
+// mark-toggle all refused (`unsupported-structure`) at any offset inside or
+// adjacent to an inline HTML fragment, even though the enclosing paragraph is
+// a perfectly ordinary editable block.
+//
+// The discriminator is `isInlineHtml` (inline-html.js), shared with the
+// character map / projection map: an html node whose PARENT is a phrasing
+// container is inline; block-level html (a root/blockquote/listItem child,
+// which preset-commonmark's remark-html-transformer wraps into
+// `paragraph > html` before ProseMirror sees it) is unchanged.
+{
+  // Raw offsets of 'a <span>x</span> b\n':
+  //   'a '=[0,2)  '<span>'=[2,8)  'x'=8  '</span>'=[9,16)  ' b'=[16,18)
+  const src = 'a <span>x</span> b\n'
+  const idx = buildSyntaxIndex(src)
+  for (let offset = 0; offset < 18; offset += 1) {
+    const block = idx.blockAt(offset)
+    assert.equal(block?.type, 'paragraph', `offset ${offset} must resolve to the paragraph`)
+    assert.equal(block.start, 0)
+    assert.equal(block.end, 18)
+  }
+  assert.equal(idx.blockAt(18), null, 'past the block end is still null (exclusive end)')
+
+  // The fragment itself is recorded as ONE indivisible span — first node start
+  // to last node end, the merged run's interior 'x' included, exactly the raw
+  // span character-map.js emits its width-1 atom unit for.
+  assert.deepEqual(idx.inlineHtmlSpans, [{ start: 2, end: 16 }])
+
+  // Strict interior only: both edges are legal caret positions.
+  assert.equal(idx.inlineHtmlSpanAt(2), null, 'the opening edge is outside')
+  assert.equal(idx.inlineHtmlSpanAt(16), null, 'the closing edge is outside')
+  assert.deepEqual(idx.inlineHtmlSpanAt(3), { start: 2, end: 16 })
+  assert.deepEqual(idx.inlineHtmlSpanAt(8), { start: 2, end: 16 }, 'the fragment TEXT is interior too')
+  assert.deepEqual(idx.inlineHtmlSpanAt(15), { start: 2, end: 16 })
+
+  // Range form: a range bisects when EITHER endpoint is strictly interior; a
+  // range that COVERS the whole fragment does not.
+  assert.equal(idx.bisectsInlineHtml(8), true)
+  assert.equal(idx.bisectsInlineHtml(2), false)
+  assert.equal(idx.bisectsInlineHtml(2, 16), false, 'deleting the WHOLE fragment is well-defined')
+  assert.equal(idx.bisectsInlineHtml(0, 18), false, 'deleting the whole paragraph is too')
+  assert.equal(idx.bisectsInlineHtml(0, 9), true, 'a range ENDING inside the fragment bisects')
+  assert.equal(idx.bisectsInlineHtml(9, 18), true, 'a range STARTING inside the fragment bisects')
+}
+
+// Block-level HTML keeps its old behavior: `blockAt` still answers 'html'.
+{
+  const idx = buildSyntaxIndex('<div>block</div>\n')
+  assert.equal(idx.blockAt(0).type, 'html')
+  assert.equal(idx.blockAt(7).type, 'html')
+  assert.deepEqual(idx.inlineHtmlSpans, [], 'block-level html is not a fragment')
+
+  // …including as a blockquote / listItem child (the other two
+  // BLOCK_CONTAINER_TYPES of remark-html-transformer).
+  const quoted = buildSyntaxIndex('> <div>x</div>\n')
+  assert.equal(quoted.blockAt(2).type, 'html')
+  const listed = buildSyntaxIndex('- <div>x</div>\n')
+  assert.equal(listed.blockAt(2).type, 'html')
+}
+
+// Headings, list items, blockquotes and table cells: the fragment never wins
+// over the enclosing block.
+{
+  // '# h <span>x</span> t\n' — fragment [4,18), heading [0,20)
+  const heading = buildSyntaxIndex('# h <span>x</span> t\n')
+  assert.equal(heading.blockAt(5).type, 'heading')
+  assert.equal(heading.blockAt(12).type, 'heading')
+  assert.deepEqual(heading.inlineHtmlSpans, [{ start: 4, end: 18 }])
+
+  // '- a <span>x</span> b\n' — the item's own paragraph child [2,20)
+  const item = buildSyntaxIndex('- a <span>x</span> b\n')
+  assert.equal(item.blockAt(5).type, 'paragraph')
+  assert.equal(item.blockAt(5).start, 2)
+  assert.ok(item.listItemAt(5), 'still recognized as a list item')
+  assert.deepEqual(item.inlineHtmlSpans, [{ start: 4, end: 18 }])
+
+  // '> a <span>x</span> b\n' — the quote's paragraph child [2,20)
+  const quoted = buildSyntaxIndex('> a <span>x</span> b\n')
+  assert.equal(quoted.blockAt(5).type, 'paragraph')
+  assert.equal(quoted.blockAt(5).start, 2)
+  assert.deepEqual(quoted.inlineHtmlSpans, [{ start: 4, end: 18 }])
+
+  // A table cell is phrasing too; `table` is the enclosing block (cells are
+  // not blocks in this index).
+  const table = buildSyntaxIndex('| a <span>x</span> b |\n| --- |\n| c |\n')
+  assert.equal(table.blockAt(5).type, 'table')
+  assert.deepEqual(table.inlineHtmlSpans, [{ start: 4, end: 18 }])
+}
+
+// Shapes the editor does NOT coalesce are still inline atoms, one span each —
+// splitting inside a lone `<br/>` or an unbalanced `<span>x` is just as wrong
+// as splitting a merged fragment.
+{
+  assert.deepEqual(buildSyntaxIndex('a <br/> b\n').inlineHtmlSpans, [{ start: 2, end: 7 }])
+  assert.deepEqual(buildSyntaxIndex('a <span>x b\n').inlineHtmlSpans, [{ start: 2, end: 8 }])
+  // A fragment containing emphasis is not merged either (the run stops at the
+  // first non-html/text sibling) — two separate atoms, two separate spans, and
+  // the gap between them (the `*x*`) stays freely editable.
+  const emphasized = buildSyntaxIndex('a <span>*x*</span> b\n')
+  assert.deepEqual(emphasized.inlineHtmlSpans, [{ start: 2, end: 8 }, { start: 11, end: 18 }])
+  assert.equal(emphasized.bisectsInlineHtml(9), false, 'the emphasis between them is editable')
+  // Nested tags merge into ONE atom.
+  assert.deepEqual(buildSyntaxIndex('a <b><i>x</i></b> b\n').inlineHtmlSpans, [{ start: 2, end: 17 }])
+  // Two adjacent fragments in one paragraph are two spans (shortest balanced
+  // prefix wins), and the space between them is not interior to either.
+  const pair = buildSyntaxIndex('a <b>x</b> <i>y</i> b\n')
+  assert.deepEqual(pair.inlineHtmlSpans, [{ start: 2, end: 10 }, { start: 11, end: 19 }])
+  assert.equal(pair.bisectsInlineHtml(10), false)
+}
+
+console.log('PASS source-kernel syntax index (inline html is phrasing)')

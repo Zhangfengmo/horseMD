@@ -7,6 +7,8 @@ import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands
 import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
+import { joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
+import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { markerFor } from '../src/renderer/src/lib/source-kernel/mark-map.js'
 
 const setup = (text, at) => {
@@ -1013,3 +1015,167 @@ wrapUnwrapRoundtrip('delete', 'a strike b\r\n', 'strike')
 }
 
 console.log('PASS source-kernel commands (toggleInlineMark)')
+
+// ---- Inline HTML: structural commands REACH the paragraph, but never split
+//      a fragment (Plan 5 Task 2 report §6.1 + its bisect guard) ----
+//
+// Before the fix `index.blockAt` answered `{type:'html'}` for every offset in
+// or beside an inline fragment, so all of these refused. After it, the
+// paragraph is resolved and the command runs — except strictly INSIDE a
+// fragment, where a split would commit two unbalanced halves
+// (`a <span>x` + `</span> b`) that the editor renders as escaped text, i.e. a
+// document that no longer matches the ProseMirror doc on screen.
+//
+// Raw offsets of 'a <span>x</span> b\n':
+//   'a '=[0,2)  '<span>'=[2,8)  'x'=8  '</span>'=[9,16)  ' b'=[16,18)  '\n'=18
+const routeAt = (src, key, offset) => {
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const result = routeStructuralKey(key, { doc, index, offset })
+  if (!result.ok) return result
+  return { ...result, text: applySourceTransaction(doc, result.transaction).doc.text }
+}
+
+{
+  const src = 'a <span>x</span> b\n'
+
+  // Enter BEFORE the fragment (offset 2 == its opening edge) — legal, and the
+  // fragment moves to the new block intact.
+  const before = routeAt(src, 'Enter', 2)
+  assert.equal(before.ok, true, before.code)
+  assert.equal(before.text, 'a \n\n<span>x</span> b\n')
+  assert.equal(before.transaction.intent, 'split-block')
+
+  // Enter AFTER the fragment (offset 16 == its closing edge) — legal, the
+  // fragment stays whole in the first block.
+  const after = routeAt(src, 'Enter', 16)
+  assert.equal(after.ok, true, after.code)
+  assert.equal(after.text, 'a <span>x</span>\n\n b\n')
+
+  // Enter INSIDE the fragment — refused at every strictly-interior offset,
+  // including the `x` between the tags (offset 8, where the merged atom has no
+  // addressable interior on the ProseMirror side either).
+  for (const offset of [3, 5, 7, 8, 9, 12, 15]) {
+    assert.deepEqual(
+      routeAt(src, 'Enter', offset),
+      { ok: false, code: 'unsupported-structure' },
+      `Enter at ${offset} must not bisect the fragment`
+    )
+  }
+
+  // Control: the same document splits normally everywhere OUTSIDE the
+  // fragment, byte-for-byte.
+  assert.equal(routeAt(src, 'Enter', 1).text, 'a\n\n <span>x</span> b\n')
+  assert.equal(routeAt(src, 'Enter', 17).text, 'a <span>x</span> \n\nb\n')
+}
+
+// Enter BETWEEN two fragments in the same paragraph. Offsets of
+// 'a <b>x</b> <i>y</i> b\n': fragments [2,10) and [11,19), the space between
+// them is 10.
+{
+  const src = 'a <b>x</b> <i>y</i> b\n'
+  const between = routeAt(src, 'Enter', 10)
+  assert.equal(between.ok, true, between.code)
+  assert.equal(between.text, 'a <b>x</b>\n\n <i>y</i> b\n')
+  assert.deepEqual(routeAt(src, 'Enter', 5), { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(routeAt(src, 'Enter', 14), { ok: false, code: 'unsupported-structure' })
+}
+
+// A lone `<br/>` and an UNBALANCED fragment are inline atoms too — the editor
+// does not merge them, but ProseMirror still holds one indivisible html node,
+// so their raw spans are equally unsplittable.
+{
+  assert.deepEqual(routeAt('a <br/> b\n', 'Enter', 4), { ok: false, code: 'unsupported-structure' })
+  assert.equal(routeAt('a <br/> b\n', 'Enter', 7).text, 'a <br/>\n\n b\n')
+  assert.deepEqual(routeAt('a <span>x b\n', 'Enter', 5), { ok: false, code: 'unsupported-structure' })
+}
+
+// A LIST ITEM's content is phrasing too: splitListItem gets the same guard.
+// '- a <span>x</span> b\n': fragment [4,18), item content starts at 2.
+{
+  const src = '- a <span>x</span> b\n'
+  assert.deepEqual(routeAt(src, 'Enter', 10), { ok: false, code: 'unsupported-structure' })
+  const ok = routeAt(src, 'Enter', 18)
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.text, '- a <span>x</span>\n-  b\n')
+  assert.equal(ok.transaction.intent, 'split-list-item')
+}
+
+// A HEADING with a fragment: splitTextBlock's heading branch, same guard.
+// '# h <span>x</span> t\n': fragment [4,18).
+{
+  const src = '# h <span>x</span> t\n'
+  assert.deepEqual(routeAt(src, 'Enter', 11), { ok: false, code: 'unsupported-structure' })
+  const ok = routeAt(src, 'Enter', 18)
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.text, '# h <span>x</span>\n\n t\n')
+}
+
+// ---- Backspace-join into / out of a fragment-bearing paragraph ----
+//
+// THE review's exact repro: 'a\n\n<span>x</span> b\n'. The second paragraph
+// STARTS with a fragment, so `blockAt(3)` used to answer the html node and the
+// ordinary join-with-previous-paragraph was refused with a toast — a real UX
+// regression versus legacy, where this merged. It now commits byte-exactly.
+// Raw offsets: 'a'=0 '\n'=1 '\n'=2, paragraph2 = [3,19), fragment = [3,17).
+{
+  const src = 'a\n\n<span>x</span> b\n'
+  const joined = routeAt(src, 'Backspace', 3)
+  assert.equal(joined.ok, true, joined.code)
+  assert.equal(joined.text, 'a\n<span>x</span> b\n')
+  assert.equal(joined.transaction.intent, 'join-block-backward')
+  assert.deepEqual(joined.transaction.selection, { anchor: 1, head: 1 })
+
+  // The mirrored Delete at the FIRST paragraph's end reaches the same join.
+  const forward = routeAt(src, 'Delete', 1)
+  assert.equal(forward.ok, true, forward.code)
+  assert.equal(forward.text, 'a\n<span>x</span> b\n')
+
+  // Backspace strictly INSIDE the fragment is not a join at all: `offset !==
+  // block.start`, so the router hands it to the character path (`not-
+  // structural`) — where the fragment is a single width-1 atom with no
+  // addressable interior, so no byte inside it is reachable either.
+  assert.deepEqual(routeAt(src, 'Backspace', 6), { ok: false, code: 'not-structural' })
+  // Called DIRECTLY (a future caller bypassing the router), the command itself
+  // refuses an interior offset rather than guessing — fail-closed, not
+  // downgraded.
+  {
+    const doc = createMarkdownDocument(src)
+    const index = buildSyntaxIndex(src)
+    assert.deepEqual(
+      joinParagraphBackward({ doc, index, offset: 6 }),
+      { ok: false, code: 'unsupported-structure' }
+    )
+  }
+}
+
+// ---- Deletion RANGES ----
+//
+// Removing a WHOLE fragment is well-defined and works; a range whose endpoint
+// falls strictly inside one does not. The character path can only ever express
+// the former (the fragment is one atom unit), which is exactly the invariant
+// `bisectsInlineHtml`'s range form states.
+{
+  const src = 'a <span>x</span> b\n'
+  const { doc, index, map } = blockSetup(src, 0)
+  // Visible units: 'a'(0) ' '(1) [fragment atom](2) ' '(3) 'b'(4).
+  assert.equal(map.visibleLength, 5)
+  assert.equal(visStartFor(map, 2), 2, 'the fragment is one visible unit at index 2')
+  assert.equal(visEndFor(map, 16), 3)
+
+  const removed = replaceVisibleText({ doc, map, visFrom: 2, visTo: 3, insert: '' })
+  assert.equal(removed.ok, true, removed.code)
+  assert.deepEqual(
+    { from: removed.transaction.from, to: removed.transaction.to },
+    { from: 2, to: 16 },
+    'the resolved raw range covers the fragment exactly'
+  )
+  assert.equal(applySourceTransaction(doc, removed.transaction).doc.text, 'a  b\n')
+  assert.equal(index.bisectsInlineHtml(2, 16), false, 'a covering range does not bisect')
+
+  // Nudge either endpoint inward and the same range is a bisection.
+  assert.equal(index.bisectsInlineHtml(3, 16), true)
+  assert.equal(index.bisectsInlineHtml(2, 15), true)
+}
+
+console.log('PASS source-kernel commands (inline html: reachable, never bisected)')
