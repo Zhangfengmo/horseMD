@@ -34,6 +34,41 @@ export function applySourceTransaction(doc, txn) {
   if (txn.baseRevision !== doc.revision) return { ok: false, code: 'stale-revision' }
   const edits = normalizeEdits(txn)
   if (!edits.length) return { ok: false, code: 'invalid-range' }
+  // HISTORY EXEMPTION for the CRLF chokepoint below (re-review finding,
+  // 2026-08-17). An inverse RESTORES bytes; it never authors new ones, so
+  // it cannot introduce a line ending spelling the document did not already
+  // have — and refusing one is strictly worse than allowing it, because a
+  // refused undo leaves the user stuck with bytes they explicitly asked to
+  // take back.
+  //
+  // Why this is airtight, not a convenient hole:
+  //  * `inverseEdits` below is constructed HERE, from this same function's
+  //    own forward edits: each entry replaces exactly the span this call
+  //    inserted with exactly the bytes it removed, expressed in the
+  //    post-forward coordinate space. Applying it therefore reconstructs the
+  //    PRE-forward text byte-for-byte — the concatenation is the same
+  //    slice-and-join, run backwards. `history.js`'s grouped inverse
+  //    (`buildInverseTransaction`) does the same for a coalesced chain: it
+  //    restores the pre-GROUP text over the post-group span.
+  //  * So the reachable result of a `history-invert` is always a document
+  //    this kernel already held and already published. The chokepoint exists
+  //    to stop a write from CREATING a lone CR / bare LF that was not there;
+  //    restoring one that WAS there is not creating it.
+  //  * `intent` is not attacker-controlled: 'history-invert' is stamped by
+  //    this function (and by history.js on the transactions it derives from
+  //    these), never by a command, and the replay is gated twice over — by
+  //    history.js's `lastKnownRevision` linear-chain pointer and by the
+  //    `baseRevision` check above.
+  //
+  // What went wrong without it: any forward edit that CREATES a '\r\n'
+  // adjacency at its own boundary has an inverse whose insert point sits
+  // between that '\r' and that '\n'. `'a\rb\ncQ\n'` delete 'b' -> `'a\r\ncQ\n'`
+  // is the minimal case; the re-review enumerated 122 such inverses among
+  // 4239 accepted forward edits across 6 mixed-ending documents. Uniform-LF
+  // and uniform-CRLF documents can never produce one (the adjacency already
+  // existed), but a MIXED-ending document can — and a mixed-ending fenced
+  // code block is kernel-mappable, so this was reachable.
+  const restoring = txn.intent === 'history-invert'
   let previousEnd = -1
   for (const edit of edits) {
     if (!validEdit(edit, doc.text.length) || edit.from < previousEnd) {
@@ -58,7 +93,11 @@ export function applySourceTransaction(doc, txn) {
     // `splitsCrlfPair` is the map-free SUPERSET of that predicate (see its
     // own comment), so this refuses everything the local guards refuse and
     // never depends on a map being available.
-    if (splitsCrlfPair(doc.text, edit.from) || splitsCrlfPair(doc.text, edit.to)) {
+    //
+    // `restoring` (see the ADR above) is the ONE exemption: an inverse can
+    // only put back bytes this document already had.
+    if (!restoring &&
+        (splitsCrlfPair(doc.text, edit.from) || splitsCrlfPair(doc.text, edit.to))) {
       return { ok: false, code: 'invalid-range' }
     }
     previousEnd = edit.to

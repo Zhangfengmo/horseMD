@@ -1249,7 +1249,24 @@ export function createKernelMode({
       return true
     }
     redoDepth += direction === 'undo' ? 1 : -1
-    applyKernelTransaction(txn, view, { record: false })
+    if (!applyKernelTransaction(txn, view, { record: false })) {
+      // The replay was refused (applyKernelTransaction has already notified).
+      // `kernel.history[direction]` has ALREADY moved the group between the
+      // stacks and advanced its internal `lastKnownRevision`, so leaving it
+      // there desyncs the pointer from `kernel.doc` and every LATER undo AND
+      // redo returns null — one refusal freezing the whole stack instead of
+      // one operation (re-review finding, 2026-08-17). Put it back, and undo
+      // this function's own redo-depth mirror with it, so a refused replay is
+      // a true no-op.
+      redoDepth -= direction === 'undo' ? 1 : -1
+      const restored = kernel.history.rollbackReplay?.()
+      pushKernelDiagnostic({
+        type: 'history-replay-refused',
+        direction,
+        restored: !!restored,
+        revision: kernel.doc.revision
+      })
+    }
     return true
   }
   const historyHandler = (direction) => (state, dispatch, viewArg) =>

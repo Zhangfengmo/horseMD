@@ -25,9 +25,19 @@ export function routeStructuralKey(key, ctx) {
   //
   // Every branch below resolves blocks/items/lines FROM `offset`, so one
   // check at the top covers Enter / Tab / Shift-Tab / Backspace / Delete
-  // together; `unsupported-structure` (not `not-structural`) is deliberate —
-  // falling through to the text path would just re-derive the same illegal
-  // raw boundary one layer down.
+  // together.
+  //
+  // CONTRACT CHANGE, stated rather than implied (re-review Minor #4): at this
+  // one offset Backspace and Delete used to answer `not-structural` — a
+  // "use the text path" signal, which `structuralHandler` turns into `return
+  // false` so ProseMirror produces its own deletion transaction, which the
+  // gateway's plain-text path then refuses via its own `bisectsLineEnding`
+  // guard. They now answer `unsupported-structure`, which the handler
+  // swallows with a toast. The BYTES are identical either way (both end in
+  // zero writes); what changes is that the refusal is now immediate and
+  // visible instead of arriving one layer down. That is the intended posture
+  // — `not-structural` claims "this is ordinary text editing here", which is
+  // false at an offset no text edit may target either.
   if (splitsCrlfPair(index.text, offset)) return { ok: false, code: 'unsupported-structure' }
   const item = index.listItemAt(offset)
   switch (key) {

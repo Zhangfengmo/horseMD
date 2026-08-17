@@ -763,10 +763,41 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 // the comparison — the type walk already fails the moment a row, a cell or a
 // block appears/disappears/changes kind).
 //
-// Cost: ONE extra mdast parse per table-cell keystroke, and only for table
-// cells. The kernel already parses per accepted keystroke anyway
-// (`bindMap` -> `buildProjectionMap` -> `buildSyntaxIndex`), so this is the
-// same order of work the path already pays, not a new class of it.
+// SCOPE OF THE PROOF, stated exactly (re-review finding, 2026-08-17). Because
+// the walk stops at `tableCell`, an edit that keeps the table's SHAPE but
+// changes what a cell displays passes: '|ab|cd|' + a '\' before the row's
+// TRAILING pipe commits '|ab|cd\|', whose second cell then reads 'cd|'. That
+// is not corruption — the bytes and the view agree (the repair reconcile
+// shows 'cd|', which is what the source now says), and the table is intact —
+// but it IS the boundary of what this proof claims: table STRUCTURE, not
+// per-cell decoded content. Widening it to pin the decoded cell text would
+// need the expected post-edit visible string, which this function is not
+// given; out of scope, recorded rather than left implicit.
+//
+// COST. One mdast parse per table-cell keystroke — measured
+// `parseKernelMarkdown` at 22 ms @12 KB, 42 ms @40 KB, 161 ms @184 KB, so the
+// naive "parse both sides" version was up to 3x the per-keystroke parse work
+// in a large document (the accepted path already pays one parse via
+// `bindMap` -> `buildProjectionMap` -> `buildSyntaxIndex`). The BEFORE side is
+// trivially cacheable: keystroke N's candidate text IS keystroke N+1's
+// baseline text, byte-identical, and `kernel.doc.text` does not change between
+// commits. `signatureFor` below is a one-slot memo keyed on the EXACT string
+// (identity/equality on the immutable text — never a hash, never a revision
+// number, so a cache hit is proof the bytes are the same), which makes the
+// steady state exactly ONE parse per table-cell keystroke. The single slot is
+// deliberate: computing the candidate evicts the baseline, which is precisely
+// the entry the next keystroke needs.
+let memoText = null
+let memoSignature = null
+
+const signatureFor = (text) => {
+  if (text === memoText) return memoSignature
+  const signature = tableStructureSignature(parseKernelMarkdown(text))
+  memoText = text
+  memoSignature = signature
+  return signature
+}
+
 const tableStructureSignature = (tree) => {
   const out = []
   const visit = (node) => {
@@ -783,8 +814,11 @@ const tableStructureSignature = (tree) => {
 // means there is nothing to prove the candidate against).
 function tableStructurePreserved(beforeText, afterText) {
   try {
-    return tableStructureSignature(parseKernelMarkdown(beforeText)) ===
-      tableStructureSignature(parseKernelMarkdown(afterText))
+    // Baseline FIRST (the common cache hit), candidate second (the miss that
+    // becomes the next keystroke's hit) — see `signatureFor`'s comment for
+    // why the order is what makes the one-slot memo work.
+    const baseline = signatureFor(beforeText)
+    return baseline === signatureFor(afterText)
   } catch {
     return false
   }
