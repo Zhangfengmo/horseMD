@@ -29,6 +29,7 @@ export default function EditorArea({
   richPreviewState,
   richForced,
   kernelModeIds,
+  onKernelStatus,
   mountedIds,
   activeTab,
   imageUploadCommand,
@@ -303,6 +304,7 @@ export default function EditorArea({
                 }}
                 onStructureChange={() => setRichDocVersion((v) => v + 1)}
                 onLoadingChange={(loading) => setTabRichLoading(tab.id, loading)}
+                onKernelStatus={(status) => onKernelStatus?.(tab.id, status)}
               />
             </div>
           )

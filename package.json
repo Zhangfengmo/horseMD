@@ -209,7 +209,7 @@
     "test:kernel-marks-ui": "node scripts/test-kernel-marks-ui.mjs",
     "test:kernel-stage3-ui": "node scripts/test-kernel-stage3-ui.mjs",
     "test:kernel-ui": "npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui && npm run test:kernel-marks-ui && npm run test:kernel-stage3-ui",
-    "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs"
+    "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs && node scripts/test-kernel-status.mjs"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

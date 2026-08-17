@@ -3353,6 +3353,32 @@ body.dark .hm-hl-swatch.hm-hl-blue { background: #4a78b8; }
 .block-switch-caret-btn .block-switch-caret {
   margin-left: 0;
 }
+/* Source-kernel degradation indicator (P6 Task 3). Rendered ONLY when
+   describeKernelStatus reports `indicator: true` — a healthy document paints
+   nothing, because a false-positive warning would be worse than the silence
+   this replaces. Amber = some blocks read-only; red = the whole tab fell back
+   to legacy editing. */
+.kernel-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 3px;
+  background: var(--warn, #d99a2b);
+}
+.kernel-status-dot[data-kernel-state='legacy'] {
+  background: var(--danger, #d9534f);
+}
+.block-menu-note {
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.72;
+  cursor: default;
+}
+.block-menu-note[data-kernel-state='legacy'] {
+  color: var(--danger, #d9534f);
+  opacity: 0.9;
+}
 .block-switch-menu {
   position: absolute;
   bottom: calc(100% + 8px);

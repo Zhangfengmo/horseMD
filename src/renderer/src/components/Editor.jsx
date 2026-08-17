@@ -112,11 +112,19 @@ export default function Editor({
   onReady,
   onActiveBlock,
   onStructureChange,
-  onLoadingChange
+  onLoadingChange,
+  // Source-kernel degradation state for the StatusBar indicator (P6 Task 3).
+  // Called only when the state actually CHANGES (the controller de-duplicates)
+  // — never per keystroke.
+  onKernelStatus
 }) {
   const { t } = useI18n()
   const tRef = useRef(t)
   tRef.current = t
+  // Read through a ref: the create effect captures its closure once, and the
+  // host re-creates this callback on every render.
+  const onKernelStatusRef = useRef(onKernelStatus)
+  onKernelStatusRef.current = onKernelStatus
   // Live mirror of the image-host upload command, read at upload time (the Crepe
   // onUpload callback is registered once at create but always uses the latest).
   const uploadCmdRef = useRef(imageUploadCommand)
@@ -385,7 +393,8 @@ export default function Editor({
           notify: fireToast,
           getT: (key) => tRef.current(key),
           onChange: (markdown, opts) => onChange?.(markdown, opts),
-          onStructureChange: () => onStructureChange?.()
+          onStructureChange: () => onStructureChange?.(),
+          onStatusChange: (status) => onKernelStatusRef.current?.(status)
         })
       : null
     if (kernelController) cleanups.push(() => kernelController.dispose())

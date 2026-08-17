@@ -204,6 +204,13 @@ export default function App() {
   // for P2 plan). An empty Set means zero tabs are opted in, which is the
   // default for every existing user and reproduces today's behavior exactly.
   const [kernelModeIds, setKernelModeIds] = useState(() => new Set())
+  // Per-tab source-kernel degradation state (P6 Task 3), reported by the
+  // Editor only when it actually changes. Feeds the StatusBar indicator so a
+  // read-only block / a fallback to legacy stops being invisible.
+  const [kernelStatuses, setKernelStatuses] = useState(() => ({}))
+  const handleKernelStatus = useCallback((id, status) => {
+    setKernelStatuses((prev) => (prev[id] === status ? prev : { ...prev, [id]: status }))
+  }, [])
 
   const activeTab = useMemo(() => tabs.find((t) => t.id === activeId) || null, [tabs, activeId])
   const activePath = activeTab?.path || null
@@ -1302,6 +1309,7 @@ export default function App() {
             richPreviewState={richPreviewState}
             richForced={richForced}
             kernelModeIds={kernelModeIds}
+            onKernelStatus={handleKernelStatus}
             mountedIds={mountedIds}
             activeTab={activeTab}
             imageUploadCommand={settings.imageUploadCommand}
@@ -1442,6 +1450,7 @@ export default function App() {
         sourceMode={sourceMode}
         onToggleSource={toggleSourceView}
         kernelMode={!!statusBarTab && kernelModeIds.has(statusBarTab.id)}
+        kernelStatus={statusBarTab ? kernelStatuses[statusBarTab.id] : null}
         kernelEligible={isKernelEligibleTab(statusBarTab)}
         onToggleKernelMode={toggleKernelMode}
         activeBlock={activeBlock}

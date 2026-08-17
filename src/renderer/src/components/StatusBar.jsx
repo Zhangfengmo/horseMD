@@ -8,6 +8,7 @@ import LayoutControl from './LayoutControl.jsx'
 import { usePopover } from '../hooks/usePopover.js'
 import { labelWithShortcut } from '../lib/commands/shortcut-labels.js'
 import { isTabDirty } from '../lib/tab-state.js'
+import { describeKernelStatus } from '../lib/kernel-status.js'
 
 function stats(md) {
   const text = (md || '')
@@ -163,16 +164,37 @@ function ThemePicker({
 // caret button (`block-switch-caret-btn`), rendered only when
 // `kernelEligible`, and its menu holds ONLY the kernel toggle (no redundant
 // rich/source item).
+// Degradation indicator (P6 Task 3). `describeKernelStatus` is the pure rule
+// (lib/kernel-status.js, asserted headlessly): it returns null when nothing
+// should be shown, and a descriptor whose `indicator` flag is FALSE for a
+// healthy document — a normal document must never paint a warning mark, since
+// a false positive here is worse than the silence it replaces. This adds no
+// new UI surface and interrupts nothing: it decorates the existing kernel
+// caret button and its menu item. The immediate "this block is read-only"
+// feedback stays on the existing toast channel (editor-kernel-mode.js's
+// `notifyBlockReadOnly`) — the status line is the persistent, glanceable half.
+function kernelStatusText(t, descriptor) {
+  if (!descriptor) return null
+  const label = t(descriptor.labelKey)
+  const detail = descriptor.level === 'partial'
+    ? t(descriptor.detailKey).replace('{count}', String(descriptor.count))
+    : t(descriptor.detailKey)
+  return { label, detail }
+}
+
 function SourceSwitch({
   sourceMode,
   onToggleSource,
   kernelMode,
   kernelEligible,
+  kernelStatus,
   onToggleKernelMode,
   effectiveKeybindings
 }) {
   const { t } = useI18n()
   const { open, setOpen, ref } = usePopover()
+  const descriptor = kernelMode ? describeKernelStatus(kernelStatus) : null
+  const text = kernelStatusText(t, descriptor)
   return (
     <div className="block-switch" ref={ref}>
       <button
@@ -187,8 +209,15 @@ function SourceSwitch({
           className="status-btn block-switch-caret-btn"
           onClick={() => setOpen((v) => !v)}
           aria-label={t('status.kernelMode')}
-          title={t('status.kernelMode')}
+          title={text ? `${t('status.kernelMode')} · ${text.label}\n${text.detail}` : t('status.kernelMode')}
         >
+          {descriptor?.indicator && (
+            <span
+              className="kernel-status-dot"
+              data-kernel-state={descriptor.level}
+              aria-hidden="true"
+            />
+          )}
           <span className="block-switch-caret">▾</span>
         </button>
       )}
@@ -203,6 +232,11 @@ function SourceSwitch({
           >
             <span className="block-menu-name">{t('status.kernelMode')}</span>
           </button>
+          {text && (
+            <div className="block-menu-note" data-kernel-state={descriptor.level} title={text.detail}>
+              {text.label}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -248,6 +282,7 @@ function MobileMore({
   onToggleSource,
   kernelMode,
   kernelEligible,
+  kernelStatus,
   onToggleKernelMode,
   theme,
   setTheme,
@@ -313,6 +348,16 @@ function MobileMore({
               <span className="block-menu-name">{t('status.kernelMode')}</span>
             </button>
           )}
+          {kernelEligible && kernelMode && (() => {
+            // Same degradation line as the desktop caret menu — the mobile
+            // sheet is the only kernel affordance on小屏, so it must not be the
+            // one place the fallback stays invisible.
+            const text = kernelStatusText(t, describeKernelStatus(kernelStatus))
+            if (!text) return null
+            return (
+              <div className="block-menu-note" title={text.detail}>{text.label}</div>
+            )
+          })()}
 
           <div className="theme-menu-label">{t('settings.fontSize')}</div>
           <div className="hm-sheet-fontsize">
@@ -411,6 +456,7 @@ export default function StatusBar({
   onToggleSource,
   kernelMode,
   kernelEligible,
+  kernelStatus,
   onToggleKernelMode,
   pageWidth,
   onSetPageWidth,
@@ -495,6 +541,7 @@ export default function StatusBar({
                 onToggleSource={onToggleSource}
                 kernelMode={kernelMode}
                 kernelEligible={kernelEligible}
+                kernelStatus={kernelStatus}
                 onToggleKernelMode={onToggleKernelMode}
                 theme={theme}
                 setTheme={setTheme}
@@ -517,6 +564,7 @@ export default function StatusBar({
               onToggleSource={onToggleSource}
               kernelMode={kernelMode}
               kernelEligible={kernelEligible}
+              kernelStatus={kernelStatus}
               onToggleKernelMode={onToggleKernelMode}
               effectiveKeybindings={effectiveKeybindings}
             />

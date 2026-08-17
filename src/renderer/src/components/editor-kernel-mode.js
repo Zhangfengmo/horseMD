@@ -68,7 +68,8 @@ export function createKernelMode({
   notify,
   getT,
   onChange,
-  onStructureChange
+  onStructureChange,
+  onStatusChange
 }) {
   const kernel = {
     doc: createMarkdownDocument(initialContent ?? ''),
@@ -324,7 +325,55 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
       splitPlaceholders = []
     }
+    // The read-only-block count can change on any rebind (a block newly
+    // proven, or newly unprovable), so the status is published here rather
+    // than only at attach. `publishStatus` de-duplicates, so an unchanged
+    // status costs nothing.
+    publishStatus()
     return kernel.map
+  }
+
+  // Observable degradation (P6 Task 3). Both kinds were silent: a block
+  // degraded to `charMap: null` only manifests as "this paragraph won't take
+  // typing", and a whole-document fallback to legacy manifests as nothing at
+  // all — yet legacy is the mode the byte-fidelity bug family lives in. This
+  // is the machine-readable state the StatusBar renders (through the pure
+  // `describeKernelStatus`, lib/kernel-status.js) and it is derived from the
+  // SAME predicate `degradedPairAt` uses for the per-block toast, so the
+  // indicator and the toast can never contradict each other.
+  //
+  //   'off'     disposed — the kernel is gone
+  //   'legacy'  attach refused; every edit runs the legacy pipeline
+  //   'pending' created but not attached yet (Crepe still building the doc)
+  //   'partial' attached, but N real pairs carry no charMap (read-only blocks)
+  //   'normal'  attached, every real pair is writable
+  const getKernelStatus = () => {
+    if (disposed) return { state: 'off', readOnlyBlocks: 0, blocks: 0, reason: null }
+    if (degraded) return { state: 'legacy', readOnlyBlocks: 0, blocks: 0, reason: degradeReason }
+    if (!attached) return { state: 'pending', readOnlyBlocks: 0, blocks: 0, reason: null }
+    const pairs = kernel.map?.blockPairs || []
+    let readOnlyBlocks = 0
+    for (const pair of pairs) {
+      if (!pair.charMap && !pair.virtual) readOnlyBlocks += 1
+    }
+    return {
+      state: readOnlyBlocks > 0 ? 'partial' : 'normal',
+      readOnlyBlocks,
+      blocks: pairs.length,
+      reason: null
+    }
+  }
+  // Emit only on a real CHANGE. `bindMap` runs on every accepted commit, and
+  // pushing an identical status into React on each keystroke would be pure
+  // re-render churn for a value that changes a handful of times per session.
+  let lastStatusKey = null
+  const publishStatus = () => {
+    if (typeof onStatusChange !== 'function') return
+    const status = getKernelStatus()
+    const key = `${status.state}:${status.readOnlyBlocks}:${status.blocks}:${status.reason || ''}`
+    if (key === lastStatusKey) return
+    lastStatusKey = key
+    onStatusChange(status)
   }
 
   const refreshProjectionMap = () => {
@@ -343,10 +392,12 @@ export function createKernelMode({
       // fallbacks apart without guessing from the document's length.
       pushKernelDiagnostic({ type: 'attach-unmappable', chunked: chunkedLoad })
       notifyUnmappable()
+      publishStatus()
       return false
     }
     kernel.map = map
     attached = true
+    publishStatus()
     return true
   }
 
@@ -1783,6 +1834,9 @@ export function createKernelMode({
     disposed = true
     kernel.map = null
     compositionSession.dispose()
+    // Clear the host's indicator: a torn-down editor must not leave a stale
+    // "some blocks are read-only" badge behind.
+    publishStatus()
   }
 
   return {
@@ -1820,6 +1874,8 @@ export function createKernelMode({
     refreshProjectionMap,
     attachAfterCreate,
     isDegraded: () => degraded,
+    // P6 Task 3: the observable-degradation state (see getKernelStatus).
+    getKernelStatus,
     composition,
     dispose
   }

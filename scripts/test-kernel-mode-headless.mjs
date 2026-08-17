@@ -2512,4 +2512,66 @@ const toggleVia = (h, markType, from, to) => {
   }
 }
 
+// ===========================================================================
+// P6 Task 3 — getKernelStatus: the machine-readable degradation state
+// ===========================================================================
+// The pure presentation rule is pinned in scripts/test-kernel-status.mjs; this
+// is the half that needs a real projection map. The counted set MUST be the
+// same predicate `degradedPairAt` uses for the per-block toast, or the
+// StatusBar and the toast would contradict each other.
+{
+  // Healthy document: attached, nothing read-only. The negative control — an
+  // indicator here would be a false positive, which is worse than silence.
+  const md = '\u7532\u4e59\n\n\u4e19\u4e01\n'
+  const h = makeHarness(md, doc(p(text('\u7532\u4e59')), p(text('\u4e19\u4e01'))))
+  assert.deepEqual(h.controller.getKernelStatus(),
+    { state: 'pending', readOnlyBlocks: 0, blocks: 0, reason: null },
+    'before attach the status is pending, never normal')
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const healthy = h.controller.getKernelStatus()
+  assert.equal(healthy.state, 'normal')
+  assert.equal(healthy.readOnlyBlocks, 0, 'a plain prose document has no read-only blocks')
+  assert.ok(healthy.blocks >= 2)
+  assert.equal(healthy.reason, null)
+}
+{
+  // A document carrying a block the kernel serves as a read-only leaf (block
+  // math: `code_block` paired with mdast `math`, charMap null by construction)
+  // reports 'partial', and the count matches the pairs `degradedPairAt` would
+  // answer for.
+  const md = 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n\u7532\u4e59\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const status = h.controller.getKernelStatus()
+  const readOnlyPairs = h.controller.kernel.map.blockPairs
+    .filter((pair) => !pair.charMap && !pair.virtual)
+  assert.ok(readOnlyPairs.length > 0, 'fixture sanity: the math block is a read-only leaf')
+  assert.equal(status.state, 'partial')
+  assert.equal(status.readOnlyBlocks, readOnlyPairs.length,
+    'the reported count is exactly the pairs the per-block toast speaks for')
+}
+{
+  // Whole-document fallback: 'legacy', carrying the reason the toast used.
+  const md = '\u7532\u4e59\n'
+  const h = makeHarness(md, doc(p(text('\u7532\u4e59')), p(text('surplus'))), { chunkedLoad: true })
+  assert.equal(h.controller.attachAfterCreate(), false)
+  assert.deepEqual(h.controller.getKernelStatus(),
+    { state: 'legacy', readOnlyBlocks: 0, blocks: 0, reason: 'chunked' })
+}
+{
+  // onStatusChange fires on real transitions and is de-duplicated, so a
+  // keystroke that leaves the status unchanged costs no host re-render.
+  const md = '\u7532\u4e59\n'
+  const seen = []
+  const h = makeHarness(md, doc(p(text('\u7532\u4e59'))), { onStatusChange: (s) => seen.push(s.state) })
+  assert.deepEqual(seen, [], 'nothing is published before attach')
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.deepEqual(seen, ['normal'])
+  h.controller.refreshProjectionMap()
+  h.controller.refreshProjectionMap()
+  assert.deepEqual(seen, ['normal'], 'an unchanged status is not re-published')
+  h.controller.dispose()
+  assert.deepEqual(seen, ['normal', 'off'], 'teardown clears the host indicator')
+}
+
 console.log('PASS kernel mode headless')
