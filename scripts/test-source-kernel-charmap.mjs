@@ -495,4 +495,131 @@ const unitsOf = (src, i = 0) => {
   assert.equal(map.visibleLength, 3)
 }
 
+// ============================================================================
+// `==highlight==` (Plan 5 Task 3) — the `==` runs are marker GAPS (no unit at
+// all, exactly like `**`/`*`/`~~`) and the content maps per character, so
+// `content.size === visibleLength` holds against ProseMirror's highlight MARK.
+// ============================================================================
+
+// 基础形状：两个 `==` 都不产生 unit，内容逐字符
+{
+  const src = 'a ==hl== b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2],
+    ['char', 4, 5], ['char', 5, 6],
+    ['char', 8, 9], ['char', 9, 10]
+  ])
+  assert.equal(map.visibleLength, 6)
+  // 边界：光标不能落进 `==` 里面（raw 2/3 与 6/7 都没有可见索引解析到）
+  assert.equal(map.visibleToRaw(2), 2)   // 内容前的边界 = gap 之前
+  assert.equal(map.rawStartForVisible(2), 4) // 作为选区起点则跳过 gap
+  assert.equal(map.visibleToRaw(4), 6)   // 内容后的边界 = gap 之前
+  assert.deepEqual(map.rawRangeForVisibleRange(2, 4), { from: 4, to: 6 })
+  // 段首/段尾整体
+  assert.deepEqual(map.rawRangeForVisibleRange(0, 6), { from: 0, to: 10 })
+}
+
+// 整段就是一个高亮：CJK 内容逐字符
+{
+  const src = '==高亮==\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['char', 2, 3], ['char', 3, 4]])
+  assert.equal(map.visibleLength, 2)
+  assert.deepEqual(map.rawRangeForVisibleRange(0, 2), { from: 2, to: 4 })
+}
+
+// 高亮内的实体与转义：仍走 textUnits 的既有解码规则
+{
+  const src = '==a&amp;b==\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['char', 2, 3], ['entity', 3, 8], ['char', 8, 9]])
+  assert.equal(map.visibleLength, 3)
+}
+{
+  const src = '==a\\*b==\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [['char', 2, 3], ['escape', 3, 5], ['char', 5, 6]])
+  assert.equal(map.visibleLength, 3)
+}
+
+// 转义的 `==` 本身：编辑器链（对已解码的值跑正则）会认它，内核链 fail-closed
+// —— 于是这一块的 visibleLength 是字面量长度，块降级为只读（不会误映射）。
+{
+  const src = '\\=\\=x\\=\\=\n'
+  const { map } = unitsOf(src)
+  assert.equal(map.visibleLength, 5, 'escaped markers stay literal `=` characters')
+  assert.ok(map.units.every((u) => u.kind === 'escape' || u.kind === 'char'))
+}
+
+// 与其他行内结构嵌套：strong 里的高亮（gap 套 gap）
+{
+  const src = '**a ==hl== b**\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 2, 3], ['char', 3, 4],
+    ['char', 6, 7], ['char', 7, 8],
+    ['char', 10, 11], ['char', 11, 12]
+  ])
+  assert.equal(map.visibleLength, 6)
+}
+
+// 高亮里的强调：两条链都不认这是高亮（正则跑在单个 text 节点上），所以 `==`
+// 仍是普通字符，逐字符映射
+{
+  const src = '==a *b* c==\n'
+  const { map } = unitsOf(src)
+  assert.equal(map.visibleLength, 9, '== are literal here: `==a `, em(b), ` c==`')
+}
+
+// 软换行跨行的高亮：内容里的 '\n' 仍是 linebreak unit
+{
+  const src = 'a ==x\ny== b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2],
+    ['char', 4, 5], ['linebreak', 5, 6], ['char', 6, 7],
+    ['char', 9, 10], ['char', 10, 11]
+  ])
+  assert.equal(map.visibleLength, 7)
+}
+
+// CRLF 段落里的高亮
+{
+  const src = 'a ==hl== b\r\nnext\r\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape.slice(0, 6), [
+    ['char', 0, 1], ['char', 1, 2],
+    ['char', 4, 5], ['char', 5, 6],
+    ['char', 8, 9], ['char', 9, 10]
+  ])
+  // 'a hl b' (6) + literal '\r' + the linebreak + 'next' — the '\r' is an
+  // ordinary char unit, same convention as the inline-html CRLF case above.
+  assert.equal(map.visibleLength, 12)
+}
+
+// 引用段落里的高亮（mdast 位置是绝对偏移，无需前缀调整）
+{
+  const src = '> a ==hl== b\n'
+  const { shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 2, 3], ['char', 3, 4],
+    ['char', 6, 7], ['char', 7, 8],
+    ['char', 10, 11], ['char', 11, 12]
+  ])
+}
+
+// 行内 HTML 片段内部的 `==`：编辑器先合并片段再跑高亮正则，所以片段里的
+// `==x==` 不是高亮；内核同样跳过（整个片段仍是一个 atom）
+{
+  const src = 'a <span>==x==</span> b\n'
+  const { map, shape } = unitsOf(src)
+  assert.deepEqual(shape, [
+    ['char', 0, 1], ['char', 1, 2], ['atom', 2, 20], ['char', 20, 21], ['char', 21, 22]
+  ])
+  assert.equal(map.visibleLength, 5)
+}
+
+console.log('PASS source-kernel character map (highlight)')
+
 console.log('PASS source-kernel character map (inline html)')

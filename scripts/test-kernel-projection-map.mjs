@@ -1420,24 +1420,84 @@ console.log('PASS kernel projection map (inline html)')
   assert.deepEqual(map.rawToPmPos(28), { pos: 18, atom: false })
 }
 
-// Case P3 (healed residual — `==高亮==`). The kernel chain has no highlight
-// plugin, so it reads six literal characters (visibleLength 6); Crepe's
-// `highlightRemark` turns them into a highlight MARK over '高亮', so PM's
-// content.size is 2. A pure size disagreement -> degrade this block only.
-// (Plan 5 Task 3 will teach the kernel `==`; until then the block is
-// read-only instead of the whole document being legacy.)
-// '==高亮==\n\nafter\n': paragraph1 [0,6], 'after' [8,13].
+// Case P3 (CURED, Plan 5 Task 3 headline — `==高亮==`). This block used to
+// degrade: the kernel chain read six literal characters (visibleLength 6)
+// while Crepe's `highlightRemark` gives PM a highlight MARK over '高亮'
+// (content.size 2). The kernel now injects a real, positioned `highlight`
+// node (highlight-syntax.js) whose `==` markers are marker GAPS and whose
+// content is per-character — exactly the strong/emphasis shape — so the
+// paragraph PAIRS and is fully EDITABLE.
+// '==高亮==\n\nafter\n': paragraph1 [0,6] ('='0 '='1 高2 亮3 '='4 '='5), 'after'
+// [8,13].
 {
   const md = '==高亮==\n\nafter\n'
   const map = buildProjectionMap(md, doc(p(text('高亮')), p(text('after'))))
-  assert.ok(map, 'a highlight-bearing document must no longer degrade entirely')
+  assert.ok(map, 'a highlight-bearing document maps')
   const kernelMap = buildCharacterMap(md, map.blockPairs[0].mdBlock)
-  assert.equal(kernelMap.visibleLength, 6, 'the kernel sees the == bytes as text')
-  assert.equal(map.blockPairs[0].charMap, null, 'the highlight paragraph degrades')
-  assert.equal(map.pmPosToRaw(1), null)
+  assert.equal(kernelMap.visibleLength, 2, 'the == bytes are marker gaps, not content')
+  assert.ok(map.blockPairs[0].charMap, 'the highlight paragraph is EDITABLE (the degradation cure)')
+  assert.equal(map.pmPosToRaw(1), 2, 'PM content start lands inside the markers')
+  assert.equal(map.pmPosToRaw(2), 3)
+  assert.equal(map.pmPosToRaw(3), 4, 'the content end stops before the closing ==')
+  assert.deepEqual(map.rawToPmPos(2), { pos: 1, atom: false })
   // paragraph1 nodeSize 1 + 2 + 1 = 4 -> paragraph2 pos 4, content start 5.
   assert.equal(map.pmPosToRaw(5), 8)
   assert.equal(map.pmPosToRaw(10), 13)
+}
+
+// Case P3b (Plan 5 Task 3): a highlight in the MIDDLE of prose, next to other
+// marks, in a heading, and inside a list item — all editable, byte-correct.
+// 'a ==hl== b\n': 'a'0 ' '1 '='2 '='3 h4 l5 '='6 '='7 ' '8 'b'9.
+{
+  const md = 'a ==hl== b\n'
+  const map = buildProjectionMap(md, doc(p(text('a hl b'))))
+  assert.ok(map?.blockPairs[0].charMap, 'an inline highlight keeps the paragraph editable')
+  assert.equal(map.blockPairs[0].charMap.visibleLength, 6)
+  assert.equal(map.pmPosToRaw(1), 0)
+  // `visibleToRaw` is gap-BEFORE by contract (see character-map.js's ADR): a
+  // caret at the mark's leading edge resolves to the byte before the opening
+  // `==`, and one at its trailing edge to the byte after the content.
+  assert.equal(map.pmPosToRaw(3), 2, 'caret before the highlight sits before the open marker')
+  assert.equal(map.pmPosToRaw(4), 5, 'inside the content, per character')
+  assert.equal(map.pmPosToRaw(5), 6, 'the content end stops before the close marker')
+  assert.equal(map.pmPosToRaw(6), 9)
+  assert.equal(map.pmPosToRaw(7), 10)
+}
+{
+  const md = '# 标 ==题==\n\n- 项 ==目==\n'
+  const map = buildProjectionMap(
+    md,
+    doc(
+      schema.node('heading', { level: 1 }, [text('标 题')]),
+      schema.node('bullet_list', null, [schema.node('list_item', null, [p(text('项 目'))])])
+    )
+  )
+  assert.ok(map, 'headings and list items with highlights map')
+  assert.ok(map.blockPairs.every((pair) => pair.charMap || !pair.pmNode.isTextblock),
+    'every textblock pair is editable')
+  const heading = map.blockPairs.find((pair) => pair.pmNode.type.name === 'heading')
+  assert.ok(heading?.charMap, 'the heading with a highlight is editable')
+  assert.equal(heading.charMap.visibleLength, 3, '标 题 — markers are gaps')
+}
+
+// Case P3c (Plan 5 Task 3 — the RED/BLUE decision, deliberately NOT cured).
+// A non-yellow highlight round-trips as inline HTML: `<mark class="hm-hl-red">`
+// … `</mark>`. The editor coalesces that run (remarkMergeInlineHtml) and then
+// `coalesceMarkHtml` turns it into a highlight mdast node, so PM holds a
+// MARKED TEXT RUN of N characters; the kernel treats the same run as ONE
+// inline-HTML atom (Task 2's shared rule), i.e. 1 visible unit. For N > 1
+// that is a size disagreement -> this block degrades to read-only while the
+// rest of the document stays editable. Supporting it would mean special-casing
+// the shared inline-HTML run rule AND teaching the toggle command to write
+// tag bytes; out of scope, and the gateway keeps refusing non-yellow colors
+// (editor-kernel-gateway.js's markAttrs check).
+// '<mark class="hm-hl-red">红字</mark>\n\nafter\n'
+{
+  const md = '<mark class="hm-hl-red">红字</mark>\n\nafter\n'
+  const map = buildProjectionMap(md, doc(p(text('红字')), p(text('after'))))
+  assert.ok(map, 'a red-highlight document still maps (only that block degrades)')
+  assert.equal(map.blockPairs[0].charMap, null, 'the red/blue highlight paragraph is read-only')
+  assert.ok(map.blockPairs[1].charMap, 'the rest of the document stays editable')
 }
 
 // Case P4 (degraded block next to the VIRTUAL trailing placeholder): the

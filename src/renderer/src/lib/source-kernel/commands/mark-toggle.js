@@ -3,6 +3,7 @@
 // source edits — no ProseMirror mark commands involved.
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { inlineMarkAt, markerFor, rangeFromInlineCode } from '../mark-map.js'
+import { wrapWouldHighlight } from '../highlight-syntax.js'
 
 // Same domain gate as mark-map.js's inlineMarkAt (table cells / code blocks /
 // html / math are unprobed for this task and stay out of scope entirely —
@@ -11,11 +12,11 @@ import { inlineMarkAt, markerFor, rangeFromInlineCode } from '../mark-map.js'
 const INLINE_CONTENT_BLOCKS = new Set(['paragraph', 'heading'])
 
 // Node types with a real mdast span (marker bytes are part of node.position)
-// that a wrap must not partially straddle. `highlight` is deliberately
-// excluded — the kernel's own remark chain has no dedicated node for `==`
-// (see mark-map.js's ADR), so there is nothing to walk for it; the only
-// provable highlight check remains mark-map.js's O(1) exact-flank probe.
-const OVERLAP_NODE_TYPES = new Set(['strong', 'emphasis', 'delete', 'inlineCode'])
+// that a wrap must not partially straddle. `highlight` joined the set in Plan
+// 5 Task 3, when the kernel chain gained real positioned `==` nodes (see
+// mark-map.js's ADR): half-covering an existing highlight now refuses like
+// half-covering a bold does, instead of silently interleaving markers.
+const OVERLAP_NODE_TYPES = new Set(['strong', 'emphasis', 'delete', 'inlineCode', 'highlight'])
 
 // Whether the visible character at `visIndex` is whitespace, decided only
 // from evidence the character map already proved (never re-decoded/guessed):
@@ -49,6 +50,25 @@ function shrinkToNonWhitespace(map, text, visFrom, visTo) {
   while (to > from && isWhitespaceVisible(map, text, to - 1)) to -= 1
   if (from >= to) return null
   return { from, to }
+}
+
+// Is every visible character in [visFrom, visTo) a LITERAL one — a `char`
+// unit whose raw bytes are the character itself, or a `linebreak` (whose raw
+// run is a line terminator plus continuation prefix, never `=`)? Entities,
+// escapes and atoms answer false: for those the raw bytes differ from the
+// decoded value the editor's regex reads, so no local raw-byte reasoning
+// about them is sound.
+function isLiteralVisibleRange(map, visFrom, visTo) {
+  let v = 0
+  for (const unit of map.units) {
+    const unitEnd = v + unit.width
+    if (unitEnd > visFrom && v < visTo && unit.kind !== 'char' && unit.kind !== 'linebreak') {
+      return false
+    }
+    v = unitEnd
+    if (v >= visTo) break
+  }
+  return true
 }
 
 function collectOverlapRanges(node, out) {
@@ -215,6 +235,22 @@ export function toggleInlineMark({ doc, index, map, visFrom, visTo, kind }) {
   // content (an ambiguous/longer delimiter run would be needed, which this
   // task deliberately does not attempt — fail-closed).
   if (kind === 'inlineCode' && doc.text.slice(rawFrom, rawTo).includes('`')) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+
+  // Highlight is the one kind whose markers are NOT unconditionally
+  // effective: `==` only opens a highlight away from other `=`/`{` bytes and
+  // around content that has no `=` and no whitespace flank (highlight-syntax.js's
+  // rule, shared with the editor). Selecting `b` in `a=b` would commit
+  // `a===b==` — bytes both parsers agree are plain text, so the map stays
+  // healthy and nothing breaks, but the user asked for a highlight and would
+  // get four inert `=` characters instead. Refuse instead, and refuse too
+  // when the selection is not literal text (a character reference, an escape
+  // or an atom inside it means the raw bytes are NOT what the editor's regex
+  // would see over the decoded value, so the two chains could disagree).
+  if (kind === 'highlight' &&
+      (!isLiteralVisibleRange(map, shrunk.from, shrunk.to) ||
+       !wrapWouldHighlight(doc.text, rawFrom, rawTo))) {
     return { ok: false, code: 'unsupported-structure' }
   }
 

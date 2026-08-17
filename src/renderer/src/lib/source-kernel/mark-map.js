@@ -42,32 +42,37 @@
 //                        ABSOLUTE raw offsets over the whole document, so a
 //                        mark inside a quoted paragraph needs no prefix
 //                        adjustment — probed and confirmed.
-//   a ==hl== b             KERNEL'S mdast (no highlight plugin in this chain)
-//                        parses this as a single plain `text` node, value
-//                        "a ==hl== b" — `==` is NOT a node boundary here. See
-//                        the ADR in the highlight section below.
+//   a ==hl== b            highlight.position = {2,9} (includes both `==`),
+//                        child text = {4,6} — a REAL node since Plan 5 Task 3
+//                        (syntax-index.js injects positioned `highlight`
+//                        nodes via highlight-syntax.js), so it needs no
+//                        special case at all: it is a span node like
+//                        strong/emphasis/delete. See the ADR below.
 //
-// ADR — highlight detection:
-// The kernel's own remark chain (this file's caller only ever builds a
-// LosslessSyntaxIndex via syntax-index.js, which does NOT load the editor's
-// custom highlight plugin) has no dedicated mdast node for `==text==`; it is
-// indistinguishable from plain text at the mdast level. Text search over the
-// block would violate the "prove, don't search" contract every other mapper
-// in this directory follows (character-map.js, syntax-index.js) — a highlight
-// pair could reappear elsewhere in the same block, in an atom, in a code
-// span's rendered text, etc.
+// ADR — highlight detection (superseded 2026-08-17, Plan 5 Task 3):
+// This module used to detect a highlight with an O(1) "flank probe": are the
+// two bytes immediately before rawFrom and immediately after rawTo both `=`?
+// That heuristic existed only because the kernel's remark chain had no node
+// for `==text==` — it was indistinguishable from plain text at the mdast
+// level, and a text SEARCH would have violated the "prove, don't search"
+// contract every other mapper in this directory follows.
 //
-// Since Task 2 (toggle command) only ever calls `inlineMarkAt` with a
-// [rawFrom, rawTo] pair that a character map has ALREADY proven to be a real,
-// lossless raw span for the CURRENT selection (never a search target), we can
-// reduce "is this selection an existing highlight?" to a fixed-width, O(1)
-// check at those exact proven offsets: are the two bytes immediately before
-// rawFrom, and the two bytes immediately after rawTo, both literal `=`? If
-// both flanks match, the selection is a highlight's content; if only one
-// flank matches (or neither), it is not — never widen the check into a scan.
+// The kernel chain now injects real, positioned `highlight` nodes (the same
+// regex the editor's own `highlightRemark` uses, applied to the same mdast
+// `text` values, with byte spans derived from the character map's decode
+// walk — highlight-syntax.js owns the rule and the reasoning). So the probe
+// is GONE: `rangeFromSpanNode` derives the marker/content split from the node
+// itself, exactly as it does for `**`/`*`/`~~`.
+//
+// This is strictly stronger than the flank probe was, and the difference is
+// observable: the probe answered "highlight" for any selection with `=` bytes
+// on both flanks, including shapes neither parser reads as a highlight
+// (`===x===`, `==x= =y==`, an escaped `\=\=x\=\=`). Those now correctly
+// return null instead of offering an unwrap that would have deleted four
+// meaningless `=` bytes.
 export const MARK_TYPES = Object.freeze(['strong', 'emphasis', 'delete', 'inlineCode', 'highlight'])
 
-const SPAN_NODE_TYPES = new Set(['strong', 'emphasis', 'delete'])
+const SPAN_NODE_TYPES = new Set(['strong', 'emphasis', 'delete', 'highlight'])
 
 // Marks meaningful only where remark parses real inline content — table
 // cells/code/html/math blocks are out of scope for Task 1 (unprobed) and are
@@ -152,28 +157,6 @@ function findExactMark(root, text, rawFrom, rawTo) {
   return found
 }
 
-// Bounds are checked against the BLOCK's own [start,end), not just the whole
-// document's length. Given today's line-based CommonMark block structure a
-// flank crossing a block boundary can't actually spell literal '==' (a line
-// terminator, which is never '=', always sits at the crossing point) — but
-// that is a property of the *parser*, not of this function, and this
-// function must not rely on it. The block-bound check makes "never resolve
-// bytes outside the block that produced this query" a structural invariant
-// of `highlightAt` itself, independent of whatever CommonMark happens to
-// guarantee about adjacent blocks today.
-function highlightAt(text, rawFrom, rawTo, block) {
-  if (rawFrom - 2 < block.start || rawTo + 2 > block.end) return null
-  const openFlank = text.slice(rawFrom - 2, rawFrom)
-  const closeFlank = text.slice(rawTo, rawTo + 2)
-  if (openFlank !== '==' || closeFlank !== '==') return null
-  return {
-    type: 'highlight',
-    openRange: { from: rawFrom - 2, to: rawFrom },
-    closeRange: { from: rawTo, to: rawTo + 2 },
-    contentRange: { from: rawFrom, to: rawTo }
-  }
-}
-
 // index: a LosslessSyntaxIndex from buildSyntaxIndex(text) — supplies `.text`
 // and `.blockAt(offset)`. rawFrom/rawTo: raw source byte offsets (already
 // proven by a character map upstream — this function does not itself trust
@@ -199,8 +182,7 @@ export function inlineMarkAt(index, rawFrom, rawTo) {
   // regardless of what any caller layer does or forgets to do.
   if (!block || !INLINE_CONTENT_BLOCKS.has(block.type)) return null
 
-  const exact = block.node ? findExactMark(block.node, text, rawFrom, rawTo) : null
-  if (exact) return exact
-
-  return highlightAt(text, rawFrom, rawTo, block)
+  // One lookup path for every kind since Plan 5 Task 3 (highlight lost its
+  // flank-probe special case — see the ADR above).
+  return block.node ? findExactMark(block.node, text, rawFrom, rawTo) : null
 }

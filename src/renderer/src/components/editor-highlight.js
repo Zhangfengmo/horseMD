@@ -14,19 +14,21 @@ import { markRule } from '@milkdown/prose'
 import { toggleMark } from '@milkdown/prose/commands'
 import { $command, $inputRule, $markAttr, $markSchema, $remark, $useKeymap } from '@milkdown/utils'
 import { findAndReplace } from 'mdast-util-find-and-replace'
+// The `==` rule itself now lives in the source kernel's pure shared module —
+// same arrangement as inline-html.js (editor-html.js): the kernel has to
+// recognize EXACTLY what this plugin recognizes, and two copies of a regex
+// with a lookbehind, a lookahead and a whitespace-flank rule would drift.
+// Behavior here is unchanged: the identical literal, passed to the identical
+// `findAndReplace` call.
+import { HIGHLIGHT_RE } from '../lib/source-kernel/highlight-syntax.js'
 
 export const HIGHLIGHT_COLORS = ['yellow', 'red', 'blue']
 
 export const highlightAttr = $markAttr('highlight')
 
-// Match ==text== without tripping on `===` / `a = b`:
-//   - not adjacent to another `=` (so `===`/trailing `=` are out)
-//   - `==}` cannot open a native highlight; that sequence is the close of
-//     source-readable review markup: `{==text==}{>>comment<<}`.
-//   - content non-empty, no `=`, no leading/trailing whitespace
-// CJK has no word boundaries, so we don't require whitespace around the `==`
-// (Typora behaves the same): `这是==高亮==的` works.
-export const HIGHLIGHT_RE = /(?<![={])(==)(?!\})([^=\s][^=]*[^=\s]|[^=\s])\1(?![=])/g
+// Re-exported for existing importers (and for tests that assert the two
+// chains share ONE rule).
+export { HIGHLIGHT_RE }
 
 export const highlightSchema = $markSchema('highlight', (ctx) => ({
   attrs: {
@@ -78,7 +80,12 @@ const MARK_HTML_RE = /^<mark\s+class="hm-hl-(yellow|red|blue)"\s*>([\s\S]*?)<\/m
 // balanced inline-HTML `<mark class="hm-hl-…">text</mark>` → highlight node.
 // findAndReplace only touches `text` nodes, so inline code / code blocks / math
 // (separate node types) are naturally left alone.
-export const highlightRemark = $remark('highlightParse', () => () => (tree) => {
+// The transform itself, exported (Plan 5 Task 3) so the cross-parser
+// consistency suite can run the REAL editor-side rule — not a copy of it —
+// against the kernel's own recognition. `highlightRemark` below is this
+// function wrapped in Milkdown's `$remark`; nothing about its behavior or
+// registration changed.
+export function highlightRemarkTransform(tree) {
   findAndReplace(tree, [
     [
       HIGHLIGHT_RE,
@@ -92,7 +99,9 @@ export const highlightRemark = $remark('highlightParse', () => () => (tree) => {
   ])
   coalesceMarkHtml(tree)
   return tree
-})
+}
+
+export const highlightRemark = $remark('highlightParse', () => () => highlightRemarkTransform)
 
 // Convert inline-HTML <mark class="hm-hl-…">…</mark> into highlight mdast nodes.
 // Commonmark splits `<mark>x</mark>` into open/text/close html nodes; we coalesce

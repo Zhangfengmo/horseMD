@@ -152,17 +152,17 @@ const at = (src, findText) => {
   assert.equal(inlineMarkAt(idx, rawFrom, rawTo), null)
 }
 
-// --- highlight: positive flank detection ------------------------------------
-// Kernel's own remark chain (no editor-highlight plugin) parses `==hl==` as
-// plain text — inlineMarkAt must derive this from raw-byte flanking, not by
-// finding an mdast node.
+// --- highlight: derived from the real node (P5-3) ---------------------------
+// The kernel chain now injects positioned `highlight` nodes
+// (highlight-syntax.js), so this resolves through the SAME `rangeFromSpanNode`
+// path as strong/emphasis/delete — no flank probe, no text search.
 {
   const src = 'a ==hl== b\n'
   const idx = buildSyntaxIndex(src)
   const rawFrom = src.indexOf('hl')
   const rawTo = rawFrom + 'hl'.length
   const mark = inlineMarkAt(idx, rawFrom, rawTo)
-  assert.ok(mark, 'highlight should be found via flank check')
+  assert.ok(mark, 'highlight should be found from its own mdast node')
   assert.equal(mark.type, 'highlight')
   assert.deepEqual(mark.contentRange, { from: rawFrom, to: rawTo })
   assert.deepEqual(mark.openRange, { from: rawFrom - 2, to: rawFrom })
@@ -299,22 +299,59 @@ const at = (src, findText) => {
   assert.equal(inlineMarkAt(idx, rawFrom, rawTo), null)
 }
 
-// --- highlight flank guard is scoped to the BLOCK's own bounds, not just the
-// whole document's length. This can't be forced through genuine CommonMark
-// parsing (a line terminator, never '=', always separates adjacent blocks),
-// so we prove the guard directly: hand inlineMarkAt a narrowed synthetic
-// block whose `.start` sits AFTER the query's left flank, even though the
-// document text still literally contains '==' there.
+// --- P5-3: shapes with `=` on BOTH flanks that are NOT highlights ----------
+// The retired flank probe answered "highlight" for any selection flanked by
+// two `=` bytes on each side. Node derivation is strictly stronger: these
+// shapes are plain text to BOTH parsers (see the cross-parser consistency
+// suite), so offering an unwrap here would have deleted meaningless bytes.
+for (const [src, needle, why] of [
+  ['a ===x=== b\n', 'x', 'a `===` run opens no highlight (the `(?<![=])` flank rule)'],
+  ['a ==x= =y== b\n', 'x= =y', 'content containing `=` is not highlightable'],
+  ['a {==x==} b\n', 'x', 'the CriticMarkup `{==` form is excluded by the rule'],
+  ['a \\=\\=x\\=\\= b\n', 'x', 'escaped markers are not markers (raw bytes are `\\=`)']
+]) {
+  const idx = buildSyntaxIndex(src)
+  const rawFrom = src.indexOf(needle)
+  const rawTo = rawFrom + needle.length
+  assert.equal(inlineMarkAt(idx, rawFrom, rawTo), null, why)
+}
+
+// --- P5-3: nested inside strong/emphasis, and partial overlap -------------
 {
-  const src = 'a ==hl== b\n'
+  const src = 'a **b ==hl== c** d\n'
   const idx = buildSyntaxIndex(src)
   const rawFrom = src.indexOf('hl')
-  const rawTo = rawFrom + 'hl'.length
-  const realBlock = idx.blockAt(rawFrom)
-  assert.ok(inlineMarkAt(idx, rawFrom, rawTo), 'fixture sanity: unnarrowed query must resolve')
-  const narrowedBlock = { ...realBlock, start: rawFrom }
-  const narrowedIndex = { ...idx, blockAt: () => narrowedBlock }
-  assert.equal(inlineMarkAt(narrowedIndex, rawFrom, rawTo), null)
+  const mark = inlineMarkAt(idx, rawFrom, rawFrom + 2)
+  assert.ok(mark, 'a highlight nested inside strong still resolves')
+  assert.equal(mark.type, 'highlight')
+  assert.equal(src.slice(mark.openRange.from, mark.openRange.to), '==')
+  assert.equal(src.slice(mark.closeRange.from, mark.closeRange.to), '==')
+  // The enclosing strong resolves from its own content range, unchanged by
+  // the injected child.
+  const strongFrom = src.indexOf('b ==')
+  const strongTo = src.indexOf(' c**') + ' c'.length
+  const strong = inlineMarkAt(idx, strongFrom, strongTo)
+  assert.equal(strong?.type, 'strong')
+}
+{
+  // Emphasis INSIDE a highlight: `==a *b* c==` is NOT a highlight in either
+  // chain (the emphasis splits the text node the rule runs over), so neither
+  // the highlight nor a partial query resolves.
+  const src = 'x ==a *b* c== y\n'
+  const idx = buildSyntaxIndex(src)
+  const from = src.indexOf('a *')
+  assert.equal(inlineMarkAt(idx, from, from + 'a *b* c'.length), null)
+  const em = src.indexOf('b', from)
+  assert.equal(inlineMarkAt(idx, em, em + 1)?.type, 'emphasis')
+}
+{
+  // Partial overlap: a query covering only PART of a highlight's content, or
+  // straddling its close marker, matches no node.
+  const src = 'a ==hello== b\n'
+  const idx = buildSyntaxIndex(src)
+  const from = src.indexOf('hello')
+  assert.equal(inlineMarkAt(idx, from, from + 3), null, 'sub-span of the content is not the mark')
+  assert.equal(inlineMarkAt(idx, from + 1, from + 7), null, 'straddling the close marker is not the mark')
 }
 
 console.log('PASS source-kernel mark map')

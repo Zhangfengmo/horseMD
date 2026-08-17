@@ -76,7 +76,13 @@ function consumeSoftBreak(text, r) {
   return i
 }
 
-function textUnits(text, node) {
+// Exported (Plan 5 Task 3) so highlight-syntax.js can derive a `text` node's
+// decoded-index -> raw-offset tables from the SAME walk the character map
+// itself uses. A highlight's byte span must be provable by exactly the rules
+// that already prove every other unit (escape / character reference / soft
+// break with its continuation prefix / astral pair), not by a second,
+// parallel decoder.
+export function textUnits(text, node) {
   const value = String(node.value ?? '')
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset

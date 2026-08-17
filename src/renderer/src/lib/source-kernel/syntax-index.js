@@ -9,6 +9,7 @@ import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { QUOTE_PREFIX } from '../markdown-preservation/block-prefix.js'
+import { injectHighlightNodes } from './highlight-syntax.js'
 import {
   BREAK_REWRITE_PARENTS,
   PHRASING_PARENTS,
@@ -92,6 +93,28 @@ export function buildSyntaxIndex(text) {
     }
     return lo
   }
+
+  // `==highlight==` (Plan 5 Task 3). The editor chain has no `==` micromark
+  // construct either — it runs a REGEX over the parsed mdast's `text` nodes
+  // (editor-highlight.js's `highlightRemark`), so the kernel recognizes the
+  // shape the same way, from the same regex, and derives real positions for
+  // the nodes it injects (highlight-syntax.js owns the whole rule and its
+  // ADR). Without this, `甲==乙==丙` was 9 literal characters to the kernel
+  // and 3 to ProseMirror (which holds a highlight MARK) — a content-size
+  // disagreement that made the paragraph non-editable and kept the highlight
+  // toolbar button refused.
+  //
+  // This is the one post-parse tree touch this module allows, and it is
+  // compatible with the "only parse, never runSync" rule at the top: it
+  // rewrites no existing node's position, it only SPLITS a text node into
+  // pieces whose positions are computed from the character map's own decode
+  // walk. `pointAt` gives those pieces a full unist point (line/column too),
+  // so an injected node is indistinguishable from a parsed one.
+  const pointAt = (offset) => {
+    const index = lineIndexAt(offset)
+    return { line: index + 1, column: offset - lines[index].start + 1, offset }
+  }
+  injectHighlightNodes(tree, text, pointAt)
 
   const buildItem = (node, ancestors, start, end) => {
     const list = ancestors[ancestors.length - 1] // 直接父 list
