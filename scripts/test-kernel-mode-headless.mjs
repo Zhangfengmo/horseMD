@@ -13,6 +13,7 @@
 // pass-through vs veto, kernel byte advancement, structural/history keymap
 // handling, caret restore, and full degradation on an unmappable document.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
@@ -20,6 +21,7 @@ import { createKernelMode } from '../src/renderer/src/components/editor-kernel-m
 import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
+import { splitMarkdown, CHUNK_SIZE, CHUNK_THRESHOLD } from '../src/renderer/src/components/editor-chunked-parse.js'
 
 // `bullet_list`/`list_item` (with a `checked` attr, `list_item` content
 // `'paragraph block*'`) mirror @milkdown/preset-commonmark + preset-gfm's
@@ -2432,6 +2434,82 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.view.state.selection.$head.parent.textContent, 'b',
     'navigation works even in a table whose cells are read-only')
   assert.equal(h.controller.kernel.doc.text, md, 'and it writes nothing')
+}
+
+// ===========================================================================
+// P6 Task 5 — THE ABOVE-CHUNK_THRESHOLD FALLBACK IS NAMED, NOT SILENT
+// ===========================================================================
+// A document over CHUNK_THRESHOLD is loaded by `appendChunks`, which parses
+// each ~40 KB chunk SEPARATELY; the kernel parses the whole text once. The two
+// disagree structurally on real content, so the projection map refuses and the
+// tab degrades to legacy — which is the mode the byte-fidelity bug family
+// lives in, and until now the user was told nothing that distinguished it from
+// any other unmappable document. The attach is still ATTEMPTED (a large
+// document whose two parses agree keeps working); what changed is that a
+// chunk-loaded failure reports its own cause.
+{
+  // Unmappable on purpose: the PM doc has a block the source does not.
+  const md = '\u7532\u4e59\n'
+  // `getT` returns a marked key so the assertions read the i18n LOOKUP, not
+  // the English fallback string (tOr treats `t(key) === key` as "no
+  // translation" and falls back, which would hide a missing key).
+  const tr = { getT: (key) => `t:${key}` }
+  const chunked = makeHarness(md, doc(p(text('\u7532\u4e59')), p(text('surplus'))), { chunkedLoad: true, ...tr })
+  assert.equal(chunked.controller.attachAfterCreate(), false, 'the map must still refuse')
+  assert.deepEqual(chunked.notifications, ['t:kernelMode.unmappableChunked'],
+    'a chunk-loaded document names the chunking as the reason')
+
+  const plain = makeHarness(md, doc(p(text('\u7532\u4e59')), p(text('surplus'))), tr)
+  assert.equal(plain.controller.attachAfterCreate(), false)
+  assert.deepEqual(plain.notifications, ['t:kernelMode.unmappable'],
+    'an ordinary unmappable document keeps the generic message')
+
+  // Both strings must exist in BOTH languages — no hardcoded user-facing text.
+  const i18n = readFileSync(new URL('../src/renderer/src/i18n.jsx', import.meta.url), 'utf8')
+  for (const key of ['kernelMode.unmappable', 'kernelMode.unmappableChunked']) {
+    assert.equal((i18n.match(new RegExp(`'${key}':`, 'g')) || []).length, 2,
+      `${key} must be declared once per language (en + zh)`)
+  }
+
+  // Negative control: `chunkedLoad` must not turn a MAPPABLE large document
+  // into a refusal. Attaching is decided by the map, never by the flag.
+  const ok = makeHarness(md, doc(p(text('\u7532\u4e59'))), { chunkedLoad: true })
+  assert.equal(ok.controller.attachAfterCreate(), true,
+    'a chunk-loaded document whose parses DO agree still attaches')
+  assert.deepEqual(ok.notifications, [], 'and says nothing')
+}
+
+// The arithmetic the ADR in editor-kernel-mode.js cites when it explains why
+// the mirroring option (plan Task 5 (d)) was rejected for reasons OTHER than
+// the offset maths. Pinned so the ADR cannot quietly become wrong: if these
+// ever stop holding, the recorded reasoning has to be revisited.
+{
+  const build = (ending) => {
+    let out = ''
+    let i = 0
+    while (out.length < 300000) {
+      i += 1
+      out += `## \u6807\u9898 ${i}${ending}${ending}`
+      out += '\u6b63\u6587\u5185\u5bb9 '.repeat(20) + ending + ending
+      if (i % 5 === 0) out += `- a${ending}${ending}- b${ending}${ending}`
+      if (i % 7 === 0) out += '```js' + ending + `const x = ${i}` + ending + '```' + ending + ending
+    }
+    return out
+  }
+  for (const ending of ['\n', '\r\n']) {
+    const text = build(ending)
+    assert.ok(text.length > CHUNK_THRESHOLD, 'fixture must actually be chunked (positive control)')
+    const chunks = splitMarkdown(text, CHUNK_SIZE)
+    assert.ok(chunks.length > 1, `${JSON.stringify(ending)}: must produce several chunks`)
+    assert.equal(chunks.join('\n'), text, `${JSON.stringify(ending)}: chunks rejoin byte-for-byte`)
+    let offset = 0
+    for (const chunk of chunks) {
+      assert.equal(text.slice(offset, offset + chunk.length), chunk,
+        `${JSON.stringify(ending)}: chunk at ${offset} is exactly that slice of the document`)
+      offset += chunk.length + 1
+    }
+    assert.equal(offset - 1, text.length, `${JSON.stringify(ending)}: the offsets cover the document exactly`)
+  }
 }
 
 console.log('PASS kernel mode headless')

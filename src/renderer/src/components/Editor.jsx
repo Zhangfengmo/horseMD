@@ -374,6 +374,11 @@ export default function Editor({
     const kernelController = kernelModeEnabled
       ? createKernelMode({
           initialContent: initialContent || '',
+          // Was this document loaded through the CHUNKED parse path (P6 Task
+          // 5)? Passed as the fact, not re-derived from a length threshold:
+          // `chunks` above IS the decision, so the controller and the loader
+          // can never disagree about which documents were chunked.
+          chunkedLoad: !!chunks,
           getView: () => viewRef.current,
           parse: (md) => parseAdapter.parse(md),
           prepareMarkdown: parseAdapter.prepare,

@@ -61,6 +61,7 @@ const STRUCTURAL_KEYS = ['Enter', 'Tab', 'Shift-Tab', 'Backspace', 'Delete']
 
 export function createKernelMode({
   initialContent,
+  chunkedLoad = false,
   getView,
   parse,
   prepareMarkdown,
@@ -112,11 +113,59 @@ export function createKernelMode({
     lastNotifyAt.set(code, now)
     notify?.(`${tOr('kernelMode.unsupported', 'Kernel mode blocked this edit')} (${code})`)
   }
+  // Why this tab fell back to legacy, or null while the kernel is live. Read
+  // by `getKernelStatus` (P6 Task 3) so the fallback is reportable instead of
+  // being a state only a toast that already vanished ever mentioned.
+  let degradeReason = null
+  // P6 Task 5 — the ABOVE-THRESHOLD fallback, stated instead of implied.
+  //
+  // A document longer than `CHUNK_THRESHOLD` (editor-chunked-parse.js) is not
+  // parsed once: `appendChunks` parses each ~40 KB chunk SEPARATELY and
+  // appends it, while the kernel parses the whole text in one go. The two
+  // genuinely disagree on real content — measured on a 262 KB concatenation of
+  // this repo's own docs/ (6 chunks): 1585 blocks whole-document vs 1572
+  // chunked, first divergence at block 647. A blank-line-separated list is one
+  // loose list to a whole parse and two lists to a chunked one; a chunk
+  // boundary near a fence shifts a code block the same way. So the projection
+  // map's block zip refuses, `attachAfterCreate` degrades, and the ENTIRE
+  // 120-400 KB band silently ran in legacy — the mode the fidelity bug family
+  // lives in — with the user told nothing.
+  //
+  // WHY THE MIRRORING FIX WAS NOT TAKEN (plan Task 5 option (d): have the
+  // kernel parse the same chunks and shift each chunk's mdast positions by its
+  // raw start offset). The arithmetic itself is exact — re-verified here:
+  // `chunks.join('\n') === text` byte-for-byte and `text.slice(off,
+  // off+chunk.length) === chunk` for every chunk, LF and CRLF alike. It is the
+  // REST of the kernel that does not mirror:
+  //  * `safeParse` (below) parses the WHOLE text with the editor chain, and it
+  //    is what `verifyPlainTextProjection` diffs the view against after every
+  //    plain-text commit and what `reconcileProjection` repairs the view TO.
+  //    With only the kernel's own parse mirrored, the first keystroke would
+  //    reconcile the view to the whole-document shape and the very next
+  //    `bindMap` would find the chunked kernel tree disagreeing with it —
+  //    map null, document permanently unwritable. Mirroring that path too
+  //    means a second chunk-aware parse entry point on the byte-repair path.
+  //  * chunk boundaries are recomputed from the CURRENT text on every rebind
+  //    (`splitMarkdown` cuts at the first blank line at/after 40 000
+  //    accumulated chars), so an edit that moves one boundary changes the
+  //    block sequence while the PM doc keeps the old one. The map would flip
+  //    between mappable and unmappable as the user types. That is an
+  //    assumption about edit locality wearing a proof's clothes.
+  // So the plan's own fallback (c) is taken: attach is still ATTEMPTED (a
+  // large document whose two parses DO agree keeps working — that agreement is
+  // still checked block by block, not assumed), and when it fails on a
+  // chunk-loaded document the refusal names its cause instead of hiding.
   const notifyUnmappable = () => {
-    notify?.(tOr(
-      'kernelMode.unmappable',
-      'Kernel mode could not map this document; legacy editing stays active (some toolbar features remain off)'
-    ))
+    degradeReason = chunkedLoad ? 'chunked' : 'unmappable'
+    notify?.(chunkedLoad
+      ? tOr(
+        'kernelMode.unmappableChunked',
+        'This document is too large to load in one piece, so the source kernel cannot pair it with the editor; legacy editing stays active'
+      )
+      : tOr(
+        'kernelMode.unmappable',
+        'Kernel mode could not map this document; legacy editing stays active (some toolbar features remain off)'
+      ))
   }
   // BLOCK-scoped refusal (P5-2.5 review finding). Since per-block degradation,
   // `UNMAPPED` covers two very different situations: a transient/unsupported
@@ -290,7 +339,9 @@ export function createKernelMode({
     const map = view ? buildProjectionMap(kernel.doc.text, view.state.doc) : null
     if (!map) {
       degraded = true
-      pushKernelDiagnostic({ type: 'attach-unmappable' })
+      // `chunked` rides on the diagnostic so a bug report can tell the two
+      // fallbacks apart without guessing from the document's length.
+      pushKernelDiagnostic({ type: 'attach-unmappable', chunked: chunkedLoad })
       notifyUnmappable()
       return false
     }
