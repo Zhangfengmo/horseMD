@@ -252,11 +252,23 @@ const slashItems = (evaluate) => evaluate(`[
   ...document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item')
 ].map((node) => ({ disabled: node.classList.contains('disabled'), index: node.dataset.index, id: node.dataset.id }))`)
 
-// Plan 4 Task 4: 'quote' is the ONE slash item the kernel owns (routed
-// through runQuoteToggle, never PM's wrapInBlockTypeCommand) — every other
-// structural item stays refused. This predicate is the "disabled matrix"
-// every other item must match; 'quote' must match the opposite.
-const isStructurallyBlocked = (item) => item.id !== 'quote'
+// The slash items the KERNEL owns, and which must therefore be enabled;
+// everything else structural stays refused. This predicate is the "disabled
+// matrix" every item must match.
+//
+// Plan 4 Task 4 added 'quote' (routed through runQuoteToggle, never PM's
+// wrapInBlockTypeCommand) and this list read `item.id !== 'quote'` for a
+// while. `e8b68bf` (feat(kernel-mode): route the block-type slash items
+// through the kernel) then added the block-type items — `KERNEL_BLOCK_TYPE_ITEMS`
+// in editor-crepe-setup.js, h1–h6 + bullet + ordered, filtered through the
+// kernel's own `BLOCK_TYPE_MARKERS` — without updating this predicate, so
+// this assertion has been failing since that commit against the behaviour it
+// deliberately shipped. `task` and `divider` are excluded there on purpose
+// (the kernel refuses them), and so are text/image/code/table/math.
+const KERNEL_ROUTED_SLASH_ITEMS = new Set([
+  'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered'
+])
+const isStructurallyBlocked = (item) => !KERNEL_ROUTED_SLASH_ITEMS.has(item.id)
 
 async function click(send, point) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
