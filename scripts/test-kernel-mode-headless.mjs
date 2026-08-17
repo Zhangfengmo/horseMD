@@ -31,7 +31,15 @@ const schema = new Schema({
     doc: { content: 'block+' },
     paragraph: { content: 'inline*', group: 'block' },
     text: { group: 'inline' },
+    // Block-type conversion domain — mirrors @milkdown/preset-commonmark's
+    // real `heading` ($nodeSchema("heading"), content 'inline*', attrs.level)
+    // and `ordered_list` shapes. Adding them does NOT affect Case 18's
+    // paragraph-vs-mdast-heading rejection: that one turns on
+    // `PM_TO_MD.paragraph` (in editor-kernel-projection-map.js), not on
+    // whether this schema declares a heading node at all.
+    heading: { content: 'inline*', group: 'block', attrs: { level: { default: 1 } } },
     bullet_list: { content: 'list_item+', group: 'block' },
+    ordered_list: { content: 'list_item+', group: 'block' },
     list_item: {
       content: 'paragraph block*',
       attrs: { checked: { default: null } }
@@ -123,6 +131,8 @@ const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
 const li = (checked, ...c) => schema.node('list_item', { checked }, c)
 const bl = (...c) => schema.node('bullet_list', null, c)
+const ol = (...c) => schema.node('ordered_list', null, c)
+const hd = (level, ...c) => schema.node('heading', { level }, c)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
 const mif = (value) => schema.node('math_inline', { value })
@@ -211,6 +221,21 @@ const FIXTURE_DOCS = {
   // why that document can never pair (mdast blockquote has NO children).
   '/quote\n': () => doc(p(text('/quote'))),
   '>\n': () => doc(bq(p())),
+  // Block-type conversion domain (Cases B1-B5). The slash query blocks and
+  // every document `runBlockTypeFromQuery` can produce from them, mirroring
+  // the live Crepe parse + `withTrailingParagraph`'s own append (a document
+  // whose last top-level child is a LIST gains a trailing paragraph; one
+  // ending in a HEADING does not — heading is an accepted final block).
+  '/h2\n': () => doc(p(text('/h2'))),
+  '/ul\n': () => doc(p(text('/ul'))),
+  '/ol\n': () => doc(p(text('/ol'))),
+  '/task\n': () => doc(p(text('/task'))),
+  '## \n': () => doc(hd(2)),
+  '## T\n': () => doc(hd(2, text('T'))),
+  '- \n': () => doc(bl(li(null, p())), p()),
+  '- x\n': () => doc(bl(li(null, p(text('x')))), p()),
+  '1. \n': () => doc(ol(li(null, p())), p()),
+  '# /h2\n': () => doc(hd(1, text('/h2'))),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -2606,6 +2631,107 @@ const toggleVia = (h, markType, from, to) => {
   assert.deepEqual(seen, ['normal'], 'an unchanged status is not re-published')
   h.controller.dispose()
   assert.deepEqual(seen, ['normal', 'off'], 'teardown clears the host indicator')
+}
+
+// ===========================================================================
+// BLOCK-TYPE CONVERSION (Cases B1-B5)
+// ===========================================================================
+// `runBlockTypeFromQuery` is reached exactly like `runQuoteToggleFromQuery`:
+// the slash item's `run` is swapped for it (editor-slash-menu.js's
+// `blockTypeRun` / editor-crepe-setup.js's `blockType` option), so NO PM
+// structural transaction is ever built and these cases call the controller
+// directly. The caret is placed where `shouldShow`'s `atEndOfBlock` guarantees
+// it is when an item runs: at the end of the query text.
+
+// Case B1: paragraph "/h2" -> an H2 the user can immediately type into. The
+// bytes, the reconciled view, the caret AND the follow-up keystroke are all
+// asserted — the keystroke is the point, because a heading the kernel creates
+// but cannot map would be a read-only block (that is exactly what the empty
+// ATX heading anchor in editor-kernel-projection-map.js exists to prevent).
+{
+  const h = makeHarness('/h2\n', doc(p(text('/h2'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runBlockTypeFromQuery('heading2', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '## \n', 'the query bytes became the marker, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(hd(2))), 'view reconciled to an empty H2')
+  assert.equal(h.view.state.selection.head, 1, 'caret sits inside the heading, after the marker')
+  assert.deepEqual(h.changes.at(-1), ['## \n', false])
+
+  // The follow-up keystroke: an ordinary plain-text commit through the
+  // heading's derived single-point anchor.
+  const oldState = h.view.state
+  const verdict = dispatchThrough(h, oldState.tr.insertText('T', 1))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the new heading is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '## T\n', 'the title lands after the marker')
+  assert.ok(h.view.state.doc.eq(doc(hd(2, text('T')))))
+
+  // Undo reverses the whole conversion in one step (applyKernelTransaction's
+  // default `record: true`), never leaving a half-converted block.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '## \n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/h2\n', 'the original query bytes come back')
+}
+
+// Case B2: paragraph "/ul" -> a bullet list whose empty item is typable
+// (the item's own `syntheticEmptyItemParagraph` anchor).
+{
+  const h = makeHarness('/ul\n', doc(p(text('/ul'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runBlockTypeFromQuery('bullet', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- \n')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(null, p())), p())), 'view reconciled to a one-item bullet list')
+
+  const oldState = h.view.state
+  assert.equal(dispatchThrough(h, oldState.tr.insertText('x', 3)), undefined)
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '- x\n', 'typing into the new item lands after the marker')
+}
+
+// Case B3: paragraph "/ol" -> an ordered list. `1.` is the CommonMark default
+// start every other list this app writes uses.
+{
+  const h = makeHarness('/ol\n', doc(p(text('/ol'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runBlockTypeFromQuery('ordered', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '1. \n')
+  assert.ok(h.view.state.doc.eq(doc(ol(li(null, p())), p())))
+}
+
+// Case B4: heading "# /h2" -> H2. The slash menu IS reachable inside a
+// heading (`shouldShow` accepts paragraph|heading), so the existing marker
+// must be REWRITTEN, never appended to.
+{
+  const h = makeHarness('# /h2\n', doc(hd(1, text('/h2'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runBlockTypeFromQuery('heading2', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '## \n', 'the old marker was replaced, not appended to')
+  assert.ok(h.view.state.doc.eq(doc(hd(2))))
+}
+
+// Case B5: an unsupported target refuses fail-closed — nothing committed,
+// nothing reconciled, the CURRENT map untouched (no lock-up), and the user
+// is told. `task` is the live example: `- [ ] ` reparses to a list item whose
+// paragraph carries the checkbox bytes in its own raw span, which the
+// projection map refuses to character-map, so the block would be created
+// read-only. The command refuses the TARGET rather than relying on
+// `requireMap` to catch it after the fact.
+{
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  const before = h.notifications.length
+  assert.equal(h.controller.runBlockTypeFromQuery('task', h.view), true,
+    'the slash item always swallows the invocation, success or refusal')
+  assert.equal(h.controller.kernel.doc.text, '/task\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('/task')))), 'view untouched')
+  assert.ok(h.controller.kernel.map, 'the current map is untouched too')
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
 }
 
 console.log('PASS kernel mode headless')

@@ -14,6 +14,7 @@ import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirro
 import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
 import { createKernelCmExtensions } from './editor-kernel-cm-bridge.js'
+import { BLOCK_TYPE_MARKERS } from '../lib/source-kernel/index.js'
 import {
   bulletListStyleSchema,
   listStyleStringifyHandler,
@@ -70,6 +71,32 @@ const mermaidLanguage = LanguageDescription.of({
     return new LanguageSupport(StreamLanguage.define(() => ({ token: () => null })))
   }
 })
+
+// Slash-item id -> source-kernel block-type target (block-type conversion
+// domain). ONE table drives BOTH the unblocking and the routing below, so an
+// item can never be enabled without a kernel route behind it — an item
+// unblocked without one would fall through to its legacy PM `run`
+// (`setBlockType`/`wrapInBlockType`), which the gateway then vetoes: a menu
+// entry that looks enabled and silently does nothing.
+//
+// The table is FILTERED through `BLOCK_TYPE_MARKERS`, the kernel's own target
+// list, rather than merely matching it by hand: a target the kernel stops
+// supporting drops out of the menu automatically instead of becoming a dead
+// entry. `task` and `divider` are absent because the kernel refuses them (see
+// lib/source-kernel/commands/block-type.js for each probed reason); they keep
+// the phase-1 "not supported yet" message.
+const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
+  Object.entries({
+    h1: 'heading1',
+    h2: 'heading2',
+    h3: 'heading3',
+    h4: 'heading4',
+    h5: 'heading5',
+    h6: 'heading6',
+    bullet: 'bullet',
+    ordered: 'ordered'
+  }).filter(([, target]) => Object.hasOwn(BLOCK_TYPE_MARKERS, target))
+))
 
 export function applyImageText(ctx, tt) {
   try {
@@ -264,11 +291,27 @@ export function createConfiguredCrepe({
       // and wraps atomically in one kernel transaction (see its own ADR
       // comment in editor-kernel-mode.js for why a separate clear-then-wrap
       // doesn't work).
+      //
+      // The block-type items (h1-h6, bullet, ordered) are unblocked the SAME
+      // way (block-type conversion domain): their `run` is swapped for
+      // `runBlockTypeFromQuery`, which replaces the query bytes with the
+      // target's marker prefix in ONE kernel transaction. `KERNEL_BLOCK_TYPE_ITEMS`
+      // is the single source of truth for which ids are routed AND which are
+      // unblocked, so the two can never drift apart (an item unblocked
+      // without a route would dispatch legacy PM structural steps the gateway
+      // then vetoes — a silently dead menu entry).
+      //
+      // Everything still absent from that table (task, divider, text, image,
+      // code, table, math) keeps the phase-1 refusal message. Each is refused
+      // for a probed reason recorded in lib/source-kernel/commands/block-type.js.
       kernelMode
         ? {
-            isBlocked: (id) => (id === 'quote' ? null : 'kernelMode.unsupported'),
+            isBlocked: (id) =>
+              (id === 'quote' || KERNEL_BLOCK_TYPE_ITEMS[id] ? null : 'kernelMode.unsupported'),
             notify,
-            quoteToggle: (view) => kernelPlugins?.runQuoteToggleFromQuery?.(view)
+            quoteToggle: (view) => kernelPlugins?.runQuoteToggleFromQuery?.(view),
+            blockTypeItems: KERNEL_BLOCK_TYPE_ITEMS,
+            blockType: (target, view) => kernelPlugins?.runBlockTypeFromQuery?.(target, view)
           }
         : undefined
     )

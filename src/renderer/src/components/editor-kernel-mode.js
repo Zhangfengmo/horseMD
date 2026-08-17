@@ -41,6 +41,7 @@ import {
   replaceVisibleText,
   routeStructuralKey,
   toggleBlockquote,
+  setBlockTypeFromQuery,
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
@@ -1615,6 +1616,59 @@ export function createKernelMode({
     return true
   }
 
+  // Slash block-type entry point (block-type conversion domain). Same shape
+  // and same reasoning as `runQuoteToggleFromQuery` right above — and for the
+  // same reason it exists at all: the slash query's bytes are ALREADY in the
+  // source when the item runs, so the strip and the marker write must be ONE
+  // kernel transaction. A separate PM `clearTextInCurrentBlockCommand`
+  // dispatch first would leave a fully-empty top-level paragraph, which
+  // CommonMark cannot represent and the kernel's own self-heal then prunes
+  // before the conversion ever runs (that ADR's full probe transcript is
+  // directly above).
+  //
+  // Unlike the quote route, this one does NOT need to hand-build its edit:
+  // `setBlockTypeFromQuery` writes a real marker, so the resulting block is
+  // an ordinary heading/list — a shape the projection map can pair. The quote
+  // route's hand-built edit exists because a bare '>' reparses to a
+  // blockquote with ZERO mdast children, which ProseMirror's `block+`
+  // blockquote can never hold; a `## ` heading (PM `inline*`) and a `- ` list
+  // item (PM auto-fills an empty paragraph, and the map pairs it via
+  // `syntheticEmptyItemParagraph`) both round-trip.
+  //
+  // `requireMap: true` is kept regardless: it is the pre-commit proof that
+  // the RESULT document maps AND that this command's own caret anchor
+  // resolves through it, with everything untouched if it does not. That guard
+  // is precisely what refuses the shapes this command's target table already
+  // excludes, should one ever slip through — the empty task item (whose
+  // paragraph carries the checkbox bytes and cannot be character-mapped) is
+  // the live example.
+  const runBlockTypeFromQuery = (target, viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    if (!kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const headRaw = kernel.map.pmPosToRaw(view.state.selection.head)
+    if (!Number.isFinite(headRaw)) {
+      notifyRefusal(KERNEL_CODES.UNMAPPED, view.state.selection.head)
+      return true
+    }
+    const routed = setBlockTypeFromQuery({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: headRaw,
+      target
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    applyKernelTransaction(routed.transaction, view, { requireMap: true })
+    return true
+  }
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -1874,6 +1928,7 @@ export function createKernelMode({
     // it into editor-slash-menu.js's per-item `run` override.
     runQuoteToggle,
     runQuoteToggleFromQuery,
+    runBlockTypeFromQuery,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's

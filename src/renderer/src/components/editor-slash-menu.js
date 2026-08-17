@@ -291,8 +291,9 @@ class SlashMenu {
     this.getT = getT
     this.onCommand = onCommand
     // Source-kernel mode (Task 7 blocking matrix): `isBlocked(id)` returns an
-    // i18n key when the item is unsupported ('kernelMode.unsupported' in
-    // phase 1, for every item), else a falsy value. Blocked items stay
+    // i18n key when the item is unsupported ('kernelMode.unsupported'), else a
+    // falsy value. The caller derives it from the same table it uses to route
+    // the enabled items (editor-crepe-setup.js). Blocked items stay
     // visible (rendered `.disabled`) — they must not run and must not reach
     // `onCommand`, but the menu itself keeps working (query/filter/nav).
     this.isBlocked = options.isBlocked || null
@@ -301,10 +302,20 @@ class SlashMenu {
     // is swapped for this callback instead of dispatching PM's
     // `wrapInBlockTypeCommand` — the kernel owns quote wrap/unwrap as a
     // source transaction (editor-kernel-mode.js's `runQuoteToggle`), so the
-    // menu must never produce the legacy PM transaction for it. Every other
-    // item keeps its normal `run` (still blocked via `isBlocked` in kernel
-    // mode — only 'quote' is unblocked, see editor-crepe-setup.js).
+    // menu must never produce the legacy PM transaction for it. Items with no
+    // kernel route keep their normal `run` and stay blocked via `isBlocked`
+    // (see editor-crepe-setup.js for the full enabled set).
     this.quoteRun = options.quoteToggle || null
+    // Source-kernel mode (block-type conversion domain): the same swap as
+    // `quoteToggle` above, for the block-type items. `blockTypeItems` maps a
+    // slash item id to a kernel target ('h2' -> 'heading2'); `blockType(target,
+    // view)` is the kernel entry point (`runBlockTypeFromQuery`) that replaces
+    // the query bytes with that target's marker prefix in ONE source
+    // transaction. Both are supplied together by editor-crepe-setup.js, which
+    // also derives `isBlocked` from the SAME table — an item can never be
+    // enabled here without a route.
+    this.blockTypeItems = options.blockTypeItems || null
+    this.blockTypeRun = options.blockType || null
     this.items = buildItems(getT, '')
     this.filtered = []
     this.selectedIndex = 0
@@ -358,6 +369,18 @@ class SlashMenu {
       // building this item's first genuine end-to-end UI regression, Plan 4
       // Task 5).
       all = all.map((it) => (it.id === 'quote' ? { ...it, run: (ctx, view) => quoteRun(view) } : it))
+    }
+    if (this.blockTypeItems && this.blockTypeRun) {
+      // Same no-`clearThen()` contract as the quote swap directly above, for
+      // the same reason: `runBlockTypeFromQuery` owns the query strip AND the
+      // marker write as ONE kernel transaction. Clearing the block first would
+      // create the unrepresentable "fully empty top-level paragraph" state the
+      // kernel's self-heal prunes before the conversion can run.
+      const items = this.blockTypeItems
+      const runBlockType = this.blockTypeRun
+      all = all.map((it) => (
+        items[it.id] ? { ...it, run: (ctx, view) => runBlockType(items[it.id], view) } : it
+      ))
     }
     const t = this.getT
     if (q) {
