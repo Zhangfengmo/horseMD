@@ -1863,6 +1863,57 @@ console.log('PASS kernel projection map (inline html)')
     'RESIDUAL: the served offset belongs to the xBz block while PM shows xAz')
 }
 
+// Case P8 (block-type conversion domain): an EMPTY ATX heading is served a
+// single-point `virtualCharMap` at its DERIVED content start, so the heading
+// the slash menu (or plain `## ` typing) just created can actually be typed
+// into. The derivation is CommonMark's ATX grammar applied to a raw span that
+// contains nothing but the marker — see `emptyAtxHeadingContentStart`.
+{
+  const h = (level, ...c) => schema.node('heading', { level }, c)
+
+  // '## ' -> marker + REAL spacing: editable, anchored at the span's end (3).
+  const spaced = buildProjectionMap('## \n', doc(h(2)))
+  assert.ok(spaced, 'an empty ATX heading document still maps')
+  assert.ok(spaced.blockPairs[0].charMap, 'empty ATX heading with spacing is editable')
+  assert.equal(spaced.blockPairs[0].virtual, true,
+    'it carries no real content bytes -> virtual, like the empty list item')
+  assert.equal(spaced.blockPairs[0].charMap.visibleLength, 0)
+  assert.equal(spaced.pmPosToRaw(1), 3, 'the caret inside the heading resolves to the content start')
+  assert.deepEqual(spaced.rawToPmPos(3), { pos: 1, atom: false })
+
+  // A TAB is spacing too (CommonMark), same derivation.
+  assert.equal(buildProjectionMap('#\t\n', doc(h(1))).pmPosToRaw(1), 2)
+
+  // '##' -> NO spacing: typing there would commit '##x', a paragraph. Stays
+  // read-only, exactly like the bare-marker empty list item.
+  assert.equal(buildProjectionMap('##\n', doc(h(2))).blockPairs[0].charMap, null,
+    'a space-less empty ATX heading stays read-only')
+
+  // A closing sequence's content start is between two marker runs — not
+  // derivable from this rule, so it stays read-only rather than guessing.
+  assert.equal(buildProjectionMap('## ##\n', doc(h(2))).blockPairs[0].charMap, null,
+    'an empty ATX heading with a closing sequence stays read-only')
+
+  // A SETEXT heading can never be empty, and a non-empty heading keeps its
+  // ordinary (real, unit-bearing) character map — the derivation must not
+  // reach either.
+  const written = buildProjectionMap('## x\n', doc(h(2, text('x'))))
+  assert.ok(written.blockPairs[0].charMap.units.length > 0, 'a written heading keeps a real char map')
+  assert.equal(written.blockPairs[0].virtual, undefined, 'and is not virtual')
+
+  // Mid-document: the derivation must not disturb its neighbours' offsets.
+  const mixed = buildProjectionMap('甲\n\n### \n\n乙\n', doc(p(text('甲')), h(3), p(text('乙'))))
+  assert.ok(mixed)
+  assert.equal(mixed.pmPosToRaw(1), 0, 'preceding paragraph unchanged')
+  assert.equal(mixed.pmPosToRaw(4), 7, 'the empty heading anchors at its own content start')
+  assert.equal(mixed.pmPosToRaw(6), 9, 'following paragraph unchanged')
+
+  // Other empty non-paragraph textblocks are NOT covered by the derivation.
+  assert.equal(buildProjectionMap('```js\n```\n', doc(cbl('js', ''), p()))?.blockPairs[0].charMap
+    ? 'code-block-has-its-own-map' : 'none', 'code-block-has-its-own-map',
+    'the code path is untouched (buildCodeMap, not buildCharacterMap)')
+}
+
 console.log('PASS kernel projection map (per-block degradation)')
 
 // ===========================================================================

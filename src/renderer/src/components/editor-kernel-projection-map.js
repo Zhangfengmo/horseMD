@@ -322,6 +322,38 @@ const virtualCharMap = (rawOffset) => {
   }
 }
 
+// An EMPTY ATX heading ('## ') has no inline content for buildCharacterMap to
+// anchor to, but its content start IS provable from the heading's own raw
+// bytes — no text search, no guess, just CommonMark's ATX grammar applied to
+// a span that contains nothing else:
+//
+//   ATX heading = up to 3 spaces of indentation, 1-6 '#', then — when the
+//   heading has content — a REQUIRED run of spaces/tabs, then the content.
+//
+// When the heading is empty, that prefix IS the whole raw span, so the
+// content start is unambiguously the span's own end offset. Typing there
+// commits '## x', which reparses as the same heading with content.
+//
+// The `[ \t]+$` tail is the load-bearing half, and it is the SAME rule the
+// empty-list-item pairing applies (`item.spacing !== ''`): a bare '##' with
+// no spacing is also an empty heading, but typing at its end would commit
+// '##x' — a PARAGRAPH. That shape keeps returning null and stays read-only.
+// A closing sequence ('## ##') likewise does not match and stays refused:
+// its content start sits between two marker runs and this function does not
+// claim to know which side new bytes belong to.
+//
+// Returns null (never a number) when the shape is not provable, so the caller
+// can keep its existing fail-closed branch.
+const EMPTY_ATX_HEADING_RE = /^ {0,3}#{1,6}[ \t]+$/
+const emptyAtxHeadingContentStart = (markdown, md) => {
+  if (md?.type !== 'heading') return null
+  const start = md.position?.start?.offset
+  const end = md.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null
+  if (!EMPTY_ATX_HEADING_RE.test(markdown.slice(start, end))) return null
+  return end
+}
+
 // The separator bytes a plain-text insert at the very end of the document
 // needs BEFORE the typed text so the reparse yields a new paragraph instead
 // of a lazy continuation line of the final list/blockquote ('- item\n' +
@@ -631,6 +663,12 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       !NON_EDITABLE_LEAF_TYPES.has(pmType) &&
       !OPAQUE_TYPES.has(pmType)
     let charMap = null
+    // Set only by the empty-ATX-heading derivation at the bottom of this
+    // branch: like the empty list item's own placeholder pair, such a pair
+    // carries NO real content bytes — it is a single insertion anchor — so it
+    // must be excluded from `editablePairForRange` (mark toggles / Tab), which
+    // is exactly what `virtual` means to editor-kernel-mode.js.
+    let virtual = false
     if (editable && pmType === 'code_block') {
       // mdast `math` shares the PM `code_block` type but stays NON-EDITABLE
       // (Plan 5 Task 1 keeps this deliberately; the task's goal was healing
@@ -804,9 +842,24 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       // a silent wrong mapping, so treat it as non-editable instead. (This
       // guard is the OLDEST per-block degradation in this file — P5-2.5
       // generalized exactly this posture to the two conditions above.)
-      if (charMap && charMap.units.length === 0 && md.type !== 'paragraph') charMap = null
+      //
+      // ONE exception, and it is a DERIVATION rather than a relaxation: an
+      // EMPTY ATX heading's content start is provable from its own raw bytes
+      // (see `emptyAtxHeadingContentStart`), so instead of serving the wrong
+      // boundary or refusing, that case gets a single-point `virtualCharMap`
+      // at the derived offset — character-for-character the treatment the
+      // empty LIST ITEM already gets ~270 lines above, including its
+      // "only when the marker carries real spacing" rule.
+      if (charMap && charMap.units.length === 0 && md.type !== 'paragraph') {
+        const anchor = emptyAtxHeadingContentStart(markdown, md)
+        if (anchor == null) charMap = null
+        else {
+          charMap = virtualCharMap(anchor)
+          virtual = true
+        }
+      }
     }
-    blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap })
+    blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap, ...(virtual ? { virtual: true } : null) })
   }
   // Every mdast block must have been consumed — a PM side that ran out first
   // (e.g. a PM node type flattenPm doesn't recognize while mdast still has
