@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Schema } from '@milkdown/prose/model'
-import { EditorState, TextSelection } from '@milkdown/prose/state'
+import { EditorState, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
 import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
@@ -37,7 +37,13 @@ const schema = new Schema({
     // paragraph-vs-mdast-heading rejection: that one turns on
     // `PM_TO_MD.paragraph` (in editor-kernel-projection-map.js), not on
     // whether this schema declares a heading node at all.
-    heading: { content: 'inline*', group: 'block', attrs: { level: { default: 1 } } },
+    // `attrs.id` mirrors preset-commonmark's real heading spec. It is what
+    // `syncHeadingIdPlugin` (a VIEW plugin) writes into the LIVE document and
+    // what a raw parse can never produce — the blindness that let the
+    // 2026-08-17 veto-divergence bug ship: without this attr declared, the
+    // stub parse and the stub view could never disagree on a heading id, so
+    // no headless case could have caught the whole-document reconcile.
+    heading: { content: 'inline*', group: 'block', attrs: { level: { default: 1 }, id: { default: '' } } },
     bullet_list: { content: 'list_item+', group: 'block' },
     ordered_list: { content: 'list_item+', group: 'block' },
     list_item: {
@@ -327,6 +333,12 @@ const FIXTURE_DOCS = {
   // Plan 5 Task 5 fixtures: a standalone image (Crepe's block-level
   // `image-block` atom over the kernel's `paragraph > image` wrapper) plus a
   // following paragraph, before and after each attribute rewrite.
+  // Case HID (2026-08-17 veto-divergence): a heading document, parsed with
+  // the EMPTY heading id a real parse always produces. The live view's
+  // heading carries the slug `syncHeadingIdPlugin` wrote there — the exact
+  // disagreement that used to reconcile the whole document per keystroke.
+  '# 标题\n\n甲乙\n': () => doc(hd(1, text('标题')), p(text('甲乙'))),
+  '# 标题\n\n甲丙乙\n': () => doc(hd(1, text('标题')), p(text('甲丙乙'))),
   '![a](x.png)\n\n甲乙\n': () => doc(ib({ src: 'x.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
   '![a](y/pic.png)\n\n甲乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
   '![a](y/pic.png)\n\n甲丙乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲丙乙'))),
@@ -2759,6 +2771,52 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.notifications.length, before,
     'a not-handled answer must not toast — the legacy command is about to run instead')
   assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'and must not touch the bytes')
+}
+
+// Case HID: heading ids are NOT content (2026-08-17 veto-divergence report).
+//
+// Two halves of one bug, pinned together because either one alone still leaves
+// a user-visible symptom:
+//  (a) `safeParse`'s `withHeadingIds` — the parse carries the LIVE ids, so a
+//      keystroke's projection check no longer reports a whole-document
+//      difference and no reconcile fires (which is what used to remount every
+//      node view and wipe every heading id).
+//  (b) the gateway's `heading-id` classification — `syncHeadingIdPlugin`'s own
+//      refresh batch passes through instead of being vetoed with a toast.
+{
+  const liveHeading = schema.node('heading', { level: 1, id: '标题' }, [text('标题')])
+  const h = makeHarness('# 标题\n\n甲乙\n', doc(liveHeading, p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true, 'a heading document must attach')
+  globalThis.__hmKernelDiagnostics = []
+
+  // (a) An ordinary keystroke in the PARAGRAPH must not be read as a heading
+  //     difference: no projection mismatch, no reconcile, id untouched.
+  const insertAt = liveHeading.nodeSize + 2
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', insertAt))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'the keystroke is allowed')
+  assert.equal(h.controller.kernel.doc.text, '# 标题\n\n甲丙乙\n', 'and writes the expected bytes')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'projection-mismatch').length,
+    0,
+    'an empty parsed heading id must NOT be reported as a content mismatch'
+  )
+  assert.equal(h.view.state.doc.child(0).attrs.id, '标题',
+    'the live heading id survives the keystroke (no whole-document reconcile)')
+
+  // (b) The plugin's own refresh batch: passed through, byte-free, silent.
+  const headingKey = new PluginKey('MILKDOWN_HEADING_ID')
+  const bytesBefore = h.controller.kernel.doc.text
+  const revisionBefore = h.controller.kernel.doc.revision
+  const notificationsBefore = h.notifications.length
+  const idTr = h.view.state.tr.setMeta(headingKey, true)
+  idTr.setNodeMarkup(0, undefined, { ...h.view.state.doc.child(0).attrs, id: '标题-#2' })
+  assert.equal(dispatchThrough(h, idTr), undefined, 'the heading-id batch is not vetoed')
+  assert.equal(h.controller.kernel.doc.text, bytesBefore, 'and writes no bytes')
+  assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'and advances no revision')
+  assert.equal(h.notifications.length, notificationsBefore, 'and raises no toast')
+  assert.equal(h.view.state.doc.child(0).attrs.id, '标题-#2', 'the view keeps the refreshed id')
+  assert.ok(h.controller.kernel.map, 'the map is rebound around the rewritten heading node')
 }
 
 console.log('PASS kernel mode headless')

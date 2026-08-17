@@ -264,10 +264,79 @@ export function createKernelMode({
     }
   }
 
+  // Mirror `@milkdown/preset-commonmark`'s `syncHeadingIdPlugin` the same way
+  // `withTrailingParagraph` above mirrors `@milkdown/plugin-trailing`, and for
+  // exactly the same class of reason: it is a VIEW plugin that writes a value
+  // into the live document which a raw parse can never produce. Every live
+  // heading carries a generated `attrs.id` slug; `parse(kernel.doc.text)`
+  // always comes back with `id: ''` because heading ids have no Markdown
+  // representation at all. Left uncorrected, EVERY doc-to-doc comparison
+  // (verifyPlainTextProjection's diff, reconcileProjection's target) reported
+  // a difference at the FIRST heading and another at the LAST — so the
+  // "minimal" diff spanned the whole document and every keystroke in a
+  // heading-bearing document replaced the entire doc, remounting every node
+  // view (CodeMirror, Mermaid, images) and wiping every heading id, which the
+  // plugin then tried to restore in a batch the gateway refused. That is the
+  // churn half of the 2026-08-17 veto-divergence report.
+  //
+  // The ids are COPIED FROM THE LIVE DOCUMENT rather than regenerated here:
+  // the plugin owns that value (slug algorithm + duplicate `-#N` suffixes),
+  // and re-deriving it in a second place would make the two disagree the day
+  // Milkdown changes it — reintroducing the permanent mismatch this fixes.
+  // Copying is self-consistent by construction: whatever the live document
+  // says today is what the parse is compared against today, and when the
+  // plugin updates an id (heading text edited) the gateway's `heading-id`
+  // pass-through lets that update land, so the next parse copies the new one.
+  //
+  // Positional pairing, gated on an EQUAL heading count. A keystroke never
+  // changes the number of headings, which is the case that matters; when a
+  // structural edit does change it, this bails out and leaves the parse's
+  // empty ids alone — one reconcile with wiped ids, which the plugin then
+  // refills through the (now classified) heading-id batch. Fail-open is safe
+  // here precisely because ids are not bytes: the worst outcome is the old
+  // behaviour for one transaction, never a wrong byte.
+  const withHeadingIds = (docNode) => {
+    try {
+      const live = getView?.()?.state?.doc
+      if (!live || !docNode) return docNode
+      const liveIds = []
+      live.descendants((node) => {
+        if (node.type?.name === 'heading') liveIds.push(node.attrs?.id ?? '')
+        return true
+      })
+      if (!liveIds.length) return docNode
+      let parsedHeadings = 0
+      docNode.descendants((node) => {
+        if (node.type?.name === 'heading') parsedHeadings += 1
+        return true
+      })
+      if (parsedHeadings !== liveIds.length) return docNode
+      let cursor = 0
+      const rewrite = (node) => {
+        let result = node
+        node.forEach((child, _offset, index) => {
+          const mapped = rewrite(child)
+          if (mapped !== child) result = result.copy(result.content.replaceChild(index, mapped))
+        })
+        if (result.type?.name === 'heading') {
+          const id = liveIds[cursor]
+          cursor += 1
+          if (typeof id === 'string' && id !== (result.attrs?.id ?? '')) {
+            result = result.type.create({ ...result.attrs, id }, result.content, result.marks)
+          }
+        }
+        return result
+      }
+      return rewrite(docNode)
+    } catch {
+      return docNode
+    }
+  }
+
   const safeParse = (markdownText) => {
     try {
       const parsed = parse(markdownText) || null
-      return parsed ? withTrailingParagraph(parsed) : null
+      return parsed ? withHeadingIds(withTrailingParagraph(parsed)) : null
     } catch {
       return null
     }
@@ -548,6 +617,16 @@ export function createKernelMode({
         // editor-kernel-gateway.js extractTrailingAppend): view-only, no
         // markdown bytes, no history entry — just rebind the map so the
         // trailing-placeholder tolerance pairs the new node.
+        bindMap(newState?.doc || null)
+        return undefined
+      case 'heading-id':
+        // @milkdown/preset-commonmark's syncHeadingIdPlugin refreshing
+        // `heading.attrs.id` (see editor-kernel-gateway.js
+        // extractHeadingIdSync for the two gates and the byte argument).
+        // Same posture as `trailing-append`: pass the transaction through,
+        // commit NO bytes, record NO history, advance NO revision — and
+        // rebind the map, because every pair holds a `pmNode` reference and
+        // the rewritten heading nodes are new objects.
         bindMap(newState?.doc || null)
         return undefined
       case 'plain-text': {

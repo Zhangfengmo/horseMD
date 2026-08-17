@@ -795,6 +795,119 @@ function extractTrailingAppend(transactions) {
   return { at: step.from }
 }
 
+// --- syncHeadingIdPlugin (heading `id` refresh) ------------------------------
+//
+// `@milkdown/preset-commonmark`'s `syncHeadingIdPlugin` is a VIEW plugin: on
+// every document change it recomputes `heading.attrs.id` from the rendered
+// text and `view.dispatch`es one `setNodeMarkup` per stale heading
+// (preset-commonmark/lib/index.js, `src/plugin/sync-heading-id-plugin.ts`).
+// `setNodeMarkup` is a `ReplaceAroundStep`, never a `ReplaceStep`, so
+// `extractPlainTextSteps` correctly refused it and the batch fell through to
+// `blocked`/`INPUT_TYPE`: the dispatch-veto channel refused it, the plugin
+// retried on the next document change, and every kernel-mode document that
+// contained ONE non-empty heading raised the "not supported yet" toast on
+// every keystroke while the user's own (separately dispatched, accepted) edit
+// landed normally. That is the 2026-08-17 veto-divergence report's finding.
+//
+// WHY PASSING THIS THROUGH CANNOT WEAKEN FAIL-CLOSED: a heading's `id`
+// attribute is not Markdown. It exists only so the rendered DOM/outline/export
+// has an anchor; no serializer writes it and `kernel.doc.text` has no
+// representation of it, so a batch that changes ONLY this attribute cannot
+// change a single authored byte. The classification below therefore commits
+// nothing and advances no revision — it is the same posture as
+// `trailing-append` right above, for the same reason.
+//
+// NARROWNESS (this must never become "any setNodeMarkup batch is fine"):
+// BOTH gates must hold.
+//   (1) provenance — the transaction carries the plugin's own
+//       `MILKDOWN_HEADING_ID` PluginKey meta; and
+//   (2) structure — EVERY step is proven, against the doc that step applies
+//       to, to be an attrs-only rewrite of a `heading` node that changes
+//       nothing but `id`: same node type, same marks, same node size, the gap
+//       covering exactly the original content (so the children are carried
+//       over untouched, not replaced), and every other attribute equal.
+// A batch that carries the meta but touches anything else fails (2) and stays
+// `blocked`; a batch that is shaped like a heading-id rewrite but comes from
+// somewhere else fails (1) and stays `blocked`.
+const HEADING_ID_META_PREFIX = 'MILKDOWN_HEADING_ID$'
+// PluginKey ids are `${name}$` for the first key of a name and `${name}$N`
+// afterwards (prosemirror-state `createKey`), and `Transaction#setMeta` stores
+// them under that string id — so a prefix match over the transaction's own
+// meta bag is how a module that cannot import Milkdown's private PluginKey
+// object reads the provenance. Wrapped in a try/catch: a missing/exotic meta
+// bag must degrade to "no provenance" (refuse), never throw into the dispatch
+// path. The live-editor UI regression (scripts/test-kernel-heading-id-ui.mjs)
+// is what pins this string to Milkdown's actual key name.
+const carriesHeadingIdMeta = (tr) => {
+  try {
+    const meta = tr?.meta
+    if (!meta) return false
+    for (const key of Object.keys(meta)) {
+      if (key.startsWith(HEADING_ID_META_PREFIX) && meta[key] === true) return true
+    }
+  } catch {
+    return false
+  }
+  return false
+}
+
+const sameMarks = (a, b) => {
+  const left = a || []
+  const right = b || []
+  if (left.length !== right.length) return false
+  return left.every((mark, index) => mark?.eq?.(right[index]))
+}
+
+// Is `step` an attrs-only heading rewrite that changes nothing but `id`,
+// measured against `doc` (the document that step applies to)?
+const isHeadingIdOnlyStep = (step, doc) => {
+  if (step?.constructor?.name !== 'ReplaceAroundStep') return false
+  if (step.structure !== true || step.insert !== 1) return false
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to)) return false
+  // The gap must be exactly the original node's content: `from`/`to` wrap the
+  // whole node and `gapFrom`/`gapTo` its content boundaries, so the children
+  // are re-parented verbatim rather than replaced by slice content.
+  if (step.gapFrom !== step.from + 1 || step.gapTo !== step.to - 1) return false
+  const slice = step.slice
+  if (!slice || slice.openStart !== 0 || slice.openEnd !== 0) return false
+  if (slice.content?.childCount !== 1) return false
+  const after = slice.content.firstChild
+  if (!after || after.type?.name !== 'heading') return false
+  // The wrapper the step inserts must be EMPTY (content comes from the gap).
+  if (after.content?.size) return false
+  let before
+  try {
+    before = doc?.nodeAt(step.from)
+  } catch {
+    return false
+  }
+  if (!before || before.type !== after.type) return false
+  if (before.nodeSize !== step.to - step.from) return false
+  if (!sameMarks(before.marks, after.marks)) return false
+  const beforeAttrs = before.attrs || {}
+  const afterAttrs = after.attrs || {}
+  for (const key of new Set([...Object.keys(beforeAttrs), ...Object.keys(afterAttrs)])) {
+    if (key === 'id') continue
+    if (beforeAttrs[key] !== afterAttrs[key]) return false
+  }
+  if (typeof afterAttrs.id !== 'string') return false
+  return true
+}
+
+function extractHeadingIdSync(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!carriesHeadingIdMeta(tr)) return null
+  if (!Array.isArray(tr.steps) || !tr.steps.length) return null
+  for (let index = 0; index < tr.steps.length; index += 1) {
+    const stepDoc = tr.docs?.[index] || (index === 0 ? oldState?.doc : null)
+    if (!stepDoc) return null
+    if (!isHeadingIdOnlyStep(tr.steps[index], stepDoc)) return null
+  }
+  return { headings: tr.steps.length }
+}
+
 // classifyTransactions: pure triage of a dispatch batch into one of eight
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
@@ -835,6 +948,11 @@ function extractTrailingAppend(transactions) {
 //   7. The trailing plugin's own empty-paragraph append (see
 //      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
 //      be vetoed.
+//   7b. `syncHeadingIdPlugin`'s heading-`id` refresh (see
+//      `extractHeadingIdSync` above) — the second view-only shape, and for
+//      the same reason: `heading.attrs.id` has no Markdown representation, so
+//      the batch cannot change an authored byte. Gated on BOTH the plugin's
+//      own meta and a per-step structural proof.
 //   8. A pure AddMarkStep/RemoveMarkStep batch over one textblock range is
 //      the toolbar/keymap mark-toggle shape (see `extractMarkToggle` above)
 //      — tried BEFORE the plain-text guard (a mark step is never a
@@ -880,6 +998,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const trailingAppend = extractTrailingAppend(trs)
   if (trailingAppend) return { kind: 'trailing-append', at: trailingAppend.at }
+
+  const headingIdSync = extractHeadingIdSync(trs, oldState)
+  if (headingIdSync) return { kind: 'heading-id', headings: headingIdSync.headings }
 
   const markToggle = extractMarkToggle(trs, oldState)
   if (markToggle) return { kind: 'mark-toggle', ...markToggle }

@@ -9,7 +9,7 @@
 // paragraph boundary) rather than a mocked transaction shape.
 import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
-import { EditorState, TextSelection } from '@milkdown/prose/state'
+import { EditorState, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, __atomGuards } from '../src/renderer/src/components/editor-kernel-gateway.js'
@@ -41,6 +41,15 @@ const schema = new Schema({
       attrs: { src: { default: '' }, alt: { default: '' }, title: { default: null } }
     },
     math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // @milkdown/preset-commonmark's heading node: `attrs.id` is the slug
+    // `syncHeadingIdPlugin` (a VIEW plugin) writes into the live document and
+    // that no Markdown parse can ever produce — the shape the heading-id
+    // classification below is built on.
+    heading: {
+      content: 'inline*',
+      group: 'block',
+      attrs: { id: { default: '' }, level: { default: 1 } }
+    },
     // Plan 3 Task 4: same shape as scripts/test-kernel-projection-map.mjs's
     // schema (content 'text*', `attrs.language`) — the gateway relaxation
     // and the language-switch AttrStep shape both target this node type.
@@ -2608,3 +2617,126 @@ const atomBytes = ({ md, state, map }, tr) => {
 }
 
 console.log('PASS kernel gateway (P6-1: typing around inline atoms; P6-1b: whole-atom deletion; hard breaks still refused)')
+
+// --- H: syncHeadingIdPlugin's heading-`id` refresh (2026-08-17 veto-divergence)
+//
+// `@milkdown/preset-commonmark`'s `syncHeadingIdPlugin` re-slugs every stale
+// `heading.attrs.id` on EVERY document change and dispatches the result as
+// `tr.setMeta(MILKDOWN_HEADING_ID, true).setNodeMarkup(pos, undefined, attrs)`
+// — a `ReplaceAroundStep` batch that `extractPlainTextSteps` (rightly) refuses
+// and that therefore used to land in `blocked`/`INPUT_TYPE`: the veto channel
+// discarded it, the plugin retried on the next change, and EVERY kernel-mode
+// document holding one non-empty heading raised the "not supported yet" toast
+// once per keystroke. `heading.attrs.id` has no Markdown representation, so a
+// batch that changes only it cannot touch an authored byte — hence the
+// view-only pass-through. These cases pin the two gates that keep it from
+// becoming "any setNodeMarkup batch is fine".
+{
+  const headingKey = new PluginKey('MILKDOWN_HEADING_ID')
+  const h = (attrs, s) => schema.node('heading', attrs, s ? text(s) : [])
+  const base = doc(
+    h({ id: '', level: 1 }, 'Title'),
+    p(text('body')),
+    h({ id: '', level: 2 }, 'Second')
+  )
+  const state = EditorState.create({ schema, doc: base })
+  // Positions: heading#1 at 0, paragraph at 7, heading#2 at 13.
+  assert.equal(state.doc.child(0).type.name, 'heading')
+  assert.equal(state.doc.nodeAt(0)?.type.name, 'heading')
+
+  const idTr = () => {
+    const tr = state.tr.setMeta(headingKey, true)
+    tr.setNodeMarkup(0, undefined, { ...state.doc.nodeAt(0).attrs, id: 'title' })
+    const second = state.doc.child(0).nodeSize + state.doc.child(1).nodeSize
+    tr.setNodeMarkup(second, undefined, { ...state.doc.nodeAt(second).attrs, id: 'second' })
+    return tr
+  }
+
+  // H1: the real plugin shape — both gates hold, so it is view-only.
+  const classified = classifyTransactions([idTr()], state)
+  assert.equal(classified.kind, 'heading-id', 'the plugin batch is classified view-only')
+  assert.equal(classified.headings, 2, 'both stale headings ride the same batch')
+
+  // H2: the identical STRUCTURE without the plugin's meta stays refused — the
+  // classification is provenance-gated, not a free pass for setNodeMarkup.
+  const noMeta = state.tr
+  noMeta.setNodeMarkup(0, undefined, { ...state.doc.nodeAt(0).attrs, id: 'title' })
+  assert.equal(classifyTransactions([noMeta], state).kind, 'blocked')
+  assert.equal(classifyTransactions([noMeta], state).blockedCode, KERNEL_CODES.INPUT_TYPE)
+
+  // H3: the meta with a step that also changes `level` — a real content change
+  // (`#` vs `##` IS authored bytes) — must be refused, not smuggled through.
+  const levelToo = state.tr.setMeta(headingKey, true)
+  levelToo.setNodeMarkup(0, undefined, { ...state.doc.nodeAt(0).attrs, id: 'title', level: 3 })
+  assert.equal(classifyTransactions([levelToo], state).kind, 'blocked')
+
+  // H4: the meta on a batch that ALSO edits text is refused whole. This is the
+  // narrowness requirement stated as a test: a mixed batch is never view-only.
+  const mixed = state.tr.setMeta(headingKey, true)
+  mixed.setNodeMarkup(0, undefined, { ...state.doc.nodeAt(0).attrs, id: 'title' })
+  mixed.insertText('X', mixed.doc.child(0).nodeSize + 1)
+  assert.equal(classifyTransactions([mixed], state).kind, 'blocked')
+
+  // H5: the meta on a NON-heading attrs rewrite (a code_block language flip
+  // wearing the heading plugin's meta) is refused — the structural half of the
+  // gate resolves the real node and checks its type.
+  const cbState = EditorState.create({ schema, doc: doc(cb('js', 'x'), p(text('a'))) })
+  const wrongType = cbState.tr.setMeta(headingKey, true)
+  wrongType.setNodeMarkup(0, undefined, { ...cbState.doc.nodeAt(0).attrs, language: 'ts' })
+  assert.equal(classifyTransactions([wrongType], cbState).kind, 'blocked')
+
+  // H6: a SECOND doc-changing transaction riding the same batch is refused,
+  // even when both carry the meta — `extractHeadingIdSync` demands exactly one.
+  const second = state.tr.setMeta(headingKey, true)
+  second.insertText('Y', 8)
+  assert.equal(classifyTransactions([idTr(), second], state).kind, 'blocked')
+}
+
+console.log('PASS kernel gateway (heading-id sync: classified view-only; meta/structure/mixed-batch gates hold)')
+
+// --- L: syncListOrderPlugin's relabel shape stays REFUSED (deliberate).
+//
+// `syncListOrderPlugin` is an `appendTransaction`, so its `setNodeMarkup`
+// relabel steps would fold into the SAME batch as the user's keystroke and
+// take the whole batch (the user's own edit included) down with it. That trap
+// was investigated on the built app on 2026-08-17 and could NOT be reached in
+// kernel mode: across typing / Enter / Backspace / Tab / nested items on
+// ordered lists numbered `1.1.1.`, `1.2.3.` and `3.4.`, the plugin never
+// dispatched once — the labels always come from the kernel's own reparse of
+// the authored bytes (remark computes the true ordinal), so the plugin's
+// `expectedLabel` already matches, and every kernel-driven projection
+// transaction sets `addToHistory: false`, which the plugin's own guard skips.
+// No pass-through is therefore granted for this shape: an unreachable risk is
+// not worth a second hole in the blocking matrix. THIS CASE IS THE PIN — if a
+// future change makes the plugin reachable, it fails closed (a refused batch,
+// never a silent byte), and this assertion is where the decision is recorded.
+{
+  const listSchema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      ordered_list: { content: 'list_item+', group: 'block', attrs: { order: { default: 1 } } },
+      list_item: { content: 'paragraph+', attrs: { label: { default: '1.' }, listType: { default: 'ordered' } } },
+      text: { group: 'inline' }
+    }
+  })
+  const lp = (s) => listSchema.node('paragraph', null, [listSchema.text(s)])
+  const li = (label, s) => listSchema.node('list_item', { label, listType: 'ordered' }, [lp(s)])
+  const listDoc = listSchema.node('doc', null, [
+    listSchema.node('ordered_list', { order: 1 }, [li('1.', 'one'), li('1.', 'two')])
+  ])
+  const listState = EditorState.create({ schema: listSchema, doc: listDoc })
+  // The plugin's own shape: relabel item #2 from '1.' to '2.'.
+  const relabel = listState.tr
+  const secondItemPos = 1 + listState.doc.child(0).child(0).nodeSize
+  relabel.setNodeMarkup(secondItemPos, undefined, { label: '2.', listType: 'ordered' })
+  assert.equal(classifyTransactions([relabel], listState).kind, 'blocked')
+  assert.equal(classifyTransactions([relabel], listState).blockedCode, KERNEL_CODES.INPUT_TYPE)
+  // And folded onto a user keystroke (the appendTransaction shape) it is still
+  // refused as a whole — fail-closed, exactly as before this task.
+  const folded = listState.tr.insertText('X', 4)
+  folded.setNodeMarkup(folded.mapping.map(secondItemPos), undefined, { label: '2.', listType: 'ordered' })
+  assert.equal(classifyTransactions([folded], listState).kind, 'blocked')
+}
+
+console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — unreachable in kernel mode, pinned fail-closed)')
