@@ -287,13 +287,31 @@ function extractLanguageStep(transactions, oldState) {
 //     it did before this task (the dispatch veto refuses the edit and toasts,
 //     rather than silently accepting a PM-only change that the next reparse
 //     from the authoritative source would discard).
-//   * An `image-block` currently in the RESIZED state (`|ratio - 1| > 0.001`,
-//     the exact predicate editor-image-markdown.js:51 serializes on) is
-//     refused for EVERY attr: in that state the raw `alt`/`title` slots are
-//     owned by the ratio convention, so writing a user alt there would delete
-//     the persisted resize. Fail closed instead.
+//   * An `image-block` currently in the RESIZED state (`isResizedImageBlock`
+//     below — the serializer's own predicate, shared verbatim) is refused for
+//     EVERY attr: in that state the raw `alt`/`title` slots are owned by the
+//     ratio convention, so writing a user alt there would delete the
+//     persisted resize. Fail closed instead. The refusal is enforced at BOTH
+//     boundaries — here and again inside `commitImageAttrs`.
 const IMAGE_SOURCE_ATTRS = new Set(['src', 'alt', 'title'])
 const IMAGE_NODE_TYPES = new Set(['image-block', 'image'])
+
+// The ratio-in-alt predicate, character-for-character the one the serializer
+// branches on (components/editor-image-markdown.js:51 —
+// `Number.isFinite(ratio) && ratio > 0 && Math.abs(ratio - 1) > 0.001`).
+// Sharing ONE definition is the point: a guard that is merely "close to" the
+// serializer's condition is a guard that disagrees with it somewhere. (The
+// first version of this dropped the `ratio > 0` clause, which over-refused a
+// ratio of 0 — safe, but not the claim the comment made.)
+//
+// Applied at BOTH boundaries — classification AND commit. See
+// `commitImageAttrs` for why the commit side re-derives instead of trusting
+// that classification already ran.
+const isResizedImageBlock = (node) => {
+  if (node?.type?.name !== 'image-block') return false
+  const ratio = Number(node.attrs?.ratio)
+  return Number.isFinite(ratio) && ratio > 0 && Math.abs(ratio - 1) > 0.001
+}
 
 function extractImageAttrStep(transactions, oldState) {
   const changed = transactions.filter((tr) => tr && tr.docChanged)
@@ -315,10 +333,7 @@ function extractImageAttrStep(transactions, oldState) {
   }
   const typeName = node?.type?.name
   if (!typeName || !IMAGE_NODE_TYPES.has(typeName)) return null
-  if (typeName === 'image-block') {
-    const ratio = Number(node.attrs?.ratio)
-    if (Number.isFinite(ratio) && Math.abs(ratio - 1) > 0.001) return null
-  }
+  if (isResizedImageBlock(node)) return null
   return { pmPos: step.pos, blockImage: typeName === 'image-block', attr: step.attr, value: step.value }
 }
 
@@ -1007,8 +1022,9 @@ export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
 
 // commitImageAttrs: turns an `image-attrs`-classified batch (see
 // `extractImageAttrStep` above) into ONE `setImageAttrs` kernel transaction
-// and applies it. Same contract as `commitCodeLanguage`: the raw anchor is
-// re-derived through the proven projection map, never taken from the caller.
+// and applies it. Same contract as `commitCodeLanguage`: the raw anchor AND
+// the ratio-in-alt safety predicate are both re-derived through the proven
+// projection map, never taken from the caller.
 //
 // The two image shapes reach their raw anchor by different, equally proven
 // routes — and neither needs the pair to be EDITABLE:
@@ -1038,6 +1054,15 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
     const pair = Array.isArray(map.blockPairs)
       ? map.blockPairs.find((candidate) => candidate.pmPos === pmPos)
       : null
+    // RE-DERIVED, NOT TRUSTED (review finding, 2026-08-17). The ratio-in-alt
+    // refusal used to live ONLY in `extractImageAttrStep`, so this function —
+    // which every other guard at this boundary re-proves from the map — took
+    // the single datum deciding whether writing `alt` is SAFE on trust from
+    // its caller. Probed: calling this directly with `attr:'alt'` on
+    // `'![1.50](x.png "说明")'` wrote `'![user alt](x.png "说明")'` and
+    // destroyed the persisted resize. The pair already carries the live PM
+    // node, so the same predicate is re-applied here against proven state.
+    if (isResizedImageBlock(pair?.pmNode)) return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
     const children = pair?.mdBlock?.children
     const image = Array.isArray(children) && children.length === 1 && children[0]?.type === 'image'
       ? children[0]

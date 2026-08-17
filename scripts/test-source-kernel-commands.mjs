@@ -1241,6 +1241,32 @@ const setImage = (text, offset, patch) => {
   assert.equal(setImage('![a](b "t")\n', 0, { title: 'x"y' }).text, '![a](b "x\\"y")\n')
   assert.equal(setImage("![a](b 't')\n", 0, { title: "x'y" }).text, "![a](b 'x\\'y')\n")
   assert.equal(setImage('![a](b (t))\n', 0, { title: 'x)y' }).text, '![a](b (x\\)y))\n')
+
+  // Review finding (2026-08-17): the title ladder used to escape ONLY `\\` and
+  // the active quote, while alt/dest also carried `&` and `|` — 91 of 8778
+  // fuzzed rewrites refused, ALL of them titles. CommonMark decodes character
+  // references inside a title, so a verbatim `a&amp;b` came back as `a&b` and
+  // no candidate could express the literal; and a raw `|` inside a GFM cell
+  // splits the column.
+  for (const open of ['"', "'", '(']) {
+    const close = open === '(' ? ')' : open
+    const src = `![a](b ${open}t${close})\n`
+    const entity = setImage(src, 0, { title: 'a&amp;b' })
+    assert.equal(entity.ok, true, 'an entity-looking title must be expressible')
+    assert.equal(entity.text, `![a](b ${open}a\\&amp;b${close})\n`)
+    // …and it really does decode back to the literal the caller asked for.
+    const reparsed = buildSyntaxIndex(entity.text)
+    assert.equal(reparsed.tree.children[0].children[0].title, 'a&amp;b')
+  }
+  {
+    const table = '| ![a](b "t") | x |\n| --- | --- |\n| y | z |\n'
+    const piped = setImage(table, 2, { title: 'a|b' })
+    assert.equal(piped.ok, true, 'a piped title must be expressible inside a table cell')
+    assert.equal(piped.text, '| ![a](b "a\\|b") | x |\n| --- | --- |\n| y | z |\n')
+    const reparsed = buildSyntaxIndex(piped.text)
+    assert.equal(reparsed.tree.children[0].type, 'table', 'the table survived')
+    assert.equal(reparsed.tree.children[0].children[0].children[0].children[0].title, 'a|b')
+  }
 }
 
 // Angle-bracket destinations: kept when present, ADOPTED when the new value

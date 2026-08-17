@@ -1715,6 +1715,45 @@ const imgText = (s) => imgSchema.text(s)
   assert.equal(kernel.doc.text, md, 'no refusal path mutated the document')
 }
 
+// Case I6b (review finding, 2026-08-17): `commitImageAttrs` must RE-DERIVE the
+// ratio-in-alt guard, not inherit it from classification. Called directly —
+// the shape a future caller, a replay, or a refactor that reorders the
+// classification chain would produce — it used to write straight through and
+// destroy the persisted resize. This is the reviewer's exact probe.
+{
+  const md = '![1.50](x.png "说明")\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: '', caption: '说明', ratio: 1.5 }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const kernel = { doc: createMarkdownDocument(md) }
+
+  for (const attr of ['alt', 'title', 'src']) {
+    assert.deepEqual(
+      commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr, value: 'user alt' }),
+      { ok: false, code: KERNEL_CODES.UNSUPPORTED },
+      `${attr} must be refused at COMMIT even when classification is bypassed`
+    )
+  }
+  assert.equal(kernel.doc.text, md, 'the numeric ratio alt and the caption title are intact')
+
+  // The predicate is the SERIALIZER's, verbatim (editor-image-markdown.js:51):
+  // `ratio > 0` is part of it, so a non-positive ratio is NOT the resized
+  // state and keeps routing normally on both boundaries.
+  const zeroDoc = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a', ratio: 0 }))
+  const zeroState = EditorState.create({ schema: imgSchema, doc: zeroDoc })
+  const zeroMd = '![a](x.png)\n'
+  const zeroMap = buildProjectionMap(zeroMd, zeroState.doc)
+  assert.equal(
+    classifyTransactions([zeroState.tr.setNodeAttribute(0, 'src', 'y.png')], zeroState).kind,
+    'image-attrs'
+  )
+  const zeroKernel = { doc: createMarkdownDocument(zeroMd) }
+  const zeroCommit = commitImageAttrs({ kernel: zeroKernel, map: zeroMap, pmPos: 0, blockImage: true, attr: 'src', value: 'y.png' })
+  assert.equal(zeroCommit.ok, true, zeroCommit.code)
+  assert.equal(zeroCommit.applied.doc.text, '![a](y.png)\n')
+}
+
 // Case I7: an AttrStep on a NON-image node with an image attr name (or a
 // multi-step batch) is not an image edit.
 {

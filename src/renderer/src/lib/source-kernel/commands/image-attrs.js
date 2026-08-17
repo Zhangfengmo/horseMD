@@ -40,6 +40,25 @@
 // (minimal bytes), and nothing unprovable is ever returned (fail-closed:
 // `unsupported-structure`).
 //
+// WHAT AXIS (b) DOES NOT SEE, AND WHY THAT IS SAFE (review finding,
+// 2026-08-17). Both sides of the structural comparison are UN-injected parses,
+// while the projection map consumes the HIGHLIGHT-INJECTED tree
+// (`injectHighlightNodes` splits text nodes around `==…==`). So a rewrite that
+// changed a neighbouring text node's VALUE without changing its span would be
+// invisible here. It is unreachable by construction: mdast `image` is a LEAF
+// whose `alt` is a string, not children, so an image-internal rewrite can only
+// SHIFT the surrounding text nodes — and every shift is exactly what axis (b)
+// compares. (An independent oracle that ran the injected tree through the same
+// comparison found zero drift over 8687 rewrites.)
+//
+// REVISION BOOKKEEPING: a request whose values already ARE the source bytes
+// returns a zero-width no-op transaction rather than an empty edit list. The
+// document text is unchanged but the revision still advances, so the caller
+// sees a dirty tab and an empty undo step. Reachable only when a node view
+// dispatches an AttrStep whose value already matches the source (Crepe's own
+// `setAttr` only fires on a real change), so this is documented rather than
+// special-cased.
+//
 // SCOPE. `alt`, `src` (the destination) and `title` only. Crepe's image UI
 // also carries `caption` and `ratio` on its `image-block` node; those are
 // ProseMirror-side display state and are NOT written to the source here —
@@ -56,6 +75,16 @@ const isWs = (ch) => ch === ' ' || ch === '\t'
 // these sets are allowed to be generous: an over-escape that still decodes to
 // the requested value is byte-legal, and one that does not is rejected by the
 // same proof as everything else.
+//
+// KNOWN, ACCEPTED IMPRECISION: escaping is all-or-nothing PER FIELD. A value
+// whose verbatim spelling fails for ONE character escalates the WHOLE field
+// (`alt:'a|b]c'` is written `a\|b\]c`, where `a|b\]c` would have sufficed).
+// The bytes are correct and decode exactly, but they are not the minimal
+// spelling, and a user WILL see the extra backslashes in source mode. A
+// per-character ladder would need a per-character proof (one reparse per
+// character), which is not worth the cost for a rare attribute edit; the
+// escalation only ever fires on a value that already contains markup
+// characters.
 const ALT_ESCAPE = new Set(['\\', '`', '*', '_', '[', ']', '<', '>', '&', '!', '~', '|', '$'])
 const BARE_DEST_ESCAPE = new Set(['\\', '(', ')', '<', '>', '&', '|'])
 const ANGLE_DEST_ESCAPE = new Set(['\\', '<', '>', '|'])
@@ -179,9 +208,19 @@ const destCandidates = (value, wasAngle) => {
   return [...bare, ...wrapped]
 }
 
+// `&` and `|` belong here for the same reasons they belong in ALT_ESCAPE /
+// BARE_DEST_ESCAPE, and their absence was a measured hole (91 fuzz refusals,
+// all of them titles): CommonMark decodes character references inside a title,
+// so a verbatim `a&amp;b` comes back as `a&b` and no candidate could express
+// the literal; and inside a GFM cell a raw `|` splits the column, so
+// `title:'a|b'` was unexpressible in a table. Both are byte-verified:
+// `![a](u "a\&amp;b")` -> title `a&amp;b`; `| ![a](u "a\|b") | x |` -> title
+// `a|b` with the table intact.
 const quoteTitle = (value, open) => {
   const close = open === '(' ? ')' : open
-  const escapes = open === '(' ? new Set(['\\', '(', ')']) : new Set(['\\', close])
+  const escapes = open === '('
+    ? new Set(['\\', '(', ')', '&', '|'])
+    : new Set(['\\', close, '&', '|'])
   return [`${open}${value}${close}`, `${open}${escapeWith(value, escapes)}${close}`]
 }
 
