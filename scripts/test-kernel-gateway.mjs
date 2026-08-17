@@ -12,7 +12,7 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument } from '../src/renderer/src/lib/source-kernel/index.js'
 
@@ -1504,3 +1504,229 @@ const withSelection = (state, from, to) =>
 }
 
 console.log('PASS kernel gateway')
+
+// ---- Image attribute AttrSteps (Plan 5 Task 5) ----
+//
+// The node/attr shapes below are the REAL ones, probed from the live
+// components rather than invented:
+//   @milkdown/components image-block/index.js:564-580 — `setAttr(attr, value)`
+//     dispatches a bare `tr.setNodeAttribute(pos, attr, value)`; the only call
+//     sites are `caption` (:400,:410), `ratio` (:436) and `src` (:545).
+//   @milkdown/components image-inline/index.js:257 — the same, `src` only.
+//   The `alt` attr on `image-block` is THIS repo's own schema extension
+//     (src/renderer/src/components/editor-image-markdown.js:20-65).
+const imgSchema = new Schema({
+  nodes: {
+    doc: { content: 'block+' },
+    paragraph: { content: 'inline*', group: 'block' },
+    // Inline image: @milkdown/preset-commonmark's imageSchema attrs, verbatim.
+    image: {
+      group: 'inline',
+      inline: true,
+      atom: true,
+      attrs: { src: { default: '' }, alt: { default: '' }, title: { default: '' } }
+    },
+    // Block image: upstream `{src, caption, ratio}` PLUS this repo's `alt`.
+    'image-block': {
+      group: 'block',
+      atom: true,
+      attrs: {
+        src: { default: '' },
+        alt: { default: '' },
+        caption: { default: '' },
+        ratio: { default: 1 }
+      }
+    },
+    text: { group: 'inline' }
+  }
+})
+const imgDoc = (...c) => imgSchema.node('doc', null, c)
+const imgP = (...c) => imgSchema.node('paragraph', null, c)
+const imgText = (s) => imgSchema.text(s)
+
+// Case I1: the block-image `src` AttrStep (the ONE image path the real UI can
+// reach today — the empty-image ImageInput's confirm button) classifies as
+// `image-attrs` and commits the destination segment byte-exactly.
+{
+  const md = '![a](old.png)\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'old.png', alt: 'a', caption: 'a' }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a standalone image maps (image-block <-> paragraph > image)')
+  assert.equal(map.blockPairs[0].charMap, null, 'the image-block pair stays NON-editable')
+
+  const tr = state.tr.setNodeAttribute(0, 'src', 'new/pic.png')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'image-attrs')
+  assert.deepEqual(
+    { pmPos: classified.pmPos, blockImage: classified.blockImage, attr: classified.attr, value: classified.value },
+    { pmPos: 0, blockImage: true, attr: 'src', value: 'new/pic.png' }
+  )
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitImageAttrs({ kernel, map, ...classified })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '![a](new/pic.png)\n')
+  assert.deepEqual(committed.transaction.edits, [{ from: 5, to: 12, insert: 'new/pic.png' }])
+  assert.equal(committed.transaction.intent, 'image-attrs')
+}
+
+// Case I2: block-image `alt` — no UI reaches it today, but the route is proven
+// so a future one does not have to reopen the gateway.
+{
+  // A three-block document so the commit is provably scoped to the middle
+  // block (this schema has no heading node, so the lead-in is a paragraph).
+  const md = 't\n\n![a](x.png)\n\n尾\n'
+  const d = imgDoc(
+    imgP(imgText('t')),
+    imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }),
+    imgP(imgText('尾'))
+  )
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const imagePos = 3 // paragraph@0 (nodeSize 3) -> image-block@3
+  assert.equal(state.doc.nodeAt(imagePos)?.type.name, 'image-block')
+
+  const tr = state.tr.setNodeAttribute(imagePos, 'alt', '说明文字')
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'image-attrs')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitImageAttrs({ kernel, map, ...classified })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 't\n\n![说明文字](x.png)\n\n尾\n',
+    'only the label segment moves; the blocks around it are untouched')
+  assert.deepEqual(committed.transaction.edits, [{ from: 5, to: 6, insert: '说明文字' }])
+}
+
+// Case I3: the INLINE image is already an atom UNIT inside its paragraph's
+// charMap, so its AttrStep resolves through the ordinary `pmPosToRaw` — all
+// three of src/alt/title route and commit.
+{
+  const md = '前![a](x.png)后\n'
+  const d = imgDoc(imgP(imgText('前'), imgSchema.node('image', { src: 'x.png', alt: 'a' }), imgText('后')))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a paragraph with an inline image maps (the image is one width-1 atom)')
+  assert.equal(state.doc.nodeAt(2)?.type.name, 'image')
+  assert.equal(map.pmPosToRaw(2), 1, "the atom's PM position resolves to the '!' of ![a](x.png)")
+
+  for (const [attr, value, expected] of [
+    ['src', 'y.png', '前![a](y.png)后\n'],
+    ['alt', 'B', '前![B](x.png)后\n'],
+    ['title', '标题', '前![a](x.png "标题")后\n']
+  ]) {
+    const tr = state.tr.setNodeAttribute(2, attr, value)
+    const classified = classifyTransactions([tr], state)
+    assert.equal(classified.kind, 'image-attrs', `${attr} must classify`)
+    assert.equal(classified.blockImage, false)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitImageAttrs({ kernel, map, ...classified })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, expected)
+  }
+}
+
+// Case I4: DISPLAY-ONLY attrs. `caption` (caption editing) and `ratio` (the
+// resize handle) are ProseMirror-side state whose only Markdown expression is
+// the historical ratio-in-alt convention owned by
+// components/editor-image-markdown.js. They are deliberately NOT classified,
+// so the batch stays `blocked`/INPUT_TYPE and the dispatch veto refuses it —
+// never a silent PM-only change the next reparse would discard.
+{
+  const md = '![a](x.png)\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+
+  const caption = classifyTransactions([state.tr.setNodeAttribute(0, 'caption', '新标题')], state)
+  assert.equal(caption.kind, 'blocked')
+  assert.equal(caption.blockedCode, KERNEL_CODES.INPUT_TYPE)
+
+  const ratio = classifyTransactions([state.tr.setNodeAttribute(0, 'ratio', 0.5)], state)
+  assert.equal(ratio.kind, 'blocked')
+  assert.equal(ratio.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(md, '![a](x.png)\n', 'nothing was committed')
+}
+
+// Case I5: RATIO-IN-ALT PRESERVATION. A genuinely resized image-block
+// (|ratio-1| > 0.001 — the exact predicate editor-image-markdown.js:51
+// serializes on) has its raw `alt` slot occupied by the numeric ratio and its
+// `title` slot by the caption. Every kernel attr route is refused for such a
+// node, so no user-supplied alt can ever overwrite the persisted resize.
+{
+  const md = '![1.50](x.png "说明")\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: '', caption: '说明', ratio: 1.5 }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a resized image still MAPS — it is only the attr route that is refused')
+
+  for (const attr of ['src', 'alt', 'title']) {
+    const classified = classifyTransactions([state.tr.setNodeAttribute(0, attr, 'x')], state)
+    assert.equal(classified.kind, 'blocked', `${attr} on a resized image-block must be refused`)
+    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  }
+
+  // A ratio of exactly 1 (and one within the 0.001 tolerance) is NOT resized —
+  // those keep routing normally.
+  const unresized = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a', ratio: 1.0005 }))
+  const unresizedState = EditorState.create({ schema: imgSchema, doc: unresized })
+  assert.equal(
+    classifyTransactions([unresizedState.tr.setNodeAttribute(0, 'src', 'y.png')], unresizedState).kind,
+    'image-attrs'
+  )
+}
+
+// Case I6: `commitImageAttrs` fails closed on inputs it cannot resolve — a
+// pmPos with no matching pair, a non-string value, a missing map.
+{
+  const md = '![a](x.png)\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const kernel = { doc: createMarkdownDocument(md) }
+
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 99, blockImage: true, attr: 'src', value: 'y' }),
+    { ok: false, code: KERNEL_CODES.UNMAPPED }
+  )
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'ratio', value: '2' }),
+    { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  )
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'src', value: 2 }),
+    { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  )
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map: null, pmPos: 0, blockImage: true, attr: 'src', value: 'y' }),
+    { ok: false, code: KERNEL_CODES.UNMAPPED }
+  )
+  // A value the command cannot prove byte-for-byte (a line ending would end
+  // the block) surfaces the command's own code, not a generic one.
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'alt', value: 'a\nb' }),
+    { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  )
+  assert.equal(kernel.doc.text, md, 'no refusal path mutated the document')
+}
+
+// Case I7: an AttrStep on a NON-image node with an image attr name (or a
+// multi-step batch) is not an image edit.
+{
+  const d = imgDoc(imgP(imgText('abc')), imgSchema.node('image-block', { src: 'x.png' }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  // Built as a real AttrStep on the image, then re-pointed at the paragraph —
+  // the same "re-label the step" technique Case 17 uses, because this schema
+  // (like the real one) gives `paragraph` no `src` attr to set.
+  const tr = state.tr.setNodeAttribute(5, 'src', 'y.png')
+  assert.equal(classifyTransactions([tr], state).kind, 'image-attrs')
+  tr.steps[0].pos = 0
+  assert.notEqual(classifyTransactions([tr], state).kind, 'image-attrs',
+    'the node at step.pos must actually BE an image node')
+
+  // A batch carrying more than the one AttrStep is never an image edit.
+  const multi = state.tr.setNodeAttribute(5, 'src', 'y.png').insertText('x', 1)
+  assert.notEqual(classifyTransactions([multi], state).kind, 'image-attrs')
+}
+
+console.log('PASS kernel gateway (image attrs: src/alt/title route, caption/ratio refused, ratio-in-alt preserved)')

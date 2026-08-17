@@ -40,6 +40,19 @@ import {
 // every node it produces carries a real `position`.
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath)
 
+// The kernel's own parse, exposed for commands that must PROVE a candidate
+// rewrite reparses to the document they intend (Plan 5 Task 5's
+// `setImageAttrs` re-parses its candidate bytes and asserts the image node
+// still starts at the same offset and carries exactly the requested
+// alt/url/title). Deliberately the SAME `processor` instance the index uses
+// — a second, separately-configured chain could drift from it and turn a
+// "proof" into a guess. Highlight injection (a post-parse tree touch that
+// only splits text nodes) is not applied here: it never changes a node's
+// span and the callers below read block/inline node positions only.
+export function parseKernelMarkdown(text) {
+  return processor.parse(String(text ?? ''))
+}
+
 export function scanLines(text) {
   const lines = []
   let start = 0

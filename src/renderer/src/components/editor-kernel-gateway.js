@@ -20,7 +20,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage, setImageAttrs } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -255,6 +255,73 @@ function extractLanguageStep(transactions, oldState) {
   return { pmPos: step.pos, language: String(step.value ?? '') }
 }
 
+// Image attribute edits (Plan 5 Task 5). PM has TWO image nodes and both are
+// ATOMS, so an attribute change is never a ReplaceStep — same AttrStep shape
+// as the task checkbox and the code-block language picker above:
+//   * `image-block` (@milkdown/components image-block/index.js:564-580) —
+//     upstream attrs `{src, caption, ratio}`, plus the `alt` attr THIS repo
+//     adds (components/editor-image-markdown.js:20-65).
+//   * `image` (@milkdown/preset-commonmark) — inline, attrs `{src, alt, title}`.
+//
+// WHAT THE REAL UI DISPATCHES (probed in @milkdown/components, not guessed —
+// the only `setAttr(...)` call sites in either component):
+//   image-block/index.js:400,410  setAttr('caption', …)  (caption editing)
+//   image-block/index.js:436      setAttr('ratio',  …)   (resize handle)
+//   image-block/index.js:545      setAttr('src',    …)   (the empty-image
+//                                 ImageInput's "confirm link" button)
+//   image-inline/index.js:257     setAttr('src',    …)   (same input, inline)
+// There is NO UI in this app that dispatches `alt` or `title`. Those two are
+// classified here anyway (the command is byte-provable for them and a future
+// UI must not have to re-open the gateway), but see the task report: today
+// only the `src` route is user-reachable.
+//
+// WHICH ATTRS REACH THE SOURCE — and which must not:
+//   * `src`/`alt`/`title` map 1:1 onto `![alt](src "title")` and route to
+//     `setImageAttrs`.
+//   * `caption`/`ratio` are ProseMirror-side DISPLAY state. The one place
+//     they touch Markdown is the historical ratio-in-alt convention in
+//     components/editor-image-markdown.js (a genuinely resized image
+//     serializes its ratio as a numeric `alt` and its caption as the
+//     `title`), which this task must not change. They are therefore NOT
+//     classified — the batch falls through to `blocked`/INPUT_TYPE exactly as
+//     it did before this task (the dispatch veto refuses the edit and toasts,
+//     rather than silently accepting a PM-only change that the next reparse
+//     from the authoritative source would discard).
+//   * An `image-block` currently in the RESIZED state (`|ratio - 1| > 0.001`,
+//     the exact predicate editor-image-markdown.js:51 serializes on) is
+//     refused for EVERY attr: in that state the raw `alt`/`title` slots are
+//     owned by the ratio convention, so writing a user alt there would delete
+//     the persisted resize. Fail closed instead.
+const IMAGE_SOURCE_ATTRS = new Set(['src', 'alt', 'title'])
+const IMAGE_NODE_TYPES = new Set(['image-block', 'image'])
+
+function extractImageAttrStep(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'AttrStep') return null
+  if (!IMAGE_SOURCE_ATTRS.has(step.attr)) return null
+  if (!Number.isFinite(step.pos)) return null
+  if (typeof step.value !== 'string') return null
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let node
+  try {
+    node = stepDoc.nodeAt(step.pos)
+  } catch {
+    return null
+  }
+  const typeName = node?.type?.name
+  if (!typeName || !IMAGE_NODE_TYPES.has(typeName)) return null
+  if (typeName === 'image-block') {
+    const ratio = Number(node.attrs?.ratio)
+    if (Number.isFinite(ratio) && Math.abs(ratio - 1) > 0.001) return null
+  }
+  return { pmPos: step.pos, blockImage: typeName === 'image-block', attr: step.attr, value: step.value }
+}
+
 // PM mark name -> kernel inline-mark kind (Plan 4 Task 3). Names probed from
 // the LIVE schema sources, not guessed:
 //  - @milkdown/preset-commonmark: $markSchema("strong") / $markSchema("emphasis")
@@ -414,6 +481,10 @@ function extractTrailingAppend(transactions) {
 //      language-switch shape (see `extractLanguageStep` above) — same reason
 //      as rule 5, checked right alongside it (both are AttrStep shapes the
 //      plain-text ReplaceStep guard can never match).
+//   6b. A lone `AttrStep` setting an image node's `src`/`alt`/`title` (see
+//      `extractImageAttrStep` above) — the third AttrStep shape, same
+//      reasoning. `caption`/`ratio` are deliberately NOT matched and keep
+//      falling through to `blocked`.
 //   7. The trailing plugin's own empty-paragraph append (see
 //      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
 //      be vetoed.
@@ -450,6 +521,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const languageStep = extractLanguageStep(trs, oldState)
   if (languageStep) return { kind: 'code-language', pmPos: languageStep.pmPos, language: languageStep.language }
+
+  const imageAttr = extractImageAttrStep(trs, oldState)
+  if (imageAttr) return { kind: 'image-attrs', ...imageAttr }
 
   const trailingAppend = extractTrailingAppend(trs)
   if (trailingAppend) return { kind: 'trailing-append', at: trailingAppend.at }
@@ -769,6 +843,58 @@ export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
 
   const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)
   const routed = changeCodeLanguage({ doc: kernel.doc, index: syntaxIndex, offset, language })
+  if (!routed.ok) return { ok: false, code: routed.code }
+
+  const result = applySourceTransaction(kernel.doc, routed.transaction)
+  if (!result.ok) return { ok: false, code: result.code }
+  return { ok: true, applied: result, transaction: routed.transaction }
+}
+
+// commitImageAttrs: turns an `image-attrs`-classified batch (see
+// `extractImageAttrStep` above) into ONE `setImageAttrs` kernel transaction
+// and applies it. Same contract as `commitCodeLanguage`: the raw anchor is
+// re-derived through the proven projection map, never taken from the caller.
+//
+// The two image shapes reach their raw anchor by different, equally proven
+// routes — and neither needs the pair to be EDITABLE:
+//   * `image-block` is a block-level ATOM, so `buildProjectionMap` pairs it
+//     with the mdast `paragraph` that wraps the image and (correctly) gives it
+//     `charMap: null` — an atom has no character content to map. Its anchor is
+//     the mdast `image` child's OWN start offset, which the projection map has
+//     already shape-guarded (`children.length === 1 && children[0].type ===
+//     'image'`). This is exactly the `commitCodeLanguage` posture: an
+//     attribute route does not require a character map, only a proven block
+//     pair — which is why image-block pairs stay non-editable (see the task
+//     report's editable-vs-attr-route decision).
+//   * an INLINE `image` is a width-1 atom UNIT inside its paragraph's charMap,
+//     so its PM position resolves through the ordinary `pmPosToRaw` — the
+//     atom's own `rawStart`, i.e. the `!` of `![alt](src)`.
+// `setImageAttrs` then re-derives the image node from that offset itself and
+// refuses anything it cannot prove byte-for-byte.
+export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, value }) {
+  if (!kernel?.doc || !map) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  if (!Number.isFinite(pmPos)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  if (!IMAGE_SOURCE_ATTRS.has(attr) || typeof value !== 'string') {
+    return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  }
+
+  let offset = null
+  if (blockImage) {
+    const pair = Array.isArray(map.blockPairs)
+      ? map.blockPairs.find((candidate) => candidate.pmPos === pmPos)
+      : null
+    const children = pair?.mdBlock?.children
+    const image = Array.isArray(children) && children.length === 1 && children[0]?.type === 'image'
+      ? children[0]
+      : null
+    offset = image?.position?.start?.offset ?? null
+  } else if (typeof map.pmPosToRaw === 'function') {
+    offset = map.pmPosToRaw(pmPos)
+  }
+  if (!Number.isFinite(offset)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+
+  const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)
+  const routed = setImageAttrs({ doc: kernel.doc, index: syntaxIndex, offset, [attr]: value })
   if (!routed.ok) return { ok: false, code: routed.code }
 
   const result = applySourceTransaction(kernel.doc, routed.transaction)

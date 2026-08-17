@@ -57,7 +57,28 @@ const schema = new Schema({
     table_header_row: { content: '(table_header)*' },
     table_row: { content: '(table_cell)*' },
     table_header: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
-    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } }
+    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
+    // Plan 5 Task 5 — the TWO image nodes, with the attrs the live schemas
+    // declare: @milkdown/preset-commonmark's inline `image` ({src, alt,
+    // title}) and @milkdown/components' block `image-block` ({src, caption,
+    // ratio}) PLUS this repo's own `alt` extension
+    // (src/renderer/src/components/editor-image-markdown.js:20-65).
+    image: {
+      group: 'inline',
+      inline: true,
+      atom: true,
+      attrs: { src: { default: '' }, alt: { default: '' }, title: { default: '' } }
+    },
+    'image-block': {
+      group: 'block',
+      atom: true,
+      attrs: {
+        src: { default: '' },
+        alt: { default: '' },
+        caption: { default: '' },
+        ratio: { default: 1 }
+      }
+    }
   },
   // Plan 4 Task 3 — mark names mirror the LIVE schema exactly (probed):
   // preset-commonmark "strong"/"emphasis"/"inlineCode"/"link", preset-gfm
@@ -88,6 +109,9 @@ const tbl = (rows) => schema.node('table', null, rows.map((cells, rowIndex) =>
       { alignment },
       [s ? p(text(s)) : p()]
     )))))
+// Plan 5 Task 5 — image helpers.
+const ib = (attrs) => schema.node('image-block', attrs)
+const img = (attrs) => schema.node('image', attrs)
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -228,7 +252,28 @@ const FIXTURE_DOCS = {
     p(text('甲乙'))),
   '| aX | b |\n| :-- | --: |\n| c | dY |\n\n甲丙乙\n': () => doc(
     tbl([[['aX', 'left'], ['b', 'right']], [['c', 'left'], ['dY', 'right']]]),
-    p(text('甲丙乙')))
+    p(text('甲丙乙'))),
+  // Plan 5 Task 5 fixtures: a standalone image (Crepe's block-level
+  // `image-block` atom over the kernel's `paragraph > image` wrapper) plus a
+  // following paragraph, before and after each attribute rewrite.
+  '![a](x.png)\n\n甲乙\n': () => doc(ib({ src: 'x.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
+  '![a](y/pic.png)\n\n甲乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
+  '![a](y/pic.png)\n\n甲丙乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲丙乙'))),
+  '![说明文字](x.png)\n\n甲乙\n': () =>
+    doc(ib({ src: 'x.png', alt: '说明文字', caption: '说明文字' }), p(text('甲乙'))),
+  // Inline image: one width-1 atom inside its paragraph.
+  '前![a](x.png)后\n\n甲乙\n': () =>
+    doc(p(text('前'), img({ src: 'x.png', alt: 'a' }), text('后')), p(text('甲乙'))),
+  '前![a](x.png "标题")后\n\n甲乙\n': () =>
+    doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: '标题' }), text('后')), p(text('甲乙'))),
+  // An image whose raw span carries a LINE ENDING (CommonMark allows one in
+  // the whitespace before the title). It maps perfectly well — it is one
+  // atom on both sides — but `setImageAttrs` refuses to rewrite it, which is
+  // what makes it the per-pair degradation fixture.
+  '前![a](x.png\n"t")后\n\n甲乙\n': () =>
+    doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: 't' }), text('后')), p(text('甲乙'))),
+  '前![a](x.png\n"t")后\n\n甲丙乙\n': () =>
+    doc(p(text('前'), img({ src: 'x.png', alt: 'a', title: 't' }), text('后')), p(text('甲丙乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -2027,6 +2072,114 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, before, 'kernel bytes untouched')
   assert.equal(h.controller.kernel.doc.revision, revision)
   assert.ok(h.notifications.length >= 2, 'both refusals notify')
+}
+
+// ---- Case 22 (Plan 5 Task 5): image attribute edits end to end ----
+//
+// The image UI's `setAttr` is a bare `tr.setNodeAttribute` — the same AttrStep
+// route as the task checkbox and the language picker — so the attribute has
+// ALREADY flipped on the live PM doc by the time the kernel classifies it.
+// A proven rewrite therefore passes the transaction through (`undefined`),
+// commits the minimal segment bytes, and rebinds the map so the blocks AFTER
+// the image (whose raw offsets just moved) keep typing.
+
+// 22a: block-image `src` — the one image path the real UI can reach today
+// (@milkdown/components image-block/index.js:545, the empty-image
+// ImageInput's confirm button).
+{
+  const md = '![a](x.png)\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true, 'a document with a standalone image maps')
+  assert.equal(h.controller.kernel.map.blockPairs[0].charMap, null,
+    'the image-block pair is NOT editable — attribute edits do not need a charMap')
+
+  const verdict = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'src', 'y/pic.png'))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'a proven image attribute edit passes through')
+  assert.equal(h.controller.kernel.doc.text, '![a](y/pic.png)\n\n甲乙\n')
+  assert.deepEqual(h.changes[h.changes.length - 1], ['![a](y/pic.png)\n\n甲乙\n', false])
+
+  // The map was rebound against the LONGER source: the paragraph after the
+  // image still commits at its new raw offsets.
+  const typed = dispatchThrough(h, h.view.state.tr.insertText('丙', 3))
+  await flushMicrotasks()
+  assert.equal(typed, undefined, 'the paragraph after the image still types')
+  assert.equal(h.controller.kernel.doc.text, '![a](y/pic.png)\n\n甲丙乙\n')
+}
+
+// 22b: block-image `alt` — this repo's own schema extension. No UI dispatches
+// it today (see the gateway's probe notes); the route is proven so a future
+// one does not have to reopen the kernel.
+{
+  const md = '![a](x.png)\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'alt', '说明文字'))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '![说明文字](x.png)\n\n甲乙\n')
+}
+
+// 22c: INLINE image `title` — resolved through the ordinary charMap atom unit
+// rather than a blockPairs lookup, and inserted (the source had no title) with
+// the destination bytes untouched.
+{
+  const md = '前![a](x.png)后\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.equal(h.view.state.doc.nodeAt(2)?.type.name, 'image')
+  const verdict = dispatchThrough(h, h.view.state.tr.setNodeAttribute(2, 'title', '标题'))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '前![a](x.png "标题")后\n\n甲乙\n')
+}
+
+// 22d: DISPLAY-ONLY attrs never reach the source. `caption` (caption editing)
+// and `ratio` (the resize handle) are refused at classification, so the
+// dispatch is vetoed and the kernel bytes do not move — the historical
+// ratio-in-alt convention (components/editor-image-markdown.js) keeps owning
+// that byte form.
+{
+  const md = '![a](x.png)\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const revision = h.controller.kernel.doc.revision
+
+  for (const [attr, value] of [['caption', '新标题'], ['ratio', 0.5]]) {
+    const verdict = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, attr, value))
+    await flushMicrotasks()
+    assert.equal(verdict?.veto, true, `${attr} must be vetoed`)
+    assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+    assert.equal(h.controller.kernel.doc.revision, revision)
+  }
+  assert.ok(h.notifications.length >= 1, 'the refusal notifies')
+}
+
+// 22e: PER-PAIR DEGRADATION. An image whose raw span carries a line ending
+// maps fine (it is one atom on both sides) but cannot be rewritten
+// byte-provably, so ITS attribute edit is vetoed — while the rest of the
+// document, including the very paragraph that holds it, keeps editing.
+{
+  const md = '前![a](x.png\n"t")后\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true,
+    'the document still maps — the unprovable image degrades nothing structurally')
+  const revision = h.controller.kernel.doc.revision
+
+  const refused = dispatchThrough(h, h.view.state.tr.setNodeAttribute(2, 'src', 'y.png'))
+  await flushMicrotasks()
+  assert.equal(refused?.veto, true, 'the unprovable image refuses its own attribute edit')
+  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.ok(h.notifications.length >= 1)
+
+  // …and only its own pair: the paragraph AFTER it still commits.
+  // p(前,image,后) is nodeSize 5 (positions 0-4); the next paragraph's content
+  // starts at 6, so 7 is between 甲 and 乙.
+  const typed = dispatchThrough(h, h.view.state.tr.insertText('丙', 7))
+  await flushMicrotasks()
+  assert.equal(typed, undefined, 'the rest of the document is unaffected')
+  assert.equal(h.controller.kernel.doc.text, '前![a](x.png\n"t")后\n\n甲丙乙\n')
 }
 
 console.log('PASS kernel mode headless')

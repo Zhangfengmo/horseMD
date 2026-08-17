@@ -36,7 +36,7 @@ import {
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -522,6 +522,44 @@ export function createKernelMode({
           map: kernel.map,
           pmPos: classified.pmPos,
           language: classified.language
+        })
+        if (!committed.ok) {
+          notifyBlocked(committed.code)
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
+        bindMap(newState?.doc || null)
+        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'image-attrs': {
+        // Image attribute edit (Plan 5 Task 5), the third AttrStep route
+        // after `code-language` and `task-toggle` and shaped identically to
+        // the first: the attribute has ALREADY flipped on the live PM doc by
+        // the time classification runs, so once `commitImageAttrs` proves the
+        // matching byte rewrite of `![alt](src "title")` the original
+        // transaction is allowed through unchanged (`return undefined`)
+        // rather than vetoed-and-reconciled.
+        //
+        // The rebind is unconditional, like `code-language`: the rewrite
+        // changes the byte length of a block that sits BEFORE every later
+        // block, so every raw offset the map serves past this image is stale
+        // until it is rebuilt.
+        //
+        // Refusal is loud and total: `caption`/`ratio` never reach here
+        // (the gateway does not classify them), and anything `setImageAttrs`
+        // cannot prove byte-for-byte vetoes the PM transaction too, so the
+        // view never shows an attribute the source does not carry.
+        const committed = commitImageAttrs({
+          kernel,
+          index: buildSyntaxIndex(kernel.doc.text),
+          map: kernel.map,
+          pmPos: classified.pmPos,
+          blockImage: classified.blockImage,
+          attr: classified.attr,
+          value: classified.value
         })
         if (!committed.ok) {
           notifyBlocked(committed.code)

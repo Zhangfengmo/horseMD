@@ -6,6 +6,7 @@ import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/comman
 import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands/task-toggle.js'
 import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
+import { setImageAttrs } from '../src/renderer/src/lib/source-kernel/commands/image-attrs.js'
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
 import { joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
@@ -1179,3 +1180,164 @@ const routeAt = (src, key, offset) => {
 }
 
 console.log('PASS source-kernel commands (inline html: reachable, never bisected)')
+
+// ---- Image attribute edits (Plan 5 Task 5) ----
+//
+// Byte cases for `setImageAttrs`. Every expectation below is the FULL document
+// text after applying the returned transaction, plus (where the point is
+// minimality) the exact edit list — a whole-span rewrite that happens to
+// produce the same bytes would pass the first assertion and fail the second,
+// which is the difference this command exists to make.
+const imageSetup = (text) => ({
+  doc: createMarkdownDocument(text),
+  index: buildSyntaxIndex(text)
+})
+
+const setImage = (text, offset, patch) => {
+  const { doc, index } = imageSetup(text)
+  const routed = setImageAttrs({ doc, index, offset, ...patch })
+  if (!routed.ok) return { ok: false, code: routed.code }
+  const applied = applySourceTransaction(doc, routed.transaction)
+  assert.equal(applied.ok, true, applied.code)
+  return { ok: true, text: applied.doc.text, edits: routed.transaction.edits, transaction: routed.transaction }
+}
+
+// Each attribute alone — minimal, single-segment edits.
+{
+  const alt = setImage('![a](b.png)\n', 0, { alt: 'new alt' })
+  assert.equal(alt.text, '![new alt](b.png)\n')
+  assert.deepEqual(alt.edits, [{ from: 2, to: 3, insert: 'new alt' }], 'only the label segment is rewritten')
+
+  const src = setImage('![a](b.png)\n', 0, { src: 'c/d.png' })
+  assert.equal(src.text, '![a](c/d.png)\n')
+  assert.deepEqual(src.edits, [{ from: 5, to: 10, insert: 'c/d.png' }], 'only the destination segment is rewritten')
+
+  const title = setImage('![a](b.png)\n', 0, { title: 'T' })
+  assert.equal(title.text, '![a](b.png "T")\n')
+  assert.deepEqual(title.edits, [{ from: 10, to: 10, insert: ' "T"' }], 'a missing title is INSERTED, nothing else moves')
+
+  const all = setImage('![a](b.png)\n', 0, { alt: 'A', src: 'B', title: 'C' })
+  assert.equal(all.text, '![A](B "C")\n')
+  assert.equal(all.edits.length, 3, 'three independent segment edits, never one whole-span rewrite')
+}
+
+// Title removal: the title AND the whitespace that introduced it.
+{
+  assert.equal(setImage('![a](b "t")\n', 0, { title: null }).text, '![a](b)\n')
+  // '' is ProseMirror's own "no title" (the image schema defaults title to
+  // ''), so it removes rather than writing a literal `""`.
+  assert.equal(setImage('![a](b "t")\n', 0, { title: '' }).text, '![a](b)\n')
+  const removed = setImage('![a](b "t")\n', 0, { title: null })
+  assert.deepEqual(removed.edits, [{ from: 6, to: 10, insert: '' }])
+}
+
+// Quote style is PRESERVED (all three CommonMark title forms), and the active
+// closing character is escaped rather than refused.
+{
+  assert.equal(setImage('![a](b "t")\n', 0, { title: 'z' }).text, '![a](b "z")\n')
+  assert.equal(setImage("![a](b 't')\n", 0, { title: 'z' }).text, "![a](b 'z')\n")
+  assert.equal(setImage('![a](b (t))\n', 0, { title: 'z' }).text, '![a](b (z))\n')
+  assert.equal(setImage('![a](b "t")\n', 0, { title: 'x"y' }).text, '![a](b "x\\"y")\n')
+  assert.equal(setImage("![a](b 't')\n", 0, { title: "x'y" }).text, "![a](b 'x\\'y')\n")
+  assert.equal(setImage('![a](b (t))\n', 0, { title: 'x)y' }).text, '![a](b (x\\)y))\n')
+}
+
+// Angle-bracket destinations: kept when present, ADOPTED when the new value
+// needs them (a URL with whitespace has no bare spelling), never introduced
+// gratuitously.
+{
+  assert.equal(setImage('![a](<b c>)\n', 0, { src: 'd e' }).text, '![a](<d e>)\n')
+  assert.equal(setImage('![a](<b c>)\n', 0, { src: 'plain.png' }).text, '![a](<plain.png>)\n')
+  assert.equal(setImage('![a](b)\n', 0, { src: 'd e' }).text, '![a](<d e>)\n')
+  assert.equal(setImage('![a](b)\n', 0, { src: 'plain.png' }).text, '![a](plain.png)\n')
+  assert.equal(setImage('![a](<>)\n', 0, { src: 'u' }).text, '![a](<u>)\n')
+}
+
+// Empty alt (both directions), CJK alt, percent-encoded URL.
+{
+  assert.equal(setImage('![](b)\n', 0, { alt: 'CJK中文说明' }).text, '![CJK中文说明](b)\n')
+  assert.equal(setImage('![a](b)\n', 0, { alt: '' }).text, '![](b)\n')
+  assert.equal(setImage('![a](foo%20bar.png)\n', 0, { src: 'x%20y.png' }).text, '![a](x%20y.png)\n',
+    'percent-encoding is bytes, never re-encoded or decoded')
+  assert.equal(setImage('![a](b)\n', 0, { src: '图片/说明.png' }).text, '![a](图片/说明.png)\n')
+}
+
+// Escaping is EARNED, not assumed: verbatim bytes first, escapes only when the
+// reparse proof says the verbatim spelling would decode to something else.
+{
+  assert.equal(setImage('![a](b)\n', 0, { alt: 'a]b' }).text, '![a\\]b](b)\n')
+  assert.equal(setImage('![a](b)\n', 0, { alt: 'a*b*c' }).text, '![a\\*b\\*c](b)\n')
+  assert.equal(setImage('![a](b)\n', 0, { alt: '# not a heading' }).text, '![# not a heading](b)\n',
+    'a leading # inside a label is inert — no escape added')
+  assert.equal(setImage('![a](b)\n', 0, { src: 'a)b' }).text, '![a](a\\)b)\n')
+  assert.equal(setImage('![a](b)\n', 0, { src: 'a(b)c' }).text, '![a](a(b)c)\n',
+    'balanced parens need no escape in a bare destination')
+}
+
+// Surrounding bytes are untouched: interior whitespace inside the parens, an
+// inline image mid-paragraph, a quoted / list-nested image.
+{
+  assert.equal(setImage('![a]( b  "t" )\n', 0, { src: 'q' }).text, '![a]( q  "t" )\n')
+  assert.equal(setImage('text ![a](b) tail\n', 5, { alt: 'z' }).text, 'text ![z](b) tail\n')
+  assert.equal(setImage('> ![a](b)\n', 2, { alt: 'q' }).text, '> ![q](b)\n')
+  assert.equal(setImage('- ![a](b)\n', 2, { src: 'z' }).text, '- ![a](z)\n')
+}
+
+// CONTEXT-SENSITIVE proof. A raw `|` written into an image inside a GFM table
+// cell leaves the image node itself intact at the same offset with exactly the
+// requested url — while collapsing the whole TABLE into a paragraph. The
+// structural (whole-tree) half of the verification is what rejects the
+// verbatim candidate and promotes the escaped one.
+{
+  const table = '| ![a](b) | x |\n| --- | --- |\n| y | z |\n'
+  const src = setImage(table, 2, { src: 'p|q' })
+  assert.equal(src.text, '| ![a](p\\|q) | x |\n| --- | --- |\n| y | z |\n')
+  const alt = setImage(table, 2, { alt: 'x|y' })
+  assert.equal(alt.text, '| ![x\\|y](b) | x |\n| --- | --- |\n| y | z |\n')
+  // …and the escaped bytes really do reparse to the requested value INSIDE a
+  // still-intact table.
+  const reindexed = buildSyntaxIndex(src.text)
+  const row = reindexed.tree.children[0]
+  assert.equal(row.type, 'table', 'the table survived')
+  assert.equal(row.children[0].children[0].children[0].url, 'p|q')
+}
+
+// A no-op request (the values already ARE the source bytes) is a well-formed
+// zero-width transaction, never an `invalid-range` from an empty edit list.
+{
+  const noop = setImage('![a](b)\n', 0, { alt: 'a', src: 'b' })
+  assert.equal(noop.text, '![a](b)\n')
+  assert.deepEqual(noop.edits, [{ from: 0, to: 0, insert: '' }])
+}
+
+// Refusal shapes — all `unsupported-structure`, all fail-closed.
+{
+  // A line ending in a written value would end the block it lives in.
+  assert.deepEqual(setImage('![a](b)\n', 0, { alt: 'line\nbreak' }), { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(setImage('![a](b)\n', 0, { src: 'a\r\nb' }), { ok: false, code: 'unsupported-structure' })
+  // No image at the offset.
+  assert.deepEqual(setImage('plain paragraph\n', 3, { alt: 'x' }), { ok: false, code: 'unsupported-structure' })
+  // A reference image is a DIFFERENT mdast node type and is never matched.
+  assert.deepEqual(
+    setImage('![a][ref]\n\n[ref]: b.png\n', 2, { alt: 'x' }),
+    { ok: false, code: 'unsupported-structure' }
+  )
+  // Nothing requested.
+  {
+    const { doc, index } = imageSetup('![a](b)\n')
+    assert.deepEqual(setImageAttrs({ doc, index, offset: 0 }), { ok: false, code: 'unsupported-structure' })
+    assert.deepEqual(setImageAttrs({ doc, index, offset: NaN, alt: 'x' }), { ok: false, code: 'unsupported-structure' })
+  }
+}
+
+// Selection bookkeeping: an anchor before the first rewritten byte survives
+// verbatim; one after the last shifts by the edit delta.
+{
+  const { doc, index } = imageSetup('text ![a](b) tail\n')
+  const routed = setImageAttrs({ doc, index, offset: 5, src: 'longer.png' })
+  assert.equal(routed.ok, true)
+  assert.deepEqual(routed.transaction.selection, { anchor: 5, head: 5 })
+  assert.equal(routed.transaction.intent, 'image-attrs')
+}
+
+console.log('PASS source-kernel commands (image attrs: minimal segment rewrites, proven byte-for-byte)')
