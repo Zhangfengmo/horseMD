@@ -64,18 +64,26 @@ const FORBIDDEN = /&#x20;|&nbsp;|<!--|​|﻿/
 // Critical-3 family (a raw-offset write splitting a '\r\n' into a lone CR and
 // a bare LF) walked straight past 12 seeds x 120 steps.
 //
-// Both invariants below were verified to be non-vacuous by re-running this
-// file against a deliberately un-fixed kernel:
-//  * uniformity — with the CRLF chokepoint AND `routeStructuralKey`'s guard
-//    removed (i.e. the kernel as it shipped before Critical 3), the
-//    uniform-CRLF starter fails at seed 3 step 28 with
-//    '中甲 \r\n\r\n1) 乙&\r\r\n2) \n   2) &*丙\r\n' — a lone CR and a bare LF
-//    in a file that started uniformly CRLF.
-//  * inverse-appliability — with the chokepoint's `history-invert` exemption
-//    removed, the MIXED starter fails at seed 4 step 50 with
-//    `inverse not appliable: invalid-range`, which is exactly the frozen-undo
-//    regression the re-review found.
-// The fixed kernel passes all 12 seeds for both.
+// NON-VACUITY, re-verified at the COMMITTED budget (re-review round 2 found
+// the first attempt vacuous: 12 seeds x 120 steps with a randomly DRAWN
+// starter PASSED against the true pre-Critical-3 kernel, and only STEPS=400
+// failed — a suite that passes both before and after the fix is worth
+// nothing). The starter draw is gone (see the matrix at the bottom of this
+// file), and both invariants were then re-run verbatim against real un-fixed
+// kernels in scratch checkouts:
+//
+//  * uniformity — `git archive 0647df2 src` (the tree as it shipped BEFORE
+//    Critical 3: no chokepoint, no router guard) + these scripts:
+//      AssertionError: line endings stopped being uniform (seed 4 step 12 Enter):
+//      {"crlf":4,"loneCr":1,"bareLf":1} in "甲\r\n\r\n1) 乙\r\n   2) 丙\r\r\n\n"
+//  * inverse-appliability — the current tree with only the chokepoint's
+//    `history-invert` exemption removed:
+//      AssertionError: inverse not appliable (seed 1 step 19 Enter): invalid-range
+//  * the published-set check below — deliberately negated (`published.has(text
+//    + 'ZZ')`) to prove undos are actually reached:
+//      AssertionError: undo produced a document the kernel never held (seed 1 step 18)
+//
+// The fixed kernel passes all 12 seeds x 5 starters for all three.
 const endingProfile = (text) => ({
   crlf: (text.match(/\r\n/g) || []).length,
   loneCr: (text.match(/\r(?!\n)/g) || []).length,
@@ -146,11 +154,19 @@ const collectInterestingOffsets = (index) => {
   return Array.from(offsets)
 }
 
-const runSeed = (seed) => {
+const runSeed = (seed, starter) => {
   const random = mulberry32(seed)
   const pick = (list) => list[Math.floor(random() * list.length)]
-  const starter = pick(STARTERS)
   let doc = createMarkdownDocument(starter)
+  // Every text this run has ever PUBLISHED (the starter plus every applied
+  // result). An undo/redo may only ever land on a member of this set — that
+  // is the whole claim behind the `history-invert` exemption to the CRLF
+  // chokepoint ("an inverse can only restore a document the kernel already
+  // held"), and until now nothing in this repo asserted it: the undo/redo
+  // branch below checked `applied.ok` and `assertInverseAppliable` checked
+  // the inverse of a FORWARD edit while discarding its result. The claim had
+  // to be proven outside the repo, which is exactly where a claim goes stale.
+  const published = new Set([starter])
   // A document that STARTED uniform must STAY uniform: no command may invent
   // a second line-ending spelling. (A mixed starter is exempt — there is no
   // uniformity to preserve; its job is the inverse-appliability check below.)
@@ -228,6 +244,10 @@ const runSeed = (seed) => {
             `forbidden entity introduced by ${action} (seed ${seed} step ${step})`)
         }
         assertEndings(applied.doc.text, `seed ${seed} step ${step} ${action}`)
+        // An undo/redo may only ever produce a document this run already
+        // published (see `published` above).
+        assert.ok(published.has(applied.doc.text),
+          `${action} produced a document the kernel never held (seed ${seed} step ${step}): ${JSON.stringify(applied.doc.text)}`)
         markdownComparisonKey(applied.doc.text)
         doc = applied.doc
         bump(stats.applied, action)
@@ -285,16 +305,32 @@ const runSeed = (seed) => {
     markdownComparisonKey(applied.doc.text)
     history.record(applied, result.transaction)
     doc = applied.doc
+    published.add(doc.text)
     bump(stats.applied, action)
     journal.push({ step, action })
   }
   return doc.text
 }
 
+// EVERY starter for EVERY seed (re-review round 2, finding A). The starter
+// used to be drawn from the same RNG stream as the actions, so which document
+// a seed exercised was a lottery — and the lottery is what made the line-ending
+// invariant VACUOUS at the committed budget: run verbatim against the true
+// pre-Critical-3 kernel (`git archive 0647df2 src` + these scripts), 12 seeds
+// x 120 steps PASSED, because no seed drew the uniform-CRLF starter into a
+// region where a structural command could bisect a '\r\n'. A suite that passes
+// both before and after the fix is worth nothing, so the draw is gone: the
+// matrix below runs all 5 starters under all 12 seeds, which makes the CRLF
+// starter reachable under every seed instead of ~1 in 5. Verified against that
+// same pre-C3 scratch copy — see the failure quoted in the invariant's own
+// comment above.
 for (const seed of SEEDS) {
-  const first = runSeed(seed)
-  const second = runSeed(seed)
-  assert.equal(first, second, `seed ${seed} must be deterministic`)
+  for (const starter of STARTERS) {
+    const label = `seed ${seed} starter ${JSON.stringify(starter)}`
+    const first = runSeed(seed, starter)
+    const second = runSeed(seed, starter)
+    assert.equal(first, second, `${label} must be deterministic`)
+  }
 }
 
 // 已归档的最小化失败序列全部回放
@@ -304,7 +340,11 @@ for (const file of readdirSync(fixtureDir).filter((f) => f.endsWith('.json'))) {
   const spec = JSON.parse(readFileSync(join(fixtureDir, file), 'utf8'))
   process.env.SEED = String(spec.seed)
   process.env.STEPS = String(spec.steps)
-  runSeed(spec.seed)
+  // `starter` became an explicit parameter when the draw was removed (see the
+  // matrix above). An archived spec may name one; older ones replay against
+  // every starter, which is a superset of what they used to cover.
+  if (spec.starter) runSeed(spec.seed, spec.starter)
+  else for (const starter of STARTERS) runSeed(spec.seed, starter)
 }
 
 if (COVERAGE) {
@@ -318,4 +358,4 @@ if (COVERAGE) {
   }
 }
 
-console.log(`PASS source-kernel state machine (${SEEDS.length} seeds x ${STEPS} steps)`)
+console.log(`PASS source-kernel state machine (${SEEDS.length} seeds x ${STARTERS.length} starters x ${STEPS} steps)`)
