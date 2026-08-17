@@ -2734,4 +2734,31 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(h.notifications.length > before, 'the refusal notifies')
 }
 
+// Case B6 (the "slash items do nothing" root cause, 2026-08-17): in a
+// DEGRADED tab — one whose `attachAfterCreate` could not build a projection
+// map, so the controller handed the tab back to the legacy pipeline — every
+// slash entry point must report NOT HANDLED (`false`), never `true`.
+//
+// This is the contract the menu's fallback rests on (editor-slash-menu.js):
+// the kernel routes return `true` for every invocation they own, success AND
+// refusal-with-toast, and `false` only when the kernel is not the live
+// authority. A `true` here would mean the item swallows the click, runs
+// nothing and says nothing — which is exactly the reported symptom, on EVERY
+// block-type item and on `quote` alike.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), false, 'this fixture must degrade')
+  assert.equal(h.controller.isActive(), false, 'a degraded controller is not active')
+  const before = h.notifications.length
+  for (const target of ['heading1', 'heading2', 'bullet', 'ordered']) {
+    assert.equal(h.controller.runBlockTypeFromQuery(target, h.view), false,
+      `a degraded tab must report '${target}' as NOT handled so the menu can fall back to legacy`)
+  }
+  assert.equal(h.controller.runQuoteToggleFromQuery(h.view), false,
+    'the quote route carries the same contract')
+  assert.equal(h.notifications.length, before,
+    'a not-handled answer must not toast — the legacy command is about to run instead')
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'and must not touch the bytes')
+}
+
 console.log('PASS kernel mode headless')

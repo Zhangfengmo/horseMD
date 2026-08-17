@@ -304,10 +304,30 @@ export function createConfiguredCrepe({
       // Everything still absent from that table (task, divider, text, image,
       // code, table, math) keeps the phase-1 refusal message. Each is refused
       // for a probed reason recorded in lib/source-kernel/commands/block-type.js.
+      //
+      // THE DEGRADED-TAB HOLE (2026-08-17, "the slash items do nothing"):
+      // `kernelMode` is the tab's SETTING, not the kernel's live authority.
+      // When `attachAfterCreate` cannot build a projection map (an unmappable
+      // document, or a chunked/heavy load) the controller sets `degraded` and
+      // hands the tab back to the legacy pipeline wholesale — but this option
+      // object was already built, so every item stayed either blocked or
+      // routed to a kernel entry point that now bails out at its own
+      // `inactive()` guard and returns false WITHOUT a toast. The menu closed
+      // and nothing happened, on every item, with no message: exactly the
+      // reported symptom, and it applied to `quote` just as much as to the
+      // block types. Both halves are fixed here and in editor-slash-menu.js:
+      //  * `isBlocked` returns null for EVERY item once the kernel is not
+      //    active — a degraded tab is a legacy tab, and legacy owns them all;
+      //  * the `run` swap falls back to the item's own legacy command when
+      //    the kernel route reports "not handled" (see the menu's own note).
+      // `isActive()` is read at CLICK time, not captured, so a tab that
+      // degrades after mount is covered.
       kernelMode
         ? {
-            isBlocked: (id) =>
-              (id === 'quote' || KERNEL_BLOCK_TYPE_ITEMS[id] ? null : 'kernelMode.unsupported'),
+            isBlocked: (id) => {
+              if (!kernelPlugins?.isActive?.()) return null
+              return id === 'quote' || KERNEL_BLOCK_TYPE_ITEMS[id] ? null : 'kernelMode.unsupported'
+            },
             notify,
             quoteToggle: (view) => kernelPlugins?.runQuoteToggleFromQuery?.(view),
             blockTypeItems: KERNEL_BLOCK_TYPE_ITEMS,

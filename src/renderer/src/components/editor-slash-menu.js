@@ -368,7 +368,18 @@ class SlashMenu {
       // comment for the full probe transcript; a real bug found while
       // building this item's first genuine end-to-end UI regression, Plan 4
       // Task 5).
-      all = all.map((it) => (it.id === 'quote' ? { ...it, run: (ctx, view) => quoteRun(view) } : it))
+      // FALLBACK CONTRACT (2026-08-17): the kernel entry points return TRUE
+      // for every invocation they own — success AND refusal-with-toast — and
+      // FALSE only when the kernel is not the live authority for this tab
+      // (`inactive()`: disposed, not yet attached, or DEGRADED to legacy after
+      // an unmappable/chunked attach). A falsy answer therefore means "the
+      // kernel did not handle this", and the honest response is the item's own
+      // legacy command — which is exactly what a degraded tab runs on for
+      // every other edit. Before this, the swap was unconditional and a
+      // degraded tab's items closed the menu and did nothing, silently.
+      all = all.map((it) => (it.id === 'quote'
+        ? { ...it, run: (ctx, view) => { if (!quoteRun(view)) it.run(ctx, view) } }
+        : it))
     }
     if (this.blockTypeItems && this.blockTypeRun) {
       // Same no-`clearThen()` contract as the quote swap directly above, for
@@ -378,8 +389,11 @@ class SlashMenu {
       // kernel's self-heal prunes before the conversion can run.
       const items = this.blockTypeItems
       const runBlockType = this.blockTypeRun
+      // Same fallback contract as the quote swap above.
       all = all.map((it) => (
-        items[it.id] ? { ...it, run: (ctx, view) => runBlockType(items[it.id], view) } : it
+        items[it.id]
+          ? { ...it, run: (ctx, view) => { if (!runBlockType(items[it.id], view)) it.run(ctx, view) } }
+          : it
       ))
     }
     const t = this.getT
