@@ -8,6 +8,7 @@ import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/rendere
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
 import { setImageAttrs } from '../src/renderer/src/lib/source-kernel/commands/image-attrs.js'
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
+import { applyLinkEdit } from '../src/renderer/src/lib/source-kernel/commands/link-toggle.js'
 import { joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { markerFor } from '../src/renderer/src/lib/source-kernel/mark-map.js'
@@ -1341,3 +1342,248 @@ const setImage = (text, offset, patch) => {
 }
 
 console.log('PASS source-kernel commands (image attrs: minimal segment rewrites, proven byte-for-byte)')
+
+// ---- Link editing (Plan 5 Task 6) ----
+//
+// Byte cases for `applyLinkEdit`. Every expectation is the FULL document text
+// after applying the returned transaction, and — where minimality is the
+// point — the exact edit list, so a whole-span rewrite that happens to
+// produce the same bytes still fails.
+//
+// `visAt` mirrors what the kernel-mode route hands the command: the character
+// map of the PHRASING block containing the operation (paragraph / heading /
+// tableCell), plus visible offsets inside it. `blockOffset` selects the block
+// the same way the projection map's pair lookup does — by a raw offset inside
+// it — so a table fixture can address one cell.
+const linkBlockAt = (tree, offset) => {
+  const kinds = new Set(['paragraph', 'heading', 'tableCell'])
+  let found = null
+  const visit = (node) => {
+    const start = node?.position?.start?.offset
+    const end = node?.position?.end?.offset
+    if (kinds.has(node?.type) && Number.isInteger(start) && Number.isInteger(end) &&
+        offset >= start && offset <= end) {
+      if (!found || start >= found.position.start.offset) found = node
+    }
+    for (const child of node?.children || []) visit(child)
+  }
+  visit(tree)
+  return found
+}
+
+const linkEdit = (text, blockOffset, args) => {
+  const doc = createMarkdownDocument(text)
+  const index = buildSyntaxIndex(text)
+  const block = linkBlockAt(index.tree, blockOffset)
+  assert.ok(block, 'fixture must have a phrasing block at ' + blockOffset)
+  const map = buildCharacterMap(text, block)
+  assert.ok(map, 'fixture block must character-map')
+  const routed = applyLinkEdit({ doc, index, map, ...args })
+  if (!routed.ok) return { ok: false, code: routed.code }
+  const applied = applySourceTransaction(doc, routed.transaction)
+  assert.equal(applied.ok, true, applied.code)
+  return {
+    ok: true,
+    text: applied.doc.text,
+    edits: routed.transaction.edits,
+    intent: routed.transaction.intent,
+    selection: routed.transaction.selection
+  }
+}
+
+// WRAP — a selection becomes a link's label; only two zero-width inserts.
+{
+  const plain = linkEdit('hello world\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'https://x.com' })
+  assert.equal(plain.text, '[hello](https://x.com) world\n')
+  assert.deepEqual(plain.edits, [
+    { from: 0, to: 0, insert: '[' },
+    { from: 5, to: 5, insert: '](https://x.com)' }
+  ], 'wrap is exactly two zero-width inserts — the label bytes are never rewritten')
+  assert.equal(plain.intent, 'link-wrap')
+  // The label content stays selected (the mark commands' contract).
+  assert.deepEqual(plain.selection, { anchor: 1, head: 6 })
+
+  // Mid-paragraph, and with a title.
+  assert.equal(linkEdit('a bc d\n', 0, { visFrom: 2, visTo: 4, op: 'wrap', href: 'u' }).text, 'a [bc](u) d\n')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'u', title: 'T' }).text,
+    '[hello](u "T")\n')
+}
+
+// WRAP over text that already contains `]` — the ONE case where the label
+// bytes must change. The escape is earned: the verbatim candidate reparses to
+// a DIFFERENT document (`[a]b](u)` is plain text, not a link), so the second
+// candidate adds a backslash to the literal bracket and nothing else.
+{
+  const bracket = linkEdit('a]b c\n', 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' })
+  assert.equal(bracket.text, '[a\\]b](u) c\n')
+  assert.deepEqual(bracket.edits, [
+    { from: 0, to: 0, insert: '[' },
+    { from: 1, to: 1, insert: '\\' },
+    { from: 3, to: 3, insert: '](u)' }
+  ])
+  assert.deepEqual(bracket.selection, { anchor: 1, head: 5 }, 'head follows the inserted escape byte')
+  // …and an ALREADY-escaped bracket is left alone (no double escape).
+  assert.equal(linkEdit('a\\]b c\n', 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' }).text, '[a\\]b](u) c\n')
+  // An opening bracket needs the same treatment.
+  assert.equal(linkEdit('a[b c\n', 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' }).text, '[a\\[b](u) c\n')
+}
+
+// UNWRAP — delete `[` and `](url "title")`, keep the label bytes verbatim.
+{
+  const one = linkEdit('a [b](u) c\n', 0, { visFrom: 2, visTo: 3, op: 'unwrap' })
+  assert.equal(one.text, 'a b c\n')
+  assert.deepEqual(one.edits, [{ from: 2, to: 3, insert: '' }, { from: 4, to: 8, insert: '' }])
+  assert.equal(one.intent, 'link-unwrap')
+  assert.deepEqual(one.selection, { anchor: 2, head: 3 })
+  assert.equal(linkEdit('[t](u "T")\n', 0, { visFrom: 0, visTo: 1, op: 'unwrap' }).text, 't\n')
+  // An escaped bracket in the label survives the unwrap as-is (still escaped,
+  // still decoding to `]`).
+  assert.equal(linkEdit('[a\\]b](u)\n', 0, { visFrom: 0, visTo: 3, op: 'unwrap' }).text, 'a\\]b\n')
+}
+
+// EDIT — only the destination segment moves; the title, the interior spaces
+// and the surrounding text are byte-identical.
+{
+  const url = linkEdit('a [b](u) c\n', 0, { visFrom: 2, visTo: 3, op: 'edit', href: 'https://z.com' })
+  assert.equal(url.text, 'a [b](https://z.com) c\n')
+  assert.deepEqual(url.edits, [{ from: 6, to: 7, insert: 'https://z.com' }])
+  assert.equal(url.intent, 'link-edit')
+  assert.deepEqual(url.selection, { anchor: 3, head: 4 }, 'the label keeps its offsets, so it stays selected')
+
+  assert.equal(linkEdit('[b](u "T")\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'v' }).text, '[b](v "T")\n',
+    'an untouched title keeps its bytes — the tooltip only ever supplies href')
+  assert.equal(linkEdit('[b]( u  "T" )\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'v' }).text,
+    '[b]( v  "T" )\n', 'interior whitespace inside the parens is preserved')
+
+  // Title add / change / remove, quote style preserved and escaped when the
+  // value carries the active closing character.
+  assert.equal(linkEdit('[b](u)\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u', title: 'T' }).text, '[b](u "T")\n')
+  assert.equal(linkEdit("[b](u 't')\n", 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u', title: 'z' }).text,
+    "[b](u 'z')\n")
+  assert.equal(linkEdit('[b](u "t")\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u', title: 'x"y' }).text,
+    '[b](u "x\\"y")\n')
+  assert.equal(linkEdit('[b](u "t")\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u', title: null }).text, '[b](u)\n')
+  assert.equal(linkEdit('[b](u "t")\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u', title: '' }).text, '[b](u)\n')
+
+  // The requested URL already IS the source bytes -> a well-formed zero-width
+  // no-op, never an `invalid-range` from an empty edit list.
+  const noop = linkEdit('[b](u)\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'u' })
+  assert.equal(noop.text, '[b](u)\n')
+  assert.deepEqual(noop.edits, [{ from: 1, to: 1, insert: '' }], 'the no-op anchors on the label, not the doc start')
+}
+
+// DESTINATION SPELLING — angle form kept when present, ADOPTED when the value
+// has no bare spelling, never introduced gratuitously; parens escaped only
+// when unbalanced.
+{
+  assert.equal(linkEdit('[b](<u v>)\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'w x' }).text, '[b](<w x>)\n')
+  assert.equal(linkEdit('[b](<u>)\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'plain' }).text, '[b](<plain>)\n')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'a b' }).text, '[hello](<a b>)\n')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'a(1)' }).text, '[hello](a(1))\n',
+    'balanced parens need no escape in a bare destination')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'a)b' }).text, '[hello](a\\)b)\n')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: '' }).text, '[hello](<>)\n',
+    'an empty destination has no bare spelling — the angle form leads')
+  assert.equal(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'x%20y' }).text, '[hello](x%20y)\n',
+    'percent-encoding is bytes, never re-encoded or decoded')
+}
+
+// INSERT — the tooltip's EMPTY-selection semantics, probed from
+// @milkdown/components link-tooltip/edit/edit-view.ts:115-122: it types the
+// href into the document and marks it, i.e. `[url](url)`.
+{
+  const inserted = linkEdit('ab\n', 0, {
+    visFrom: 1, visTo: 1, op: 'insert', href: 'https://q.com', insertedText: 'https://q.com'
+  })
+  assert.equal(inserted.text, 'a[https://q.com](https://q.com)b\n')
+  assert.equal(inserted.intent, 'link-insert')
+  assert.deepEqual(inserted.selection, { anchor: 15, head: 15 }, 'caret parks at the end of the label')
+  // A label needing an escape still resolves (the ladder escalates).
+  assert.equal(
+    linkEdit('ab\n', 0, { visFrom: 1, visTo: 1, op: 'insert', href: 'u', insertedText: 'x]y' }).text,
+    'a[x\\]y](u)b\n'
+  )
+}
+
+// CONTEXT: heading, blockquote, list item, table cell, CJK, CRLF.
+{
+  assert.equal(linkEdit('# hi there\n', 2, { visFrom: 0, visTo: 2, op: 'wrap', href: 'u' }).text, '# [hi](u) there\n')
+  assert.equal(linkEdit('> hi there\n', 2, { visFrom: 0, visTo: 2, op: 'wrap', href: 'u' }).text, '> [hi](u) there\n')
+  assert.equal(linkEdit('- hi there\n', 2, { visFrom: 0, visTo: 2, op: 'wrap', href: 'u' }).text, '- [hi](u) there\n')
+  assert.equal(linkEdit('中文说明测试\n', 0, { visFrom: 0, visTo: 2, op: 'wrap', href: '中文.md' }).text,
+    '[中文](中文.md)说明测试\n')
+  assert.equal(linkEdit('hello world\r\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'u' }).text,
+    '[hello](u) world\r\n', 'CRLF endings are untouched')
+
+  const table = '| a | x |\n| --- | --- |\n| y | z |\n'
+  assert.equal(linkEdit(table, 2, { visFrom: 0, visTo: 1, op: 'wrap', href: 'u' }).text,
+    '| [a](u) | x |\n| --- | --- |\n| y | z |\n')
+  // A raw `|` inside a URL would ADD A COLUMN to the table: the verbatim
+  // candidate leaves a link node with the requested url at the right offset,
+  // and the structural half of the proof is what rejects it in favour of the
+  // escaped spelling (which decodes to the same URL inside an intact table).
+  const piped = linkEdit(table, 2, { visFrom: 0, visTo: 1, op: 'wrap', href: 'p|q' })
+  assert.equal(piped.text, '| [a](p\\|q) | x |\n| --- | --- |\n| y | z |\n')
+  const reparsed = buildSyntaxIndex(piped.text)
+  assert.equal(reparsed.tree.children[0].type, 'table', 'the table survived')
+  assert.equal(reparsed.tree.children[0].children[0].children[0].children[0].url, 'p|q')
+}
+
+// REFUSALS — all fail-closed, nothing written.
+{
+  const refuse = { ok: false, code: 'unsupported-structure' }
+  const unmapped = { ok: false, code: 'unmapped-selection' }
+
+  // AUTOLINK LITERALS. GFM turns a bare `www.a.com` into a positioned `link`
+  // node with NO syntax bytes, and ProseMirror carries the same `link` mark
+  // for it — so the tooltip's remove/edit can target one. There is nothing to
+  // rewrite, so both directions refuse.
+  assert.deepEqual(linkEdit('see www.a.com ok\n', 0, { visFrom: 4, visTo: 13, op: 'unwrap' }), refuse)
+  assert.deepEqual(linkEdit('see www.a.com ok\n', 0, { visFrom: 4, visTo: 13, op: 'edit', href: 'u' }), refuse)
+  assert.deepEqual(linkEdit('see www.a.com ok\n', 0, { visFrom: 4, visTo: 13, op: 'wrap', href: 'u' }), refuse)
+  // A CommonMark angle autolink is the same story (`<https://a.com>` opens
+  // with `<`, not `[`).
+  assert.deepEqual(linkEdit('<https://a.com>\n', 0, { visFrom: 0, visTo: 13, op: 'unwrap' }), refuse)
+
+  // An unwrap whose bare text would IMMEDIATELY become an autolink literal
+  // again is refused: the user's removal would visibly not happen.
+  assert.deepEqual(linkEdit('[www.a.com](u)\n', 0, { visFrom: 0, visTo: 9, op: 'unwrap' }), refuse)
+
+  // Partial coverage of an existing link (the shape `toggleLinkCommand`
+  // produces when only part of a link is selected) — neither unwrap nor
+  // re-target is expressible.
+  assert.deepEqual(linkEdit('[abc](u)\n', 0, { visFrom: 0, visTo: 2, op: 'unwrap' }), refuse)
+  assert.deepEqual(linkEdit('[abc](u)\n', 0, { visFrom: 1, visTo: 3, op: 'edit', href: 'v' }), refuse)
+  // Links cannot nest: a wrap touching an existing one, or an insert with the
+  // caret strictly inside one.
+  assert.deepEqual(linkEdit('a [b](u) c\n', 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'v' }), refuse)
+  assert.deepEqual(
+    linkEdit('[abc](u)\n', 0, { visFrom: 1, visTo: 1, op: 'insert', href: 'v', insertedText: 'v' }),
+    refuse
+  )
+
+  // Half-covering another inline mark would strand its delimiters.
+  assert.deepEqual(linkEdit('a **bc** d\n', 0, { visFrom: 1, visTo: 4, op: 'wrap', href: 'u' }), refuse)
+  // …while a wrap fully INSIDE one is legal and byte-exact.
+  assert.equal(linkEdit('a **bc** d\n', 0, { visFrom: 2, visTo: 4, op: 'wrap', href: 'u' }).text,
+    'a **[bc](u)** d\n')
+
+  // A line ending in any written value would end the block.
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap', href: 'a\nb' }), refuse)
+  assert.deepEqual(linkEdit('[b](u)\n', 0, { visFrom: 0, visTo: 1, op: 'edit', href: 'a\r\nb' }), refuse)
+
+  // Argument shapes.
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'wrap' }), refuse, 'href is required')
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'nope', href: 'u' }), refuse)
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 2, visTo: 2, op: 'wrap', href: 'u' }), refuse,
+    'a zero-width range is the insert op, never a wrap')
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 0, visTo: 5, op: 'insert', href: 'u', insertedText: 'x' }), refuse,
+    'insert requires an EMPTY range')
+  assert.deepEqual(linkEdit('hello\n', 0, { visFrom: 2, visTo: 2, op: 'insert', href: 'u', insertedText: '' }), refuse)
+  // No existing link to act on.
+  assert.deepEqual(linkEdit('plain text\n', 0, { visFrom: 0, visTo: 5, op: 'unwrap' }), refuse)
+  // An unmapped boundary (mid-entity) never resolves to raw bytes.
+  assert.deepEqual(linkEdit('a&#x1F600;b\n', 0, { visFrom: 2, visTo: 3, op: 'wrap', href: 'u' }), unmapped)
+}
+
+console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, proven byte-for-byte)')
