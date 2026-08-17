@@ -1672,3 +1672,197 @@ const linkEdit = (text, blockOffset, args) => {
 }
 
 console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, proven byte-for-byte)')
+
+// ===========================================================================
+// WHOLE-BRANCH REVIEW, CRITICAL 2 (2026-08-17): a wrap must not partially
+// straddle a LINK.
+//
+// mark-toggle.js kept its own private `OVERLAP_NODE_TYPES` (marks only) while
+// link-toggle.js built the correct superset (marks + link/image/html/math/
+// footnote/break). Plan 5 Task 3 edited the mark-toggle copy to add
+// `highlight` without widening it, so a drag-selection crossing a link
+// boundary committed a marker stranded INSIDE the link label. `requireMap`
+// could not catch it: the resulting bytes reparse into a document that maps
+// cleanly (content.size 9 == visibleLength 9), it is just not the document
+// the user asked for. The mirror-image operation (linking across a bold
+// boundary) was already refused by link-toggle's own copy, so this was
+// cross-task incoherence.
+//
+// Both commands now import ONE set from mark-map.js.
+// ===========================================================================
+{
+  const src = 'a [b](u) c\n'
+  // Visible: 'a b c' — 'a'=0, ' '=1, 'b'=2, ' '=3, 'c'=4. The link node's raw
+  // span is [2,8); its label 'b' is raw [3,4).
+  const straddle = (visFrom, visTo, kind = 'strong') => {
+    const { doc, index, map } = blockSetup(src, 0)
+    assert.equal(map.visibleLength, 5, 'fixture sanity: the link contributes ONE visible char')
+    return toggleInlineMark({ doc, index, map, visFrom, visTo, kind })
+  }
+
+  // RED (the bytes this used to commit — asserted as NEVER produced again).
+  assert.deepEqual(straddle(2, 5), { ok: false, code: 'unsupported-structure' },
+    "bolding the visible 'b c' used to commit 'a [**b](u) c**\\n'")
+  assert.deepEqual(straddle(0, 3), { ok: false, code: 'unsupported-structure' },
+    "bolding the visible 'a b' used to commit '**a [b**](u) c\\n'")
+  // …and the same for every other kind the toggle owns.
+  for (const kind of ['emphasis', 'delete', 'inlineCode', 'highlight']) {
+    assert.equal(straddle(2, 5, kind).ok, false, `${kind} must refuse the same straddle`)
+    assert.equal(straddle(0, 3, kind).ok, false, `${kind} must refuse the mirrored straddle`)
+  }
+
+  // GREEN controls — the shapes that must KEEP working, byte-exact. A wrap
+  // fully INSIDE the link label, a wrap fully CONTAINING the link, and a wrap
+  // that never touches it.
+  const commit = (visFrom, visTo, kind = 'strong') => {
+    const { doc, index, map } = blockSetup(src, 0)
+    const routed = toggleInlineMark({ doc, index, map, visFrom, visTo, kind })
+    assert.equal(routed.ok, true, `expected a commit, got ${routed.code}`)
+    const applied = applySourceTransaction(doc, routed.transaction)
+    assert.equal(applied.ok, true, applied.code)
+    return applied.doc.text
+  }
+  assert.equal(commit(2, 3), 'a [**b**](u) c\n', 'bold INSIDE the link label still commits')
+  assert.equal(commit(0, 5), '**a [b](u) c**\n', 'bold CONTAINING the whole link still commits')
+  assert.equal(commit(4, 5), 'a [b](u) **c**\n', 'bold entirely after the link still commits')
+  assert.equal(commit(0, 1), '**a** [b](u) c\n', 'bold entirely before the link still commits')
+}
+
+// The same class, pinned for every OTHER delimiter-bearing node type in the
+// shared set. These are width-1 visible ATOMS, so a visible offset can never
+// land mid-node and the refusal is belt-and-braces rather than the reachable
+// hole `link` was — but "unreachable today" is a claim that has to be
+// re-provable, not remembered, so each one is exercised: a range that CONTAINS
+// the atom commits, and the atom's own interior is simply not addressable.
+{
+  const atomCase = (src, needle, visAtom) => {
+    const { doc, index, map } = blockSetup(src, 0)
+    // The atom occupies exactly ONE visible slot.
+    const before = toggleInlineMark({ doc, index, map, visFrom: 0, visTo: visAtom, kind: 'strong' })
+    const covering = toggleInlineMark({ doc, index, map, visFrom: visAtom, visTo: visAtom + 1, kind: 'strong' })
+    return { before, covering, needle }
+  }
+  // inline image: 'a ![i](p.png) b\n' -> visible 'a X b' (X = the atom at 2).
+  {
+    const { covering } = atomCase('a ![i](p.png) b\n', '![i](p.png)', 2)
+    assert.equal(covering.ok, true, 'a range covering the whole image atom is legal')
+    const applied = applySourceTransaction(createMarkdownDocument('a ![i](p.png) b\n'), covering.transaction)
+    assert.equal(applied.doc.text, 'a **![i](p.png)** b\n')
+  }
+  // inline math
+  {
+    const { covering } = atomCase('a $x^2$ b\n', '$x^2$', 2)
+    assert.equal(covering.ok, true, 'a range covering the whole inline-math atom is legal')
+    const applied = applySourceTransaction(createMarkdownDocument('a $x^2$ b\n'), covering.transaction)
+    assert.equal(applied.doc.text, 'a **$x^2$** b\n')
+  }
+  // inline HTML (a coalesced run is ONE atom on both chains)
+  {
+    const { covering } = atomCase('a <span>y</span> b\n', '<span>y</span>', 2)
+    assert.equal(covering.ok, true, 'a range covering the whole inline-HTML run is legal')
+    const applied = applySourceTransaction(createMarkdownDocument('a <span>y</span> b\n'), covering.transaction)
+    assert.equal(applied.doc.text, 'a **<span>y</span>** b\n')
+  }
+  // footnoteReference — remark-gfm parses `[^1]` as an atom when a definition
+  // exists. Whatever it decodes to, no wrap may straddle it.
+  {
+    const src = 'a [^1] b\n\n[^1]: note\n'
+    const { doc, index, map } = blockSetup(src, 0)
+    for (let visFrom = 0; visFrom <= map.visibleLength; visFrom += 1) {
+      for (let visTo = visFrom + 1; visTo <= map.visibleLength; visTo += 1) {
+        const routed = toggleInlineMark({ doc, index, map, visFrom, visTo, kind: 'strong' })
+        if (!routed.ok) continue
+        const applied = applySourceTransaction(doc, routed.transaction)
+        assert.equal(applied.ok, true, applied.code)
+        // Every ACCEPTED wrap must leave the footnote reference's own bytes
+        // contiguous — never '[^**1]' or '**[^**1]'.
+        assert.ok(!/\[\^\*|\*\]/.test(applied.doc.text),
+          `a wrap straddled the footnote reference: ${JSON.stringify(applied.doc.text)}`)
+      }
+    }
+  }
+}
+
+// ===========================================================================
+// WHOLE-BRANCH REVIEW, CRITICAL 3 (2026-08-17): no raw-offset write may
+// bisect a CRLF pair.
+//
+// `bisectsLineEnding` answered `true` at such an offset, but only three of
+// the five raw-offset write paths asked it. The structural path never did:
+//   'one\r\ntwo three\r\n', visible 4 -> raw 4, bisectsLineEnding = true
+//   routeStructuralKey('Enter') -> ok
+//   result: 'one\r\r\n\r\n\ntwo three\r\n'  (lone CR + bare LF)
+// The fix is layered: `applySourceTransaction` (markdown-document.js) refuses
+// the write BY CONSTRUCTION for every command, and the three paths that were
+// unguarded/incidentally-safe now say so explicitly. Both layers are pinned.
+// ===========================================================================
+{
+  const crlf = 'one\r\ntwo three\r\n'
+  const doc = createMarkdownDocument(crlf)
+  const index = buildSyntaxIndex(crlf)
+
+  // (a) the structural router — the reachable-from-a-keypress hole.
+  for (const key of ['Enter', 'Tab', 'Shift-Tab', 'Backspace', 'Delete']) {
+    assert.deepEqual(routeStructuralKey(key, { doc, index, offset: 4, empty: true }),
+      { ok: false, code: 'unsupported-structure' },
+      `${key} at an intra-CRLF offset must refuse`)
+  }
+  // The SAME keys one byte either side keep their pre-fix answers — the guard
+  // is a point refusal, not a CRLF-document-wide freeze.
+  assert.equal(routeStructuralKey('Enter', { doc, index, offset: 3, empty: true }).ok, true,
+    'Enter at the end of the first visual line still splits')
+  assert.equal(routeStructuralKey('Enter', { doc, index, offset: 5, empty: true }).ok, true,
+    'Enter at the start of the second visual line still splits')
+
+  // (b) the chokepoint — a hand-built transaction at the same offset, i.e.
+  // any future command that forgets to ask. This is the RED assertion: the
+  // committed text must NEVER be the lone-CR/bare-LF document again.
+  const splitEnter = { baseRevision: 0, from: 4, to: 4, insert: '\r\n\r\n', intent: 'split-block' }
+  const applied = applySourceTransaction(doc, splitEnter)
+  assert.deepEqual(applied, { ok: false, code: 'invalid-range' },
+    "applySourceTransaction must refuse the write that produced 'one\\r\\r\\n\\r\\n\\ntwo three\\r\\n'")
+  // both ends are checked, and multi-edit transactions too
+  assert.equal(applySourceTransaction(doc, { baseRevision: 0, from: 2, to: 4, insert: 'X' }).code, 'invalid-range')
+  assert.equal(applySourceTransaction(doc, { baseRevision: 0, from: 4, to: 6, insert: 'X' }).code, 'invalid-range')
+  assert.equal(applySourceTransaction(doc, {
+    baseRevision: 0,
+    edits: [{ from: 0, to: 1, insert: 'O' }, { from: 4, to: 4, insert: 'X' }]
+  }).code, 'invalid-range', 'a bisecting edit anywhere in the list refuses the whole transaction')
+  // GREEN control: writes that do NOT bisect the pair still commit, and the
+  // document stays uniformly CRLF.
+  const ok = applySourceTransaction(doc, { baseRevision: 0, from: 3, to: 5, insert: '\r\n\r\n' })
+  assert.equal(ok.ok, true, ok.code)
+  assert.equal(ok.doc.text, 'one\r\n\r\ntwo three\r\n')
+  assert.equal(/\r(?!\n)/.test(ok.doc.text), false, 'no lone \\r')
+  assert.equal(/(?<!\r)\n/.test(ok.doc.text), false, 'no bare \\n')
+
+  // (c) replaceVisibleText — previously unguarded, and the path a kernel-mode
+  // Tab insert takes.
+  const block = index.blockAt(0)
+  const map = buildCharacterMap(crlf, block.node)
+  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 4, visTo: 4, insert: 'X' }),
+    { ok: false, code: 'unmapped-selection' }, 'an insert point between \\r and \\n refuses')
+  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 0, visTo: 4, insert: 'X' }),
+    { ok: false, code: 'unmapped-selection' }, 'a range ENDING there refuses')
+  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 4, visTo: 8, insert: 'X' }),
+    { ok: false, code: 'unmapped-selection' }, 'a range STARTING there refuses')
+  const kept = replaceVisibleText({ doc, map, visFrom: 0, visTo: 3, insert: 'ONE' })
+  assert.equal(kept.ok, true, kept.code)
+  assert.equal(applySourceTransaction(doc, kept.transaction).doc.text, 'ONE\r\ntwo three\r\n')
+
+  // (d) toggleInlineMark — safe only INCIDENTALLY before this fix (its
+  // whitespace shrink treats a `linebreak` unit as whitespace and steps past
+  // it), now stated explicitly. The shrink is why these two still commit
+  // rather than refuse: the assertion is that whatever they commit keeps the
+  // file uniformly CRLF.
+  for (const [visFrom, visTo] of [[0, 4], [4, 8], [0, 8]]) {
+    const routed = toggleInlineMark({ doc, index, map, visFrom, visTo, kind: 'strong' })
+    if (!routed.ok) continue
+    const out = applySourceTransaction(doc, routed.transaction)
+    assert.equal(out.ok, true, out.code)
+    assert.equal(/\r(?!\n)/.test(out.doc.text), false, `lone \\r from a mark toggle [${visFrom},${visTo})`)
+    assert.equal(/(?<!\r)\n/.test(out.doc.text), false, `bare \\n from a mark toggle [${visFrom},${visTo})`)
+  }
+}
+
+console.log('PASS source-kernel commands (whole-branch review: link-boundary wraps + CRLF bisection chokepoint)')

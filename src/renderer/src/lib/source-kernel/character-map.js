@@ -436,9 +436,26 @@ export function buildCharacterMap(text, blockNode) {
 // The cheap text test is the fast path AND a necessary condition; the unit
 // walk is what actually PROVES the offset is that boundary in THIS block's
 // map, rather than a '\r\n' that merely happens to sit in surrounding source.
+// The BYTE-LEVEL half of the predicate, standing alone (2026-08-17 review,
+// Critical 3). `bisectsLineEnding` below needs a character map to prove the
+// offset is a real unit boundary in THIS block; `splitsCrlfPair` needs
+// nothing but the text, and is therefore a strict SUPERSET of it: every
+// offset the map-aware predicate refuses, this one refuses too.
+//
+// That superset property is what lets `markdown-document.js`'s
+// `applySourceTransaction` — the single place every raw-offset write in this
+// kernel is applied — enforce the rule BY CONSTRUCTION, with no map in hand.
+// Before that chokepoint existed, only three of the five raw-offset write
+// paths consulted `bisectsLineEnding`, and a structural Enter at an
+// intra-CRLF offset committed 'one\r\ntwo\r\n' -> 'one\r\r\n\r\n\ntwo\r\n'
+// (a lone CR plus a bare LF in a uniform-CRLF file).
+export function splitsCrlfPair(text, rawOffset) {
+  if (typeof text !== 'string' || !Number.isFinite(rawOffset)) return false
+  return text.charCodeAt(rawOffset - 1) === 13 && text.charCodeAt(rawOffset) === 10
+}
+
 export function bisectsLineEnding(charMap, text, rawOffset) {
-  if (!charMap || typeof text !== 'string' || !Number.isFinite(rawOffset)) return false
-  if (text.charCodeAt(rawOffset - 1) !== 13 || text.charCodeAt(rawOffset) !== 10) return false
+  if (!charMap || !splitsCrlfPair(text, rawOffset)) return false
   const units = charMap.units
   if (!Array.isArray(units)) return false
   for (let index = 0; index < units.length - 1; index += 1) {

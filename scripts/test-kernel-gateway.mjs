@@ -14,13 +14,17 @@ import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
-import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction } from '../src/renderer/src/lib/source-kernel/index.js'
+import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/index.js'
 
 const schema = new Schema({
   nodes: {
     doc: { content: 'block+' },
     paragraph: { content: 'inline*', group: 'block' },
     hard_break: { group: 'inline', inline: true, selectable: false },
+    // preset-commonmark's `html` node (node/html.ts): an INLINE atom carrying
+    // the raw fragment in `attrs.value` — the same spec
+    // scripts/test-kernel-projection-map.mjs uses.
+    html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
     // Plan 3 Task 4: same shape as scripts/test-kernel-projection-map.mjs's
     // schema (content 'text*', `attrs.language`) — the gateway relaxation
     // and the language-switch AttrStep shape both target this node type.
@@ -1506,6 +1510,143 @@ const withSelection = (state, from, to) =>
   const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
   assert.equal(committed.ok, false, 'a write into a degraded table must fail closed')
   assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
+}
+
+// ===========================================================================
+// Case T8 — WHOLE-BRANCH REVIEW, CRITICAL 1 (2026-08-17): a COMPACT table
+// cell must be proven by a REPARSE, not by a byte-level guard on the inserted
+// characters.
+//
+// The pre-fix guard asked `step.insertText.includes('|')`. A backslash
+// contains no '|', so it passed — and in a COMPACT (unpadded) table it lands
+// directly before the neighbouring delimiter, turning it into '\|', which GFM
+// unescapes BEFORE splitting the row. The header then has one column while
+// the delimiter row has two, and the whole block stops being a table:
+//
+//   '|a|b|\n|-|-|\n|c|d|\n' + one '\' after 'a'
+//     committed '|a\|b|\n|-|-|\n|c|d|\n'
+//     which parseKernelMarkdown reports as a single `paragraph`.
+//
+// Nothing downstream caught it: `verifyPlainTextProjection` runs AFTER
+// `kernel.doc` is advanced, so it repaired the VIEW to match the corrupted
+// bytes and the file was saved that way. HorseMD-native PADDED tables hide
+// the shape entirely (the '\' lands before a space), which is why fuzzing on
+// this repo's own fixtures never produced it.
+{
+  const compact = '|a|b|\n|-|-|\n|c|d|\n'
+  const d = doc(tbl([['a', 'b'], ['c', 'd']]))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(compact, state.doc)
+  assert.ok(map, 'a compact table must map')
+  assert.ok(map.blockPairs.every((pair) => pair.charMap), 'every compact cell is editable')
+
+  // RED evidence, kept executable: these ARE the bytes the old path
+  // committed, and this is what they parse to.
+  {
+    const corrupted = '|a\\|b|\n|-|-|\n|c|d|\n'
+    assert.deepEqual(parseKernelMarkdown(corrupted).children.map((child) => child.type), ['paragraph'],
+      'fixture sanity: the escaped delimiter really does destroy the table')
+  }
+
+  // (a) the header cell — refused, with the kernel document untouched.
+  {
+    const kernel = { doc: createMarkdownDocument(compact) }
+    const tr = state.tr.insertText('\\', 5)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text',
+      'it still classifies as plain text — the refusal is a proof, not a shape rule')
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, false, "typing '\\' at the end of a compact cell must be refused")
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+    assert.equal(kernel.doc.text, compact, 'a refused commit must leave kernel.doc byte-identical')
+  }
+
+  // (b) a BODY cell of the same table — same refusal (the row loses a column).
+  {
+    const kernel = { doc: createMarkdownDocument(compact) }
+    const tr = state.tr.insertText('\\', 17)
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, false, "'\\' before a body-row delimiter must be refused too")
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+  }
+
+  // (c) GREEN, byte-exact: an ordinary character in the same compact cell
+  //     still commits — the proof refuses corruption, not compact tables.
+  {
+    const kernel = { doc: createMarkdownDocument(compact) }
+    const tr = state.tr.insertText('X', 5)
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '|aX|b|\n|-|-|\n|c|d|\n')
+  }
+
+  // (d) GREEN, byte-exact: the SAME backslash in a PADDED table is legal —
+  //     it lands before a space, the table keeps its shape, so the proof
+  //     passes and the byte is committed verbatim. (This is the assertion
+  //     that would catch an over-broad "refuse all backslashes" fix.)
+  {
+    const padded = '| a | b |\n| - | - |\n| c | d |\n'
+    const paddedMap = buildProjectionMap(padded, state.doc)
+    const kernel = { doc: createMarkdownDocument(padded) }
+    const tr = state.tr.insertText('\\', 5)
+    const committed = commitPlainText({ kernel, map: paddedMap, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '| a\\ | b |\n| - | - |\n| c | d |\n')
+    assert.deepEqual(parseKernelMarkdown(committed.applied.doc.text).children.map((c) => c.type), ['table'],
+      'the padded table survives, which is exactly why the commit is allowed')
+  }
+
+  // (e) the proof is SCOPED to table cells: the same byte in an ordinary
+  //     paragraph never pays for a reparse and never refuses.
+  {
+    const plain = doc(p(text('ab')))
+    const plainState = EditorState.create({ schema, doc: plain })
+    const plainMap = buildProjectionMap('ab\n', plainState.doc)
+    const committed = commitPlainText({
+      kernel: { doc: createMarkdownDocument('ab\n') },
+      map: plainMap,
+      transactions: [plainState.tr.insertText('\\', 2)],
+      oldState: plainState
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'a\\b\n')
+  }
+}
+
+// ===========================================================================
+// Case H — THE INLINE-HTML TYPING CONTRACT, pinned so the user guide cannot
+// drift from it again (2026-08-17 whole-branch review, "Also fix").
+//
+// guide/basics/rich-and-source.md used to claim that in a paragraph holding
+// an inline HTML fragment 「同一段落里片段以外的位置可以正常输入」 — that
+// plain typing outside the fragment works. It does not: `textblockProfile`
+// (this file, :82) returns null for ANY textblock with a non-text inline
+// child, so EVERY ReplaceStep in such a paragraph is refused, wherever the
+// caret sits. Only the structural keys (Enter/Backspace, which never reach
+// this classifier) work — which is exactly what the UI tests actually prove.
+// The guide now groups inline HTML with inline math / inline images.
+{
+  const md = '片段 <span>内联</span> 结束。\n'
+  const d = doc(p(text('片段 '), schema.node('html', { value: '<span>内联</span>' }), text(' 结束。')))
+  const state = EditorState.create({ schema, doc: d })
+  // PM content: '片段 ' (3) + the html atom (1) + ' 结束。' (4). Typing at
+  // EVERY position in the paragraph — before the fragment, at both of its
+  // edges, and after it — must be refused identically.
+  const lastPos = state.doc.content.size - 1
+  assert.equal(lastPos, 9, 'fixture sanity: the paragraph holds 8 inline positions')
+  for (let pos = 1; pos <= lastPos; pos += 1) {
+    const tr = state.tr.insertText('X', pos)
+    const classified = classifyTransactions([tr], state)
+    assert.equal(classified.kind, 'blocked',
+      `typing at PM ${pos} in an inline-HTML paragraph must be refused (the guide claimed otherwise)`)
+    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  }
+  // Control: the identical keystroke in a fragment-free paragraph is plain
+  // text — the refusal is about the paragraph's inline shape, nothing else.
+  {
+    const plainState = EditorState.create({ schema, doc: doc(p(text('片段 内联 结束。'))) })
+    assert.equal(classifyTransactions([plainState.tr.insertText('X', 3)], plainState).kind, 'plain-text')
+  }
+  void md
 }
 
 console.log('PASS kernel gateway')

@@ -6,6 +6,7 @@
 import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
+import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
 
@@ -14,6 +15,20 @@ const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
 // 容而接受，不在本任务的路由逻辑里判断。
 export function routeStructuralKey(key, ctx) {
   const { index, offset } = ctx
+  // CRLF bisection, refused at the DOOR of the whole structural family
+  // (2026-08-17 review, Critical 3). `applySourceTransaction` enforces the
+  // same rule by construction for every write, but a command that routes
+  // "successfully" and then produces a transaction nothing can ever apply is
+  // a worse contract than one that says no up front — and this is the exact
+  // shape the review probed: 'one\r\ntwo three\r\n' at raw offset 4 answered
+  // `ok` for Enter and committed a lone CR plus a bare LF.
+  //
+  // Every branch below resolves blocks/items/lines FROM `offset`, so one
+  // check at the top covers Enter / Tab / Shift-Tab / Backspace / Delete
+  // together; `unsupported-structure` (not `not-structural`) is deliberate —
+  // falling through to the text path would just re-derive the same illegal
+  // raw boundary one layer down.
+  if (splitsCrlfPair(index.text, offset)) return { ok: false, code: 'unsupported-structure' }
   const item = index.listItemAt(offset)
   switch (key) {
     case 'Enter':

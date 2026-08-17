@@ -1,7 +1,7 @@
 // source-kernel 聚合导出：源码事务内核对外的唯一入口。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 export { createMarkdownDocument, applySourceTransaction } from './markdown-document.js'
-export { buildSyntaxIndex, scanLines } from './syntax-index.js'
+export { buildSyntaxIndex, scanLines, parseKernelMarkdown } from './syntax-index.js'
 export { buildCharacterMap, bisectsLineEnding } from './character-map.js'
 export { buildCodeMap } from './code-map.js'
 export { inlineMarkAt, markerFor, rangeFromInlineCode } from './mark-map.js'

@@ -87,6 +87,7 @@ import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 const root = `/tmp/horsemd-kernel-stage3-${process.pid}`
 const file = join(root, 'stage3.md')
 const crlfFile = join(root, 'stage3-crlf.md')
+const compactFile = join(root, 'stage3-compact-table.md')
 const svgFile = join(root, 'stage3.svg')
 const port = Number(process.env.CDP_PORT || 10025)
 const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
@@ -146,6 +147,11 @@ const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
 const S9 = S8.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
 const S10 = S9.replace('行内公式 $x^2$ 结束。\n', '行内公式 $x^2$ 结束。\n\n\n')
 const S11 = S10.replace('片段 <span>内联</span> 结束。\n', '片段 <span>内联</span> 结束。\n\n\n')
+// Step 10(e) — the Critical 2 (link-boundary) proof. The straddling bold is
+// REFUSED (bytes stay at S11); the control that follows bolds the link LABEL
+// itself and then unwraps it, netting back to S11, so every later checkpoint
+// (SAVED, the cold reopen) is unaffected.
+const S12 = S11.replace(`[文档](${AUTHORED_URL_2})`, `[**文档**](${AUTHORED_URL_2})`)
 const SAVED = S11
 
 const CRLF_FIXTURE = [
@@ -173,6 +179,28 @@ const CRLF_FIXTURE = [
   ''
 ].join('\r\n')
 const CRLF_AFTER_CELL = CRLF_FIXTURE.replace('| 甲 | 乙 |', '| 甲X | 乙 |')
+
+// ---- WHOLE-BRANCH REVIEW, CRITICAL 1: the COMPACT-table fixture ----------
+// HorseMD writes PADDED tables ('| 甲 | 乙 |'), and in a padded table a typed
+// '\' lands before a SPACE, so it is harmless. Tables pasted from other tools
+// are routinely COMPACT ('|甲|乙|') — there the same keystroke lands directly
+// before the delimiter, turning it into '\|', which GFM unescapes before
+// splitting the row: the header loses a column, the block stops being a
+// table, and (because `verifyPlainTextProjection` runs AFTER kernel.doc is
+// advanced) the VIEW was repaired to match the destroyed bytes and the file
+// was saved that way. Its own isolated session/file so the main fixture's
+// byte checkpoints stay untouched.
+const COMPACT_FIXTURE = [
+  '# 紧凑表格',
+  '',
+  '|甲|乙|',
+  '|-|-|',
+  '|丙|丁|',
+  '',
+  '尾段落。',
+  ''
+].join('\n')
+const COMPACT_AFTER_CELL = COMPACT_FIXTURE.replace('|甲|乙|', '|甲X|乙|')
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -406,6 +434,15 @@ async function clickToolbarButtonTitled(evaluate, send, pattern) {
   await sleep(300)
 }
 
+// Mod+key (same shape as test-kernel-marks-ui.mjs's helper) — used for the
+// Ctrl/Cmd+B path of the link-boundary refusal below.
+async function pressMod(send, key, code, keyCode) {
+  const params = { key, code, modifiers: 4, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode }
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
+  await sleep(delay)
+}
+
 async function clickHighlightYellow(evaluate, send) {
   const itemRect = await waitFor(() => evaluate(`(() => {
     const it = (${VISIBLE_TOOLBAR})?.querySelector('.hm-highlight-item')
@@ -543,6 +580,7 @@ async function run() {
   await mkdir(root, { recursive: true })
   await writeFile(file, FIXTURE)
   await writeFile(crlfFile, CRLF_FIXTURE)
+  await writeFile(compactFile, COMPACT_FIXTURE)
   await writeFile(svgFile, SVG)
   let app
   try {
@@ -918,6 +956,35 @@ async function run() {
       'the red-<mark> block must stay degraded: neither typing nor Enter may write a byte, while every other block above committed')
     assert.equal(app.dialogs.length, 0, 'no dialog from the degraded-block refusals')
 
+    // (e) WHOLE-BRANCH REVIEW, CRITICAL 2: a bold whose drag-selection
+    //     CROSSES a link boundary must be refused. Before the fix
+    //     mark-toggle.js's private overlap set had no `link` in it, so this
+    //     exact gesture committed a stranded marker inside the label
+    //     ('a [**b](u) c**'), which `requireMap` could not catch because the
+    //     result still maps cleanly. The mirror-image operation (linking
+    //     across a bold boundary) was already refused, which is what made
+    //     this cross-task incoherence rather than an unknown.
+    //     Rendered text here is '参见 文档 链接。' (the link label is '文档'
+    //     at visible [3,5)), so [4,7) starts inside the label and ends
+    //     outside it.
+    await selectRange(evaluate, send, '参见 文档 链接。', 4, 7)
+    await pressMod(send, 'b', 'KeyB', 66)
+    await sleep(400)
+    await assertSource(evaluate, S11,
+      'bolding a selection that straddles a link boundary must write ZERO bytes')
+    // …and the control that keeps this from being a "bold is broken" pass:
+    // a selection entirely INSIDE the link label still commits.
+    await selectRange(evaluate, send, '参见 文档 链接。', 3, 5)
+    await pressMod(send, 'b', 'KeyB', 66)
+    await sleep(400)
+    await assertSource(evaluate, S12,
+      'bolding the link LABEL itself must still commit byte-exact')
+    await selectRange(evaluate, send, '参见 文档 链接。', 3, 5)
+    await pressMod(send, 'b', 'KeyB', 66)
+    await sleep(400)
+    await assertSource(evaluate, S11, 'unbolding the label nets back to the previous bytes')
+    assert.equal(app.dialogs.length, 0, 'no dialog from the link-boundary refusal')
+
     // ---- diagnostics: no fatal entry anywhere, and only the two explained
     //      mismatches (first-commit table repair + alt caption derivation) ----
     const mismatchesAtEnd = await assertNoFatalDiagnostics(evaluate, 'end of the interaction chain')
@@ -983,7 +1050,53 @@ async function run() {
     assert.equal(app.dialogs.length, 0, 'no dialog from the CRLF save')
     await assertNoFatalDiagnostics(evaluate, 'CRLF session')
 
-    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the math read-only refusals, save, cold reopen and the CRLF variant all match the kernel-derived byte strings')
+    // ============================================================
+    // 13) WHOLE-BRANCH REVIEW, CRITICAL 1 — a COMPACT table, isolated
+    //     session: typing '\' at the end of a cell must be REFUSED (the
+    //     table survives, on screen and on disk), while ordinary typing in
+    //     the same cell still commits byte-exact.
+    // ============================================================
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile-compact'), port: port + 4, appArgs: [compactFile] })
+    ;({ evaluate, send } = app)
+    await waitFor(async () => (await mounted(evaluate) || '').includes('尾段落'), 'compact-table fixture did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on the compact-table mount')
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'kernel mode did not remount the compact-table tab')
+    await sleep(400)
+    const compactDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(!compactDiagnostics.includes('attach-unmappable'),
+      `the compact table degraded to legacy fallback: ${compactDiagnostics}`)
+
+    // (a) the corruption gesture: caret after 甲, type one backslash.
+    await clickAt(evaluate, send, '甲', 1)
+    assert.equal(await selectionBlockText(evaluate), '甲', 'the caret must be inside the compact 甲 cell')
+    await typeTextLikeUser(send, '\\', { delayMs: delay })
+    await sleep(500)
+    await assertSource(evaluate, COMPACT_FIXTURE,
+      "typing '\\' at the end of a COMPACT table cell must write ZERO bytes — it used to commit '|甲\\|乙|' and destroy the table")
+    // The table is still a TABLE in the live view — the pre-fix behavior
+    // repaired the view into a single paragraph to match the ruined bytes.
+    assert.equal(await evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('table')`), true,
+      'the compact table must still be rendered as a table after the refusal')
+    assert.equal(app.dialogs.length, 0, 'no dialog from the compact-cell refusal')
+
+    // (b) the control: an ordinary character in the SAME cell still commits.
+    await clickAt(evaluate, send, '甲', 1)
+    await typeTextLikeUser(send, 'X', { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('甲X'), 'the ordinary compact-cell character never landed')
+    await assertSource(evaluate, COMPACT_AFTER_CELL,
+      'ordinary typing in a compact cell must still commit byte-exact — the proof refuses corruption, not compact tables')
+
+    // (c) disk bytes after save, and a cold reopen that still reads a table.
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'compact save button missing')
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'compact save did not finish')
+    assert.equal(await readFile(compactFile, 'utf8'), COMPACT_AFTER_CELL,
+      'the compact table must reach disk with its structure intact')
+    await assertNoFatalDiagnostics(evaluate, 'compact-table session')
+
+    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the math read-only refusals, the link-boundary bold refusal, save, cold reopen, the CRLF variant and the compact-table backslash refusal all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

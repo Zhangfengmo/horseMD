@@ -1,5 +1,6 @@
 // 源码事务内核：MarkdownDocument.text 是唯一持久化真相。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
+import { splitsCrlfPair } from './character-map.js'
 
 export function createMarkdownDocument(text) {
   return { text: String(text ?? ''), revision: 0 }
@@ -36,6 +37,28 @@ export function applySourceTransaction(doc, txn) {
   let previousEnd = -1
   for (const edit of edits) {
     if (!validEdit(edit, doc.text.length) || edit.from < previousEnd) {
+      return { ok: false, code: 'invalid-range' }
+    }
+    // THE CRLF CHOKEPOINT (2026-08-17 whole-branch review, Critical 3).
+    // Every raw-offset write in this kernel — the gateway's plain-text
+    // commit, every command under commands/, the history's own inverse
+    // replay — is applied HERE and nowhere else, so this is the one place
+    // the rule can be enforced BY CONSTRUCTION rather than by five call
+    // sites remembering to ask.
+    //
+    // An edit boundary strictly INSIDE a '\r\n' pair is byte-addressable but
+    // structurally indivisible: writing there splits ONE line ending into a
+    // lone CR plus a separate LF, so a uniform-CRLF document silently gains
+    // a mixed-ending line. `bisectsLineEnding` (character-map.js) proved the
+    // same thing map-locally for three of the write paths; the two that
+    // never consulted it were reachable from ordinary UI — a structural
+    // Enter at visible offset 4 of 'one\r\ntwo three\r\n' committed
+    // 'one\r\r\n\r\n\ntwo three\r\n'.
+    //
+    // `splitsCrlfPair` is the map-free SUPERSET of that predicate (see its
+    // own comment), so this refuses everything the local guards refuse and
+    // never depends on a map being available.
+    if (splitsCrlfPair(doc.text, edit.from) || splitsCrlfPair(doc.text, edit.to)) {
       return { ok: false, code: 'invalid-range' }
     }
     previousEnd = edit.to

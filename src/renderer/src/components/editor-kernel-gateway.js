@@ -20,7 +20,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -722,6 +722,74 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 // `lib/source-kernel/commands/` enforce ONE definition instead of two copies
 // that can drift apart. Behavior is unchanged (the copy was byte-identical).
 
+// ===========================================================================
+// TABLE-CELL REPARSE PROOF (2026-08-17 whole-branch review, Critical 1)
+// ===========================================================================
+// A GFM table's structure is decided by CONTEXT-SENSITIVE bytes, so guarding
+// the INSERTED characters can never be sufficient. The probe that ended the
+// byte-only guard:
+//
+//   '|a|b|\n|-|-|\n|c|d|\n'  + one '\' typed at the end of cell (0,0)
+//   committed '|a\|b|\n|-|-|\n|c|d|\n'
+//   which reparses to ONE paragraph — the table is gone, and saved that way.
+//
+// The inserted byte is a backslash: it contains no '|', so
+// `insertText.includes('|')` (the pre-existing guard, kept below as the cheap
+// early refusal) says nothing about it. What it does is turn the NEIGHBOURING
+// delimiter into '\|', which GFM unescapes before splitting the row — the
+// header then has one column while the delimiter row has two, and the whole
+// block stops being a table. HorseMD-native PADDED tables ('| a | b |') hide
+// this: there the '\' lands before a space, not before the '|'. Compact
+// tables from other tools do not.
+//
+// Nothing downstream catches it either: `verifyPlainTextProjection`
+// (editor-kernel-mode.js) runs AFTER `kernel.doc` has been advanced, so it
+// "repairs" the VIEW to match the corrupted bytes — the table visibly
+// collapses into a paragraph and the file keeps the collapsed bytes.
+//
+// So the cell path gets the posture the other two byte-rewriting write paths
+// already have (commands/image-attrs.js `verifyCandidate`,
+// commands/link-toggle.js): REPARSE the candidate document and prove the
+// structure is unchanged BEFORE the caller advances `kernel.doc`.
+//
+// The signature is a pre-order type walk that STOPS at `tableCell`: every
+// block boundary, every table, every row and every cell in the document is
+// compared, while the edited cell's own inline content — which is precisely
+// what the user just changed — is not. That is exactly the brief's scope
+// ("still parses as a table with the same row/column counts"), stated
+// structurally rather than as two counters, and it costs no offset
+// arithmetic (an insert at a cell's own start byte makes "did this node's
+// start shift?" genuinely ambiguous, so offsets are deliberately not part of
+// the comparison — the type walk already fails the moment a row, a cell or a
+// block appears/disappears/changes kind).
+//
+// Cost: ONE extra mdast parse per table-cell keystroke, and only for table
+// cells. The kernel already parses per accepted keystroke anyway
+// (`bindMap` -> `buildProjectionMap` -> `buildSyntaxIndex`), so this is the
+// same order of work the path already pays, not a new class of it.
+const tableStructureSignature = (tree) => {
+  const out = []
+  const visit = (node) => {
+    out.push(node?.type)
+    if (node?.type === 'tableCell') return
+    for (const child of node?.children || []) visit(child)
+  }
+  visit(tree)
+  return out.join(' ')
+}
+
+// Fail-closed on a parse failure of EITHER side (an unparseable candidate is
+// exactly the case that must not be committed, and an unparseable baseline
+// means there is nothing to prove the candidate against).
+function tableStructurePreserved(beforeText, afterText) {
+  try {
+    return tableStructureSignature(parseKernelMarkdown(beforeText)) ===
+      tableStructureSignature(parseKernelMarkdown(afterText))
+  } catch {
+    return false
+  }
+}
+
 // commitPlainText: turns a `plain-text`-classified batch into ONE kernel
 // transaction and applies it. Independently re-derives the step list (it
 // does not trust a caller-supplied `classification.steps` — this function's
@@ -753,6 +821,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
 
   const edits = []
   let cumulativeDelta = 0
+  let touchedTableCell = false
   const prefixedVirtualBlocks = new Set()
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
@@ -848,8 +917,17 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       // `code_block` textblocks. The DELETE side needs no guard — a cell
       // pair's charMap covers only that cell's content units, so every
       // resolved raw range is already confined between its delimiters.)
-      if (pair?.tableCell && step.insertText.includes('|')) {
-        return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+      if (pair?.tableCell) {
+        // Cheap early refusal for the one byte that is unconditionally
+        // structural. The REAL proof is the reparse below (see the
+        // `tableStructurePreserved` ADR): a byte-level guard cannot decide a
+        // context-sensitive escape like '\' turning the neighbouring '|' into
+        // '\|'. This one stays because it is free and gives the precise
+        // "column count would change" refusal at the step that caused it.
+        if (step.insertText.includes('|')) {
+          return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+        }
+        touchedTableCell = true
       }
     }
     if (edits.length && rawFrom < edits[edits.length - 1].to) {
@@ -927,6 +1005,13 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   const transaction = { baseRevision: kernel.doc.revision, edits, intent: 'insert-text' }
   const result = applySourceTransaction(kernel.doc, transaction)
   if (!result.ok) return { ok: false, code: result.code }
+  // The reparse proof runs BEFORE this function reports success — the caller
+  // (editor-kernel-mode.js's `plain-text` case) advances `kernel.doc` from
+  // `committed.applied`, so a refusal here means the bytes were never
+  // published and the PM transaction is vetoed with the view untouched.
+  if (touchedTableCell && !tableStructurePreserved(kernel.doc.text, result.doc.text)) {
+    return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  }
   return { ok: true, applied: result, transaction }
 }
 

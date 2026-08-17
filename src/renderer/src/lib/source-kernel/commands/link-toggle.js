@@ -60,6 +60,7 @@
 // a URL from silently growing a column.
 import { parseKernelMarkdown } from '../syntax-index.js'
 import { buildCharacterMap, bisectsLineEnding } from '../character-map.js'
+import { OVERLAP_NODE_TYPES } from '../mark-map.js'
 import { BREAK_REWRITE_PARENTS, inlineHtmlRunAt } from '../inline-html.js'
 
 // The inline node types `character-map.js` treats as width-1 ATOMS. Kept in
@@ -79,11 +80,9 @@ const PHRASING_BLOCKS = new Set(['paragraph', 'heading', 'tableCell'])
 // rule mark-toggle.js's `hasPartialOverlap` applies): a range that covers a
 // node entirely, or sits entirely inside one, is fine; one that crosses a
 // boundary would strand the node's delimiters on the far side of a newly
-// inserted `[` or `](url)`.
-const OVERLAP_NODE_TYPES = new Set([
-  'strong', 'emphasis', 'delete', 'inlineCode', 'highlight', 'link', 'linkReference',
-  'image', 'imageReference', 'html', 'inlineMath', 'footnoteReference', 'break'
-])
+// inserted `[` or `](url)`. The set moved to mark-map.js (2026-08-17 review,
+// Critical 2) so this command and mark-toggle.js share ONE owner instead of
+// two copies that drifted apart.
 
 const isWs = (ch) => ch === ' ' || ch === '\t'
 

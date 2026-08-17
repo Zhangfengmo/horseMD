@@ -2,7 +2,8 @@
 // inlineCode/highlight) over a visible selection, entirely as raw-byte
 // source edits — no ProseMirror mark commands involved.
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
-import { inlineMarkAt, markerFor, rangeFromInlineCode } from '../mark-map.js'
+import { inlineMarkAt, markerFor, rangeFromInlineCode, OVERLAP_NODE_TYPES } from '../mark-map.js'
+import { bisectsLineEnding } from '../character-map.js'
 import { wrapWouldHighlight } from '../highlight-syntax.js'
 
 // Same domain gate as mark-map.js's inlineMarkAt (table cells / code blocks /
@@ -12,11 +13,11 @@ import { wrapWouldHighlight } from '../highlight-syntax.js'
 const INLINE_CONTENT_BLOCKS = new Set(['paragraph', 'heading'])
 
 // Node types with a real mdast span (marker bytes are part of node.position)
-// that a wrap must not partially straddle. `highlight` joined the set in Plan
-// 5 Task 3, when the kernel chain gained real positioned `==` nodes (see
-// mark-map.js's ADR): half-covering an existing highlight now refuses like
-// half-covering a bold does, instead of silently interleaving markers.
-const OVERLAP_NODE_TYPES = new Set(['strong', 'emphasis', 'delete', 'inlineCode', 'highlight'])
+// that a wrap must not partially straddle. The set is NOT defined here: it is
+// owned by mark-map.js and shared with commands/link-toggle.js — see that
+// module's `OVERLAP_NODE_TYPES` comment for the drift (a bold straddling a
+// link boundary stranding `**` inside the label) that ended the two private
+// copies.
 
 // Whether the visible character at `visIndex` is whitespace, decided only
 // from evidence the character map already proved (never re-decoded/guessed):
@@ -182,6 +183,17 @@ export function toggleInlineMark({ doc, index, map, visFrom, visTo, kind }) {
   // entry there).
   const range = map.rawRangeForVisibleRange(shrunk.from, shrunk.to)
   if (!range) return { ok: false, code: 'unmapped-selection' }
+  // CRLF bisection (2026-08-17 review, Critical 3). Today this is unreachable
+  // by construction — `shrinkToNonWhitespace` above treats a `linebreak` unit
+  // as whitespace and shrinks past it, so a resolved boundary never lands on
+  // the '\r'/'\n' seam. That is an INCIDENTAL substitute for the rule, not a
+  // statement of it: a future relaxation of the shrink (marking a selection
+  // that deliberately spans a soft break) would silently re-open the hole.
+  // Stated explicitly, next to the two other commands that state it.
+  if (bisectsLineEnding(map, doc.text, range.from) ||
+      bisectsLineEnding(map, doc.text, range.to)) {
+    return { ok: false, code: 'unmapped-selection' }
+  }
   const { from: rawFrom, to: rawTo } = range
 
   // Defensive: the caller guarantees a single-block selection (the map was

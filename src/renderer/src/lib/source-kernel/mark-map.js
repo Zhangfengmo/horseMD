@@ -72,6 +72,38 @@
 // meaningless `=` bytes.
 export const MARK_TYPES = Object.freeze(['strong', 'emphasis', 'delete', 'inlineCode', 'highlight'])
 
+// THE ONE OWNER of "which inline node's byte span may a wrap not PARTIALLY
+// straddle" (2026-08-17 whole-branch review, Critical 2). Two copies of this
+// set existed — commands/mark-toggle.js's (marks only) and
+// commands/link-toggle.js's (marks + link/image/html/math/footnote/break) —
+// and they drifted: Plan 5 Task 3 added `highlight` to the mark-toggle copy
+// without widening it, so bolding a drag-selection that crossed a link
+// boundary committed a stranded marker INSIDE the link label:
+//   'a [b](u) c\n' + bold over the visible "b c"  ->  'a [**b](u) c**\n'
+//   'a [b](u) c\n' + bold over the visible "a b"  ->  '**a [b**](u) c\n'
+// The mirror-image operation (linking across a bold boundary) was already
+// refused by link-toggle's own copy, so this was cross-task incoherence, not
+// an unknown. Both commands now import THIS set; adding a node type here
+// widens the refusal for every wrap command at once.
+//
+// Membership rule: a node whose raw span carries DELIMITER bytes of its own
+// (`[`…`](…)`, `**`…`**`, `` ` ``, `<span>`…`</span>`, `$`…`$`, `![`…`](…)`,
+// `[^1]`, a hard break's trailing spaces). A range that covers such a node
+// entirely, or sits entirely inside it, is legal; one that crosses a boundary
+// would put the new wrapper's opening marker on one side of the delimiters
+// and its closing marker on the other.
+//
+// The ATOM types (`image`, `imageReference`, `html`, `inlineMath`,
+// `footnoteReference`, `break`) are width-1 VISIBLE units, so a visible
+// selection can never land mid-atom and their presence here is belt-and-
+// braces — pinned as such in scripts/test-source-kernel-commands.mjs rather
+// than assumed. `link`/`linkReference` are the ones that were genuinely
+// reachable: their label is real, selectable phrasing.
+export const OVERLAP_NODE_TYPES = Object.freeze(new Set([
+  'strong', 'emphasis', 'delete', 'inlineCode', 'highlight', 'link', 'linkReference',
+  'image', 'imageReference', 'html', 'inlineMath', 'footnoteReference', 'break'
+]))
+
 const SPAN_NODE_TYPES = new Set(['strong', 'emphasis', 'delete', 'highlight'])
 
 // Marks meaningful only where remark parses real inline content — table
