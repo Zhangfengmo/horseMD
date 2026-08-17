@@ -46,11 +46,45 @@ const STARTERS = [
   '# 头\n\n段落甲\n\n- 甲\n- [x] 乙\n  1. 丙\n',
   '> 引甲\n>\n> * 引乙\n',
   '甲\r\n\r\n1) 乙\r\n2) 丙\r\n',
-  '- \n\n尾\n'
+  '- \n\n尾\n',
+  // MIXED line endings (re-review, 2026-08-17). Every starter above is
+  // uniform, so the harness could never reach the shape where a forward edit
+  // CREATES a '\r\n' adjacency at its own boundary — the shape whose inverse
+  // the CRLF chokepoint refused, freezing the whole undo stack. A mixed
+  // document is not exotic: `buildCodeMap` maps a mixed-ending fenced block,
+  // so it is reachable in the editor.
+  '甲\r乙\n\n- \n\n尾\n'
 ]
 const KEYS = ['Enter', 'Tab', 'Shift-Tab', 'Backspace', 'Delete']
 const INSERTS = ['x', '中', ' ', '\t', '*', '&']
 const FORBIDDEN = /&#x20;|&nbsp;|<!--|​|﻿/
+
+// ---- line-ending invariants (re-review, 2026-08-17) -----------------------
+// The harness had NO line-ending invariant at all, which is why the whole
+// Critical-3 family (a raw-offset write splitting a '\r\n' into a lone CR and
+// a bare LF) walked straight past 12 seeds x 120 steps.
+//
+// Both invariants below were verified to be non-vacuous by re-running this
+// file against a deliberately un-fixed kernel:
+//  * uniformity — with the CRLF chokepoint AND `routeStructuralKey`'s guard
+//    removed (i.e. the kernel as it shipped before Critical 3), the
+//    uniform-CRLF starter fails at seed 3 step 28 with
+//    '中甲 \r\n\r\n1) 乙&\r\r\n2) \n   2) &*丙\r\n' — a lone CR and a bare LF
+//    in a file that started uniformly CRLF.
+//  * inverse-appliability — with the chokepoint's `history-invert` exemption
+//    removed, the MIXED starter fails at seed 4 step 50 with
+//    `inverse not appliable: invalid-range`, which is exactly the frozen-undo
+//    regression the re-review found.
+// The fixed kernel passes all 12 seeds for both.
+const endingProfile = (text) => ({
+  crlf: (text.match(/\r\n/g) || []).length,
+  loneCr: (text.match(/\r(?!\n)/g) || []).length,
+  bareLf: (text.match(/(?<!\r)\n/g) || []).length
+})
+// "Uniform" = no lone CR anywhere, and not both spellings of a line break in
+// the same document.
+const isUniform = (profile) =>
+  profile.loneCr === 0 && (profile.crlf === 0 || profile.bareLf === 0)
 
 // Coverage instrumentation (attempted vs actually-applied per action label).
 // Kept permanently (COVERAGE=1 env gate) rather than deleted after use, per
@@ -115,7 +149,29 @@ const collectInterestingOffsets = (index) => {
 const runSeed = (seed) => {
   const random = mulberry32(seed)
   const pick = (list) => list[Math.floor(random() * list.length)]
-  let doc = createMarkdownDocument(pick(STARTERS))
+  const starter = pick(STARTERS)
+  let doc = createMarkdownDocument(starter)
+  // A document that STARTED uniform must STAY uniform: no command may invent
+  // a second line-ending spelling. (A mixed starter is exempt — there is no
+  // uniformity to preserve; its job is the inverse-appliability check below.)
+  const startedUniform = isUniform(endingProfile(starter))
+  const assertEndings = (text, where) => {
+    if (!startedUniform) return
+    const profile = endingProfile(text)
+    assert.ok(isUniform(profile),
+      `line endings stopped being uniform (${where}): ${JSON.stringify(profile)} in ${JSON.stringify(text)}`)
+  }
+  // Every recorded inverse must be APPLIABLE against the document its forward
+  // edit produced, and must restore that forward edit's input byte-for-byte.
+  // A history whose inverse cannot be applied is a frozen undo stack — which
+  // is exactly what the CRLF chokepoint caused for edits that created a
+  // '\r\n' adjacency at their own boundary. Checked without consuming it (the
+  // result is discarded; `doc` keeps moving forward).
+  const assertInverseAppliable = (applied, before, where) => {
+    const back = applySourceTransaction(applied.doc, applied.inverse)
+    assert.equal(back.ok, true, `inverse not appliable (${where}): ${back.code}`)
+    assert.equal(back.doc.text, before, `inverse did not restore the exact bytes (${where})`)
+  }
   const history = createSourceHistory()
   const journal = []
 
@@ -171,6 +227,7 @@ const runSeed = (seed) => {
           assert.ok(!FORBIDDEN.test(applied.doc.text),
             `forbidden entity introduced by ${action} (seed ${seed} step ${step})`)
         }
+        assertEndings(applied.doc.text, `seed ${seed} step ${step} ${action}`)
         markdownComparisonKey(applied.doc.text)
         doc = applied.doc
         bump(stats.applied, action)
@@ -220,6 +277,10 @@ const runSeed = (seed) => {
       assert.ok(!FORBIDDEN.test(applied.doc.text),
         `forbidden entity introduced (seed ${seed} step ${step} ${action})`)
     }
+    // 不变式:行终止符拼写不被凭空引入(见 endingProfile / isUniform)
+    assertEndings(applied.doc.text, `seed ${seed} step ${step} ${action}`)
+    // 不变式:每一条被记录的 inverse 都必须可应用，且逐字节还原编辑前的文本
+    assertInverseAppliable(applied, before, `seed ${seed} step ${step} ${action}`)
     // 不变式:新源码可解析(parse 不抛)且语义 key 可计算
     markdownComparisonKey(applied.doc.text)
     history.record(applied, result.transaction)
