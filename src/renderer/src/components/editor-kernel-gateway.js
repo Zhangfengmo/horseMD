@@ -265,8 +265,15 @@ function extractLanguageStep(transactions, oldState) {
 // (plan Global Constraints) — a link toggle falls through to `blocked`/
 // INPUT_TYPE. A highlight whose color is not 'yellow' is also refused at
 // classification (see extractMarkToggle): only the pure `==text==` byte form
-// is kernel-ownable this phase; red/blue round-trip as `<mark class>` HTML,
-// which the kernel's mark-map fail-closes on (plan Global Constraints).
+// is kernel-ownable — that is the form P5-3 taught the kernel chain to parse
+// (lib/source-kernel/highlight-syntax.js), so a yellow toggle now COMMITS
+// instead of being refused downstream by `requireMap`. Red/blue keep
+// round-tripping as `<mark class="hm-hl-…">` inline HTML, which the kernel
+// coalesces into ONE atom while ProseMirror holds an N-character marked run —
+// a size disagreement that degrades the block to read-only (pinned in
+// scripts/test-kernel-projection-map.mjs Case P3c). Supporting it would mean
+// special-casing the SHARED inline-HTML run rule and teaching the toggle
+// command to write tag bytes; explicitly out of scope for stage 3.
 const MARK_TOGGLE_KINDS = Object.freeze({
   strong: 'strong',
   emphasis: 'emphasis',

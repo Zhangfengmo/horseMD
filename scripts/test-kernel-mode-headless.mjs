@@ -125,13 +125,20 @@ const FIXTURE_DOCS = {
   '甲乙丙\n': () => doc(p(text('甲乙丙'))),
   '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
   '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
-  // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. The
-  // live chain turns `==高亮==` into a highlight MARK over '高亮' (PM
-  // content.size 2) while the kernel chain reads six literal characters —
-  // the size disagreement that now degrades only that pair.
-  '甲乙\n\n==高亮==\n': () => doc(p(text('甲乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
-  '甲丙乙\n\n==高亮==\n': () => doc(p(text('甲丙乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
-  '甲丁丙乙\n\n==高亮==\n': () => doc(p(text('甲丁丙乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
+  // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
+  // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
+  // see Case M4), so the pin moved to the RED highlight, which is exactly the
+  // shape P5-3 deliberately did NOT teach: `<mark class="hm-hl-red">` is
+  // inline HTML, ONE atom to the kernel's shared run rule but a 2-character
+  // marked text run in ProseMirror (the editor's `coalesceMarkHtml` turns the
+  // merged fragment into a highlight node). The same pure size disagreement,
+  // in the shape that still has it.
+  '甲乙\n\n<mark class="hm-hl-red">高亮</mark>\n': () =>
+    doc(p(text('甲乙')), p(schema.text('高亮', [schema.mark('highlight', { color: 'red' })]))),
+  '甲丙乙\n\n<mark class="hm-hl-red">高亮</mark>\n': () =>
+    doc(p(text('甲丙乙')), p(schema.text('高亮', [schema.mark('highlight', { color: 'red' })]))),
+  '甲丁丙乙\n\n<mark class="hm-hl-red">高亮</mark>\n': () =>
+    doc(p(text('甲丁丙乙')), p(schema.text('高亮', [schema.mark('highlight', { color: 'red' })]))),
   '甲`乙`丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙'))),
   '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')]))),
   // P4-3.5 Fix B fixtures: plain typing inside the already-marked paragraph.
@@ -1223,45 +1230,84 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '甲**乙**丙\n', 'redo re-wraps')
 }
 
-// Case M4 (ADR pin — the pre-commit map guard, `requireMap`): a toggle whose
-// RESULT document cannot rebuild a projection map refuses FAIL-CLOSED,
-// BEFORE any mutation — bytes, view, history all unchanged, with a
-// notification. One shape still hits it today (probe evidence in the Task 3
-// report):
-//  - highlight (ANY selection): the committed `==` bytes are literal text
-//    to the kernel chain (no highlight plugin there) but invisible to the
-//    Crepe parse — the block's content-size identity check always fails.
-// (Multi-char inline code used to be pinned here too — P4-3.5's per-char
-// inlineCode units healed it; it now COMMITS, see Case M4b below.)
-// When the projection map learns the highlight pairing, this assertion is
-// the one to flip.
+// Case M4 (FLIPPED by P5-3 — the highlight toggle works): this used to be
+// the ADR pin for the pre-commit map guard (`requireMap`), because the
+// committed `==` bytes were literal text to the kernel chain and invisible to
+// the Crepe parse, so the toggled paragraph came back unmappable and the
+// guard refused the whole transaction. The kernel now injects real positioned
+// `highlight` nodes (highlight-syntax.js), the toggled block pairs, the
+// transaction's anchor resolves, and the toggle COMMITS byte-exactly.
 //
-// P5-2.5 changed WHICH HALF of `requireMap` refuses this, deliberately, so
-// the user-visible behavior stays identical: the result document's map now
-// BUILDS (the size-mismatched paragraph degrades to a non-editable pair
-// instead of nulling the whole map), so the guard's second half — "the
-// transaction's own selection anchor must still resolve through the new
-// map" — is what refuses. Without that half the toggle would commit bytes
-// into a paragraph the user could then no longer type in, which is strictly
-// worse than today's "nothing happens, toast shown".
-for (const [markName, from, to, label] of [
-  ['highlight', 2, 3, 'highlight']
-]) {
+// `requireMap` itself is unchanged and still guards this route; it simply has
+// no reachable mark shape left that trips it (the remaining live pin for the
+// guard is the `/quote` empty-blockquote refusal in
+// scripts/test-kernel-marks-ui.mjs). The two refusals below are the new
+// fail-closed edges, and they refuse EARLIER, in the toggle command itself.
+{
   const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
   const before = h.notifications.length
-  const tr = toggleVia(h, schema.marks[markName], from, to)
-  assert.ok(tr)
+
+  // Wrap: select 乙, hit highlight -> `甲==乙==丙`, reconciled to a real
+  // highlight MARK, selection kept on the content (2..3 shifted by the two
+  // inserted marker bytes -> 2..3 again in PM coordinates, since the markers
+  // are gaps).
+  const tr = toggleVia(h, schema.marks.highlight, 2, 3)
+  assert.equal(tr.steps[0].constructor.name, 'AddMarkStep')
   const verdict = dispatchThrough(h, tr)
   await flushMicrotasks()
-  assert.deepEqual(verdict, { veto: true }, label + ' toggle must veto')
-  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', label + ': kernel bytes untouched')
-  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))), label + ': view untouched')
-  assert.ok(h.notifications.length > before, label + ': refusal notifies')
+  assert.deepEqual(verdict, { veto: true }, 'the PM mark transaction is always vetoed; the kernel reconciles')
+  assert.equal(h.controller.kernel.doc.text, '甲==乙==丙\n', 'highlight wrap commits byte-exactly')
   assert.ok(
-    globalThis.__hmKernelDiagnostics.some((entry) => entry.type === 'projection-unmappable-refused'),
-    label + ': the pre-commit map guard is the refusing party'
+    h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙')))),
+    'the reconciled doc carries a real highlight mark'
   )
+  assert.ok(h.controller.kernel.map, 'the map rebinds — no post-toggle lock-up (the old M4 failure mode)')
+  assert.ok(h.controller.kernel.map.blockPairs[0].charMap,
+    'and the toggled paragraph is still EDITABLE, which is what used to be impossible')
+  assert.equal(h.notifications.length, before, 'a successful toggle notifies nothing')
+  assert.equal(h.view.state.selection.from, 2)
+  assert.equal(h.view.state.selection.to, 3)
+
+  // Unwrap: the same range resolves to the highlight node's exact content
+  // range (mark-map.js derives it from the real node now) and both markers go.
+  const tr2 = toggleVia(h, schema.marks.highlight, 2, 3)
+  assert.equal(tr2.steps[0].constructor.name, 'RemoveMarkStep')
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.deepEqual(verdict2, { veto: true })
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'highlight unwrap removes both marker runs')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+
+  // Undo: each toggle is its own kernel history group.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲==乙==丙\n', 'undo #1 restores the highlight wrap')
+  assert.ok(
+    h.view.state.doc.eq(doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))))
+  )
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'undo #2 restores the original')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+}
+
+// Case M4a (P5-3 fail-closed edge): `==` markers are NOT unconditionally
+// effective. Wrapping a selection whose neighbours or content would make the
+// shared rule read plain text instead of a highlight refuses in the toggle
+// command (`unsupported-structure`), before any byte is written — otherwise
+// the user would get four inert `=` characters and no highlight.
+//  - '甲=乙丙' selecting 乙 would commit '甲===乙==丙' (a `===` run: no highlight
+//    in EITHER chain).
+{
+  const h = makeHarness('甲=乙丙\n', doc(p(text('甲=乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  const verdict = dispatchThrough(h, toggleVia(h, schema.marks.highlight, 3, 4))
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, 'the inert-marker wrap must veto')
+  assert.equal(h.controller.kernel.doc.text, '甲=乙丙\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲=乙丙')))), 'view untouched')
+  assert.ok(h.notifications.at(-1).includes('unsupported-structure'),
+    `the toggle command itself refuses, got: ${h.notifications.at(-1)}`)
 }
 
 // Case M4b: inline-code wrap/unwrap commits end-to-end — single-char AND,
@@ -1566,17 +1612,21 @@ for (const [markName, from, to, label] of [
 // here, `attachAfterCreate` set `degraded = true`, and the ENTIRE tab fell
 // back to legacy (that is the pattern this task cures).
 //
-// The unprovable block is a highlight paragraph: the kernel chain has no
-// `==` plugin, so it reads six literal characters, while Crepe's
-// `highlightRemark` gives PM a highlight MARK over the two inner ones
-// (content.size 2). A pure content-size disagreement.
-// Raw offsets of '甲乙\n\n==高亮==\n': 甲=0 乙=1 \n=2 \n=3, '==高亮==' = [4,10),
-// \n=10. PM: paragraph1 pos 0 (content start 1), paragraph2 pos 4 (content
-// start 5, size 2 — the mark is not modelled here, it does not change size).
+// The unprovable block is a RED highlight paragraph: `<mark class="hm-hl-red">`
+// is inline HTML, which the shared run rule (inline-html.js) coalesces into
+// ONE atom on the kernel side, while the editor's `coalesceMarkHtml` turns
+// the same fragment into a highlight node so ProseMirror holds a 2-character
+// marked text run. A pure content-size disagreement (1 vs 2).
+// (It used to be `==高亮==`; P5-3 made that shape editable — see Case M4 —
+// so the pin moved to the red/blue form P5-3 deliberately left alone.)
+// PM: paragraph1 pos 0 (content start 1), paragraph2 pos 4 (content start 5,
+// size 2 — the mark does not change size).
 {
   globalThis.__hmKernelDiagnostics = []
-  const md = '甲乙\n\n==高亮==\n'
-  const h = makeHarness(md, doc(p(text('甲乙')), p(schema.text('高亮', [schema.mark('highlight')]))))
+  const RED = '<mark class="hm-hl-red">高亮</mark>'
+  const md = '甲乙\n\n' + RED + '\n'
+  const redP = () => p(schema.text('高亮', [schema.mark('highlight', { color: 'red' })]))
+  const h = makeHarness(md, doc(p(text('甲乙')), redP()))
   assert.equal(h.controller.attachAfterCreate(), true,
     'a document with one unprovable block must still attach (no whole-tab degradation)')
   assert.equal(h.controller.isDegraded(), false, 'kernel mode stays active')
@@ -1590,9 +1640,9 @@ for (const [markName, from, to, label] of [
   const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
   await flushMicrotasks()
   assert.equal(verdict, undefined, 'typing in the good paragraph is allowed')
-  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n==高亮==\n',
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n' + RED + '\n',
     'the commit is byte-exact and leaves the degraded block untouched')
-  assert.deepEqual(h.changes.at(-1), ['甲丙乙\n\n==高亮==\n', false])
+  assert.deepEqual(h.changes.at(-1), ['甲丙乙\n\n' + RED + '\n', false])
   // ...and the cheap-path verify still passes: reparsing the kernel bytes
   // reproduces the live doc exactly (the kernel/PM disagreement is between
   // the KERNEL's remark chain and the EDITOR's parse, never between two
@@ -1616,7 +1666,7 @@ for (const [markName, from, to, label] of [
   assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'no revision advance')
   assert.ok(h.notifications.length > notifBefore, 'the refusal is surfaced, never silent')
   //     (This particular block is refused one layer EARLIER than the map —
-  //     the inserted char would carry the highlight mark, which
+  //     the inserted char would carry the red highlight mark, which
   //     `plainSliceText` rejects as `unsupported-input-type`. Both layers are
   //     fail-closed; (c) below exercises the MAP's own refusal, which is the
   //     one this task changed.)
@@ -1634,7 +1684,7 @@ for (const [markName, from, to, label] of [
   assert.ok(h.notifications.at(-1).includes('unmapped-selection'),
     `the map refuses the unprovable caret, got: ${h.notifications.at(-1)}`)
   assert.ok(
-    h.view.state.doc.eq(doc(p(text('甲丙乙')), p(schema.text('高亮', [schema.mark('highlight')])))),
+    h.view.state.doc.eq(doc(p(text('甲丙乙')), redP())),
     'the view is untouched by the refused Enter')
 
   // (d) the good paragraph is STILL editable after all those refusals — the
@@ -1643,7 +1693,7 @@ for (const [markName, from, to, label] of [
   const verdict2 = dispatchThrough(h, h.view.state.tr.insertText('丁', 2))
   await flushMicrotasks()
   assert.equal(verdict2, undefined)
-  assert.equal(h.controller.kernel.doc.text, '甲丁丙乙\n\n==高亮==\n')
+  assert.equal(h.controller.kernel.doc.text, '甲丁丙乙\n\n' + RED + '\n')
 }
 
 // Case 18 (blockAt inline html): the review's exact UX regression, cured

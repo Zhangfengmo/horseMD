@@ -412,13 +412,14 @@ export function createKernelMode({
           return { veto: true }
         }
         // `requireMap` refuses (pre-commit, everything untouched) any toggle
-        // whose RESULT document cannot rebuild a projection map — today that
-        // is highlight (`==` bytes visible to the kernel chain, invisible
-        // to the Crepe parse); see applyKernelTransaction's own comment and
-        // the Task 3 report ADR. (inlineCode used to hit it too — P4-3.5's
-        // per-char inlineCode units healed that pairing, so code toggles of
-        // any length now pass the guard.) applyKernelTransaction notifies
-        // on every failure path itself.
+        // whose RESULT document cannot rebuild a projection map, or whose own
+        // anchor no longer resolves through it. No mark kind trips it today:
+        // inlineCode was healed by P4-3.5's per-char units and highlight by
+        // P5-3's positioned `==` nodes (highlight-syntax.js). It stays because
+        // it is what makes this route fail-closed BY CONSTRUCTION rather than
+        // by enumeration — a future mark, or a future shape of an existing
+        // one, must prove it still maps before a byte is written.
+        // applyKernelTransaction notifies on every failure path itself.
         applyKernelTransaction(routed.transaction, view, { requireMap: true })
         return { veto: true }
       }
@@ -664,28 +665,28 @@ export function createKernelMode({
   // provably rebuilds a projection map AND that map can still resolve the
   // position this transaction acts on. The mark-toggle route demands this
   // because a byte-successful toggle can produce a document the projection
-  // layer cannot pair: a highlight's `==` bytes are literal text to the
-  // kernel chain (no highlight plugin there) but invisible to the Crepe
-  // parse, so `buildProjectionMap`'s content-size identity check rejects
-  // the block (probe evidence in the Task 3 report; inline code used to be
-  // the second such shape until P4-3.5 gave it per-char units). Without this
-  // guard the toggle would COMMIT, reconcile, then leave a byte-correct but
-  // unmappable target where every subsequent edit vetoes with UNMAPPED (a
-  // lock-up trap). Refusing up front keeps the toggle fail-closed: bytes,
-  // history and view all stay exactly as they were.
+  // layer cannot pair; without the guard such a toggle would COMMIT,
+  // reconcile, then leave a byte-correct but unmappable target where every
+  // subsequent edit vetoes with UNMAPPED (a lock-up trap). Refusing up front
+  // keeps the toggle fail-closed: bytes, history and view all stay exactly as
+  // they were.
+  //
+  // The two shapes that used to trip it are both healed — inline code by
+  // P4-3.5's per-char units, and highlight by P5-3, which taught the kernel
+  // chain the `==` rule the editor uses (lib/source-kernel/highlight-syntax.js)
+  // so a toggled paragraph pairs and stays editable. The guard is deliberately
+  // kept anyway: it is a structural precondition of this route, not a
+  // workaround for a known list of marks.
   //
   // The ANCHOR half of the guard is what P5-2.5 added, and it is what keeps
-  // this refusal working now that the projection map degrades an unprovable
-  // block instead of the whole document: after P5-2.5 a highlight toggle
-  // still rebuilds a map (every OTHER block pairs fine), but the toggled
-  // block itself comes back with `charMap: null`, so the transaction's own
-  // selection anchor no longer resolves through `rawToPmPos`. Requiring the
-  // anchor to resolve reproduces exactly the pre-P5-2.5 decision for this
-  // route (refuse, nothing happens, toast) rather than committing bytes into
-  // a paragraph the user could then no longer type in. Any mark whose result
-  // stays pairable (bold/italic/strike/inline code) resolves its anchor and
-  // commits unchanged. A transaction with no selection at all is judged on
-  // the map alone.
+  // the refusal meaningful now that the projection map degrades an unprovable
+  // block instead of the whole document: a toggle whose block degrades still
+  // rebuilds a map (every OTHER block pairs fine), but the toggled block comes
+  // back with `charMap: null`, so the transaction's own selection anchor no
+  // longer resolves through `rawToPmPos` — refuse, nothing happens, toast,
+  // rather than committing bytes into a paragraph the user could then no
+  // longer type in. A transaction with no selection at all is judged on the
+  // map alone.
   // Structural intents keep `requireMap: false` — their existing
   // placeholder flows legitimately pass through transient states this
   // strict guard would wrongly refuse.

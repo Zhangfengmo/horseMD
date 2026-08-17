@@ -77,7 +77,11 @@ const AFTER_D = AFTER_C.replace('壬癸子丑', '**壬癸子丑**')
 const AFTER_E = AFTER_D.replace('寅卯辰巳', '`寅卯辰巳`')
 const AFTER_F = AFTER_E.replace('前午未申酉后段尾', '前**午未申酉**后段尾')
 const AFTER_TYPING = AFTER_F.replace('前**午未申酉**后段尾', '前X**午未申酉**后Y段尾Z')
-// Highlight refusal (M4 pin), link refusal (no kernel kind), and the /quote
+// P5-3: the highlight toolbar button now COMMITS (it used to be refused).
+// Wrap then unwrap nets to zero change, so every later checkpoint is
+// unaffected — same shape as the Bold wrap/unwrap in step 2.
+const AFTER_HIGHLIGHT = FIXTURE.replace('壹贰叁肆', '==壹贰叁肆==')
+// Link refusal (no kernel kind) and the /quote
 // placeholder refusal (empty-blockquote projection guard, this task's fix)
 // are all byte-neutral EXCEPT the "/quote" text itself, which the TYPING of
 // the query commits as ordinary plain text (only the WRAP click is refused).
@@ -442,18 +446,27 @@ async function run() {
     await assertSource(evaluate, AFTER_B, 'clicking Bold again must unwrap back to the original bytes')
 
     // ============================================================
-    // 6) HIGHLIGHT REFUSAL PIN (M4): select -> toolbar highlight -> bytes
-    //    unchanged, doc still mapped (proven immediately below by a real
-    //    successful byte round trip riding the SAME kernel.map). Done here,
+    // 6) HIGHLIGHT (P5-3 flipped pin — this used to assert a REFUSAL):
+    //    select -> toolbar highlight -> the `==` bytes are committed, then
+    //    highlight again -> unwrapped back to the original bytes. Done here,
     //    right after step 2, while the selection toolbar is still on — step
     //    3a below turns the toolbar SETTING off for the ctxmenu test and
     //    never turns it back on.
     // ============================================================
     await selectRange(evaluate, send, '壹贰叁肆', 0, 4)
-    const beforeHighlight = await paragraphTexts(evaluate)
     await clickHighlightYellow(evaluate, send)
-    const afterHighlight = await paragraphTexts(evaluate)
-    assert.deepEqual(afterHighlight, beforeHighlight, 'highlight toggle must be refused (bytes unchanged) — projection map has no == pairing yet')
+    await assertSource(evaluate, AFTER_HIGHLIGHT, 'toolbar highlight must wrap the selection with ==')
+    // The mark really is live in the view (not just bytes on disk): the
+    // reconciled document renders a <mark> for it.
+    const highlightRendered = await waitFor(() => evaluate(`(() => {
+      const el = (${VISIBLE_EDITOR})?.querySelector('mark.hm-highlight')
+      return el ? el.textContent : null
+    })()`), 'the committed highlight did not render as a <mark> in the view')
+    assert.equal(highlightRendered, '壹贰叁肆', 'the rendered highlight covers exactly the selected word')
+
+    await selectRange(evaluate, send, '壹贰叁肆', 0, 4)
+    await clickHighlightYellow(evaluate, send)
+    await assertSource(evaluate, AFTER_B, 'clicking highlight again must unwrap back to the original bytes')
 
     // ============================================================
     // 7) Link toolbar button -> blocked, bytes unchanged
@@ -464,9 +477,9 @@ async function run() {
     const afterLink = await paragraphTexts(evaluate)
     assert.deepEqual(afterLink, beforeLink, 'link toggle must be blocked (bytes unchanged)')
 
-    // Prove the kernel map is STILL live after both refusals: a real,
+    // Prove the kernel map is STILL live after the refusal: a real,
     // successful byte-assert round trip.
-    await assertSource(evaluate, AFTER_B, 'kernel.map must still be intact after the highlight/link refusals (no byte drift)')
+    await assertSource(evaluate, AFTER_B, 'kernel.map must still be intact after the link refusal (no byte drift)')
 
     // ============================================================
     // 3a) ctxmenu Italic on a second word (needs the selection-toolbar
@@ -789,7 +802,7 @@ async function run() {
     await assertSourceLegacy(evaluate, MULTI_QUOTE_UNWRAPPED,
       'unquoting the MIDDLE paragraph must lift the WHOLE blockquote (all three paragraphs freed), never split it into two quotes around a freed middle paragraph')
 
-    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight/link refusals, the /quote fail-closed fix, code-block ctxmenu gating, whole-blockquote legacy unwrap, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode marks + quote domain UI regression: toolbar/ctxmenu/keyboard mark toggles, inline code, the typing-after-bold matrix, highlight wrap/unwrap, the link refusal, the /quote fail-closed fix, code-block ctxmenu gating, whole-blockquote legacy unwrap, undo/redo groups, save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
