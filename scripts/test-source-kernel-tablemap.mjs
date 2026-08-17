@@ -281,6 +281,100 @@ console.log('--- source kernel table map ---')
 }
 
 // ---------------------------------------------------------------------------
+// Case 6b (review finding, 2026-08-17): ROW-TRAILING whitespace. An mdast
+// last-cell `position` runs to the end of the ROW, so a stray space after the
+// closing `|` lands INSIDE the cell's own raw span:
+//   '| a | b |   \n…' -> tableRow [0,12), cells [0,4) '| a ' and
+//                        [4,12) '| b |   '  (probed)
+// Locating the closing pipe by `text[end - 1]` alone therefore left it inside
+// the content region and the padding proof refused the cell — a read-only
+// cell caused by nothing but trailing whitespace.
+// ---------------------------------------------------------------------------
+{
+  const md = '| a | b |   \n| --- | --- |\n| c | d |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'row-trailing whitespace must still zip')
+  assert.ok(result.cells.every((c) => c.charMap), 'every cell stays EDITABLE')
+  assert.deepEqual(result.cells.map((c) => boundaries(c.charMap)),
+    [[2, 3], [6, 7], [29, 30], [33, 34]])
+}
+{
+  // A trailing TAB, and trailing whitespace on a BODY row's last cell.
+  const md = '| a | b |\t\n| --- | --- |\n| c | d |  \n'
+  const result = buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'trailing tab / body-row trailing whitespace must still zip')
+  assert.ok(result.cells.every((c) => c.charMap))
+  assert.deepEqual(result.cells.map((c) => boundaries(c.charMap)),
+    [[2, 3], [6, 7], [27, 28], [31, 32]])
+}
+{
+  // A row with NO closing pipe but trailing whitespace: `to` must stay at the
+  // cell's end (there is no pipe to pull it in from), which is what keeps the
+  // padding proof and the empty-cell anchor rule unchanged.
+  const md = '| a | b   \n| --- | --- |\n| c | d |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'pipe-less row with trailing whitespace must still zip')
+  assert.ok(result.cells.every((c) => c.charMap))
+  assert.deepEqual(boundaries(result.cells[1].charMap), [6, 7])
+}
+{
+  // CRLF + row-trailing whitespace (both review shapes at once).
+  const md = '| a | b |  \r\n| --- | --- |\r\n| c | d |\r\n'
+  const result = buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'CRLF row-trailing whitespace must still zip')
+  assert.ok(result.cells.every((c) => c.charMap))
+  assert.deepEqual(result.cells.map((c) => boundaries(c.charMap)),
+    [[2, 3], [6, 7], [30, 31], [34, 35]])
+}
+
+// ---------------------------------------------------------------------------
+// Case 6c (review finding, 2026-08-17): DELIMITER-ROW trailing whitespace.
+// Same class as 6b with a much bigger blast radius — `DELIMITER_RE` anchored
+// `\|?$` with no trailing `[ \t]*`, so one stray space degraded the WHOLE
+// table. Every block-prefix flavour is covered because the recovery strips
+// `[ \t>]*` before matching.
+// ---------------------------------------------------------------------------
+{
+  const md = '| a | b |\n| --- | --- |   \n| c | d |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'delimiter-row trailing whitespace must still zip')
+  assert.equal(md.slice(result.delimiter.start, result.delimiter.end), '| --- | --- |   ')
+  assert.equal(result.width, 2)
+  assert.ok(result.cells.every((c) => c.charMap), 'every cell stays EDITABLE')
+  assert.deepEqual(result.cells.map((c) => boundaries(c.charMap)),
+    [[2, 3], [6, 7], [29, 30], [33, 34]])
+}
+{
+  // …and inside a blockquote, where the line also carries a '> ' prefix.
+  const md = '> | a | b |\n> | --- | --- |\t\n> | c | d |\n'
+  const result = buildTableCellMaps(md, nestedTable(md),
+    tableNode([[[text('a')], [text('b')]], [[text('c')], [text('d')]]]), 0)
+  assert.ok(result, 'quoted delimiter row with a trailing tab must still zip')
+  assert.equal(md.slice(result.delimiter.start, result.delimiter.end), '> | --- | --- |\t')
+  assert.ok(result.cells.every((c) => c.charMap))
+}
+{
+  // Negative control: a line that is NOT a delimiter row still degrades the
+  // whole table (the trailing-whitespace tolerance must not loosen the shape
+  // check itself). Here the mdast table's own bytes are re-checked against a
+  // hand-made node whose header row claims a delimiter line that isn't one.
+  const md = '| a | b |\n| --- | --- |\n| c | d |\n'
+  const table = mdTableOf(md)
+  const forged = {
+    ...table,
+    children: [table.children[0]],
+    position: { start: { offset: 0 }, end: { offset: 9 } }
+  }
+  assert.equal(buildTableCellMaps(md, forged, tableNode([[[text('a')], [text('b')]]]), 0), null,
+    'a delimiter row outside the table span must still refuse')
+}
+
+// ---------------------------------------------------------------------------
 // Case 7: rich inline content inside a cell — inline code, inline math, an
 // image, a highlight, emphasis. All of these go through exactly the same unit
 // machinery a paragraph uses (buildCharacterMap), so they stay editable and

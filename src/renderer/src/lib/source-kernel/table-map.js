@@ -86,8 +86,16 @@ import { isInlineBreakHtml } from './inline-html.js'
 const PADDING_RE = /^[ \t]*$/
 // A GFM delimiter row, after its block prefix ('> ' / list indentation) has
 // been stripped: optional outer pipes, and between them only
-// `:?-+:?` column specs.
-const DELIMITER_RE = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/
+// `:?-+:?` column specs. The trailing `[ \t]*` is load-bearing (review
+// finding, 2026-08-17): CommonMark/GFM allow trailing whitespace on ANY line,
+// and editors (including this one) leave it behind routinely — without it a
+// single trailing space on the delimiter row made this recovery fail and
+// degraded the WHOLE table.
+const DELIMITER_RE = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
+// What may follow a cell's CONTENT region inside the cell's own raw span:
+// its closing `|` (last cell of a pipe-closed row) plus any row-trailing
+// whitespace. Proven per cell so nothing content-bearing is left unmapped.
+const CELL_TAIL_RE = /^\|?[ \t]*$/
 // The block prefix a table line inside a blockquote / list item carries.
 const BLOCK_PREFIX_RE = /^[ \t>]*/
 
@@ -134,6 +142,17 @@ function delimiterColumnCount(text, range) {
 // trailing `|` (present only on the last cell of a row that closes its pipes).
 // Everything inside this region that is not covered by a content unit must be
 // padding — that is asserted by the caller below.
+//
+// ROW-TRAILING WHITESPACE (review finding, 2026-08-17): an mdast last-cell
+// `position` runs to the end of the ROW, so `| a | b |   ` gives the second
+// cell the raw span `'| b |   '` — the closing `|` is NOT the final byte.
+// Looking only at `text[end - 1]` therefore left the delimiter INSIDE the
+// content region, the padding proof below saw a `|`, and the cell degraded to
+// read-only for nothing more than a stray space. The pipe is located by
+// skipping back over trailing spaces/tabs FIRST — but `to` is only pulled in
+// when a pipe is actually found there, so a cell with no closing pipe
+// (`'| b   '`) and an EMPTY cell (`'|  '`, whose anchor is derived from its
+// padding) keep the exact region they had before.
 function cellContentRegion(text, mdCell) {
   const start = offsetOf(mdCell.position?.start)
   const end = offsetOf(mdCell.position?.end)
@@ -141,7 +160,9 @@ function cellContentRegion(text, mdCell) {
   let from = start
   if (text[from] === '|') from += 1
   let to = end
-  if (to > from && text[to - 1] === '|') to -= 1
+  let scan = end
+  while (scan > from && (text[scan - 1] === ' ' || text[scan - 1] === '\t')) scan -= 1
+  if (scan > from && text[scan - 1] === '|') to = scan - 1
   return { from, to }
 }
 
@@ -191,6 +212,10 @@ function emptyCellCharMap(text, region) {
 function buildCellCharMap(text, mdCell) {
   const region = cellContentRegion(text, mdCell)
   if (!region) return null
+  // Whatever the cell's own raw span holds AFTER the content region must be
+  // exactly its closing `|` and/or row-trailing whitespace — nothing
+  // content-bearing may sit outside the mapped region.
+  if (!CELL_TAIL_RE.test(text.slice(region.to, offsetOf(mdCell.position?.end)))) return null
   const children = mdCell.children || []
   if (!children.length) {
     // A childless cell must be padding-only between its delimiters, or the
@@ -272,7 +297,11 @@ function walkPmTable(pmTable, pmPos) {
       const cellPos = rowPos + 1 + cellOffset
       cells.push({ pmNode: paragraph, pmPos: cellPos + 1 })
     })
-    rows.push(cells)
+    // Only a fully-collected row is recorded: a row whose cell loop bailed
+    // out has partial data that nothing may read (the whole walk fails
+    // anyway), and leaving it out keeps `rows` honest for the `rows.length
+    // === 0` header-position check above.
+    if (ok) rows.push(cells)
   })
   return ok ? rows : null
 }
@@ -309,7 +338,7 @@ export function buildTableCellMaps(text, mdTable, pmTable, pmPos) {
   const delimiter = delimiterRowRange(text, mdTable)
   if (!delimiter) return null
   const declared = delimiterColumnCount(text, delimiter)
-  if (!declared) return null
+  if (declared === null) return null
   const align = mdTable.align
   if (!Array.isArray(align) || align.length !== declared) return null
 

@@ -23,6 +23,14 @@
 //    legacy behavior (pass everything through, intercept no keys).
 import { keymap } from '@milkdown/prose/keymap'
 import { TextSelection } from '@milkdown/prose/state'
+// Table-cell navigation (Plan 5 Task 4 review fix): the SAME two commands
+// @milkdown/preset-gfm's own `tableKeymap` binds Tab / Shift-Tab to
+// (preset-gfm/lib/index.js:415-420 + :652-667 — `goToNextTableCellCommand` IS
+// `goToNextCell(1)`), so kernel mode reproduces the editor's expected
+// behaviour rather than shadowing it. Both are SELECTION-only commands (they
+// dispatch nothing but `tr.setSelection(...).scrollIntoView()`), so they write
+// no bytes and the gateway classifies their transaction as `selection-only`.
+import { goToNextCell, isInTable } from '@milkdown/prose/tables'
 import {
   KERNEL_CODES,
   applySourceTransaction,
@@ -1068,6 +1076,43 @@ export function createKernelMode({
     if (!kernel.map) {
       notifyBlocked(KERNEL_CODES.UNMAPPED)
       return true
+    }
+    // Tab / Shift-Tab inside a GFM table cell NAVIGATE between cells (Plan 5
+    // Task 4 review fix). Two things made this necessary the moment table
+    // cells became mappable:
+    //  1. Before Task 4 a caret in a cell had no raw offset at all, so the
+    //     `Number.isFinite(offset)` guard below refused the key. With cells
+    //     mapped, `routeStructuralKey('Tab')` answers `not-structural` and the
+    //     fallback below inserted a LITERAL TAB into the cell's source. GFM
+    //     treats that byte as cell padding, so the reparse still mapped and
+    //     ProseMirror still showed the same text — the tab was INVISIBLE in
+    //     the view but persisted to the file, dirtied the document, took a
+    //     history slot, and accumulated on every press. A byte no user can
+    //     see is exactly the fidelity-bug family this kernel exists to end.
+    //  2. This keymap is registered AHEAD of Crepe's own plugins, so it also
+    //     preempted preset-gfm's `tableKeymap` NextCell/PrevCell — Tab stopped
+    //     moving between cells and Shift-Tab was swallowed silently.
+    // Routing to preset-gfm's own commands fixes both at once and writes no
+    // bytes. Checked from the LIVE PM state (`isInTable`), not from the
+    // projection map, so navigation also works inside a table whose cells
+    // degraded to read-only — moving the caret is always safe.
+    if (key === 'Tab' || key === 'Shift-Tab') {
+      let inTable = false
+      try {
+        inTable = isInTable(state)
+      } catch {
+        inTable = false
+      }
+      if (inTable) {
+        try {
+          goToNextCell(key === 'Tab' ? 1 : -1)(state, dispatch || view.dispatch.bind(view), view)
+        } catch {
+          /* no next/previous cell, or a table shape prosemirror-tables can't
+             resolve — swallow the key rather than let another keymap run a
+             structural command the kernel does not own. */
+        }
+        return true
+      }
     }
     const offset = kernel.map.pmPosToRaw(state.selection.head)
     if (!Number.isFinite(offset)) {

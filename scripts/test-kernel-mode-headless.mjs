@@ -53,11 +53,35 @@ const schema = new Schema({
     // (lib/index.js:88-280): four container levels (table / row / cell /
     // paragraph) against mdast's three. `alignment` is the cell attr
     // preset-gfm declares; nothing in this phase writes it.
-    table: { content: 'table_header_row table_row+', group: 'block' },
-    table_header_row: { content: '(table_header)*' },
-    table_row: { content: '(table_cell)*' },
-    table_header: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
-    table_cell: { content: 'paragraph+', attrs: { alignment: { default: 'left' } } },
+    //
+    // `tableRole` + the colspan/rowspan/colwidth attrs come from
+    // prosemirror-tables' own `tableNodes()` (which preset-gfm spreads) and
+    // are NOT decoration here: `isInTable`/`selectionCell`/`TableMap` — the
+    // machinery behind the Tab/Shift-Tab cell navigation this file exercises
+    // — read exactly those.
+    table: { content: 'table_header_row table_row+', group: 'block', tableRole: 'table' },
+    table_header_row: { content: '(table_header)*', tableRole: 'row' },
+    table_row: { content: '(table_cell)*', tableRole: 'row' },
+    table_header: {
+      content: 'paragraph+',
+      tableRole: 'header_cell',
+      attrs: {
+        alignment: { default: 'left' },
+        colspan: { default: 1 },
+        rowspan: { default: 1 },
+        colwidth: { default: null }
+      }
+    },
+    table_cell: {
+      content: 'paragraph+',
+      tableRole: 'cell',
+      attrs: {
+        alignment: { default: 'left' },
+        colspan: { default: 1 },
+        rowspan: { default: 1 },
+        colwidth: { default: null }
+      }
+    },
     // Plan 5 Task 5 — the TWO image nodes, with the attrs the live schemas
     // declare: @milkdown/preset-commonmark's inline `image` ({src, alt,
     // title}) and @milkdown/components' block `image-block` ({src, caption,
@@ -253,6 +277,26 @@ const FIXTURE_DOCS = {
   '| aX | b |\n| :-- | --: |\n| c | dY |\n\n甲丙乙\n': () => doc(
     tbl([[['aX', 'left'], ['b', 'right']], [['c', 'left'], ['dY', 'right']]]),
     p(text('甲丙乙'))),
+  // Case 21c: the REGRESSION shape itself — a literal tab committed into a
+  // cell. GFM reads it as cell padding, so the document still parses to the
+  // very same ProseMirror doc (the tab is invisible in the view while living
+  // in the file). Registered deliberately even though the fixed build never
+  // reaches it: without the fixture `stubParse` would THROW on the pre-fix
+  // bytes and the kernel would roll back, masking the byte assertion in Case
+  // 21c and turning it into a tripwire that can never fire.
+  '| a\t | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n': () => doc(
+    tbl([[['a', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
+    p(text('甲乙'))),
+  // Case 21c (e): the positive control — a Tab in the ORDINARY paragraph
+  // after the table still commits a literal tab.
+  '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\t\n': () => doc(
+    tbl([[['a', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
+    p(text('甲乙\t'))),
+  // Case 21d: a RAGGED table (body row short of a cell) — the whole table
+  // degrades to one opaque pair, but cell navigation must still work.
+  '| a | b |\n| :-- | --: |\n| c |\n\n甲乙\n': () => doc(
+    tbl([[['a', 'left'], ['b', 'right']], [['c', 'left']]]),
+    p(text('甲乙'))),
   // Plan 5 Task 5 fixtures: a standalone image (Crepe's block-level
   // `image-block` atom over the kernel's `paragraph > image` wrapper) plus a
   // following paragraph, before and after each attribute rewrite.
@@ -2180,6 +2224,98 @@ const toggleVia = (h, markType, from, to) => {
   await flushMicrotasks()
   assert.equal(typed, undefined, 'the rest of the document is unaffected')
   assert.equal(h.controller.kernel.doc.text, '前![a](x.png\n"t")后\n\n甲丙乙\n')
+}
+
+// Case 21c (review finding, 2026-08-17): Tab / Shift-Tab inside a table cell
+// NAVIGATE between cells and write NOTHING.
+//
+// The regression Task 4 introduced: before it, a caret in a cell had no raw
+// offset, so `structuralHandler`'s `Number.isFinite(offset)` guard refused
+// the key. Once cells became mappable, `routeStructuralKey('Tab')` answered
+// `not-structural` and the fallback inserted a LITERAL TAB into the cell's
+// source ('| a | b |' + Tab -> '| a\t | b |'). GFM reads that byte as cell
+// padding, so the reparse still mapped and ProseMirror still showed 'a' — an
+// INVISIBLE byte persisted to the file, dirtying the document and
+// accumulating on every press. Separately, this keymap is registered ahead of
+// Crepe's plugins, so it also preempted preset-gfm's own NextCell/PrevCell
+// (tableKeymap, priority 100) and Tab stopped moving between cells at all.
+//
+// PM geometry for '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n' (Case 21):
+// cell paragraphs at 3 / 8 / 15 / 20, content positions 4 / 9 / 16 / 21.
+{
+  const md = '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const revision = h.controller.kernel.doc.revision
+  const notifications = h.notifications.length
+
+  const caretAt = (pos) => {
+    h.view.updateState(h.view.state.apply(
+      h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, pos))
+    ))
+  }
+
+  // (a) Tab from the first header cell -> the SECOND cell's content.
+  caretAt(5) // after 'a'
+  assert.equal(h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view), true,
+    'Tab in a cell is handled (never falls through to another keymap)')
+  // The byte contract FIRST — this is the assertion that fails on the
+  // pre-fix build with '| a\t | b |…'.
+  assert.equal(h.controller.kernel.doc.text, md, 'Tab wrote NO bytes')
+  assert.equal(/\t/.test(h.controller.kernel.doc.text), false, 'no tab byte reached the source')
+  assert.equal(h.controller.kernel.doc.revision, revision, 'Tab took no history slot')
+  assert.equal(h.view.state.selection.$head.parent.textContent, 'b',
+    'Tab moved the caret into the next cell')
+
+  // (b) Shift-Tab goes back.
+  assert.equal(h.controller.structuralHandlers['Shift-Tab'](h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.view.state.selection.$head.parent.textContent, 'a',
+    'Shift-Tab moved the caret back to the previous cell')
+  assert.equal(h.controller.kernel.doc.text, md)
+
+  // (c) Tab wraps from the header row into the body row.
+  caretAt(10) // in cell 'b'
+  h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view)
+  assert.equal(h.view.state.selection.$head.parent.textContent, 'c',
+    'Tab crosses the row boundary, like preset-gfm does')
+
+  // (d) Tab at the LAST cell has nowhere to go: swallowed, still no bytes.
+  caretAt(22) // in cell 'd'
+  assert.equal(h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view), true,
+    'Tab at the last cell is still swallowed (no other keymap may run)')
+  assert.equal(h.view.state.selection.$head.parent.textContent, 'd')
+  assert.equal(h.controller.kernel.doc.text, md, 'the last-cell Tab wrote no bytes either')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.equal(/\t/.test(h.controller.kernel.doc.text), false,
+    'NO tab byte may ever reach the source through a table cell')
+  assert.equal(h.notifications.length, notifications, 'cell navigation never toasts')
+
+  // (e) POSITIVE CONTROL on the same live document: Tab in the ORDINARY
+  //     paragraph after the table still inserts a literal tab, source-first.
+  caretAt(h.view.state.doc.content.size - 1) // end of 甲乙
+  assert.equal(h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text,
+    '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\t\n',
+    'a paragraph Tab is unchanged by the table branch')
+}
+
+// Case 21d: a DEGRADED (ragged) table still navigates — moving the caret is
+// always safe, and it must not fall through to another keymap either. The
+// check is made from the LIVE PM state (`isInTable`), not the projection map,
+// exactly so this shape keeps working.
+{
+  const md = '| a | b |\n| :-- | --: |\n| c |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tablePairs = h.controller.kernel.map.blockPairs.filter((pair) => pair.tableCell)
+  assert.equal(tablePairs.length, 0, 'sanity: the ragged table degraded to one opaque pair')
+  h.view.updateState(h.view.state.apply(
+    h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5))
+  ))
+  assert.equal(h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.view.state.selection.$head.parent.textContent, 'b',
+    'navigation works even in a table whose cells are read-only')
+  assert.equal(h.controller.kernel.doc.text, md, 'and it writes nothing')
 }
 
 console.log('PASS kernel mode headless')

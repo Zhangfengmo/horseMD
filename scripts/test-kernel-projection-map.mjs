@@ -453,6 +453,41 @@ console.log('--- kernel projection map ---')
   assert.ok(map.blockPairs[4].charMap, 'the trailing paragraph stays editable')
 }
 
+// Case 9e (review finding, 2026-08-17): TRAILING WHITESPACE — on a row and on
+// the delimiter row — must not cost editability. An mdast last-cell position
+// runs to the end of the ROW, so a stray space after the closing `|` used to
+// leave the delimiter inside the cell's content region (that cell degraded);
+// and `DELIMITER_RE` had no trailing `[ \t]*`, so a stray space on the
+// delimiter row degraded the WHOLE table. Both are byte shapes every editor
+// (this one included) produces routinely.
+{
+  const cellsOf = (a, b, c, d) => schema.node('table', null, [
+    schema.node('table_header_row', null, [
+      schema.node('table_header', null, [p(text(a))]),
+      schema.node('table_header', null, [p(text(b))])
+    ]),
+    schema.node('table_row', null, [
+      schema.node('table_cell', null, [p(text(c))]),
+      schema.node('table_cell', null, [p(text(d))])
+    ])
+  ])
+  for (const [label, md] of [
+    ['row-trailing whitespace', '| a | b |   \n| - | - |\n| c | d |\n\nP\n'],
+    ['row-trailing tab', '| a | b |\t\n| - | - |\n| c | d |\n\nP\n'],
+    ['body-row trailing whitespace', '| a | b |\n| - | - |\n| c | d |  \n\nP\n'],
+    ['delimiter-row trailing whitespace', '| a | b |\n| - | - |   \n| c | d |\n\nP\n']
+  ]) {
+    const map = buildProjectionMap(md, doc(cellsOf('a', 'b', 'c', 'd'), p(text('P'))))
+    assert.ok(map, `${label}: map must build`)
+    assert.equal(map.blockPairs.length, 5, `${label}: four cell pairs + the paragraph`)
+    for (let index = 0; index < 4; index += 1) {
+      assert.ok(map.blockPairs[index].charMap, `${label}: cell ${index} must stay EDITABLE`)
+      assert.equal(map.blockPairs[index].charMap.visibleLength, 1)
+    }
+    assert.ok(map.blockPairs[4].charMap, `${label}: the paragraph stays editable`)
+  }
+}
+
 // Case 10: bullet_list PM paired against ORDERED markdown -> whole map
 // null, even though every block type string ('list'/'listItem'/'paragraph')
 // still lines up. md = '1. 甲\n2. 乙\n' parses to an mdast `list` with
