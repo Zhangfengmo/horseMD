@@ -10,7 +10,24 @@
 // cell / image attribute / link editing on top. This script is the single
 // acceptance check that all six landed together: ONE document that mixes
 // every stage-3 construct attaches LIVE (step 1), and then each domain's own
-// user-reachable UI gesture commits byte-exact source (steps 3-9).
+// UI gesture commits byte-exact source (steps 3-10).
+//
+// WHY ATTACH ALONE IS NOT THE ACCEPTANCE (review finding, and the reason
+// step 10 exists): since per-block degradation landed (commit 3b29cdf) the
+// two failure regimes are no longer the same. A BLOCK-TYPE disagreement
+// (paragraph vs `code_block(LaTeX)` — the pre-cure `$$…$$` shape) still
+// nulls the whole map, so the block-math half of the math cure IS guarded by
+// the attach assertion. But a CONTENT-SIZE disagreement — exactly what a
+// regression of the inline-math, inline-HTML or highlight cure produces —
+// leaves the map building and degrades only that block: attach still
+// succeeds, and a "typing here is refused" assertion is satisfied by BOTH
+// the healed and the degraded state. So each of those three cures gets an
+// assertion that can ONLY pass while its block is MAPPED: a byte-exact
+// commit landing IN that block (typing for the highlight paragraph, a
+// structural Enter for the two atom-bearing paragraphs — `pmPosToRaw` skips
+// any pair whose charMap is null, so a degraded block fails closed with zero
+// bytes). Step 10(d) is the mirror image: the red `<mark>` paragraph must
+// STAY degraded while the rest of the document keeps editing.
 //
 // Every "expected bytes" string below is DERIVED, not guessed: each one is
 // the literal output of running the real kernel primitives this UI drives
@@ -31,13 +48,13 @@
 //  - block math (or ANY fenced block) inside a list item (task-1 §4.6):
 //    ProseMirror's `list_item` content model inserts a filler paragraph, so
 //    PM has one structural node more than mdast.
-//  - a red/blue highlight (task-2 §6.4, task-3 §3): those round-trip as
-//    `<mark class="hm-hl-…">` = inline HTML, which is a width-1 atom on the
-//    kernel side but an N-character marked run in PM — that block degrades
-//    to read-only. The YELLOW `==` spelling is the editable one and is the
-//    one this fixture (and the toolbar swatch in step 5) uses.
 //  - adjacent root-level `<div>` siblings (task-2 §6.2): the editor chain
 //    coalesces them across the blank line, the kernel does not.
+// A red `<mark class="hm-hl-red">` highlight is INCLUDED rather than excluded
+// (review finding): it round-trips as inline HTML — a width-1 atom on the
+// kernel side vs an N-character marked run in PM — so it degrades PER BLOCK,
+// not whole-map (task-2 §6.4 / task-3 §3, projection-map Case P3c). Keeping
+// it in the fixture is what pins that contract in the live app.
 // The document also ENDS in a plain paragraph on purpose: Crepe's always-on
 // `@milkdown/plugin-trailing` appends a synthetic empty paragraph whenever
 // the last top-level block is anything else, which the projection map does
@@ -56,7 +73,10 @@
 //     refreshes it — precisely the staleness task-5-report §8 predicted.
 //     Both halves are asserted (one mismatch AND the repaired caption); the
 //     `src` commit is the control that no other attribute does this.
-// Everything in between must add ZERO.
+// Everything in between must add ZERO. The ring buffer is capped at 100
+// entries with shift-out and this session pushes one per accepted AND vetoed
+// key, so a `total < 100` sanity assertion guards the pins from silently
+// turning into false reds through eviction.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -86,7 +106,9 @@ const FIXTURE = [
   '',
   '片段 <span>内联</span> 结束。', // inline HTML coalesced to one atom
   '',
-  '已有==高亮==片段。',           // authored YELLOW highlight
+  '已有==高亮==片段。',           // authored YELLOW highlight (a MARK -> mapped)
+  '',
+  '红色<mark class="hm-hl-red">高亮</mark>片段。', // red highlight = inline HTML -> this BLOCK degrades
   '',
   '| 甲 | 乙 |',                  // GFM table with a real alignment delimiter row
   '| :-- | --: |',
@@ -118,7 +140,13 @@ const S6 = S5.replace(`[伍陆柒捌](${LINK_URL})`, '伍陆柒捌')
 const IMG_SRC = 'https://z.example/pic.png'
 const S7 = S6.replace('![]()', `![](${IMG_SRC})`)
 const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
-const SAVED = S8
+// The three "this block is really MAPPED" commits (step 10). S10/S11 are
+// paragraph-END Enters: `splitTextBlock`'s non-quoted branch inserts
+// `ending + ending` at the caret, i.e. exactly one extra blank line.
+const S9 = S8.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
+const S10 = S9.replace('行内公式 $x^2$ 结束。\n', '行内公式 $x^2$ 结束。\n\n\n')
+const S11 = S10.replace('片段 <span>内联</span> 结束。\n', '片段 <span>内联</span> 结束。\n\n\n')
+const SAVED = S11
 
 const CRLF_FIXTURE = [
   '# 阶段三 CRLF',
@@ -272,6 +300,10 @@ async function assertNoFatalDiagnostics(evaluate, label) {
   const entries = await kernelDiagnostics(evaluate)
   const fatal = entries.filter((entry) => FATAL_DIAGNOSTICS.includes(entry.type))
   assert.deepEqual(fatal, [], `${label}: fatal kernel diagnostics: ${JSON.stringify(fatal)}`)
+  // The ring buffer shifts out its oldest entry past 100. Every count-based
+  // pin below assumes nothing was evicted, so prove it.
+  assert.ok(entries.length < 100,
+    `${label}: the diagnostics ring reached ${entries.length} entries — at 100 it evicts, which would silently corrupt every count pin in this file`)
   return entries.filter((entry) => entry.type === 'projection-mismatch').length
 }
 
@@ -478,6 +510,34 @@ async function selectionBlockText(evaluate) {
   })()`)
 }
 
+// Same, plus whether the caret really sits at the block's END — the two
+// structural-Enter probes in step 10 are only meaningful at the end (an
+// Enter in the middle of an inline-HTML fragment is refused by
+// `bisectsInlineHtml`, which would make the probe pass for the wrong reason
+// if it silently landed there).
+async function selectionState(evaluate) {
+  await resolveView(evaluate)
+  return JSON.parse(await evaluate(`(() => {
+    const v = window.__hmStage3View
+    if (!v) return 'null'
+    const head = v.state.selection.$head
+    return JSON.stringify({ text: head.parent.textContent, atEnd: head.parentOffset === head.parent.content.size })
+  })()`))
+}
+
+// The live PM attrs of the block image whose alt is `alt` (null when none) —
+// the discriminating control for the caption veto, which "zero bytes" alone
+// cannot provide.
+async function imageBlockAttrs(evaluate, alt) {
+  await resolveView(evaluate)
+  return JSON.parse(await evaluate(`(() => {
+    const v = window.__hmStage3View
+    let attrs = null
+    v.state.doc.forEach((node) => { if (node.type.name === 'image-block' && node.attrs.alt === ${JSON.stringify(alt)}) attrs = node.attrs })
+    return JSON.stringify(attrs)
+  })()`))
+}
+
 async function run() {
   await rm(root, { recursive: true, force: true })
   await mkdir(root, { recursive: true })
@@ -517,7 +577,7 @@ async function run() {
     await resolveView(evaluate)
     const shapes = JSON.parse(await evaluate(`(() => {
       const v = window.__hmStage3View
-      const found = { mathBlock: false, mathInline: false, htmlInline: false, highlight: false, table: false, imageBlocks: 0, link: false }
+      const found = { mathBlock: false, mathInline: false, htmlInline: false, highlightYellow: false, highlightRed: false, table: false, imageBlocks: 0, link: false }
       v.state.doc.descendants((node) => {
         const name = node.type.name
         if (name === 'code_block' && (node.attrs.language || '').toLowerCase() === 'latex') found.mathBlock = true
@@ -526,7 +586,7 @@ async function run() {
         if (name === 'table') found.table = true
         if (name === 'image-block') found.imageBlocks += 1
         for (const mark of node.marks || []) {
-          if (mark.type.name === 'highlight') found.highlight = true
+          if (mark.type.name === 'highlight') found[(mark.attrs.color || 'yellow') === 'red' ? 'highlightRed' : 'highlightYellow'] = true
           if (mark.type.name === 'link') found.link = true
         }
         return true
@@ -534,7 +594,7 @@ async function run() {
       return JSON.stringify(found)
     })()`))
     assert.deepEqual(shapes, {
-      mathBlock: true, mathInline: true, htmlInline: true, highlight: true, table: true, imageBlocks: 2, link: true
+      mathBlock: true, mathInline: true, htmlInline: true, highlightYellow: true, highlightRed: true, table: true, imageBlocks: 2, link: true
     }, `the attached document must really contain every stage-3 construct: ${JSON.stringify(shapes)}`)
 
     // ============================================================
@@ -589,22 +649,25 @@ async function run() {
       'the toolbar must appear on a real selection before any toggle')
     await clickHighlightYellow(evaluate, send)
     await assertSource(evaluate, S3, 'the toolbar highlight must wrap the selection with ==')
-    // The fixture already ships an authored highlight ("高亮"), so this reads
-    // ALL rendered marks rather than the first one — and that authored mark
-    // doubles as the negative control for the unwrap below (it must survive).
+    // The fixture already ships an authored YELLOW highlight ("高亮") and a
+    // RED one, so this reads all rendered YELLOW marks rather than the first
+    // `mark.hm-highlight` (which would be the authored one) — the authored
+    // yellow mark doubles as the negative control for the unwrap below.
+    const yellowMarks = `[...(${VISIBLE_EDITOR})?.querySelectorAll('mark.hm-highlight.hm-hl-yellow') || []].map((n) => n.textContent)`
     const highlightsAfterWrap = await waitFor(async () => {
-      const list = await evaluate(`JSON.stringify([...(${VISIBLE_EDITOR})?.querySelectorAll('mark.hm-highlight') || []].map((n) => n.textContent))`)
-      const parsed = JSON.parse(list)
+      const parsed = JSON.parse(await evaluate(`JSON.stringify(${yellowMarks})`))
       return parsed.includes('壹贰叁肆') ? parsed : null
-    }, 'the committed highlight did not render as a <mark> in the view')
+    }, 'the committed highlight did not render as a yellow <mark> in the view')
     assert.deepEqual(highlightsAfterWrap.slice().sort(), ['壹贰叁肆', '高亮'].sort(),
-      `exactly the authored mark plus the new one may be rendered: ${JSON.stringify(highlightsAfterWrap)}`)
+      `exactly the authored yellow mark plus the new one may be rendered: ${JSON.stringify(highlightsAfterWrap)}`)
 
     await selectRange(evaluate, send, '壹贰叁肆', 0, 4)
     await clickHighlightYellow(evaluate, send)
     await assertSource(evaluate, S2, 'clicking the highlight swatch again must restore the original bytes')
-    assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify([...(${VISIBLE_EDITOR})?.querySelectorAll('mark.hm-highlight') || []].map((n) => n.textContent))`)),
+    assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(${yellowMarks})`)),
       ['高亮'], "unwrapping must remove ONLY the new mark and leave the fixture's authored one")
+    assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify([...(${VISIBLE_EDITOR})?.querySelectorAll('mark.hm-highlight.hm-hl-red') || []].map((n) => n.textContent))`)),
+      ['高亮'], 'the red <mark> paragraph must be rendered throughout (it is step 10(d)\'s subject)')
 
     // ============================================================
     // 6) LINK — three flows on real UI surfaces:
@@ -671,6 +734,12 @@ async function run() {
     //    URL and confirming dispatches `setAttr('src', …)`
     //    (task-5-report §1: no UI anywhere dispatches alt/title).
     // ============================================================
+    // `.link-input-area` only exists in the ImageInput half of the image-block
+    // component (rendered when the node has NO src), so it addresses the
+    // `![]()` block — but only as long as exactly one such input exists.
+    // Assert that rather than relying on first-match order.
+    assert.equal(await evaluate(`(${VISIBLE_EDITOR})?.querySelectorAll('.milkdown-image-block .link-input-area').length`), 1,
+      'exactly ONE image src input may exist (it is how this step addresses the ![]() block)')
     const inputPoint = await waitFor(() => evaluate(`(() => {
       const input = (${VISIBLE_EDITOR})?.querySelector('.milkdown-image-block .link-input-area')
       if (!input) return null
@@ -707,6 +776,16 @@ async function run() {
     })()`)
     assert.equal(captionResult, 'dispatched', 'the block image with alt="说明" must be present for the caption probe')
     await sleep(400)
+    // "Zero bytes" alone does NOT discriminate a veto from a silently
+    // ACCEPTED display-only attribute (caption has no source expression, so
+    // an accepted one would also write nothing). The veto is observable in
+    // the view: `editor-kernel-gateway.js` blocks caption/ratio, and the
+    // dispatch-veto protocol discards the whole transaction — so the LIVE
+    // node must still carry its original caption. (The repaired-caption
+    // assertion after the alt commit below cannot retro-prove this: the
+    // repair reconcile would produce the parse-derived value either way.)
+    assert.equal((await imageBlockAttrs(evaluate, '说明'))?.caption, '说明',
+      'the caption AttrStep must be VETOED, not merely byte-neutral: the live node keeps its original caption')
     await assertSource(evaluate, S7, 'a caption AttrStep must be refused fail-closed: zero bytes')
 
     // Everything from the first commit up to here — table cell, Tab,
@@ -744,13 +823,7 @@ async function run() {
     const mismatchesAfterAlt = await assertNoFatalDiagnostics(evaluate, 'after the alt AttrStep')
     assert.equal(mismatchesAfterAlt, mismatchesAfterFirstCommit + 1,
       'the alt AttrStep must cost exactly one (repaired) projection-mismatch — no more, and not zero (the caption-derivation staleness is real)')
-    await resolveView(evaluate)
-    const repairedImage = JSON.parse(await evaluate(`(() => {
-      const v = window.__hmStage3View
-      let attrs = null
-      v.state.doc.forEach((node) => { if (node.type.name === 'image-block' && node.attrs.alt === '新说明') attrs = node.attrs })
-      return JSON.stringify(attrs)
-    })()`))
+    const repairedImage = await imageBlockAttrs(evaluate, '新说明')
     assert.ok(repairedImage, 'the live image-block must carry the new alt after the commit')
     assert.equal(repairedImage.caption, '新说明',
       'the repair reconcile must have refreshed the parse-derived caption to match the new alt')
@@ -786,14 +859,76 @@ async function run() {
     await assertSource(evaluate, S8, 'the inline-math typing attempt must not change a single byte')
     assert.equal(app.dialogs.length, 0, 'no dialog from either math refusal')
 
-    // ---- diagnostics: no fatal entry anywhere, and the one tolerated
-    //      first-commit table mismatch never recurred ----
+    // ============================================================
+    // 10) THE CURE PROOFS (see the header's "why attach alone is not the
+    //     acceptance"). Every assertion here can ONLY pass while the block
+    //     in question is MAPPED — `pmPosToRaw` skips any pair whose charMap
+    //     is null, so a block degraded by a regression of the highlight /
+    //     inline-math / inline-HTML cure fails closed with zero bytes and
+    //     these byte checkpoints go red. The refusals in step 9 cannot do
+    //     this job: they are satisfied by the healed AND the degraded state.
+    // ============================================================
+    // (a) highlight cure — the AUTHORED `==高亮==` paragraph is a plain
+    //     marked textblock, so it takes ordinary typing.
+    await clickAt(evaluate, send, '已有高亮片段。', 7)
+    assert.equal(await selectionBlockText(evaluate), '已有高亮片段。',
+      'the caret must be inside the authored-highlight paragraph (positive control)')
+    await typeTextLikeUser(send, 'Y', { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('已有高亮片段。Y'), 'the typed Y never landed in the highlight paragraph')
+    await assertSource(evaluate, S9,
+      'typing in the AUTHORED-highlight paragraph must commit byte-exact — this is what proves that block is MAPPED, not merely non-degrading')
+
+    // (b) inline-math cure — that paragraph cannot take typing (step 9), so
+    //     the mapped-block proof is a STRUCTURAL Enter at its end.
+    await clickBlockEndByPrefix(evaluate, send, '行内公式')
+    let caret = await selectionState(evaluate)
+    assert.deepEqual(caret, { text: '行内公式  结束。', atEnd: true },
+      `Enter must be pressed at the END of the inline-math paragraph: ${JSON.stringify(caret)}`)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(400)
+    await assertSource(evaluate, S10,
+      'a structural Enter at the end of the INLINE-MATH paragraph must commit byte-exact — the mapped-block proof for the math cure')
+
+    // (c) inline-HTML cure — same shape (commit 1c0d311 exists precisely to
+    //     let structural commands reach inline-HTML paragraphs).
+    await clickBlockEndByPrefix(evaluate, send, '片段')
+    caret = await selectionState(evaluate)
+    assert.deepEqual(caret, { text: '片段  结束。', atEnd: true },
+      `Enter must be pressed at the END of the inline-HTML paragraph: ${JSON.stringify(caret)}`)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(400)
+    await assertSource(evaluate, S11,
+      'a structural Enter at the end of the INLINE-HTML paragraph must commit byte-exact — the mapped-block proof for the inline-HTML cure')
+    assert.equal(app.dialogs.length, 0, 'no dialog from the three cure proofs')
+
+    // (d) the mirror image: the RED `<mark>` paragraph is inline HTML in the
+    //     source but an N-character marked run in PM, so it must stay
+    //     DEGRADED — both typing and a structural Enter refuse with zero
+    //     bytes, while (a)-(c) above just proved the rest of the document is
+    //     fully mapped. That contrast IS the per-block degradation contract.
+    await clickBlockEndByPrefix(evaluate, send, '红色')
+    caret = await selectionState(evaluate)
+    assert.deepEqual(caret, { text: '红色高亮片段。', atEnd: true },
+      `the caret must sit at the end of the red-mark paragraph: ${JSON.stringify(caret)}`)
+    await typeTextLikeUser(send, 'Z', { delayMs: delay })
+    await sleep(300)
+    await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
+    await sleep(400)
+    await assertSource(evaluate, S11,
+      'the red-<mark> block must stay degraded: neither typing nor Enter may write a byte, while every other block above committed')
+    assert.equal(app.dialogs.length, 0, 'no dialog from the degraded-block refusals')
+
+    // ---- diagnostics: no fatal entry anywhere, and only the two explained
+    //      mismatches (first-commit table repair + alt caption derivation) ----
     const mismatchesAtEnd = await assertNoFatalDiagnostics(evaluate, 'end of the interaction chain')
     assert.equal(mismatchesAtEnd, mismatchesAfterAlt,
       `projection-mismatch recurred after the alt commit (${mismatchesAfterAlt} -> ${mismatchesAtEnd}) — only the pre-existing first-commit table repair and the alt caption-derivation repair are tolerated`)
 
     // ============================================================
-    // 10) Save -> disk bytes exact; dialogs empty; full quit; cold reopen.
+    // 11) Save -> disk bytes exact; dialogs empty; full quit; cold reopen.
+    //     NOTE: kernel mode is not persisted, so the reopened tab comes back
+    //     in LEGACY mode — this is a cross-pipeline check (legacy reads back
+    //     exactly what the kernel wrote), not a kernel re-attach.
     // ============================================================
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
@@ -814,13 +949,13 @@ async function run() {
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
     // ============================================================
-    // 11) CRLF variant, isolated session: the same mixture with '\r\n'
+    // 12) CRLF variant, isolated session: the same mixture with '\r\n'
     //     endings must attach too, and a cell edit must keep every ending
     //     intact on disk (the source view shows an LF projection —
     //     see test-codeblock-crlf-ui.mjs).
     // ============================================================
     await stopBuiltElectron(app, { removeProfile: true })
-    app = await launchBuiltElectron({ profileDir: join(root, 'profile-crlf'), port: port + 1, appArgs: [crlfFile] })
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile-crlf'), port: port + 2, appArgs: [crlfFile] })
     ;({ evaluate, send } = app)
     await waitFor(async () => (await mounted(evaluate) || '').includes('尾段落'), 'CRLF fixture did not mount')
     assert.equal(app.dialogs.length, 0, 'no dialog on the CRLF fixture mount')
