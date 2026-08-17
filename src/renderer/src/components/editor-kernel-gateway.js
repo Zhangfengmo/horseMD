@@ -12,8 +12,9 @@
 // classifyTransactions() re-derives the same "is this a plain,
 // single-textblock edit" guard that src/renderer/src/lib/source-transaction-sync.js
 // (:158-260) used for its legacy raw-text-matching path (relaxed for marked
-// textblocks since P4-3.5 — see textblockProfile below; the legacy file keeps
-// its own stricter copy), but reimplements it
+// textblocks since P4-3.5 and for textblocks carrying inline ATOMS since P6-1
+// — see textblockProfile below; the legacy file keeps its own stricter copy),
+// but reimplements it
 // directly against PM Step/Node objects — it deliberately does NOT reuse
 // that file's text-search/blockHints machinery (that belongs to the legacy
 // fallback, not the kernel path). Where the two diverge: the legacy path had
@@ -62,16 +63,47 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
   return text
 }
 
-// Textblock inline profile (P4-3.5, Fix B — replaces the old blanket
-// `isPlainTextblock` refusal): a textblock qualifies for the plain-text path
-// when every inline child is TEXT (marked or not). Non-text inline content
-// (inline images, hard breaks, …) stays out of scope exactly as before —
-// those atoms' raw syntax spans make byte-for-byte step translation
-// unprovable here. Marks alone no longer disqualify the block: after P4-3
-// made mark toggles real, "bold a word, then type anywhere in that
-// paragraph" refused every keystroke with a toast — the relaxation lets the
-// plain parts of a marked paragraph type normally while two guards keep the
-// byte contract closed:
+// Inline atoms the plain-text path may type AROUND (P6 Task 1). An ALLOWLIST,
+// not a denylist: an inline node type nobody probed must fail closed, and the
+// kernel's own `ATOMS` set (lib/source-kernel/character-map.js) is what
+// decides which shapes get a width-1 `atom` unit on the raw side — this list
+// is its ProseMirror-side counterpart and must never grow past it.
+//
+// Names are the LIVE schema's, probed 2026-08-17, not guessed:
+//   'image'             @milkdown/preset-commonmark $nodeSchema("image")
+//   'html'              @milkdown/preset-commonmark $nodeSchema("html")
+//   'math_inline'       @milkdown/crepe latex feature (inline TeX in attrs)
+//   'footnote_reference' @milkdown/preset-gfm $nodeSchema("footnote_reference")
+//
+// DELIBERATELY ABSENT: the hard break (live name `hardbreak`; older fixtures
+// spell it `hard_break`, so neither is listed). Every other atom's raw span
+// sits INSIDE one line, and its two visible boundaries resolve to the same
+// byte through all three charMap resolvers. A hard break does not:
+//
+//   'a  \n  b'    text[0,1) break[1,4) text[6,7)
+//   '> a  \n> b'  text[2,3) break[3,6) text[8,9)
+//
+// the break's raw span stops at the line ending, so the next line's
+// continuation prefix (indentation, or a blockquote's '> ') belongs to NO
+// unit. The insert boundary just after the break resolves to the PRE-gap
+// offset, and typing there would commit '> a  \nX> b' — the quote marker
+// demoted to paragraph text, the same prefix-eating shape this file's CRLF
+// guard exists for. (A SOFT break has no such hole: `consumeSoftBreak` folds
+// the continuation prefix into its `linebreak` unit, which is why soft breaks
+// were always typable.) A smaller correct relaxation beats a larger unproven
+// one, so hard breaks stay refused and are recorded in the blocking matrix.
+const TYPABLE_INLINE_ATOMS = new Set(['image', 'html', 'math_inline', 'footnote_reference'])
+
+// Textblock inline profile (P4-3.5, Fix B; atom relaxation P6 Task 1 — both
+// replace the old blanket `isPlainTextblock` refusal). A textblock qualifies
+// for the plain-text path when every inline child is either TEXT (marked or
+// not) or one of the probed inline ATOMS above.
+//
+// Marks stopped disqualifying the block in P4-3.5: after P4-3 made mark
+// toggles real, "bold a word, then type anywhere in that paragraph" refused
+// every keystroke with a toast. The relaxation lets the plain parts of a
+// marked paragraph type normally while two guards keep the byte contract
+// closed:
 //  1. the inserted slice itself must still be PLAIN (`plainSliceText` above)
 //     — typing INSIDE a mark run inherits the mark, so the storedMarks/
 //     mark-inheritance trap stays refused;
@@ -79,15 +111,41 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
 //     run (`stepRespectsMarkedRuns` below) — a range crossing INTO a run
 //     would delete content while stranding its delimiters ('a **' — the
 //     P4-2 probed corruption shape).
+//
+// P6-1 is the SAME shape one level out: admission relaxed, proof tightened
+// per step. A paragraph carrying an inline image / formula / HTML fragment
+// used to be untypable in its ENTIRETY (the largest coverage hole blocking
+// kernel mode from becoming the default); now it types everywhere except
+// across the atom itself, guarded by:
+//  3. no step may INTERSECT an atom (`stepAvoidsAtoms` below).
+// The byte contract at the atom's own edges was probed, not assumed: for
+// 'a![x](y.png)b' the units are char[0,1) atom[1,12) char[12,13), and BOTH
+// atom boundaries resolve to a single byte through all three resolvers
+// (`visibleToRaw` / `rawStartForVisible` / `rawNeutralInsert` — vis 1 -> 1,
+// vis 2 -> 12), so an insert on either edge is byte-exact. Inline math
+// ('a$x^2$b' -> atom[1,6)), a coalesced inline-HTML run ('a<span>q</span>b'
+// -> ONE atom[1,15)) and a footnote reference ('a[^1]b' -> atom[1,5)) probe
+// identically on the raw side. Note that admission alone is never the proof:
+// the block must ALSO have survived `buildProjectionMap`'s `content.size ===
+// charMap.visibleLength` check, or its pair carries `charMap: null` and every
+// commit into it fails closed with UNMAPPED (pinned by the gateway tests).
 const textblockProfile = (node) => {
   if (!node?.isTextblock) return null
-  let allText = true
+  let admissible = true
   let hasMarkedRun = false
+  let hasAtom = false
   node.forEach((child) => {
-    if (!child?.isText) allText = false
-    else if (child.marks && child.marks.length) hasMarkedRun = true
+    if (child?.isText) {
+      if (child.marks && child.marks.length) hasMarkedRun = true
+      return
+    }
+    if (child?.type?.name && TYPABLE_INLINE_ATOMS.has(child.type.name)) {
+      hasAtom = true
+      return
+    }
+    admissible = false
   })
-  return allText ? { hasMarkedRun } : null
+  return admissible ? { hasMarkedRun, hasAtom } : null
 }
 
 // Guard 2 of the relaxation above: for a range step [from, to) inside a
@@ -113,6 +171,52 @@ const stepRespectsMarkedRuns = (parent, blockContentStart, from, to) => {
     const insideRun = from >= runFrom && to <= runTo
     const containsRun = from < runFrom && to > runTo
     if (!insideRun && !containsRun) ok = false
+  })
+  return ok
+}
+
+// Guard 3 of the relaxation above (P6 Task 1): a step's range [from, to) must
+// not INTERSECT any inline atom in the textblock. Same walk shape as
+// `stepRespectsMarkedRuns` — the parent's children in PM coordinates, starting
+// at the block's content position — deliberately, so the two guards cannot
+// drift apart in how they enumerate a textblock.
+//
+// THE BOUNDARY RULE, stated explicitly because it is the one genuinely
+// ambiguous case: an insert exactly AT an atom's edge is ALLOWED, on BOTH
+// sides. It was decided by probe, not preference — at an atom's left edge all
+// three charMap resolvers return the atom's own `rawStart`, and at its right
+// edge all three return its `rawEnd`, so the inserted bytes provably land
+// OUTSIDE the atom's markdown syntax on the side the caret was on. (This
+// matches the charMap's standing "the front unit's end" boundary convention:
+// for an atom the front unit's end IS the atom's rawEnd, and the following
+// unit's rawStart is the same offset — there is no gap to be ambiguous about.)
+// Concretely: 'a![x](y.png)b' + 'X' at the left edge commits
+// 'aX![x](y.png)b', and at the right edge 'a![x](y.png)Xb'.
+//
+// So only these are refused:
+//  - a ZERO-WIDTH insert strictly INSIDE an atom (`atomFrom < from < atomTo`).
+//    Unreachable for today's atoms — every one of them is a PM leaf of
+//    nodeSize 1, so no position exists between its two edges — but written
+//    for the range rather than for the constant so an inline node with
+//    content could never slip through unproven.
+//  - any NON-EMPTY range overlapping an atom, i.e. deleting or typing over
+//    one. Per probe a whole-atom deletion is in fact byte-provable (the
+//    resolved raw range is exactly the atom's own bytes); it is refused here
+//    because the plan's Global Constraints admit only steps that intersect no
+//    atom. Relaxing THAT is a separate, separately-proven change.
+const stepAvoidsAtoms = (parent, blockContentStart, from, to) => {
+  let offset = blockContentStart
+  let ok = true
+  parent.forEach((child) => {
+    const atomFrom = offset
+    const atomTo = offset + child.nodeSize
+    offset = atomTo
+    if (child.isText) return
+    if (from === to) {
+      if (from > atomFrom && from < atomTo) ok = false
+      return
+    }
+    if (from < atomTo && to > atomFrom) ok = false
   })
   return ok
 }
@@ -161,6 +265,13 @@ function extractPlainTextSteps(transactions, oldState) {
       if (!profile) return null
       if (profile.hasMarkedRun && step.from < step.to &&
           !stepRespectsMarkedRuns($from.parent, $from.start(), step.from, step.to)) {
+        return null
+      }
+      // Unlike the marked-run guard, this one runs for ZERO-WIDTH steps too:
+      // a bare caret insert is exactly the case whose "is this inside the
+      // atom or at its edge?" answer the guard pins.
+      if (profile.hasAtom &&
+          !stepAvoidsAtoms($from.parent, $from.start(), step.from, step.to)) {
         return null
       }
       const allowNewline = $from.parent.type?.name === 'code_block'

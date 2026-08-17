@@ -144,8 +144,13 @@ const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
 // The three "this block is really MAPPED" commits (step 10). S10/S11 are
 // paragraph-END Enters: `splitTextBlock`'s non-quoted branch inserts
 // `ending + ending` at the caret, i.e. exactly one extra blank line.
-const S9 = S8.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
-const S10 = S9.replace('行内公式 $x^2$ 结束。\n', '行内公式 $x^2$ 结束。\n\n\n')
+// P6-1 (2026-08-17): the inline-math paragraph is now TYPABLE around its
+// atom, so step 9's 'W' at the paragraph end is a real byte commit — it used
+// to be a refusal. The atom itself stays untouchable (step 9 proves that with
+// a delete ACROSS it, which must leave S8b intact).
+const S8b = S8.replace('行内公式 $x^2$ 结束。', '行内公式 $x^2$ 结束。W')
+const S9 = S8b.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
+const S10 = S9.replace('行内公式 $x^2$ 结束。W\n', '行内公式 $x^2$ 结束。W\n\n\n')
 const S11 = S10.replace('片段 <span>内联</span> 结束。\n', '片段 <span>内联</span> 结束。\n\n\n')
 // Step 10(e) — the Critical 2 (link-boundary) proof. The straddling bold is
 // REFUSED (bytes stay at S11); the control that follows bolds the link LABEL
@@ -227,7 +232,6 @@ const visibleSource = (evaluate) => evaluate(`(
   [...document.querySelectorAll('textarea.source-editor')]
     .find((node) => node.offsetParent)?.value ?? null
 )`)
-const paragraphTexts = (evaluate) => evaluate(`[...(${VISIBLE_EDITOR})?.querySelectorAll('p') || []].map((n) => n.textContent)`)
 
 async function toggleSourceMode(evaluate) {
   const clicked = await evaluate(`(() => {
@@ -867,12 +871,12 @@ async function run() {
       'the repair reconcile must have refreshed the parse-derived caption to match the new alt')
 
     // ============================================================
-    // 9) MATH, per the declared stage-3 scope (task-1-report §3): block
-    //    math PAIRS but stays READ-ONLY (charMap null), and the paragraph
-    //    holding INLINE math is not directly typable (gateway
-    //    textblockProfile refuses any textblock with a non-text inline
-    //    child — same class as an inline image). Both must refuse WITHOUT
-    //    writing bytes, and neither may raise a dialog.
+    // 9) MATH. Block math PAIRS but stays READ-ONLY (charMap null) — it must
+    //    refuse WITHOUT writing bytes. The paragraph holding INLINE math is
+    //    now TYPABLE around the formula (P6 Task 1 relaxed
+    //    `textblockProfile` to admit inline atoms), so typing there is a real
+    //    byte commit; what is still refused is a step that INTERSECTS the
+    //    `math_inline` atom. Neither refusal may raise a dialog.
     // ============================================================
     await revealMathCodeMirror(evaluate, send)
     await clickMathCmLineEnd(evaluate, send)
@@ -889,12 +893,30 @@ async function run() {
     await clickBlockEndByPrefix(evaluate, send, '行内公式')
     assert.equal(await selectionBlockText(evaluate), '行内公式  结束。',
       'the caret must be inside the inline-math paragraph (positive control)')
-    const beforeInlineMath = await paragraphTexts(evaluate)
     await typeTextLikeUser(send, 'W', { delayMs: delay })
+    await waitFor(async () => ((await mounted(evaluate)) || '').includes('结束。W'),
+      'the typed W never landed in the inline-math paragraph (P6-1 made it typable)')
+    await assertSource(evaluate, S8b,
+      'typing in the inline-math paragraph must now commit byte-exact, next to the untouched $x^2$')
+
+    // ...and the atom itself is still untouchable. Dispatched directly (the
+    // same channel step 8's AttrStep uses) because a drag-selection across a
+    // KaTeX-rendered formula is not reliably addressable by character rects;
+    // the transaction still travels the real dispatch-veto path, which is
+    // exactly what this asserts.
+    const atomCross = await evaluate(`(() => {
+      const v = window.__hmStage3View
+      if (!v) return 'no-view'
+      let pos = null
+      v.state.doc.descendants((node, p) => { if (pos === null && node.type.name === 'math_inline') pos = p })
+      if (pos === null) return 'no-math-inline'
+      v.dispatch(v.state.tr.delete(pos, pos + 1))
+      return 'dispatched'
+    })()`)
+    assert.equal(atomCross, 'dispatched', 'the inline-math atom must be locatable (positive control)')
     await sleep(400)
-    assert.deepEqual(await paragraphTexts(evaluate), beforeInlineMath,
-      'typing in the inline-math paragraph must be refused (view unchanged)')
-    await assertSource(evaluate, S8, 'the inline-math typing attempt must not change a single byte')
+    await assertSource(evaluate, S8b,
+      'a step CROSSING the inline-math atom must not change a single byte')
     assert.equal(app.dialogs.length, 0, 'no dialog from either math refusal')
 
     // ============================================================
@@ -916,11 +938,12 @@ async function run() {
     await assertSource(evaluate, S9,
       'typing in the AUTHORED-highlight paragraph must commit byte-exact — this is what proves that block is MAPPED, not merely non-degrading')
 
-    // (b) inline-math cure — that paragraph cannot take typing (step 9), so
-    //     the mapped-block proof is a STRUCTURAL Enter at its end.
+    // (b) inline-math cure — step 9 already typed into this paragraph (P6-1),
+    //     so its text now ends in the committed 'W'; the structural Enter at
+    //     its end stays as the second, independent mapped-block proof.
     await clickBlockEndByPrefix(evaluate, send, '行内公式')
     let caret = await selectionState(evaluate)
-    assert.deepEqual(caret, { text: '行内公式  结束。', atEnd: true },
+    assert.deepEqual(caret, { text: '行内公式  结束。W', atEnd: true },
       `Enter must be pressed at the END of the inline-math paragraph: ${JSON.stringify(caret)}`)
     await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
     await sleep(400)

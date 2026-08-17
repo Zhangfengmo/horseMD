@@ -1863,29 +1863,38 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.map.pmPosToRaw(4), 16)
 }
 
-// Case 16: fail-closed is preserved INSIDE the fragment-bearing paragraph.
-// `textblockProfile` (editor-kernel-gateway.js) only admits textblocks whose
-// every inline child is TEXT — an html atom's raw syntax span makes byte-level
-// step translation unprovable there — so a keystroke in THAT paragraph is
-// vetoed with a toast while the rest of the document keeps typing normally.
+// Case 16: fail-closed is preserved for steps that touch the fragment itself.
+// P6-1 relaxed `textblockProfile` (editor-kernel-gateway.js) to admit inline
+// ATOMS, so typing AROUND the fragment now commits (asserted first, since that
+// is the coverage this case used to deny); what stays refused is a step that
+// INTERSECTS the atom — its raw syntax span is indivisible, and this task adds
+// no ability to edit or remove it. PM layout: content start 1, 'a ' 1..3, the
+// html atom 3..4, ' b' 4..6.
 {
   const md = 'a <span>x</span> b\n\n甲乙\n'
   const h = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
-  const before = h.notifications.length
-  const verdict = dispatchThrough(h, h.view.state.tr.insertText('Z', 1))
-  assert.deepEqual(verdict, { veto: true }, 'typing inside the HTML-bearing paragraph is refused')
-  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
-  assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
+  assert.equal(dispatchThrough(h, h.view.state.tr.insertText('Z', 1)), undefined,
+    'typing OUTSIDE the fragment, in the same paragraph, is now allowed')
+  assert.equal(h.controller.kernel.doc.text, 'Za <span>x</span> b\n\n甲乙\n',
+    'and commits byte-exactly, leaving the fragment untouched')
+
+  const g = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
+  assert.equal(g.controller.attachAfterCreate(), true)
+  const before = g.notifications.length
+  const verdict = dispatchThrough(g, g.view.state.tr.delete(3, 4))
+  assert.deepEqual(verdict, { veto: true }, 'a step intersecting the fragment atom is refused')
+  assert.equal(g.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.ok(g.notifications.length > before, 'the refusal is surfaced, never silent')
   // Positive control for the P5-2.5 block-scoped message: this paragraph is
   // NOT degraded (it pairs and carries a charMap), it is merely an unsupported
   // TYPING target, so the user must keep getting the GENERIC message. If this
   // ever flips to "read-only", `degradedPairAt` has started over-reporting.
-  assert.ok(h.controller.kernel.map.blockPairs[0].charMap,
+  assert.ok(g.controller.kernel.map.blockPairs[0].charMap,
     'the fragment-bearing paragraph is mapped, not degraded')
-  assert.ok(h.notifications.at(-1).includes('unsupported-input-type'),
-    `a non-degraded refusal keeps the generic message, got: ${h.notifications.at(-1)}`)
-  assert.ok(!h.notifications.at(-1).includes('read-only'),
+  assert.ok(g.notifications.at(-1).includes('unsupported-input-type'),
+    `a non-degraded refusal keeps the generic message, got: ${g.notifications.at(-1)}`)
+  assert.ok(!g.notifications.at(-1).includes('read-only'),
     'a non-degraded refusal must not claim the block is read-only')
 }
 

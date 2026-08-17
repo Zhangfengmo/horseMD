@@ -21,10 +21,26 @@ const schema = new Schema({
     doc: { content: 'block+' },
     paragraph: { content: 'inline*', group: 'block' },
     hard_break: { group: 'inline', inline: true, selectable: false },
+    // The LIVE hardbreak node name is `hardbreak` (@milkdown/preset-commonmark
+    // `$nodeSchema("hardbreak")`, probed 2026-08-17), NOT the `hard_break`
+    // spelling the older fixtures above use. Both are declared so the P6-1
+    // atom relaxation can be pinned against the name the shipped schema
+    // actually registers — the relaxation's allowlist must refuse it.
+    hardbreak: { group: 'inline', inline: true, atom: true },
     // preset-commonmark's `html` node (node/html.ts): an INLINE atom carrying
     // the raw fragment in `attrs.value` — the same spec
     // scripts/test-kernel-projection-map.mjs uses.
     html: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
+    // Inline image (@milkdown/preset-commonmark `$nodeSchema("image")`) and
+    // Crepe's inline LaTeX node (`math_inline`) — the two other inline atoms
+    // the kernel charMap models as width-1 `atom` units. Added for P6 Task 1.
+    image: {
+      group: 'inline',
+      inline: true,
+      atom: true,
+      attrs: { src: { default: '' }, alt: { default: '' }, title: { default: null } }
+    },
+    math_inline: { group: 'inline', inline: true, atom: true, attrs: { value: { default: '' } } },
     // Plan 3 Task 4: same shape as scripts/test-kernel-projection-map.mjs's
     // schema (content 'text*', `attrs.language`) — the gateway relaxation
     // and the language-switch AttrStep shape both target this node type.
@@ -63,6 +79,9 @@ const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
+const img = (src) => schema.node('image', { src })
+const mathInline = (value) => schema.node('math_inline', { value })
+const inlineHtml = (value) => schema.node('html', { value })
 // rows: array of rows; each row an array of cell TEXT strings ('' = empty cell).
 const tbl = (rows) => schema.node('table', null, rows.map((cells, rowIndex) =>
   schema.node(rowIndex === 0 ? 'table_header_row' : 'table_row', null,
@@ -1119,13 +1138,20 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(committed.applied.doc.text, 'ab\n')
 }
 
-// (i) a paragraph with a NON-text inline child (hard_break) keeps refusing —
-// the relaxation is marks-only.
+// (i) a paragraph holding a HARD BREAK keeps refusing after the P6-1 atom
+// relaxation — the break is the one inline atom that stayed out of the
+// allowlist (its raw span is a LINE ENDING whose continuation prefix belongs
+// to no charMap unit; see the P6-1 section at the end of this file for the
+// probe). Both the legacy `hard_break` fixture spelling and the LIVE
+// `hardbreak` node name are pinned, so an allowlist that keyed off the wrong
+// spelling would fail here.
 {
-  const d = doc(p(text('ab'), schema.nodes.hard_break.create(), text('cd')))
-  const state = EditorState.create({ schema, doc: d })
-  const tr = state.tr.insertText('X', 2)
-  assert.equal(classifyTransactions([tr], state).kind, 'blocked')
+  for (const nodeName of ['hard_break', 'hardbreak']) {
+    const d = doc(p(text('ab'), schema.nodes[nodeName].create(), text('cd')))
+    const state = EditorState.create({ schema, doc: d })
+    const tr = state.tr.insertText('X', 2)
+    assert.equal(classifyTransactions([tr], state).kind, 'blocked', `${nodeName} must stay refused`)
+  }
 }
 
 // ---- Plan 4 Task 3: mark-toggle classification ----
@@ -1646,37 +1672,49 @@ const withSelection = (state, from, to) =>
 // Case H — THE INLINE-HTML TYPING CONTRACT, pinned so the user guide cannot
 // drift from it again (2026-08-17 whole-branch review, "Also fix").
 //
-// guide/basics/rich-and-source.md used to claim that in a paragraph holding
-// an inline HTML fragment 「同一段落里片段以外的位置可以正常输入」 — that
-// plain typing outside the fragment works. It does not: `textblockProfile`
-// (this file, :82) returns null for ANY textblock with a non-text inline
-// child, so EVERY ReplaceStep in such a paragraph is refused, wherever the
-// caret sits. Only the structural keys (Enter/Backspace, which never reach
-// this classifier) work — which is exactly what the UI tests actually prove.
-// The guide now groups inline HTML with inline math / inline images.
+// HISTORY, because this assertion has now been INVERTED once and the reason
+// matters: guide/basics/rich-and-source.md originally claimed that in a
+// paragraph holding an inline HTML fragment 「同一段落里片段以外的位置可以正常
+// 输入」. At the time that was FALSE — `textblockProfile` returned null for ANY
+// textblock with a non-text inline child, so every ReplaceStep in such a
+// paragraph was refused wherever the caret sat, and this case pinned the
+// refusal. P6 Task 1 made the guide's original claim TRUE by relaxing the
+// admission (see the P6-1 section at the end of this file): typing OUTSIDE
+// the fragment now commits byte-exactly, and only steps that INTERSECT the
+// fragment are refused. The case is kept, inverted, so the pairing stays
+// pinned in whichever direction the code actually behaves.
 {
   const md = '片段 <span>内联</span> 结束。\n'
-  const d = doc(p(text('片段 '), schema.node('html', { value: '<span>内联</span>' }), text(' 结束。')))
+  const d = doc(p(text('片段 '), inlineHtml('<span>内联</span>'), text(' 结束。')))
   const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'inline-HTML paragraph must map')
   // PM content: '片段 ' (3) + the html atom (1) + ' 结束。' (4). Typing at
-  // EVERY position in the paragraph — before the fragment, at both of its
-  // edges, and after it — must be refused identically.
+  // EVERY inline position — before the fragment, at both of its edges, and
+  // after it — is now plain text, and there is no PM position INSIDE the
+  // width-1 atom to type into.
   const lastPos = state.doc.content.size - 1
   assert.equal(lastPos, 9, 'fixture sanity: the paragraph holds 8 inline positions')
   for (let pos = 1; pos <= lastPos; pos += 1) {
     const tr = state.tr.insertText('X', pos)
     const classified = classifyTransactions([tr], state)
-    assert.equal(classified.kind, 'blocked',
-      `typing at PM ${pos} in an inline-HTML paragraph must be refused (the guide claimed otherwise)`)
-    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+    assert.equal(classified.kind, 'plain-text',
+      `typing at PM ${pos} in an inline-HTML paragraph must now be plain text`)
   }
-  // Control: the identical keystroke in a fragment-free paragraph is plain
-  // text — the refusal is about the paragraph's inline shape, nothing else.
+  // Bytes at the two fragment edges (raw: '片段 ' = [0,3), fragment [3,17),
+  // ' 结束。' = [17,21)).
   {
-    const plainState = EditorState.create({ schema, doc: doc(p(text('片段 内联 结束。'))) })
-    assert.equal(classifyTransactions([plainState.tr.insertText('X', 3)], plainState).kind, 'plain-text')
+    const { committed } = commitOf(md, map, state, state.tr.insertText('X', 4))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '片段 X<span>内联</span> 结束。\n')
   }
-  void md
+  {
+    const { committed } = commitOf(md, map, state, state.tr.insertText('X', 5))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '片段 <span>内联</span>X 结束。\n')
+  }
+  // A deletion that swallows the fragment is still refused (the atom guard).
+  assert.equal(classifyTransactions([state.tr.delete(4, 5)], state).kind, 'blocked')
 }
 
 console.log('PASS kernel gateway')
@@ -2232,3 +2270,237 @@ const commitLink = (md, pmDoc, classified) => {
 }
 
 console.log('PASS kernel gateway (link tooltip: wrap/edit/unwrap/insert classified, mixed-batch guard intact)')
+
+// ===========================================================================
+// P6 Task 1 — TYPING AROUND INLINE ATOMS
+// ===========================================================================
+// Before this task `textblockProfile` returned null the moment ANY inline
+// child had `isText === false`, so a paragraph holding an inline image /
+// inline formula / inline HTML fragment was entirely untypable — the single
+// largest coverage hole blocking kernel mode from becoming the default.
+//
+// PROBE (2026-08-17, run against the real kernel parser + buildCharacterMap,
+// not assumed). Every inline atom the kernel models is a width-1 `atom` unit
+// whose raw span is EXACTLY the node's own mdast position, and at BOTH of its
+// visible boundaries the charMap's three resolvers agree on one byte offset:
+//
+//   'a![x](y.png)b'  text[0,1) image[1,12) text[12,13)
+//                    units char[0,1) atom[1,12) char[12,13)
+//                    vis 1 -> 1/1/1   vis 2 -> 12/12/12   (raw/start/neutral)
+//   'a$x^2$b'        inlineMath[1,6)   vis 1 -> 1/1/1  vis 2 -> 6/6/6
+//   'a<span>q</span>b' the coalesced html run [1,15) is ONE atom
+//                    vis 1 -> 1/1/1  vis 2 -> 15/15/15
+//   'a[^1]b'         footnoteReference[1,5)  vis 1 -> 1/1/1  vis 2 -> 5/5/5
+//
+// So an insert at either atom EDGE is byte-exact, and this task allows it.
+// A step that INTERSECTS an atom is refused (plan Global Constraints: "the
+// relaxation only admits steps that intersect no atom; it adds no ability to
+// edit atom interiors"). Note that a whole-atom DELETION is, per the probe,
+// also byte-provable ('a![x](y.png)b' minus the atom resolves to raw [1,12),
+// exactly the image's own bytes) — it is refused here by plan constraint, not
+// because it was found unprovable. That is recorded in the task report as the
+// obvious next relaxation.
+//
+// HARD BREAKS ARE THE EXCEPTION and stay refused. Probed:
+//
+//   'a  \n  b'    text[0,1) break[1,4) text[6,7)   <- units [1,4) then [6,7)
+//   '> a  \n> b'  text[2,3) break[3,6) text[8,9)   <- units [3,6) then [8,9)
+//
+// A hard break's raw span STOPS at the line ending; the next line's
+// continuation prefix (indentation, or a blockquote's '> ' marker) belongs to
+// NO unit. That leaves a gap, and the insert boundary right after the break
+// resolves to the PRE-gap offset — typing there would commit
+// '> a  \nX> b', turning the quote marker into paragraph text. (A SOFT break
+// has no such hole: `consumeSoftBreak` folds the continuation prefix into the
+// `linebreak` unit, which is why soft breaks were always typable.) A smaller
+// correct relaxation beats a larger unproven one, so `break`/`hardbreak` is
+// left out of the allowlist and recorded in the blocking matrix.
+
+const atomFixture = (md, d) => {
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, `fixture must map: ${JSON.stringify(md)}`)
+  return { md, state, map }
+}
+const atomBytes = ({ md, state, map }, tr) => {
+  const classified = classifyTransactions([tr], state)
+  if (classified.kind !== 'plain-text') return { kind: classified.kind, code: classified.blockedCode }
+  const { committed } = commitOf(md, map, state, tr)
+  return committed.ok ? { kind: 'plain-text', text: committed.applied.doc.text } : { kind: 'refused', code: committed.code }
+}
+
+// A1: an inline image no longer blocks its paragraph — every boundary types,
+// and the bytes land on the correct side of the `![alt](src)` syntax.
+{
+  const f = atomFixture('a![x](y.png)b\n', doc(p(text('a'), img('y.png'), text('b'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 1)), { kind: 'plain-text', text: 'Xa![x](y.png)b\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX![x](y.png)b\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a![x](y.png)Xb\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)), { kind: 'plain-text', text: 'a![x](y.png)bX\n' })
+}
+
+// A2: the atom is ONE PM position wide, so "an insert strictly inside an
+// atom" is not a representable step — pinned rather than left implicit,
+// because the intersect guard's zero-width branch is written for it anyway
+// (a future inline node with content would make it reachable).
+{
+  const f = atomFixture('a![x](y.png)b\n', doc(p(text('a'), img('y.png'), text('b'))))
+  const atom = f.state.doc.nodeAt(2)
+  assert.equal(atom.type.name, 'image')
+  assert.equal(atom.nodeSize, 1, 'an inline image occupies exactly one PM position')
+}
+
+// A3: any step INTERSECTING the atom is refused — delete it, delete across
+// it from either side, or type over it as a selection replacement.
+{
+  const f = atomFixture('a![x](y.png)b\n', doc(p(text('a'), img('y.png'), text('b'))))
+  for (const [from, to] of [[2, 3], [1, 3], [2, 4], [1, 4]]) {
+    const classified = classifyTransactions([f.state.tr.delete(from, to)], f.state)
+    assert.equal(classified.kind, 'blocked', `delete(${from},${to}) must be refused`)
+    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  }
+  assert.equal(classifyTransactions([f.state.tr.replaceWith(2, 3, text('Z'))], f.state).kind, 'blocked')
+}
+
+// A4: deletions that do NOT touch the atom commit normally, on both sides.
+{
+  const f = atomFixture('ab![x](y.png)cd\n', doc(p(text('ab'), img('y.png'), text('cd'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 2)), { kind: 'plain-text', text: 'b![x](y.png)cd\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'a![x](y.png)cd\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(4, 5)), { kind: 'plain-text', text: 'ab![x](y.png)d\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(5, 6)), { kind: 'plain-text', text: 'ab![x](y.png)c\n' })
+  assert.equal(classifyTransactions([f.state.tr.delete(3, 4)], f.state).kind, 'blocked')
+}
+
+// A5: BETWEEN two adjacent atoms — the boundary shared by two atom units.
+{
+  const f = atomFixture('![a](1.png)![b](2.png)\n', doc(p(img('1.png'), img('2.png'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 1)), { kind: 'plain-text', text: 'X![a](1.png)![b](2.png)\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)), { kind: 'plain-text', text: '![a](1.png)X![b](2.png)\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)), { kind: 'plain-text', text: '![a](1.png)![b](2.png)X\n' })
+  for (const [from, to] of [[1, 2], [2, 3], [1, 3]]) {
+    assert.equal(classifyTransactions([f.state.tr.delete(from, to)], f.state).kind, 'blocked')
+  }
+}
+
+// A6: inline math and inline HTML take the identical route.
+{
+  const m = atomFixture('a$x^2$b\n', doc(p(text('a'), mathInline('x^2'), text('b'))))
+  assert.deepEqual(atomBytes(m, m.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX$x^2$b\n' })
+  assert.deepEqual(atomBytes(m, m.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a$x^2$Xb\n' })
+  assert.equal(classifyTransactions([m.state.tr.delete(2, 3)], m.state).kind, 'blocked')
+
+  const h = atomFixture('a<span>q</span>b\n', doc(p(text('a'), inlineHtml('<span>q</span>'), text('b'))))
+  assert.deepEqual(atomBytes(h, h.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX<span>q</span>b\n' })
+  assert.deepEqual(atomBytes(h, h.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a<span>q</span>Xb\n' })
+  assert.equal(classifyTransactions([h.state.tr.delete(2, 3)], h.state).kind, 'blocked')
+}
+
+// A7: the atom guard STACKS with the P4-3.5 marked-run guard rather than
+// replacing it. '**bo**![x](y.png)c': raw *=0 *=1 b=2 o=3 *=4 *=5 image[6,17)
+// c=17. PM: strong text 'bo' (1..3), image (3..4), 'c' (4..5).
+{
+  const f = atomFixture('**bo**![x](y.png)c\n',
+    doc(p(schema.text('bo', [schema.mark('strong')]), img('y.png'), text('c'))))
+  // plain insert at the strong run's trailing edge == the atom's left edge:
+  // the neutral resolver puts it AFTER '**' and BEFORE '!'.
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(3, 3, text('X'))),
+    { kind: 'plain-text', text: '**bo**X![x](y.png)c\n' })
+  // before the opening '**'
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(1, 1, text('X'))),
+    { kind: 'plain-text', text: 'X**bo**![x](y.png)c\n' })
+  // right after the atom
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+    { kind: 'plain-text', text: '**bo**![x](y.png)Xc\n' })
+  // a delete INSIDE the marked run still commits (marked-run guard: insideRun)
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)),
+    { kind: 'plain-text', text: '**b**![x](y.png)c\n' })
+  // deleting the run's EXACT content leaves the empty delimiters — the pinned
+  // P4-2 byte-consistent outcome, unchanged by this task.
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 3)),
+    { kind: 'plain-text', text: '****![x](y.png)c\n' })
+  // a range straddling the run's edge AND the atom is refused by both guards.
+  assert.equal(classifyTransactions([f.state.tr.delete(2, 4)], f.state).kind, 'blocked')
+}
+
+// A8: CRLF document — the atom's raw span sits inside one line, so neither
+// resolved offset can bisect a '\r\n' pair; the surrounding CRLF bytes are
+// untouched.
+{
+  const md = 'a![x](y.png)b\r\n\r\nnext\r\n'
+  const f = atomFixture(md, doc(p(text('a'), img('y.png'), text('b')), p(text('next'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)),
+    { kind: 'plain-text', text: 'aX![x](y.png)b\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)),
+    { kind: 'plain-text', text: 'a![x](y.png)Xb\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 6)),
+    { kind: 'plain-text', text: 'a![x](y.png)b\r\n\r\nXnext\r\n' })
+  assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'blocked')
+}
+
+// A9: hard breaks stay refused, under BOTH the legacy fixture spelling and
+// the live `hardbreak` node name — see the probe in this section's header for
+// the continuation-prefix gap that makes them unprovable today. The refusal
+// is block-wide, so a paragraph mixing an image with a hard break is refused
+// too (fail-closed: one unprovable atom refuses the block, it is never
+// silently narrowed to "the safe half of the paragraph").
+{
+  for (const nodeName of ['hard_break', 'hardbreak']) {
+    const d = doc(p(text('a'), schema.nodes[nodeName].create(), text('b')))
+    const state = EditorState.create({ schema, doc: d })
+    for (const pos of [1, 2, 3, 4]) {
+      assert.equal(classifyTransactions([state.tr.insertText('X', pos)], state).kind, 'blocked',
+        `${nodeName}: typing at PM ${pos} must stay refused`)
+    }
+  }
+  const mixed = doc(p(text('a'), img('y.png'), schema.nodes.hardbreak.create(), text('b')))
+  const mixedState = EditorState.create({ schema, doc: mixed })
+  assert.equal(classifyTransactions([mixedState.tr.insertText('X', 2)], mixedState).kind, 'blocked',
+    'an image + hard break paragraph is refused as a whole')
+}
+
+// A10: fail-closed chain — classification admitting the shape is NOT the
+// proof. When the block itself is DEGRADED (PM and the kernel disagree on the
+// inline count, so buildProjectionMap serves `charMap: null`), the batch still
+// classifies as plain-text and `commitPlainText` refuses with UNMAPPED, with
+// the source bytes untouched.
+{
+  const md = 'a![x](y.png)b\n'
+  const d = doc(p(text('a'), img('y.png'), img('z.png'), text('b')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'the map still builds — the degradation is per-block')
+  assert.equal(map.blockPairs[0].charMap, null, 'the mismatched paragraph degrades to read-only')
+  const tr = state.tr.insertText('X', 2)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, false)
+  assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
+  assert.equal(kernel.doc.text, md, 'no bytes were written')
+}
+
+// A11: a LINKED image — the atom itself carries a mark, so the atom guard and
+// the marker-gap resolver have to cooperate. '[![x](y.png)](url)' wrapped in
+// 'a…b': the image atom is [2,13) and the link's own '](url)' gap follows it,
+// so a plain insert at the atom's RIGHT edge must chase past the closing
+// delimiter (raw 19), not land inside it.
+{
+  const md = 'a[![x](y.png)](url)b\n'
+  const linked = schema.node('image', { src: 'y.png' }, null, [schema.mark('link', { href: 'url' })])
+  const f = atomFixture(md, doc(p(text('a'), linked, text('b'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 1)),
+    { kind: 'plain-text', text: 'Xa[![x](y.png)](url)b\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)),
+    { kind: 'plain-text', text: 'aX[![x](y.png)](url)b\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(3, 3, text('X'))),
+    { kind: 'plain-text', text: 'a[![x](y.png)](url)Xb\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+    { kind: 'plain-text', text: 'a[![x](y.png)](url)bX\n' })
+  // Real typing at PM 3 INHERITS the link mark from the atom, so the
+  // pre-existing plain-slice guard refuses it — unchanged by this task.
+  assert.equal(classifyTransactions([f.state.tr.insertText('X', 3)], f.state).kind, 'blocked')
+  assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'blocked')
+}
+
+console.log('PASS kernel gateway (P6-1: typing around inline atoms; hard breaks still refused)')
