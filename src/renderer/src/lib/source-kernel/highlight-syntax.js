@@ -58,6 +58,22 @@ import { BREAK_REWRITE_PARENTS, inlineHtmlRunAt } from './inline-html.js'
 // before.
 export const HIGHLIGHT_RE = /(?<![={])(==)(?!\})([^=\s][^=]*[^=\s]|[^=\s])\1(?![=])/g
 
+// The same rule in the shape a ProseMirror INPUT RULE needs: anchored at the
+// caret (`$`) and therefore matched against the text typed so far, not
+// scanned globally. Owned here next to `HIGHLIGHT_RE` (it used to be a third
+// near-copy inside editor-highlight.js) and asserted EQUIVALENT to it by
+// scripts/test-source-kernel-highlight-consistency.mjs: a string matches this
+// exactly when `highlightMatches` reports a highlight ENDING at the string's
+// end, at the same index.
+//
+// The literal differs from `HIGHLIGHT_RE` in three inconsequential ways, all
+// forced by the anchoring: no `g` flag (one match, at the caret), the closing
+// marker spelled out instead of `\1` (there is no need to back-reference a
+// two-character constant), and no trailing `(?![=])` (nothing can follow `$`).
+// It is a live-typing convenience, not an authority: whatever mark it applies
+// is re-derived from the bytes on the next parse by the rule above.
+export const HIGHLIGHT_INPUT_RE = /(?<![={])==(?!\})([^=\s][^=]*[^=\s]|[^=\s])==$/
+
 // Private clone so a kernel scan can never disturb the `lastIndex` of the
 // instance `mdast-util-find-and-replace` is iterating with (it owns the shared
 // export; both reset to 0 per node, but two owners of one stateful regex is a

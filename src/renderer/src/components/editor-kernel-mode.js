@@ -490,12 +490,14 @@ export function createKernelMode({
         }
         // `requireMap` refuses (pre-commit, everything untouched) any toggle
         // whose RESULT document cannot rebuild a projection map, or whose own
-        // anchor no longer resolves through it. No mark kind trips it today:
-        // inlineCode was healed by P4-3.5's per-char units and highlight by
-        // P5-3's positioned `==` nodes (highlight-syntax.js). It stays because
-        // it is what makes this route fail-closed BY CONSTRUCTION rather than
-        // by enumeration — a future mark, or a future shape of an existing
-        // one, must prove it still maps before a byte is written.
+        // anchor no longer resolves through it. No mark KIND is categorically
+        // refused any more (inlineCode was healed by P4-3.5's per-char units,
+        // highlight by P5-3's positioned `==` nodes), but the guard is very
+        // much live per CONTENT: highlighting a bare URL still hits it,
+        // because the result `see ==www.a.com== ok` cannot be
+        // character-mapped at all (remark's autolink-literal fallback leaves
+        // the paragraph's phrasing positionless). Pinned as Case M4c in
+        // scripts/test-kernel-mode-headless.mjs.
         // applyKernelTransaction notifies on every failure path itself.
         applyKernelTransaction(routed.transaction, view, { requireMap: true })
         return { veto: true }
@@ -748,12 +750,17 @@ export function createKernelMode({
   // keeps the toggle fail-closed: bytes, history and view all stay exactly as
   // they were.
   //
-  // The two shapes that used to trip it are both healed — inline code by
-  // P4-3.5's per-char units, and highlight by P5-3, which taught the kernel
-  // chain the `==` rule the editor uses (lib/source-kernel/highlight-syntax.js)
-  // so a toggled paragraph pairs and stays editable. The guard is deliberately
-  // kept anyway: it is a structural precondition of this route, not a
-  // workaround for a known list of marks.
+  // The two MARK KINDS that used to trip it unconditionally are both healed —
+  // inline code by P4-3.5's per-char units, and highlight by P5-3, which
+  // taught the kernel chain the `==` rule the editor uses
+  // (lib/source-kernel/highlight-syntax.js) — but the guard is not vestigial:
+  // it still refuses per CONTENT. The live example is highlighting a bare URL
+  // (`see www.a.com ok`): the wrap is byte-legal, yet the result paragraph
+  // cannot be character-mapped (remark's gfm autolink-literal fallback
+  // rebuilds the phrasing WITHOUT positions), so the anchor half below
+  // refuses and nothing is written. Case M4c in
+  // scripts/test-kernel-mode-headless.mjs is that pin; without the guard the
+  // toggle would commit into a paragraph the user could no longer type in.
   //
   // The ANCHOR half of the guard is what P5-2.5 added, and it is what keeps
   // the refusal meaningful now that the projection map degrades an unprovable

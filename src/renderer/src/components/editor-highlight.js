@@ -20,7 +20,7 @@ import { findAndReplace } from 'mdast-util-find-and-replace'
 // with a lookbehind, a lookahead and a whitespace-flank rule would drift.
 // Behavior here is unchanged: the identical literal, passed to the identical
 // `findAndReplace` call.
-import { HIGHLIGHT_RE } from '../lib/source-kernel/highlight-syntax.js'
+import { HIGHLIGHT_INPUT_RE, HIGHLIGHT_RE } from '../lib/source-kernel/highlight-syntax.js'
 
 export const HIGHLIGHT_COLORS = ['yellow', 'red', 'blue']
 
@@ -164,8 +164,11 @@ export const toggleHighlightCommand = $command('ToggleHighlight', (ctx) => () =>
 )
 
 export const highlightInputRule = $inputRule((ctx) =>
-  // Fires as you type the closing `==` (yellow highlight).
-  markRule(/(?<![={])==(?!\})([^=\s][^=]*[^=\s]|[^=\s])==$/, highlightSchema.type(ctx))
+  // Fires as you type the closing `==` (yellow highlight). The caret-anchored
+  // spelling of the shared rule — same module, asserted equivalent to
+  // HIGHLIGHT_RE (see its comment there), so this is no longer a third
+  // near-copy that can drift.
+  markRule(HIGHLIGHT_INPUT_RE, highlightSchema.type(ctx))
 )
 
 export const highlightKeymap = $useKeymap('highlightKeymap', {

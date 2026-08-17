@@ -140,6 +140,18 @@ const FIXTURE_DOCS = {
   // (Crepe's, WITH the highlight remark plugin) turns committed marker
   // bytes into real marks — mirrored here exactly.
   '甲乙丙\n': () => doc(p(text('甲乙丙'))),
+  // P5-3 review follow-up (Case M4c): the ONE mark shape that still trips
+  // `requireMap`'s anchor half. The wrap is byte-legal but the RESULT block
+  // cannot character-map, so the toggle must refuse before writing anything.
+  // (`safeParse` runs on the result text BEFORE the refusal, hence a fixture.)
+  'see www.a.com ok\n': () => doc(p(
+    text('see '),
+    schema.text('www.a.com', [schema.mark('link', { href: 'http://www.a.com' })]),
+    text(' ok'))),
+  'see ==www.a.com== ok\n': () => doc(p(
+    text('see =='),
+    schema.text('www.a.com', [schema.mark('link', { href: 'http://www.a.com' })]),
+    text('== ok'))),
   '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
   '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
   // P5-2.5 review item 6: the `/quote` slash query and the bytes
@@ -1348,6 +1360,45 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(h.view.state.doc.eq(doc(p(text('甲=乙丙')))), 'view untouched')
   assert.ok(h.notifications.at(-1).includes('unsupported-structure'),
     `the toggle command itself refuses, got: ${h.notifications.at(-1)}`)
+}
+
+// Case M4c (P5-3 review follow-up — `requireMap`'s ANCHOR half is REACHABLE
+// from the mark route, contrary to what M4's first draft claimed): highlight
+// a bare URL. The wrap itself is legal (`toggleInlineMark` returns ok and the
+// bytes would be `see ==www.a.com== ok`), but that result cannot be
+// character-mapped: remark's gfm autolink-literal falls back to a
+// POSITIONLESS `link` node, and — because the fallback rebuilds the whole
+// paragraph's phrasing — the surrounding `text` nodes lose their positions
+// too, so `buildCharacterMap` fails closed for the entire block. The block
+// would therefore come back degraded (permanently read-only for that
+// revision), and `rawToPmPos(anchor)` returns null, so the guard refuses
+// BEFORE any byte is written.
+//
+// UX consequence, recorded deliberately: "select a URL, click highlight,
+// nothing happens (toast)". That is the fail-closed outcome; the alternative
+// — committing bytes into a paragraph the user can no longer type in — is
+// strictly worse. Not a highlight defect: the same paragraph is already
+// unmappable in the kernel today with or without the markers.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const linkDoc = () => doc(p(
+    text('see '),
+    schema.text('www.a.com', [schema.mark('link', { href: 'http://www.a.com' })]),
+    text(' ok')))
+  const h = makeHarness('see www.a.com ok\n', linkDoc())
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  // PM: content starts at 1, 'see ' is 4 chars -> the URL spans 5..14.
+  const verdict = dispatchThrough(h, toggleVia(h, schema.marks.highlight, 5, 14))
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, 'the unmappable-result toggle must veto')
+  assert.equal(h.controller.kernel.doc.text, 'see www.a.com ok\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(linkDoc()), 'view untouched')
+  assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.some((entry) => entry.type === 'projection-unmappable-refused'),
+    'the pre-commit map guard is the refusing party (not the toggle command)'
+  )
 }
 
 // Case M4b: inline-code wrap/unwrap commits end-to-end — single-char AND,
