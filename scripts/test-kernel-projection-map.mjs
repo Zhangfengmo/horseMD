@@ -1076,6 +1076,10 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
 // plain ```js fence in a list item (asserted below), so Task 7 must not
 // misdiagnose this as a math-domain failure; it belongs to whatever task
 // teaches flattenMd about the filler paragraph.
+// P5-2.5 re-checked and did NOT flip this: the failure is a block-COUNT
+// mismatch (4 PM structural nodes vs 3 mdast ones), i.e. the two trees are
+// aligned differently — exactly the class that must keep rejecting the whole
+// map. Per-block degradation only covers CONTENT-level disagreements.
 {
   const mdMath = '- $$\n  E=mc^2\n  $$\n'
   const dMath = doc(schema.node('bullet_list', null, [
@@ -1093,12 +1097,29 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
 }
 
 // Case M7: fail-closed is preserved — a PM doc that DISAGREES with the
-// kernel's math parse (a plain text node where the kernel proved an atom)
-// still rejects the whole map rather than guessing.
+// kernel's math parse (a plain text node where the kernel proved an atom) is
+// never guessed at.
+//
+// FLIPPED by P5-2.5 (deliberate): this disagreement is a CONTENT-level one
+// (PM content.size 7 vs the kernel's decoded visibleLength 5 for the same,
+// correctly-paired paragraph), so it now degrades only THAT PAIR to a
+// non-editable leaf instead of nulling the whole map. Fail-closed is intact
+// where it counts: the block carries `charMap: null`, so no offset inside it
+// resolves in either direction and every write into it is refused. The
+// STRUCTURAL disagreements (Case M6's block-count mismatch, Case 4's type
+// mismatch, Case H6/H9's shape/count guards) still reject the whole map.
 {
   const md = 'a $x$ b\n'
   const map = buildProjectionMap(md, doc(p(text('a $x$ b'))))
-  assert.equal(map, null, 'PM/kernel disagreement about math still fails closed')
+  assert.ok(map, 'a size disagreement degrades the block, not the document')
+  assert.equal(map.blockPairs.length, 1)
+  assert.equal(map.blockPairs[0].charMap, null, 'the disagreeing paragraph is non-editable')
+  assert.equal(map.pmPosToRaw(1), null, 'no PM position inside it maps to raw')
+  assert.equal(map.pmPosToRaw(4), null)
+  assert.equal(map.rawToPmPos(0), null, 'no raw offset inside it maps to PM')
+  assert.equal(map.rawToPmPos(3), null)
+  assert.equal(map.virtualBlockAt(1), null, 'a degraded pair is never a virtual insert target')
+  assert.equal(map.pairAt(1), null, 'pairAt skips charMap-less pairs')
 }
 
 console.log('PASS kernel projection map')
@@ -1220,10 +1241,19 @@ const br = () => schema.node('hard_break')
 }
 
 // Case H7: fail-closed 仍然成立 —— PM 说是一整段纯文本、内核证明的是合并原子，
-// 尺寸不一致（18 vs 5）→ 整图拒绝，绝不猜。
+// 尺寸不一致（18 vs 5）。
+//
+// P5-2.5 **有意翻转**：这是**内容级**分歧（配对本身没错：一个 paragraph 对一个
+// paragraph），因此只把该 pair 降级成不可编辑叶，整图仍然可用。fail-closed 没有
+// 削弱——该块 charMap 为 null，任何方向的偏移都解析不出来，写入一律被拒。真正说明
+// 「两棵树对不齐」的结构性检查（Case H6 的形状守卫、Case H9 的块数不符）依旧整图拒绝。
 {
   const md = 'a <span>x</span> b\n'
-  assert.equal(buildProjectionMap(md, doc(p(text('a <span>x</span> b')))), null)
+  const map = buildProjectionMap(md, doc(p(text('a <span>x</span> b'))))
+  assert.ok(map, '尺寸分歧只降级该块')
+  assert.equal(map.blockPairs[0].charMap, null, '分歧的段落不可编辑')
+  assert.equal(map.pmPosToRaw(1), null)
+  assert.equal(map.rawToPmPos(0), null)
 }
 
 // Case H8: 标题 + 相邻片段 + 列表项里的片段，一份文档里同时出现。
@@ -1259,6 +1289,8 @@ const br = () => schema.node('hard_break')
 // 合并根级 html 兄弟，而合并跨越了块边界（两块之间的空行属于谁没有定义），与
 // 「块级 HTML 是不可编辑叶」的现有契约冲突。此处钉住 null，防止将来有人以为它已
 // 经工作；若日后治理，本用例应翻转为 map 非 null。
+// P5-2.5 复核后 **未** 翻转：这里的失败是 **块数不符**（pmBlocks 1 vs mdBlocks 2），
+// 属于「两棵树对不齐」的结构性失败，必须继续整图拒绝；逐块降级只处理内容级分歧。
 {
   const md = '<div>\n\n</div>\n'
   assert.equal(
@@ -1290,3 +1322,196 @@ const br = () => schema.node('hard_break')
 }
 
 console.log('PASS kernel projection map (inline html)')
+
+// ---- P5-2.5: per-block fail-closed degradation ----
+//
+// The recurring pattern through plans 3/4/5: ONE block the kernel cannot
+// prove nulled the ENTIRE map, degrading a whole document to legacy even
+// though every other block paired perfectly. Two conditions did that for an
+// editable textblock pair — `buildCharacterMap` returning null, and
+// `pm.node.content.size !== charMap.visibleLength`. Both now degrade only
+// that PAIR (`charMap: null`, the same non-editable-leaf posture
+// mermaid/latex/math/table/image-block/block-HTML already had).
+//
+// SAFETY (the crux — proven by construction in Case P1 below): the pairing is
+// POSITIONAL. flattenPm/flattenMd walk their trees pre-order and the loop
+// zips them index-for-index, so pair N+1's raw offsets come from
+// `mdBlocks[N+1].position` — the kernel's own parse of the raw source — and
+// cannot be shifted by a content-level disagreement inside pair N. A
+// genuinely mis-ALIGNED zip always changes the block COUNT (a chain merging
+// or splitting a block), and every count/type/shape invariant stays
+// whole-map fail-closed (Case P5 below).
+
+// Case P1 (neighbour-offset integrity): block 2 has a deliberate size
+// mismatch (kernel proves 'BB' = 2 visible chars, PM shows 'BXB' = 3) while
+// blocks 1 and 3 are perfectly ordinary. The whole map must survive, block 2
+// must be unmappable in BOTH directions, and blocks 1 and 3 must map to
+// byte-correct raw offsets.
+// 'A\n\nBB\n\nC\n': A=0 \n=1 \n=2 B=3 B=4 \n=5 \n=6 C=7 \n=8.
+// PM: p1 pos 0 (content [1,2]), p2 pos 3 (content start 4, size 3),
+// p3 pos 8 (content start 9).
+{
+  const md = 'A\n\nBB\n\nC\n'
+  const map = buildProjectionMap(md, doc(p(text('A')), p(text('BXB')), p(text('C'))))
+  assert.ok(map, 'one unprovable block must not null the whole map')
+  assert.equal(map.blockPairs.length, 3)
+
+  // The offender degrades — and nothing else does.
+  assert.equal(map.blockPairs[1].charMap, null, 'the size-mismatched block is non-editable')
+  assert.ok(map.blockPairs[0].charMap, 'block 1 stays editable')
+  assert.ok(map.blockPairs[2].charMap, 'block 3 stays editable')
+
+  // Neighbours: byte-correct in both directions.
+  assert.equal(map.pmPosToRaw(1), 0)
+  assert.equal(map.pmPosToRaw(2), 1)
+  assert.deepEqual(map.rawToPmPos(0), { pos: 1, atom: false })
+  assert.deepEqual(map.rawToPmPos(1), { pos: 2, atom: false })
+  assert.equal(map.pmPosToRaw(9), 7)
+  assert.equal(map.pmPosToRaw(10), 8)
+  assert.deepEqual(map.rawToPmPos(7), { pos: 9, atom: false })
+  assert.deepEqual(map.rawToPmPos(8), { pos: 10, atom: false })
+
+  // The degraded block: no position resolves, in either direction, through
+  // any resolver — including the gap-aware/insert-role ones.
+  for (const pmPos of [4, 5, 6, 7]) {
+    assert.equal(map.pmPosToRaw(pmPos), null, `pmPosToRaw(${pmPos}) must fail closed`)
+    assert.equal(map.pmPosToRawStart(pmPos), null)
+    assert.equal(map.pmPosToRawInsert(pmPos), null)
+    assert.equal(map.pairAt(pmPos), null)
+    assert.equal(map.virtualBlockAt(pmPos), null)
+  }
+  for (const raw of [3, 4, 5]) {
+    assert.equal(map.rawToPmPos(raw), null, `rawToPmPos(${raw}) must fail closed`)
+  }
+}
+
+// Case P2 (healed residual — inline HTML fragment containing a NON-ASCII
+// autolink). Editor chain: remark-gfm autolinks `www.例子.cn`, then
+// `remarkUnwrapNonAsciiAutolinks` splits it and `remarkMergeInlineHtml` can
+// no longer coalesce the run — PM keeps [text, html atom, text('www.例子.cn'),
+// html atom, text] (content.size 15; the link MARK does not affect size, so
+// it is elided here). Kernel chain: keeps a positionless `link` node inside
+// the paragraph, so `buildCharacterMap` cannot prove the block's units and
+// returns null. Before P5-2.5 that nulled the WHOLE document.
+// 'a <span>www.例子.cn</span> b\n\nafter\n': paragraph1 [0,26], 'after' [28,33].
+{
+  const md = 'a <span>www.例子.cn</span> b\n\nafter\n'
+  const d = doc(
+    p(text('a '), inlineHtml('<span>'), text('www.例子.cn'), inlineHtml('</span>'), text(' b')),
+    p(text('after'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'an autolink-bearing HTML fragment must no longer degrade the document')
+  assert.equal(map.blockPairs.length, 2)
+  // Which of the two conditions healed it: the character map itself is
+  // unprovable here (not a size disagreement).
+  assert.equal(
+    buildCharacterMap(md, map.blockPairs[0].mdBlock), null,
+    'the kernel genuinely cannot character-map this paragraph'
+  )
+  assert.equal(map.blockPairs[0].charMap, null, 'so the block degrades to a non-editable leaf')
+  assert.equal(map.pmPosToRaw(1), null)
+  assert.equal(map.rawToPmPos(3), null)
+  // The OTHER paragraph is editable and byte-correct: paragraph1 nodeSize is
+  // 1 + 15 + 1 = 17 -> paragraph2 pos 17, content start 18 -> raw 28.
+  assert.ok(map.blockPairs[1].charMap)
+  assert.equal(map.pmPosToRaw(18), 28)
+  assert.equal(map.pmPosToRaw(23), 33)
+  assert.deepEqual(map.rawToPmPos(28), { pos: 18, atom: false })
+}
+
+// Case P3 (healed residual — `==高亮==`). The kernel chain has no highlight
+// plugin, so it reads six literal characters (visibleLength 6); Crepe's
+// `highlightRemark` turns them into a highlight MARK over '高亮', so PM's
+// content.size is 2. A pure size disagreement -> degrade this block only.
+// (Plan 5 Task 3 will teach the kernel `==`; until then the block is
+// read-only instead of the whole document being legacy.)
+// '==高亮==\n\nafter\n': paragraph1 [0,6], 'after' [8,13].
+{
+  const md = '==高亮==\n\nafter\n'
+  const map = buildProjectionMap(md, doc(p(text('高亮')), p(text('after'))))
+  assert.ok(map, 'a highlight-bearing document must no longer degrade entirely')
+  const kernelMap = buildCharacterMap(md, map.blockPairs[0].mdBlock)
+  assert.equal(kernelMap.visibleLength, 6, 'the kernel sees the == bytes as text')
+  assert.equal(map.blockPairs[0].charMap, null, 'the highlight paragraph degrades')
+  assert.equal(map.pmPosToRaw(1), null)
+  // paragraph1 nodeSize 1 + 2 + 1 = 4 -> paragraph2 pos 4, content start 5.
+  assert.equal(map.pmPosToRaw(5), 8)
+  assert.equal(map.pmPosToRaw(10), 13)
+}
+
+// Case P4 (degraded block next to the VIRTUAL trailing placeholder): the
+// two tolerances are independent — a degraded pair neither consumes nor
+// shifts the trailing-placeholder slot, and the placeholder still anchors at
+// the raw document end with its separator prefix.
+// 'a $x$ b\n\n- 甲\n': paragraph [0,7], list [9,13] ('-'9 ' '10 甲11 \n12).
+// PM: paragraph pos 0 (content.size 7 vs the kernel's 5 -> degraded),
+// bullet_list pos 9, list_item 10, paragraph 11 (content start 12),
+// trailing placeholder paragraph pos 16 (content pos 17).
+{
+  const md = 'a $x$ b\n\n- 甲\n'
+  const d = doc(
+    p(text('a $x$ b')),
+    schema.node('bullet_list', null, [schema.node('list_item', null, [p(text('甲'))])]),
+    p()
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'a degraded block plus the trailing placeholder must both hold')
+  assert.equal(map.blockPairs[0].charMap, null, 'the math paragraph degrades')
+  assert.equal(map.pmPosToRaw(12), 11, 'the list item stays byte-correct')
+  assert.equal(map.pmPosToRaw(13), 12)
+  assert.deepEqual(map.virtualBlockAt(17), { raw: 13, prefix: '\n' })
+}
+
+// Case P5 (STRUCTURAL failures must NOT have flipped): every invariant that
+// says "the two trees are aligned differently" still rejects the WHOLE map.
+// These are the guards the safety argument leans on — if any of them ever
+// degrades per-block instead, a mis-aligned zip could serve WRONG offsets for
+// the blocks that happen to still look consistent.
+{
+  // (a) block COUNT: mdast has a block the PM side never produced.
+  assert.equal(buildProjectionMap('A\n\nB\n', doc(p(text('A')))), null,
+    'unconsumed mdast block must reject the whole map')
+  // (b) block COUNT the other way: a surplus, non-tolerable PM block.
+  assert.equal(buildProjectionMap('A\n', doc(p(text('A')), p(text('B')))), null,
+    'surplus non-empty PM block must reject the whole map')
+  // (c) TYPE pairing: heading vs paragraph.
+  assert.equal(buildProjectionMap('# h\n', doc(p(text('h')))), null,
+    'type-pair mismatch must reject the whole map')
+  // (d) ORDERED flag: the marker-numbering scheme is structure, not decoration.
+  assert.equal(
+    buildProjectionMap('1. 甲\n', doc(schema.node('bullet_list', null, [
+      schema.node('list_item', null, [p(text('甲'))])
+    ]))),
+    null,
+    'ordered-flag mismatch must reject the whole map'
+  )
+  // (e) image-block SHAPE: the pair is only legal for a paragraph whose
+  // single child is an image.
+  assert.equal(
+    buildProjectionMap('前![a](x.png)后\n', doc(schema.node('image-block', { src: 'x.png' }))),
+    null,
+    'a mixed paragraph paired with image-block must reject the whole map'
+  )
+  // (f) block-HTML SHAPE: the pair is only legal for the wrapper
+  // `remarkHtmlTransformer` produces (a paragraph whose single child is the
+  // html atom).
+  assert.equal(buildProjectionMap('<div>x</div>\n', doc(p(text('<div>x</div>')))), null,
+    'block-HTML shape guard must reject the whole map')
+}
+
+// Case P6 (residual, NOT healed — pinned so nobody assumes otherwise): a
+// standalone-line `$$x$$`. `editor-parse-adapter.js`'s `normalizeDisplayMath`
+// rewrites the line to the multi-line block form BEFORE the PM parse, so PM
+// holds a `code_block` (language 'LaTeX') while the kernel holds the RAW
+// bytes, whose mdast is a `paragraph` containing one inline-math atom. That
+// is a TYPE-pair mismatch (`PM_TO_MD.code_block` has no 'paragraph' entry),
+// i.e. a structural failure — deliberately still whole-map. Healing it means
+// teaching the pairing about the pre-normalization, not relaxing fail-closed.
+{
+  const md = '$$x$$\n\nafter\n'
+  assert.equal(buildProjectionMap(md, doc(cbl('LaTeX', 'x'), p(text('after')))), null,
+    'standalone $$x$$ still degrades the whole map (type-pair mismatch, not a size one)')
+}
+
+console.log('PASS kernel projection map (per-block degradation)')

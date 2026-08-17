@@ -122,6 +122,13 @@ const FIXTURE_DOCS = {
   '甲乙丙\n': () => doc(p(text('甲乙丙'))),
   '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
   '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
+  // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. The
+  // live chain turns `==高亮==` into a highlight MARK over '高亮' (PM
+  // content.size 2) while the kernel chain reads six literal characters —
+  // the size disagreement that now degrades only that pair.
+  '甲乙\n\n==高亮==\n': () => doc(p(text('甲乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
+  '甲丙乙\n\n==高亮==\n': () => doc(p(text('甲丙乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
+  '甲丁丙乙\n\n==高亮==\n': () => doc(p(text('甲丁丙乙')), p(schema.text('高亮', [schema.mark('highlight')]))),
   '甲`乙`丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('inlineCode')]), text('丙'))),
   '甲`乙丙`\n': () => doc(p(text('甲'), schema.text('乙丙', [schema.mark('inlineCode')]))),
   // P4-3.5 Fix B fixtures: plain typing inside the already-marked paragraph.
@@ -756,18 +763,26 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
 // directly corrupting `kernel.doc` on the live controller (an accepted
 // technique in this file for exercising a defensive path with no other
 // entry point). After the first Enter (`kernel.doc.text === '甲乙\n\n\n'`,
-// view `doc(p(甲乙), p())`), `kernel.doc` is replaced with a SAME-WIDTH but
-// different-character real paragraph ('丁\n\n\n' — 1 char, not 2) while the
-// VIEW keeps showing the original 2-char '甲乙'. This is invisible to the
-// pure-kernel Enter derivation (routeStructuralKey only cares about the
-// trailing-gap OFFSET, which is structurally identical either way) and
-// invisible to the CONTROLLER's own map (unchanged, still built against the
-// real '甲乙'), so the second Enter is accepted and proceeds exactly like
-// Case 17's — right up until the extended chain's bindMap call, which DOES
-// notice: the corrupted kernel text's real paragraph is now only 1 char
-// wide while the view's real paragraph is still 2 (`buildCharacterMap`'s
-// `visibleLength` vs `pm.node.content.size`), so buildProjectionMap rejects
-// the WHOLE map.
+// view `doc(p(甲乙), p())`), `kernel.doc` is replaced with a text whose real
+// block is a HEADING ('# 丁\n\n\n') while the VIEW keeps showing a
+// PARAGRAPH. This is invisible to the pure-kernel Enter derivation
+// (routeStructuralKey only cares about the trailing-gap OFFSET, which is
+// structurally identical either way) and invisible to the CONTROLLER's own
+// map (unchanged, still built against the real '甲乙'), so the second Enter
+// is accepted and proceeds exactly like Case 17's — right up until the
+// extended chain's bindMap call, which DOES notice: `PM_TO_MD.paragraph` has
+// no 'heading' entry, so buildProjectionMap rejects the WHOLE map.
+//
+// P5-2.5 changed the FORCING MECHANISM (not this case's subject, which is
+// extendTrailingPlaceholder's atomic rollback). It used to corrupt with a
+// same-shape paragraph of a different WIDTH ('丁\n\n\n' — 1 char where the
+// view shows 2), relying on `content.size !== visibleLength` to null the
+// whole map. That condition is now a per-BLOCK degradation (the offending
+// pair simply becomes non-editable and the map still builds), so it can no
+// longer force a map failure. A type-pair mismatch is the nearest remaining
+// STRUCTURAL failure and expresses the same "the two trees disagree about
+// the document" premise — see the P5-2.5 section of
+// scripts/test-kernel-projection-map.mjs for the full boundary.
 {
   globalThis.__hmKernelDiagnostics = []
   const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
@@ -781,17 +796,19 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
 
   // Corrupt: same trailing-blank structure (so the pure Enter derivation and
   // the EXISTING map's pmPosToRaw both still resolve identically), but the
-  // real paragraph is now width-mismatched against what the view shows.
+  // real block is now a HEADING where the view shows a PARAGRAPH — a
+  // structural (type-pair) disagreement, the class that still rejects the
+  // whole map after P5-2.5.
   const beforeCorruption = h.controller.kernel.doc
-  h.controller.kernel.doc = { text: '丁\n\n\n', revision: beforeCorruption.revision }
+  h.controller.kernel.doc = { text: '# 丁\n\n\n', revision: beforeCorruption.revision }
   const notifBefore = h.notifications.length
 
   const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
   assert.equal(handled, true, 'the key is swallowed either way, success or refusal')
 
   // kernel.doc must be back to EXACTLY the corrupted pre-attempt value —
-  // never the extended '丁\n\n\n\n' the failed attempt computed internally.
-  assert.equal(h.controller.kernel.doc.text, '丁\n\n\n',
+  // never the extended '# 丁\n\n\n\n' the failed attempt computed internally.
+  assert.equal(h.controller.kernel.doc.text, '# 丁\n\n\n',
     'kernel.doc must roll back to its pre-extend value on a failed chain extension')
   // The view must be back to exactly ONE placeholder — the second (failed)
   // insert removed, not left orphaned.
@@ -1206,6 +1223,15 @@ const toggleVia = (h, markType, from, to) => {
 // inlineCode units healed it; it now COMMITS, see Case M4b below.)
 // When the projection map learns the highlight pairing, this assertion is
 // the one to flip.
+//
+// P5-2.5 changed WHICH HALF of `requireMap` refuses this, deliberately, so
+// the user-visible behavior stays identical: the result document's map now
+// BUILDS (the size-mismatched paragraph degrades to a non-editable pair
+// instead of nulling the whole map), so the guard's second half — "the
+// transaction's own selection anchor must still resolve through the new
+// map" — is what refuses. Without that half the toggle would commit bytes
+// into a paragraph the user could then no longer type in, which is strictly
+// worse than today's "nothing happens, toast shown".
 for (const [markName, from, to, label] of [
   ['highlight', 2, 3, 'highlight']
 ]) {
@@ -1520,6 +1546,92 @@ for (const [markName, from, to, label] of [
   assert.deepEqual(verdict, { veto: true }, 'typing inside the HTML-bearing paragraph is refused')
   assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
   assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
+}
+
+// Case 17 (P5-2.5): a document containing ONE unprovable block attaches and
+// stays fully usable — the unprovable block degrades to read-only, every
+// other block edits source-first. Before P5-2.5 the whole map came back null
+// here, `attachAfterCreate` set `degraded = true`, and the ENTIRE tab fell
+// back to legacy (that is the pattern this task cures).
+//
+// The unprovable block is a highlight paragraph: the kernel chain has no
+// `==` plugin, so it reads six literal characters, while Crepe's
+// `highlightRemark` gives PM a highlight MARK over the two inner ones
+// (content.size 2). A pure content-size disagreement.
+// Raw offsets of '甲乙\n\n==高亮==\n': 甲=0 乙=1 \n=2 \n=3, '==高亮==' = [4,10),
+// \n=10. PM: paragraph1 pos 0 (content start 1), paragraph2 pos 4 (content
+// start 5, size 2 — the mark is not modelled here, it does not change size).
+{
+  globalThis.__hmKernelDiagnostics = []
+  const md = '甲乙\n\n==高亮==\n'
+  const h = makeHarness(md, doc(p(text('甲乙')), p(schema.text('高亮', [schema.mark('highlight')]))))
+  assert.equal(h.controller.attachAfterCreate(), true,
+    'a document with one unprovable block must still attach (no whole-tab degradation)')
+  assert.equal(h.controller.isDegraded(), false, 'kernel mode stays active')
+
+  const pairs = h.controller.kernel.map.blockPairs
+  assert.equal(pairs.length, 2)
+  assert.ok(pairs[0].charMap, 'the good paragraph is editable')
+  assert.equal(pairs[1].charMap, null, 'the unprovable paragraph degrades to a non-editable leaf')
+
+  // (a) typing in the GOOD paragraph commits byte-correct.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in the good paragraph is allowed')
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n==高亮==\n',
+    'the commit is byte-exact and leaves the degraded block untouched')
+  assert.deepEqual(h.changes.at(-1), ['甲丙乙\n\n==高亮==\n', false])
+  // ...and the cheap-path verify still passes: reparsing the kernel bytes
+  // reproduces the live doc exactly (the kernel/PM disagreement is between
+  // the KERNEL's remark chain and the EDITOR's parse, never between two
+  // editor parses), so a degraded block causes no repair churn.
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) =>
+      entry.type === 'projection-mismatch' || entry.type === 'projection-parse-failure').length,
+    0,
+    'no projection mismatch/parse failure from the degraded block'
+  )
+
+  // (b) typing INSIDE the degraded block is refused, fail-closed, with a
+  //     toast and ZERO byte change. (paragraph2 shifted by one char: pos 5,
+  //     content start 6.)
+  const bytesBefore = h.controller.kernel.doc.text
+  const revisionBefore = h.controller.kernel.doc.revision
+  const notifBefore = h.notifications.length
+  const refused = dispatchThrough(h, h.view.state.tr.insertText('Z', 7))
+  assert.deepEqual(refused, { veto: true }, 'typing in the degraded block is vetoed')
+  assert.equal(h.controller.kernel.doc.text, bytesBefore, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'no revision advance')
+  assert.ok(h.notifications.length > notifBefore, 'the refusal is surfaced, never silent')
+  //     (This particular block is refused one layer EARLIER than the map —
+  //     the inserted char would carry the highlight mark, which
+  //     `plainSliceText` rejects as `unsupported-input-type`. Both layers are
+  //     fail-closed; (c) below exercises the MAP's own refusal, which is the
+  //     one this task changed.)
+
+  // (c) a STRUCTURAL key inside the degraded block is refused by the MAP —
+  //     the caret's raw offset is unprovable (`pmPosToRaw` skips
+  //     charMap-less pairs), so it never reaches PM's own commands (which
+  //     would produce an unowned structural transaction).
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  const notifBeforeEnter = h.notifications.length
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true,
+    'Enter is swallowed (refused), never delegated to PM')
+  assert.equal(h.controller.kernel.doc.text, bytesBefore, 'Enter changed no bytes')
+  assert.ok(h.notifications.length > notifBeforeEnter, 'the Enter refusal notifies')
+  assert.ok(h.notifications.at(-1).includes('unmapped-selection'),
+    `the map refuses the unprovable caret, got: ${h.notifications.at(-1)}`)
+  assert.ok(
+    h.view.state.doc.eq(doc(p(text('甲丙乙')), p(schema.text('高亮', [schema.mark('highlight')])))),
+    'the view is untouched by the refused Enter')
+
+  // (d) the good paragraph is STILL editable after all those refusals — the
+  //     degraded block never poisons the map.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const verdict2 = dispatchThrough(h, h.view.state.tr.insertText('丁', 2))
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲丁丙乙\n\n==高亮==\n')
 }
 
 console.log('PASS kernel mode headless')

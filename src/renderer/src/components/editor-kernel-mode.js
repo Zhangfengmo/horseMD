@@ -661,18 +661,31 @@ export function createKernelMode({
   //
   // `requireMap` (Plan 4 Task 3): refuse the WHOLE transaction — before any
   // kernel/history/view mutation — unless the post-transaction document
-  // provably rebuilds a projection map. The mark-toggle route demands this
+  // provably rebuilds a projection map AND that map can still resolve the
+  // position this transaction acts on. The mark-toggle route demands this
   // because a byte-successful toggle can produce a document the projection
   // layer cannot pair: a highlight's `==` bytes are literal text to the
   // kernel chain (no highlight plugin there) but invisible to the Crepe
   // parse, so `buildProjectionMap`'s content-size identity check rejects
-  // the block and the whole map comes back null (probe evidence in the
-  // Task 3 report; inline code used to be the second such shape until
-  // P4-3.5 gave it per-char units). Without this guard the
-  // toggle would COMMIT, reconcile, then fail the rebind — leaving a
-  // byte-correct but unmappable document where every subsequent edit vetoes
-  // with UNMAPPED (a lock-up trap). Refusing up front keeps the toggle
-  // fail-closed: bytes, history and view all stay exactly as they were.
+  // the block (probe evidence in the Task 3 report; inline code used to be
+  // the second such shape until P4-3.5 gave it per-char units). Without this
+  // guard the toggle would COMMIT, reconcile, then leave a byte-correct but
+  // unmappable target where every subsequent edit vetoes with UNMAPPED (a
+  // lock-up trap). Refusing up front keeps the toggle fail-closed: bytes,
+  // history and view all stay exactly as they were.
+  //
+  // The ANCHOR half of the guard is what P5-2.5 added, and it is what keeps
+  // this refusal working now that the projection map degrades an unprovable
+  // block instead of the whole document: after P5-2.5 a highlight toggle
+  // still rebuilds a map (every OTHER block pairs fine), but the toggled
+  // block itself comes back with `charMap: null`, so the transaction's own
+  // selection anchor no longer resolves through `rawToPmPos`. Requiring the
+  // anchor to resolve reproduces exactly the pre-P5-2.5 decision for this
+  // route (refuse, nothing happens, toast) rather than committing bytes into
+  // a paragraph the user could then no longer type in. Any mark whose result
+  // stays pairable (bold/italic/strike/inline code) resolves its anchor and
+  // commits unchanged. A transaction with no selection at all is judged on
+  // the map alone.
   // Structural intents keep `requireMap: false` — their existing
   // placeholder flows legitimately pass through transient states this
   // strict guard would wrongly refuse.
@@ -710,6 +723,14 @@ export function createKernelMode({
       nextMap = buildProjectionMap(result.doc.text, parsed)
     }
     if (requireMap && !nextMap) {
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      pushKernelDiagnostic({ type: 'projection-unmappable-refused', intent: txn.intent })
+      return false
+    }
+    if (requireMap && Number.isFinite(anchor) && !nextMap?.rawToPmPos?.(anchor)) {
+      // The map built, but the block this transaction acted on degraded to a
+      // non-editable pair (see the P5-2.5 note above) — same refusal, same
+      // untouched state.
       notifyBlocked(KERNEL_CODES.PROJECTION)
       pushKernelDiagnostic({ type: 'projection-unmappable-refused', intent: txn.intent })
       return false

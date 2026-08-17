@@ -9,13 +9,27 @@
 // kernel's mdast (rather than a fresh remark parse) so ProjectionMap can
 // reuse the kernel's single source of truth for block boundaries.
 //
-// Fail-closed: any structural mismatch (block count, block type, ordered
-// flag, or a textblock the kernel can't character-map) rejects the WHOLE
-// map (`null`), never a partial/best-effort map. Some block TYPES are
-// non-editable by construction, though — they still occupy a slot in the
-// structural pairing (so a document CONTAINING one still maps its other
-// blocks), but never carry a charMap and any offset targeting them (or
-// their raw span) resolves to `null`: `html` (no reliable character-level
+// Fail-closed, at TWO different granularities (P5-2.5):
+//   * STRUCTURAL failures reject the WHOLE map (`null`), never a partial/
+//     best-effort map — block count, block type pairing, the ordered flag,
+//     the image-block / block-HTML shape guards, a surplus PM node, an
+//     unconsumed mdast block, an unconsumed vouched placeholder. Each of
+//     those says the two trees are ALIGNED DIFFERENTLY, so no pair's offsets
+//     can be trusted.
+//   * CONTENT failures degrade only THAT PAIR to a non-editable leaf
+//     (`charMap: null`): the kernel couldn't character-map the block, or the
+//     kernel's decoded visible length disagrees with PM's own content size.
+//     Both are statements about one block, and the pairing is positional —
+//     each pair's raw offsets come from its OWN mdast node position — so the
+//     neighbours keep byte-correct offsets. Every consumer resolves through
+//     `pairForContentPos`/`rawToPmPos`, which skip charMap-less pairs and
+//     answer `null`, so an unprovable block is simply read-only and every
+//     write into it fails closed. Before P5-2.5 one such block nulled the
+//     entire map, silently degrading the whole tab back to legacy.
+// Some block TYPES are non-editable by construction — they still occupy a
+// slot in the structural pairing (so a document CONTAINING one still maps
+// its other blocks), but never carry a charMap and any offset targeting them
+// (or their raw span) resolves to `null`: `html` (no reliable character-level
 // decode contract) and `table` (treated as one opaque leaf — see
 // OPAQUE_TYPES below). `code_block` (Plan 3 Task 3) gets a real,
 // prefix-aware charMap via `buildCodeMap` — EXCEPT when it pairs with mdast
@@ -490,11 +504,12 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // non-editable (final-review fix, 2026-08-16; `charMap` stays `null`,
         // same contract as mermaid/latex/math above) instead of rejecting
         // the WHOLE map, so the rest of the document (including any OTHER
-        // code block) stays fully mappable. The two checks below only run
-        // when `buildCodeMap` DID prove a charMap; they still reject the
-        // WHOLE map on their own failures (a genuine PM/mdast structural
-        // mismatch, or the CRLF-bridge ADR), which is unrelated to this
-        // per-block content-shape case.
+        // code block) stays fully mappable. The check below only runs when
+        // `buildCodeMap` DID prove a charMap, and since P5-2.5 it degrades
+        // the same way (see the generic branch's own P5-2.5 comment): a
+        // size disagreement is a statement about THIS block's content, and
+        // every invariant that proves the two trees are ALIGNED (counts,
+        // types, shapes) stays whole-map fail-closed.
         //
         // Same structural (not textual) consistency check as the generic
         // path below: PM's own content size must equal the kernel's decoded
@@ -513,7 +528,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // buildCodeMap's own empty-value case already anchors to the real
         // content start (right after the open fence line's ending), never
         // to the block's own marker position.
-        if (charMap && pm.node.content.size !== charMap.visibleLength) return null
+        if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
         // ADR (2026-08-17) — the former "non-'\n' lineEnding => non-editable"
         // gate is REMOVED here. It never described a defect in THIS module's
         // math: the identity asserted right above (`content.size ===
@@ -553,17 +568,48 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       }
     } else if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character
-      // alignment — no charMap means the kernel couldn't prove the raw
-      // source round-trips through this block's decoded text, so the whole
-      // map is rejected rather than silently degrading this one block.
+      // alignment. No charMap (the kernel couldn't prove this block's units)
+      // — or a charMap whose decoded visible length disagrees with PM's own
+      // content size — means THIS BLOCK is unprovable, so it degrades to a
+      // non-editable leaf (`charMap = null`, exactly the posture
+      // mermaid/latex/math/table/image-block/block-HTML pairs already have)
+      // and the rest of the document keeps its map.
+      //
+      // P5-2.5 — why per-BLOCK, not per-DOCUMENT (this used to `return null`):
+      //  * Both conditions are statements about ONE block's CONTENT, not
+      //    about the pairing. The pairing itself is positional: `flattenPm`
+      //    and `flattenMd` walk their trees pre-order and the loop zips them
+      //    index-for-index, so pair N+1's raw offsets come from
+      //    `mdBlocks[N+1].position` — the kernel's own parse of the raw text
+      //    — and cannot be shifted by anything that happens inside pair N.
+      //  * A genuinely mis-ALIGNED zip (the editor chain merging or splitting
+      //    a block relative to the kernel's parse) always changes the block
+      //    COUNT, and every count/shape invariant below and above stays
+      //    whole-map fail-closed: the type-pair check, the ordered-flag
+      //    check, the image-block and block-HTML shape guards, the
+      //    surplus-PM-node guard, the `mdIndex !== mdBlocks.length` check,
+      //    and the placeholder-consumption check. So an alignment failure is
+      //    still the loud, document-wide signal it always was; only a
+      //    localized content disagreement degrades quietly.
+      //  * Serving a null charMap for a textblock is not a new contract:
+      //    `buildCodeMap`'s own failure (above) and the empty-textblock guard
+      //    (below) already produce exactly that, and every consumer resolves
+      //    a position through `pairForContentPos`/`rawToPmPos`, which SKIP
+      //    charMap-less pairs and answer `null` — i.e. the block is read-only
+      //    and every write into it fails closed (see the consumer audit in
+      //    the P5-2.5 report).
+      // The one thing this deliberately trades away: a document whose single
+      // unprovable block used to force the WHOLE tab back to legacy (where
+      // that block was editable) now stays in kernel mode with that block
+      // read-only. That is the intended direction — legacy is the mode with
+      // the fidelity bug family, and every other block becomes source-first.
       charMap = buildCharacterMap(markdown, md)
-      if (!charMap) return null
       // Structural (not textual) consistency check: PM's own content size
       // (sum of each child's nodeSize — text nodes contribute their char
       // length, atom nodes contribute 1) must equal the kernel's decoded
       // visible length. This is a numeric comparison of two independently
       // derived structural counts, not a text/string match.
-      if (pm.node.content.size !== charMap.visibleLength) return null
+      if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
       // Empty-textblock guard: a zero-unit charMap's ONLY boundary is
       // `boundaries[0] = blockNode.position.start.offset` (buildCharacterMap's
       // fallback when there's no first unit to anchor to) — i.e. literally
@@ -573,8 +619,10 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       // begin. For any other textblock type (e.g. an empty ATX heading
       // `'#\n'`) the block's start offset is the MARKER's position (the
       // `#`), not the content start — serving that as a boundary would be
-      // a silent wrong mapping, so treat it as non-editable instead.
-      if (charMap.units.length === 0 && md.type !== 'paragraph') charMap = null
+      // a silent wrong mapping, so treat it as non-editable instead. (This
+      // guard is the OLDEST per-block degradation in this file — P5-2.5
+      // generalized exactly this posture to the two conditions above.)
+      if (charMap && charMap.units.length === 0 && md.type !== 'paragraph') charMap = null
     }
     blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap })
   }
