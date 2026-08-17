@@ -1574,4 +1574,129 @@ console.log('PASS kernel projection map (inline html)')
     'standalone $$x$$ still degrades the whole map (type-pair mismatch, not a size one)')
 }
 
+// ---- The mis-zip canary (P5-2.5 review finding) ----
+//
+// Per-block degradation removed a canary nobody had named: before it, a
+// MIS-ALIGNED zip (the two sequences pairing block i against the wrong block
+// i) was caught for free, because at least one pair's lengths disagreed and
+// that rejected the WHOLE map. Now only that pair degrades — and a
+// coincidentally same-type, same-length pair would be SERVED with offsets
+// belonging to a different source block, silently.
+//
+// The document-wide defence is the INVARIANT documented at the top of
+// editor-kernel-projection-map.js (a mis-zip always changes the block COUNT,
+// and every count/type/shape guard is still whole-map). `blockEndpointsAgree`
+// is the second line: it compares each SERVED pair's first/last decoded
+// character against the PM node's own text. These cases pin BOTH the catch
+// and its honest residual — a regression in either direction is visible here.
+
+// Case P7: the reviewer's base-vs-head differential. mdast is
+// [a, bb, cc, ddd]; the PM doc is shifted by one block (same COUNT, so the
+// zip is reached). Raw offsets of 'a\n\nbb\n\ncc\n\nddd\n':
+//   a=0 \n1 \n2 b=3 b=4 \n5 \n6 c=7 c=8 \n9 \n10 d=11 d=12 d=13 \n14.
+// Pair 1 (PM 'cc' vs mdast 'bb') agrees on TYPE and on LENGTH — the size
+// check cannot see it. Pre-endpoint-check this served pmPosToRaw(6) === 4,
+// an offset inside the 'bb' block while the view shows 'cc'.
+{
+  const md = 'a\n\nbb\n\ncc\n\nddd\n'
+  const shifted = doc(p(text('bb')), p(text('cc')), p(text('ddd')), p(text('e')))
+  const map = buildProjectionMap(md, shifted)
+  assert.ok(map, 'the mis-zip still BUILDS a map (this is the behavior change P5-2.5 made)')
+  // The pair the size check cannot see: same type, same visible length.
+  assert.equal(map.blockPairs[1].pmNode.textContent, 'cc')
+  assert.equal(map.blockPairs[1].mdBlock.position.start.offset, 3, 'paired against the bb block')
+  // ...caught by the endpoint cross-check instead ('c' vs 'b').
+  assert.equal(map.blockPairs[1].charMap, null, 'the mis-zipped pair must NOT be served')
+  for (let i = 0; i < map.blockPairs.length; i += 1) {
+    assert.equal(map.blockPairs[i].charMap, null, `pair ${i} must degrade`)
+  }
+  assert.equal(map.pmPosToRaw(6), null,
+    'the wrong-block offset (raw 4) must no longer be served')
+  assert.equal(map.rawToPmPos(4), null)
+}
+
+// Case P7a (positive controls — the endpoint check must NOT degrade a
+// legitimately-correct block). Every shape whose first/last unit is NOT a
+// plain `char` is skipped by construction; these prove the skips work and
+// that ordinary blocks still serve offsets.
+{
+  // escape at both ends: '\*x\*' -> PM '*x*'
+  const esc = buildProjectionMap('\\*x\\*\n', doc(p(text('*x*'))))
+  assert.ok(esc?.blockPairs[0].charMap, 'escaped endpoints stay editable')
+  assert.equal(esc.pmPosToRaw(1), 0)
+
+  // entity at both ends: '&amp;x&amp;' -> PM '&x&'
+  const ent = buildProjectionMap('&amp;x&amp;\n', doc(p(text('&x&'))))
+  assert.ok(ent?.blockPairs[0].charMap, 'entity endpoints stay editable')
+
+  // atom endpoints (inline image both sides) — no PM character at all.
+  const img = buildProjectionMap(
+    '![a](x.png)m![b](y.png)\n',
+    doc(p(schema.node('image', { src: 'x.png' }), text('m'), schema.node('image', { src: 'y.png' })))
+  )
+  assert.ok(img?.blockPairs[0].charMap, 'atom endpoints stay editable')
+
+  // hard break in the middle, plain chars at the ends.
+  const hb = buildProjectionMap('a\\\nb\n', doc(p(text('a'), br(), text('b'))))
+  assert.ok(hb?.blockPairs[0].charMap, 'a hard break does not disturb the endpoints')
+
+  // marker gaps at both ends: '**bold**' -> PM 'bold' (first/last units are
+  // the content chars, not the markers).
+  const strong = buildProjectionMap('**bold**\n', doc(p(text('bold'))))
+  assert.ok(strong?.blockPairs[0].charMap, 'mark markers are gaps, endpoints are content')
+  assert.equal(strong.pmPosToRaw(1), 2)
+
+  // highlight (Plan 5 Task 3) and inline code — same marker-gap shape.
+  assert.ok(buildProjectionMap('==hl==\n', doc(p(text('hl'))))?.blockPairs[0].charMap)
+  assert.ok(buildProjectionMap('`c`\n', doc(p(text('c'))))?.blockPairs[0].charMap)
+
+  // heading / list item / blockquote: the raw endpoints sit after the marker
+  // syntax, which the charMap already accounts for.
+  assert.ok(buildProjectionMap('# h\n', doc(schema.node('heading', { level: 1 }, [text('h')])))
+    ?.blockPairs[0].charMap)
+  const item = buildProjectionMap('- 甲\n', doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(text('甲'))])
+  ])))
+  assert.ok(item?.blockPairs[2].charMap, 'list item paragraph stays editable')
+
+  // code blocks: LF, CRLF and a quoted fence (per-line prefix) — the
+  // endpoints are literal bytes on both sides.
+  assert.ok(buildProjectionMap('```js\nab\n```\n', doc(cbl('js', 'ab'), p()))?.blockPairs[0].charMap)
+  assert.ok(buildProjectionMap('```js\r\nab\r\ncd\r\n```\r\n',
+    doc(cbl('js', 'ab\r\ncd'), p()))?.blockPairs[0].charMap, 'CRLF fence stays editable')
+  assert.ok(buildProjectionMap('> ```js\n> ab\n> ```\n',
+    doc(schema.node('blockquote', null, [cbl('js', 'ab')]), p()))?.blockPairs[1].charMap,
+    'quoted fence stays editable')
+
+  // astral plane: a `char` unit is a whole code point (width 2), compared as
+  // its own raw slice on both sides.
+  assert.ok(buildProjectionMap('😀x😀\n', doc(p(text('😀x😀'))))?.blockPairs[0].charMap,
+    'surrogate-pair endpoints stay editable')
+
+  // empty blocks have no endpoints to compare.
+  assert.ok(buildProjectionMap('```js\n```\n', doc(cbl('js', ''), p()))?.blockPairs[0].charMap)
+}
+
+// Case P7b (the honest RESIDUAL): the endpoint check is one character deep at
+// each end. A mis-zip whose blocks agree on type, on visible length AND on
+// both endpoint characters is still served with the WRONG block's offsets.
+// mdast [a, xBz, xAz] against a PM doc shifted by one: pair 1 is PM 'xAz'
+// against the mdast 'xBz' block — only the middle character differs.
+// This is a KNOWN hole, bounded by the count invariant at the top of
+// editor-kernel-projection-map.js (no chain in the app can produce a
+// same-count reordering today). If a future plugin ever can, this is the
+// assertion that must change — closing it needs full content verification,
+// not a deeper endpoint probe.
+{
+  const md = 'a\n\nxBz\n\nxAz\n'
+  const shifted = doc(p(text('xBz')), p(text('xAz')), p(text('q')))
+  const map = buildProjectionMap(md, shifted)
+  assert.ok(map)
+  assert.equal(map.blockPairs[0].charMap, null, 'length disagreement still degrades')
+  assert.equal(map.blockPairs[2].charMap, null)
+  assert.ok(map.blockPairs[1].charMap, 'RESIDUAL: same type, length and endpoints -> still served')
+  assert.equal(map.pmPosToRaw(6), 3,
+    'RESIDUAL: the served offset belongs to the xBz block while PM shows xAz')
+}
+
 console.log('PASS kernel projection map (per-block degradation)')

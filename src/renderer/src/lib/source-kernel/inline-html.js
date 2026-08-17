@@ -113,8 +113,14 @@ export const PHRASING_PARENTS = BREAK_REWRITE_PARENTS
 // Is this mdast `html` node an INLINE fragment (as opposed to block-level HTML)?
 //
 // This is the one discriminator for the inline-vs-block question, shared by
-// `character-map.js`/`syntax-index.js` (kernel chain) and mirrored by the
-// projection map's own phrasing guard. Its ground truth is
+// `character-map.js`/`syntax-index.js` (kernel chain). Note that the
+// projection map's `MD_PHRASING_PARENTS` is NOT a mirror of this rule (P5-2.5
+// review finding — the earlier wording claimed it was): the two answer
+// different questions. This one CLASSIFIES a node ("is this html node inline
+// or block-level?"); that one decides WHERE THE BLOCK WALK STOPS ("do not
+// descend into a paragraph/heading looking for more block slots"). They agree
+// on today's type list by construction, not by derivation, and either can
+// change without the other. Its ground truth is
 // preset-commonmark's `remark-html-transformer.ts`: an mdast `html` whose
 // parent is a BLOCK container (`root`/`blockquote`/`listItem`) is wrapped into
 // `paragraph > html` before ProseMirror parses it, so it behaves as a block;

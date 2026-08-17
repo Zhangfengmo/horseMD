@@ -110,6 +110,75 @@ export function createKernelMode({
       'Kernel mode could not map this document; legacy editing stays active (some toolbar features remain off)'
     ))
   }
+  // BLOCK-scoped refusal (P5-2.5 review finding). Since per-block degradation,
+  // `UNMAPPED` covers two very different situations: a transient/unsupported
+  // position (the generic "not supported yet" case) and a block the kernel
+  // could not prove, which is PERMANENTLY read-only for this revision — the
+  // user cannot type in it, cannot Enter out of it, cannot even delete their
+  // way out. Telling them "this operation isn't supported yet" for the second
+  // one is misleading, so every call site that can TELL the difference (i.e.
+  // has a PM position to test) raises this message instead. Same cooldown
+  // bookkeeping as `notifyBlocked`, keyed on its own pseudo-code so a
+  // block-read-only toast never suppresses (or is suppressed by) a generic
+  // one.
+  const BLOCK_READ_ONLY = 'block-read-only'
+  const notifyBlockReadOnly = () => {
+    // The diagnostic is pushed on EVERY refusal (no cooldown): it is the
+    // machine-readable record a test/bug report needs, and suppressing it
+    // would make a second refusal in the same window invisible. Only the
+    // user-facing toast is rate-limited.
+    pushKernelDiagnostic({ type: BLOCK_READ_ONLY, revision: kernel.doc.revision })
+    const now = Date.now()
+    if (now - (lastNotifyAt.get(BLOCK_READ_ONLY) || 0) < NOTIFY_COOLDOWN_MS) return
+    lastNotifyAt.set(BLOCK_READ_ONLY, now)
+    notify?.(tOr(
+      'kernelMode.blockReadOnly',
+      'This paragraph is read-only in the source kernel (its source could not be proven); the rest of the document still edits normally'
+    ))
+  }
+  // Is `pmPos` inside a REAL pair the projection map degraded to non-editable
+  // (`charMap: null`)? Resolved by the pair's own NODE span — a degraded pair
+  // has no charMap, so it has no content range to search with (`pairAt` skips
+  // it by design). Virtual pairs are excluded: a placeholder is never a
+  // "read-only block", and non-editable-by-construction leaves (table,
+  // image-block, block HTML, mermaid/latex/math code blocks) are reported the
+  // same way on purpose — from the user's seat they are the same situation:
+  // this block cannot be edited here, the rest of the document can.
+  const degradedPairAt = (pmPos) => {
+    if (!Number.isFinite(pmPos)) return null
+    for (const pair of kernel.map?.blockPairs || []) {
+      if (pair.charMap || pair.virtual) continue
+      const node = pair.pmNode
+      const size = node?.nodeSize
+      if (!Number.isFinite(size)) continue
+      if (pmPos > pair.pmPos && pmPos < pair.pmPos + size) return pair
+    }
+    return null
+  }
+  // Refusal reporter for the paths that hold a PM position: a degraded block
+  // gets the block-scoped message, everything else keeps the generic one.
+  const notifyRefusal = (code, pmPos) => {
+    if (degradedPairAt(pmPos)) notifyBlockReadOnly()
+    else notifyBlocked(code)
+  }
+  // Where a refused BATCH was trying to write, in `oldState` coordinates. The
+  // first step of the first doc-changing transaction is always expressed in
+  // that space (later steps are rebased — see extractPlainTextSteps' doc
+  // comment), which is exactly the position `degradedPairAt` needs. The live
+  // selection is NOT a substitute: a batch can target a block the caret is not
+  // in (programmatic inserts, IME replays, find/replace), and reporting the
+  // caret's block would then describe the wrong paragraph. Falls back to the
+  // selection only when no step position is available.
+  const batchTargetPos = (transactions, oldState) => {
+    const trs = Array.isArray(transactions) ? transactions : [transactions]
+    for (const tr of trs) {
+      if (!tr?.docChanged || !Array.isArray(tr.steps)) continue
+      for (const step of tr.steps) {
+        if (Number.isFinite(step?.from)) return step.from
+      }
+    }
+    return oldState?.selection?.from
+  }
 
   // Mirror `@milkdown/plugin-trailing`'s default shouldAppend (Crepe ships it
   // unconditionally, with the default config): the live view always carries
@@ -344,7 +413,12 @@ export function createKernelMode({
         // ONE kernel commit (or a clean revert) once it settles.
         return undefined
       case 'blocked':
-        notifyBlocked(classified.blockedCode)
+        // The batch's own starting caret decides which message the user gets:
+        // a refusal INSIDE a degraded block is "this paragraph is read-only"
+        // (permanent for this revision, and the primary way a user meets a
+        // degraded block — by typing in it); anywhere else it stays the
+        // generic "not supported yet". See `notifyRefusal`.
+        notifyRefusal(classified.blockedCode, batchTargetPos(transactions, oldState))
         return { veto: true }
       case 'trailing-append':
         // @milkdown/plugin-trailing's own convenience paragraph (see
@@ -364,7 +438,10 @@ export function createKernelMode({
           // resync whenever this batch's steps targeted a code_block, so a
           // genuine CM-side divergence gets pulled back in sync instead of
           // persisting forever.
-          notifyBlocked(committed.code)
+          // Block-scoped signal when the refusal is a degraded block (the
+          // batch's own starting caret is the position to test) — see
+          // `notifyRefusal`.
+          notifyRefusal(committed.code, batchTargetPos(transactions, oldState))
           if (batchTargetsCodeBlock(transactions, oldState)) scheduleVetoResync()
           return { veto: true }
         }
@@ -395,7 +472,7 @@ export function createKernelMode({
         if (!view) return { veto: true }
         const pair = editablePairForRange(classified.pmFrom, classified.pmTo)
         if (!pair) {
-          notifyBlocked(KERNEL_CODES.UNMAPPED)
+          notifyRefusal(KERNEL_CODES.UNMAPPED, classified.pmFrom)
           return { veto: true }
         }
         const contentPos = pair.pmPos + 1
@@ -921,7 +998,7 @@ export function createKernelMode({
     const { from, to } = state.selection
     const pair = editablePairForRange(from, to)
     if (!pair) {
-      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      notifyRefusal(KERNEL_CODES.UNMAPPED, from)
       return false
     }
     const contentPos = pair.pmPos + 1
@@ -951,7 +1028,10 @@ export function createKernelMode({
     if (!Number.isFinite(offset)) {
       // Fail-closed: an unprovable caret must not reach PM's structural
       // commands (their output would be an unowned structural transaction).
-      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      // A caret sitting in a DEGRADED block gets the block-scoped message —
+      // "this paragraph is read-only" is the true and actionable statement
+      // there, not "this operation isn't supported yet".
+      notifyRefusal(KERNEL_CODES.UNMAPPED, state.selection.head)
       return true
     }
     // 块尾连续 Enter (Task 2, plan 3): the caret sits exactly at the LAST
@@ -1171,7 +1251,7 @@ export function createKernelMode({
     }
     const offset = kernel.map.pmPosToRaw(view.state.selection.head)
     if (!Number.isFinite(offset)) {
-      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      notifyRefusal(KERNEL_CODES.UNMAPPED, view.state.selection.head)
       return true
     }
     const routed = toggleBlockquote({
@@ -1235,7 +1315,7 @@ export function createKernelMode({
     }
     const headRaw = kernel.map.pmPosToRaw(view.state.selection.head)
     if (!Number.isFinite(headRaw) || headRaw < 1) {
-      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      notifyRefusal(KERNEL_CODES.UNMAPPED, view.state.selection.head)
       return true
     }
     const index = buildSyntaxIndex(kernel.doc.text)

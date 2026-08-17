@@ -26,6 +26,62 @@
 //     answer `null`, so an unprovable block is simply read-only and every
 //     write into it fails closed. Before P5-2.5 one such block nulled the
 //     entire map, silently degrading the whole tab back to legacy.
+//
+// ==========================================================================
+// INVARIANT (P5-2.5 review finding — READ THIS BEFORE ADDING A PLUGIN)
+// ==========================================================================
+// The per-block degradation above is only safe because A MIS-ALIGNED ZIP
+// ALWAYS CHANGES THE BLOCK COUNT. The zip pairs `flattenPm[i]` with
+// `flattenMd[i]`; if the two sequences ever describe the same document with
+// the same COUNT but a different ORDER/CORRESPONDENCE, then a pair whose type
+// and visible length coincidentally agree is served with offsets belonging to
+// a DIFFERENT source block — silently, since the map deliberately does no
+// text search. Before P5-2.5 that class was caught for free: a mis-aligned
+// zip virtually always produced at least ONE length disagreement, and that
+// disagreement rejected the WHOLE map. That canary is gone by construction —
+// only the offending pair degrades now — so the invariant has to be stated
+// and defended explicitly.
+//
+// Every known way the two sides can differ in block count today, and why each
+// is still caught document-wide (verified 2026-08-17):
+//   1. `remarkMergeInlineHtml` merging ROOT-LEVEL html siblings (editor side
+//      loses a block; Case H9) -> mdast has an unconsumed block ->
+//      `mdIndex !== mdBlocks.length`.
+//   2. ProseMirror `createAndFill` inserting the schema-required filler
+//      paragraph in a list item holding a leading block (PM gains a block;
+//      Case M6) -> the surplus/type guards.
+//   3. `@milkdown/plugin-trailing` appending an empty final paragraph (PM
+//      gains a block) -> the ONE deliberately tolerated surplus, and only as
+//      an EMPTY, LAST, top-level paragraph.
+//   4. `createMermaidSplitPlugin` (editor-mermaid.js) splitting one mermaid
+//      `code_block` into N (PM gains N-1 NON-EMPTY blocks) -> the surplus
+//      guard refuses (a non-empty code_block never qualifies as the trailing
+//      placeholder). In kernel mode it never even lands: its slice carries
+//      node content, so the gateway classifies the appendTransaction as
+//      `blocked` and vetoes it.
+//   5. `createMathBlockPromotionPlugin` (editor-math.js) replacing typed
+//      `$$x$$` with a `code_block` (PM gains blocks) -> same two layers as 4.
+//   6. `remark-frontmatter` (editor chain only): the kernel's processor has
+//      no frontmatter extension, so `---\ntitle: x\n---` is
+//      `thematicBreak + setext heading` to it while PM holds ONE
+//      `frontmatter` node (not in PM_TO_MD, so `flattenPm` records no slot
+//      at all) -> the very first pair is a type mismatch, and the counts
+//      differ too. A frontmatter document degrades entirely; it never serves
+//      a wrong offset.
+// None of these can produce "same count, different correspondence": a merge
+// only removes, a fill/split/promotion only adds, and NOTHING in either chain
+// REORDERS blocks. A future plugin that removes one block and adds another in
+// the same pass WOULD break this invariant — it must either be given an
+// explicit pairing here or be kept out of the parse chain.
+//
+// Second line of defence (not a substitute): `blockEndpointsAgree` below
+// cross-checks each SERVED pair's first/last decoded character against the PM
+// node's own text. It catches the ordinary mis-zip (neighbouring blocks
+// rarely share both endpoints) but not one whose blocks agree on type, length
+// AND both endpoint characters — see Case P7b in
+// scripts/test-kernel-projection-map.mjs, which pins that residual honestly.
+// ==========================================================================
+//
 // Some block TYPES are non-editable by construction — they still occupy a
 // slot in the structural pairing (so a document CONTAINING one still maps
 // its other blocks), but never carry a charMap and any offset targeting them
@@ -267,6 +323,53 @@ const trailingInsertPrefix = (markdown, ending) => {
 // build `units[]` into its (private) boundaries map — buildCharacterMap
 // only exposes the forward direction (`visibleToRaw`), so the inverse has
 // to be re-derived from the public `units[]` contract, not text search.
+// Endpoint cross-check for a pair about to be SERVED (P5-2.5 review finding;
+// see the INVARIANT block at the top of this file). The count/type/shape
+// guards prove the two sequences are aligned; the size check proves this
+// block's two counts agree. Neither can tell a correctly-zipped pair from a
+// mis-zipped one whose blocks happen to have the same type and the same
+// visible length — and this module deliberately does no text search, so
+// nothing else would notice either. Comparing ONE character at each end is
+// the cheapest possible content evidence: O(1) per block, and it turns the
+// ordinary mis-zip (neighbouring blocks with different text) from "served
+// with wrong offsets" into "degraded, read-only".
+//
+// It is applied ONLY where the decode is the IDENTITY, so it can never
+// degrade a legitimately-correct block:
+//   - `char` units carry exactly their own raw bytes (`rawEnd - rawStart ===
+//     width`, see character-map.js/code-map.js), so the raw slice IS the
+//     visible text there;
+//   - `escape` (`\*` -> `*`), `entity` (`&amp;` -> `&`), `atom` (image /
+//     inline math / inline html — no PM character at all) and `linebreak`
+//     (whose raw span can include a blockquote/list line prefix) units are
+//     SKIPPED, never guessed at;
+//   - a zero-unit charMap (empty paragraph, empty code fence) has no
+//     endpoints and always passes.
+// `textContent` is the PM node's own text (atoms contribute nothing to it,
+// which is why an atom endpoint is skipped rather than compared).
+function blockEndpointsAgree(markdown, pmNode, charMap) {
+  const units = charMap?.units
+  if (!Array.isArray(units) || units.length === 0) return true
+  let text
+  try {
+    text = pmNode.textContent
+  } catch {
+    return true
+  }
+  if (typeof text !== 'string') return true
+  const first = units[0]
+  if (first.kind === 'char') {
+    const raw = markdown.slice(first.rawStart, first.rawEnd)
+    if (raw && text.slice(0, raw.length) !== raw) return false
+  }
+  const last = units[units.length - 1]
+  if (last.kind === 'char') {
+    const raw = markdown.slice(last.rawStart, last.rawEnd)
+    if (raw && text.slice(text.length - raw.length) !== raw) return false
+  }
+  return true
+}
+
 function walkUnits(charMap, onUnit) {
   let vis = 0
   for (const unit of charMap.units) {
@@ -529,6 +632,11 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // content start (right after the open fence line's ending), never
         // to the block's own marker position.
         if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
+        // Endpoint cross-check (see `blockEndpointsAgree` + the INVARIANT
+        // block at the top of this file): a code block's units are
+        // char/linebreak only, so this compares the fence content's first and
+        // last literal byte against PM's own code text.
+        if (charMap && !blockEndpointsAgree(markdown, pm.node, charMap)) charMap = null
         // ADR (2026-08-17) — the former "non-'\n' lineEnding => non-editable"
         // gate is REMOVED here. It never described a defect in THIS module's
         // math: the identity asserted right above (`content.size ===
@@ -610,6 +718,10 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       // visible length. This is a numeric comparison of two independently
       // derived structural counts, not a text/string match.
       if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
+      // Endpoint cross-check: the last content evidence before this pair's
+      // offsets are served to writers (see `blockEndpointsAgree` + the
+      // INVARIANT block at the top of this file).
+      if (charMap && !blockEndpointsAgree(markdown, pm.node, charMap)) charMap = null
       // Empty-textblock guard: a zero-unit charMap's ONLY boundary is
       // `boundaries[0] = blockNode.position.start.offset` (buildCharacterMap's
       // fallback when there's no first unit to anchor to) — i.e. literally

@@ -125,6 +125,13 @@ const FIXTURE_DOCS = {
   '甲乙丙\n': () => doc(p(text('甲乙丙'))),
   '甲**乙**丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('strong')]), text('丙'))),
   '甲==乙==丙\n': () => doc(p(text('甲'), schema.text('乙', [schema.mark('highlight')]), text('丙'))),
+  // P5-2.5 review item 6: the `/quote` slash query and the bytes
+  // `runQuoteToggleFromQuery` would commit for it (a bare owned-blank-line
+  // marker). ProseMirror's blockquote is `block+` and cannot hold zero
+  // children, so the parse fills an empty paragraph in — which is exactly
+  // why that document can never pair (mdast blockquote has NO children).
+  '/quote\n': () => doc(p(text('/quote'))),
+  '>\n': () => doc(bq(p())),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -1604,6 +1611,16 @@ const toggleVia = (h, markType, from, to) => {
   assert.deepEqual(verdict, { veto: true }, 'typing inside the HTML-bearing paragraph is refused')
   assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
   assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
+  // Positive control for the P5-2.5 block-scoped message: this paragraph is
+  // NOT degraded (it pairs and carries a charMap), it is merely an unsupported
+  // TYPING target, so the user must keep getting the GENERIC message. If this
+  // ever flips to "read-only", `degradedPairAt` has started over-reporting.
+  assert.ok(h.controller.kernel.map.blockPairs[0].charMap,
+    'the fragment-bearing paragraph is mapped, not degraded')
+  assert.ok(h.notifications.at(-1).includes('unsupported-input-type'),
+    `a non-degraded refusal keeps the generic message, got: ${h.notifications.at(-1)}`)
+  assert.ok(!h.notifications.at(-1).includes('read-only'),
+    'a non-degraded refusal must not claim the block is read-only')
 }
 
 // Case 17 (P5-2.5): a document containing ONE unprovable block attaches and
@@ -1665,11 +1682,14 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, bytesBefore, 'kernel bytes untouched')
   assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'no revision advance')
   assert.ok(h.notifications.length > notifBefore, 'the refusal is surfaced, never silent')
-  //     (This particular block is refused one layer EARLIER than the map —
-  //     the inserted char would carry the red highlight mark, which
-  //     `plainSliceText` rejects as `unsupported-input-type`. Both layers are
-  //     fail-closed; (c) below exercises the MAP's own refusal, which is the
-  //     one this task changed.)
+  //     Typing is how a user actually meets a degraded block, so this path
+  //     gets the BLOCK-SCOPED message too (P5-2.5 review item 3), even though
+  //     the refusal itself comes one layer EARLIER than the map (the inserted
+  //     char would carry the red highlight mark, which `plainSliceText`
+  //     rejects as `unsupported-input-type`). Both layers are fail-closed;
+  //     (c) below exercises the MAP's own refusal.
+  assert.ok(h.notifications.at(-1).includes('read-only'),
+    `typing in a degraded block must say it is read-only, got: ${h.notifications.at(-1)}`)
 
   // (c) a STRUCTURAL key inside the degraded block is refused by the MAP —
   //     the caret's raw offset is unprovable (`pmPosToRaw` skips
@@ -1680,9 +1700,24 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true,
     'Enter is swallowed (refused), never delegated to PM')
   assert.equal(h.controller.kernel.doc.text, bytesBefore, 'Enter changed no bytes')
-  assert.ok(h.notifications.length > notifBeforeEnter, 'the Enter refusal notifies')
-  assert.ok(h.notifications.at(-1).includes('unmapped-selection'),
-    `the map refuses the unprovable caret, got: ${h.notifications.at(-1)}`)
+  // No new toast is asserted here: `notifyBlockReadOnly` rate-limits the
+  // TOAST (one per cooldown window, so a held key does not strobe) while
+  // pushing its diagnostic every time — (b) just raised the same message.
+  // The block-scoped message itself is asserted on (b) above and pinned by
+  // the diagnostic below.
+  // ...it is the BLOCK-SCOPED message (P5-2.5 review item 3), not the
+  // generic "not supported yet" one: this paragraph is permanently read-only
+  // for this revision, which is a different (and actionable) statement. The
+  // harness's `getT` echoes the key back, so `tOr` serves the English
+  // fallback — the key itself is asserted via the diagnostic below.
+  assert.ok(h.notifications.at(-1).includes('read-only'),
+    `a degraded block must say so, got: ${h.notifications.at(-1)}`)
+  assert.ok(!h.notifications.at(-1).includes('unmapped-selection'),
+    'the block-scoped message must not carry the generic code')
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'block-read-only').length >= 2,
+    'both the typing and the Enter refusal are diagnosable as block-read-only'
+  )
   assert.ok(
     h.view.state.doc.eq(doc(p(text('甲丙乙')), redP())),
     'the view is untouched by the refused Enter')
@@ -1788,6 +1823,35 @@ const toggleVia = (h, markType, from, to) => {
     )
   }
   assert.equal(h.controller.kernel.doc.text, bytesBefore, 'the controls committed nothing either')
+}
+
+// Case 20 (P5-2.5 review item 6): `requireMap`'s OTHER caller,
+// `runQuoteToggleFromQuery`, was only pinned by the UI suite. It refuses
+// fail-closed: the bytes it would commit ('>' alone on its line) reparse to a
+// blockquote with ZERO mdast children while ProseMirror's `block+` blockquote
+// always holds at least an empty paragraph — pmBlocks 2 vs mdBlocks 1, a
+// COUNT mismatch, so the whole map is null and the guard's FIRST half
+// refuses. (The anchor half P5-2.5 added is unreachable for this command:
+// its result document can never build a map at all. It is exercised by the
+// highlight route — Case M4 — instead.)
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('/quote\n', doc(p(text('/quote'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // Caret at the end of the query text, which is what `shouldShow` guarantees.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  const before = h.notifications.length
+  assert.equal(h.controller.runQuoteToggleFromQuery(h.view), true,
+    'the slash item always swallows the invocation, success or refusal')
+  assert.equal(h.controller.kernel.doc.text, '/quote\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('/quote')))), 'view untouched')
+  assert.ok(h.controller.kernel.map, 'the CURRENT map is untouched too (no lock-up)')
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
+  assert.ok(
+    globalThis.__hmKernelDiagnostics.some((entry) =>
+      entry.type === 'projection-unmappable-refused' && entry.intent === 'wrap-blockquote'),
+    'the pre-commit map guard is the refusing party'
+  )
 }
 
 console.log('PASS kernel mode headless')
