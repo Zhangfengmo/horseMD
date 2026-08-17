@@ -20,7 +20,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -503,6 +503,13 @@ function extractLinkEdit(transactions, oldState) {
   // Every mark step must carry the `link` mark type, and each side must
   // coalesce into ONE contiguous range (the same rule extractMarkToggle
   // applies: a gap means a skipped segment or a cross-block jump).
+  //
+  // The steps must also agree on `href`. The tooltip never emits two adjacent
+  // link steps with different destinations (one confirm produces ONE mark), so
+  // this is unreachable today — but "last attrs win" would silently commit the
+  // second href for a batch this classifier never probed, which contradicts
+  // its own fail-closed posture everywhere else. Refuse instead (review
+  // finding, 2026-08-17).
   const coalesce = (steps) => {
     if (!steps.length) return null
     let from = null
@@ -511,6 +518,7 @@ function extractLinkEdit(transactions, oldState) {
     for (const step of steps) {
       if (step.mark?.type?.name !== 'link') return null
       if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+      if (attrs && step.mark.attrs?.href !== attrs.href) return null
       attrs = step.mark.attrs || null
       if (from == null) {
         from = step.from
@@ -707,29 +715,12 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   return { kind: 'plain-text', steps }
 }
 
-// True when `rawOffset` sits strictly INSIDE a '\r\n' line ending, i.e. on the
-// boundary between a `char` unit holding the '\r' and the `linebreak` unit
-// holding the '\n'. Used by `commitPlainText`'s bisection guard (see its call
-// site for the corruption shapes this refuses).
-//
-// The cheap text test is the fast path AND a necessary condition; the unit
-// walk is what actually PROVES the offset is that boundary in THIS block's
-// map (rather than, say, a '\r\n' that happens to sit in surrounding source).
-// charMap shapes without a `units` array (virtualCharMap, hand-built maps in
-// older tests) can carry no such boundary and answer `false`.
-function bisectsLineEnding(charMap, text, rawOffset) {
-  if (!charMap || typeof text !== 'string' || !Number.isFinite(rawOffset)) return false
-  if (text.charCodeAt(rawOffset - 1) !== 13 || text.charCodeAt(rawOffset) !== 10) return false
-  const units = charMap.units
-  if (!Array.isArray(units)) return false
-  for (let index = 0; index < units.length - 1; index += 1) {
-    const unit = units[index]
-    const next = units[index + 1]
-    if (unit?.kind !== 'char' || next?.kind !== 'linebreak') continue
-    if (unit.rawEnd === rawOffset && next.rawStart === rawOffset) return true
-  }
-  return false
-}
+// `bisectsLineEnding` (used by `commitPlainText`'s guard below — see its call
+// site for the corruption shapes it refuses) used to be a private copy here.
+// It now comes from `lib/source-kernel/character-map.js`, the module that owns
+// the unit model the predicate reads, so this file and the pure commands under
+// `lib/source-kernel/commands/` enforce ONE definition instead of two copies
+// that can drift apart. Behavior is unchanged (the copy was byte-identical).
 
 // commitPlainText: turns a `plain-text`-classified batch into ONE kernel
 // transaction and applies it. Independently re-derives the step list (it
@@ -1100,7 +1091,12 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
 // contentPos`. Virtual pairs (trailing/split placeholders, empty list items)
 // have no real bytes and are excluded by the caller's `editablePairForRange`.
 export function routeLinkEdit({ kernel, index, pair, op, pmFrom, pmTo, href, insertedText }) {
-  if (!kernel?.doc || !pair?.charMap) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  // `pair.virtual` is re-checked here, not just inherited from the caller's
+  // `editablePairForRange`: a placeholder pair (trailing/split placeholder,
+  // empty list item) has no real source bytes, and taking "is this a real
+  // block?" on trust from the caller is exactly the fail-open shape the image
+  // route's ratio guard was corrected for (61f8b9c). One line, closed here.
+  if (!kernel?.doc || !pair?.charMap || pair.virtual) return { ok: false, code: KERNEL_CODES.UNMAPPED }
   if (!Number.isFinite(pmFrom) || !Number.isFinite(pmTo)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
   const contentPos = pair.pmPos + 1
   const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)

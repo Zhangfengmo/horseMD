@@ -411,3 +411,41 @@ export function buildCharacterMap(text, blockNode) {
     rawNeutralInsert
   }
 }
+
+// True when `rawOffset` sits strictly INSIDE a '\r\n' line ending, i.e. on the
+// boundary between the unit holding the '\r' and the `linebreak` unit holding
+// the '\n'. Such an offset is byte-legal and genuinely addressable from
+// ProseMirror, but structurally indivisible: writing there splits ONE line
+// ending into a lone CR plus a separate LF, so a two-line CRLF document
+// silently becomes three lines. Every command that resolves a raw offset from
+// a character map must refuse it.
+//
+// It exists as a real boundary because the maps deliberately model a CRLF as
+// TWO units. In a PROSE block a CRLF soft break leaves the '\r' in the mdast
+// text value, so `textUnits` emits a width-1 `char` unit for it and then the
+// `linebreak` unit for the '\n' (plus any continuation prefix); in a CODE
+// block `buildCodeMap` splits the pair the same way for its own reasons.
+//
+// This lives here — in the module that owns the unit model — so the gateway's
+// plain-text path (editor-kernel-gateway.js `commitPlainText`) and the pure
+// commands under commands/ enforce ONE predicate rather than two copies that
+// can drift. Character maps without a `units` array (the projection map's
+// `virtualCharMap`, hand-built maps in older tests) can carry no such
+// boundary and answer `false`.
+//
+// The cheap text test is the fast path AND a necessary condition; the unit
+// walk is what actually PROVES the offset is that boundary in THIS block's
+// map, rather than a '\r\n' that merely happens to sit in surrounding source.
+export function bisectsLineEnding(charMap, text, rawOffset) {
+  if (!charMap || typeof text !== 'string' || !Number.isFinite(rawOffset)) return false
+  if (text.charCodeAt(rawOffset - 1) !== 13 || text.charCodeAt(rawOffset) !== 10) return false
+  const units = charMap.units
+  if (!Array.isArray(units)) return false
+  for (let index = 0; index < units.length - 1; index += 1) {
+    const unit = units[index]
+    const next = units[index + 1]
+    if (unit?.kind !== 'char' || next?.kind !== 'linebreak') continue
+    if (unit.rawEnd === rawOffset && next.rawStart === rawOffset) return true
+  }
+  return false
+}

@@ -1612,4 +1612,63 @@ const linkEdit = (text, blockOffset, args) => {
   assert.deepEqual(linkEdit('a&#x1F600;b\n', 0, { visFrom: 2, visTo: 3, op: 'wrap', href: 'u' }), unmapped)
 }
 
+// COORDINATE SYSTEM (review finding, 2026-08-17). The command's
+// `visibleTextOf` must count exactly what `buildCharacterMap` counts, or every
+// visible offset AFTER an inline ATOM means something different to the two
+// sides and the expected-label / expected-text strings get sliced in the wrong
+// space. It charged atoms 0 and the map charges 1, so each shape below —
+// perfectly ordinary prose — refused. The raw range was right all along; only
+// the proof's own expectations were shifted.
+{
+  // inline image
+  assert.equal(linkEdit('see ![i](p.png) more words here\n', 0, { visFrom: 6, visTo: 10, op: 'wrap', href: 'u' }).text,
+    'see ![i](p.png) [more](u) words here\n')
+  assert.equal(linkEdit('see ![i](p.png) more words here\n', 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' }).text,
+    '[see](u) ![i](p.png) more words here\n', 'the control that always worked: nothing before the atom')
+  // inline math
+  assert.equal(linkEdit('a $x^2$ word here\n', 0, { visFrom: 4, visTo: 8, op: 'wrap', href: 'u' }).text,
+    'a $x^2$ [word](u) here\n')
+  // hard break
+  assert.equal(linkEdit('aa\\\nbb cc\n', 0, { visFrom: 3, visTo: 5, op: 'wrap', href: 'u' }).text,
+    'aa\\\n[bb](u) cc\n')
+  // a COALESCED inline-HTML run is ONE unit on both sides — text after it, and
+  // the run itself as a whole label.
+  assert.equal(linkEdit('x <span>y</span> z w\n', 0, { visFrom: 4, visTo: 5, op: 'wrap', href: 'u' }).text,
+    'x <span>y</span> [z](u) w\n')
+  assert.equal(linkEdit('x <span>y</span> z w\n', 0, { visFrom: 2, visTo: 3, op: 'wrap', href: 'u' }).text,
+    'x [<span>y</span>](u) z w\n')
+  // …and the same alignment holds for the other three ops around an atom.
+  assert.equal(linkEdit('see ![i](p.png) [more](u) words\n', 0, { visFrom: 6, visTo: 10, op: 'edit', href: 'v' }).text,
+    'see ![i](p.png) [more](v) words\n')
+  assert.equal(linkEdit('see ![i](p.png) [more](u) words\n', 0, { visFrom: 6, visTo: 10, op: 'unwrap' }).text,
+    'see ![i](p.png) more words\n')
+  assert.equal(
+    linkEdit('see ![i](p.png) more\n', 0, { visFrom: 6, visTo: 6, op: 'insert', href: 'u', insertedText: 'q' }).text,
+    'see ![i](p.png) [q](u)more\n'
+  )
+}
+
+// CRLF BISECTION (review finding, 2026-08-17). A CRLF soft break leaves the
+// '\r' in the mdast text value, so the map models it as a `char` unit plus the
+// `linebreak` unit for the '\n' — and the offset between them is a real,
+// ProseMirror-addressable position. Writing there is byte-legal and even
+// survives the reparse proof (remark keeps the literal '\r', so the decoded
+// text is unchanged), but it splits ONE line ending into a lone CR and a
+// separate LF: 2 lines silently become 3. Refuse, exactly as the gateway's
+// plain-text path does.
+{
+  const crlf = 'one\r\ntwo three\r\n'
+  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 0, visTo: 4, op: 'wrap', href: 'u' }),
+    { ok: false, code: 'unmapped-selection' }, 'a range ENDING between \\r and \\n refuses')
+  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 4, visTo: 8, op: 'wrap', href: 'u' }),
+    { ok: false, code: 'unmapped-selection' }, 'a range STARTING there refuses too')
+  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 4, visTo: 4, op: 'insert', href: 'u', insertedText: 'u' }),
+    { ok: false, code: 'unmapped-selection' }, 'and so does an insert point there')
+  // Everything that does NOT bisect the pair still works, including a label
+  // that spans the whole soft break.
+  assert.equal(linkEdit(crlf, 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' }).text, '[one](u)\r\ntwo three\r\n')
+  assert.equal(linkEdit(crlf, 0, { visFrom: 5, visTo: 8, op: 'wrap', href: 'u' }).text, 'one\r\n[two](u) three\r\n')
+  assert.equal(linkEdit(crlf, 0, { visFrom: 0, visTo: 8, op: 'wrap', href: 'u' }).text, '[one\r\ntwo](u) three\r\n')
+}
+
 console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, proven byte-for-byte)')

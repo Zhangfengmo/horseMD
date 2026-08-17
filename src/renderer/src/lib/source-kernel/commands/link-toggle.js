@@ -59,7 +59,15 @@
 // Task 4 made mappable and where the reparse proof is what keeps a `|` inside
 // a URL from silently growing a column.
 import { parseKernelMarkdown } from '../syntax-index.js'
-import { buildCharacterMap } from '../character-map.js'
+import { buildCharacterMap, bisectsLineEnding } from '../character-map.js'
+import { BREAK_REWRITE_PARENTS, inlineHtmlRunAt } from '../inline-html.js'
+
+// The inline node types `character-map.js` treats as width-1 ATOMS. Kept in
+// lockstep with its own `ATOMS` set — see `visibleTextOf` for why the two
+// walks must agree unit for unit.
+const ATOM_TYPES = new Set([
+  'image', 'imageReference', 'break', 'footnoteReference', 'html', 'inlineMath'
+])
 
 // The blocks whose mdast content is real inline phrasing AND which the
 // projection map can hand this command a character map for. Anything else
@@ -261,16 +269,67 @@ function phrasingBlockFor(tree, rawFrom, rawTo) {
   return found
 }
 
-// Decoded text of an inline subtree. Only used to compare a BASELINE parse
-// against a CANDIDATE parse (never to derive bytes), so what matters is that
-// both sides run the identical rule: `text`/`inlineCode` contribute their
-// decoded `value`, containers recurse, atoms (image/break/html/math)
-// contribute nothing.
-function flattenText(node) {
+// Placeholder for one inline ATOM. Any character works (this string is only
+// ever compared against another string built by this same function), but it
+// must be exactly ONE UTF-16 unit so the result stays index-compatible with
+// the character map — see `visibleTextOf`. U+FFFC OBJECT REPLACEMENT CHARACTER
+// is the Unicode-sanctioned stand-in for "an embedded non-text object".
+const ATOM_PLACEHOLDER = '￼'
+
+// The block's VISIBLE text, in the character map's own coordinate system.
+//
+// This function is index-compatible with `buildCharacterMap` BY CONSTRUCTION:
+// it walks the same children in the same order with the same branching as
+// `character-map.js`'s `collectUnits`, and emits exactly as many UTF-16 units
+// as that walk emits visible width —
+//   * `text`     -> its decoded `value` (escape/entity/astral/soft-break all
+//                   already collapse to the value's own length there);
+//   * `inlineCode` -> its `value` (per-value-char units, padding stripped);
+//   * an ATOM   -> ONE placeholder (width-1 unit);
+//   * a COALESCED inline-HTML run -> ONE placeholder, using the SAME
+//     `inlineHtmlRunAt` rule the map uses (`<span>x</span>` is one atom on
+//     both sides, not three units);
+//   * containers (strong/emphasis/delete/link/highlight) -> recurse.
+//
+// WHY THIS MATTERS (review finding, 2026-08-17). The earlier version charged
+// atoms width 0 while the map charges 1, so in any block holding an inline
+// image / inline math / hard break / html fragment, every visible offset AFTER
+// that atom meant something different to the two sides. The raw range resolved
+// from the map was still correct, but the expected-label and expected-text
+// strings this function feeds into `verifyCandidate` were sliced in the wrong
+// space, so proof axes (b) and (c) compared shifted substrings — which made
+// perfectly ordinary shapes ('see ![i](p.png) more words', 'a $x^2$ word',
+// text after a hard break) refuse. Fail-closed, but wrong, and it weakened the
+// label assertion into comparing something that was not the user's selection.
+//
+// `null` (unknown leaf with neither `value` nor `children`) mirrors
+// `collectUnits`' own fail-closed answer for the same shape.
+function visibleTextOf(node) {
   if (node?.type === 'text' || node?.type === 'inlineCode') return String(node.value ?? '')
-  if (!Array.isArray(node?.children)) return ''
+  const children = node?.children
+  if (!Array.isArray(children)) return null
+  // Same question `collectUnits` asks per recursion level, answered from the
+  // same set — asking rather than hardcoding keeps the two walks identical.
+  const breakHtmlCuts = BREAK_REWRITE_PARENTS.has(node.type)
   let out = ''
-  for (const child of node.children) out += flattenText(child)
+  let i = 0
+  while (i < children.length) {
+    const run = inlineHtmlRunAt(children, i, breakHtmlCuts)
+    if (run) {
+      out += ATOM_PLACEHOLDER
+      i = run.end
+      continue
+    }
+    const child = children[i]
+    i += 1
+    if (ATOM_TYPES.has(child.type)) {
+      out += ATOM_PLACEHOLDER
+      continue
+    }
+    const inner = visibleTextOf(child)
+    if (inner === null) return null
+    out += inner
+  }
   return out
 }
 
@@ -481,7 +540,7 @@ function verifyCandidate(text, spec) {
   // and shows the promised text.
   const block = findNode(tree, blockType, blockStart, nextBlockEnd)
   if (!block) return false
-  if (flattenText(block) !== expectedText) return false
+  if (visibleTextOf(block) !== expectedText) return false
   const map = buildCharacterMap(text, block)
   if (!map || map.visibleLength !== expectedVisibleLength) return false
 
@@ -492,7 +551,7 @@ function verifyCandidate(text, spec) {
     if (!isAuthoredLink(node, text)) return false
     if ((node.url ?? '') !== link.url) return false
     if ((node.title ?? null) !== link.title) return false
-    if (flattenText(node) !== link.label) return false
+    if (visibleTextOf(node) !== link.label) return false
   }
   if (forbidLinkRange) {
     let overlapping = false
@@ -557,6 +616,21 @@ export function applyLinkEdit({ doc, index, map, visFrom, visTo, op, href, title
   const { from: rawFrom, to: rawTo } = range
 
   const text = doc.text
+  // CRLF bisection (review finding, 2026-08-17) — the same guard
+  // `editor-kernel-gateway.js`'s `commitPlainText` applies to the plain-text
+  // path, enforced here through the SHARED predicate (character-map.js).
+  // A CRLF soft break leaves the '\r' in the mdast text value, so the map
+  // models it as a `char` unit followed by the `linebreak` unit for the '\n'
+  // — and the offset between them is a real, ProseMirror-addressable
+  // position. Writing there is byte-legal and even survives the reparse proof
+  // (remark keeps the literal '\r', so the decoded text is unchanged), but it
+  // splits ONE line ending into a lone CR plus a separate LF: probed on
+  // 'one\r\ntwo three\r\n', wrapping PM[1,5) produced "[one\r](u)\ntwo three\r\n"
+  // — 2 lines silently became 3. Refuse instead.
+  if (bisectsLineEnding(map, text, rawFrom) || bisectsLineEnding(map, text, rawTo)) {
+    return { ok: false, code: 'unmapped-selection' }
+  }
+
   const block = phrasingBlockFor(index.tree, rawFrom, rawTo)
   if (!block) return { ok: false, code: 'unmapped-selection' }
   const blockType = block.type
@@ -568,7 +642,14 @@ export function applyLinkEdit({ doc, index, map, visFrom, visTo, op, href, title
 
   const baselineMap = buildCharacterMap(text, block)
   if (!baselineMap) return { ok: false, code: 'unmapped-selection' }
-  const baselineText = flattenText(block)
+  const baselineText = visibleTextOf(block)
+  // The index-compatibility invariant `visibleTextOf` exists to hold (see its
+  // own comment). Asserting it here — rather than trusting the two walks to
+  // stay in step forever — turns any future divergence into a refusal instead
+  // of a silently shifted `label`/`expectedText` slice.
+  if (baselineText === null || baselineText.length !== baselineMap.visibleLength) {
+    return { ok: false, code: 'unmapped-selection' }
+  }
   const baseline = outerSignature(parseKernelMarkdown(text), blockType, blockStart, blockEnd)
 
   // ---- unwrap / edit: an existing authored link must cover the range ----
@@ -668,7 +749,7 @@ export function applyLinkEdit({ doc, index, map, visFrom, visTo, op, href, title
         expectedVisibleLength: baselineMap.visibleLength,
         baseline,
         delta,
-        link: { start, end: end + delta, url: href, title: expectedTitle, label: flattenText(node) }
+        link: { start, end: end + delta, url: href, title: expectedTitle, label: visibleTextOf(node) }
       })
       if (!ok) continue
       return {

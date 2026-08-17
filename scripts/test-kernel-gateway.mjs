@@ -2024,4 +2024,40 @@ const commitLink = (md, pmDoc, classified) => {
   })
 }
 
+// Case L11: two CONTIGUOUS AddMarkSteps that disagree on `href` refuse rather
+// than silently coalescing to the second one's destination. The tooltip never
+// emits this (one confirm produces ONE mark), so it is unreachable today —
+// which is precisely why it must refuse: this classifier's contract is "prove
+// the shape I probed, refuse everything else", not "pick a plausible value".
+{
+  const d = doc(p(text('ab'), schema.text('cd', [schema.mark('emphasis')]), text('ef')))
+  const state = EditorState.create({ schema, doc: d })
+  const tr = state.tr
+  tr.step(new AddMarkStep(1, 3, linkMark('u')))
+  tr.step(new AddMarkStep(3, 5, linkMark('DIFFERENT')))
+  const classified = classifyTransactions([tr], state)
+  assert.equal(classified.kind, 'blocked')
+  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+}
+
+// Case L12: `routeLinkEdit` re-checks `pair.virtual` itself rather than
+// trusting the caller's `editablePairForRange` to have filtered placeholders
+// out — a placeholder pair (trailing/split placeholder, empty list item) has
+// no real source bytes. Same fail-open SHAPE the image route's ratio guard was
+// corrected for.
+{
+  const md = 'hello world\n'
+  const d = doc(p(text('hello world')))
+  const map = buildProjectionMap(md, d)
+  const real = pairForRange(map, 1, 6)
+  assert.ok(real, 'sanity: the real pair resolves')
+  const kernel = { doc: createMarkdownDocument(md) }
+  assert.equal(routeLinkEdit({ kernel, pair: real, op: 'wrap', pmFrom: 1, pmTo: 6, href: 'u' }).ok, true)
+  assert.deepEqual(
+    routeLinkEdit({ kernel, pair: { ...real, virtual: true }, op: 'wrap', pmFrom: 1, pmTo: 6, href: 'u' }),
+    { ok: false, code: KERNEL_CODES.UNMAPPED }
+  )
+  assert.equal(kernel.doc.text, md, 'routeLinkEdit never applies — it only routes')
+}
+
 console.log('PASS kernel gateway (link tooltip: wrap/edit/unwrap/insert classified, mixed-batch guard intact)')

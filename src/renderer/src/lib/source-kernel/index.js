@@ -2,7 +2,7 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 export { createMarkdownDocument, applySourceTransaction } from './markdown-document.js'
 export { buildSyntaxIndex, scanLines } from './syntax-index.js'
-export { buildCharacterMap } from './character-map.js'
+export { buildCharacterMap, bisectsLineEnding } from './character-map.js'
 export { buildCodeMap } from './code-map.js'
 export { inlineMarkAt, markerFor, rangeFromInlineCode } from './mark-map.js'
 export { toggleInlineMark } from './commands/mark-toggle.js'
