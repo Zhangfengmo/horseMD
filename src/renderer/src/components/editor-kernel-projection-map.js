@@ -100,6 +100,7 @@
 // the same shape (`kind` in char|linebreak only, code has no escapes/
 // entities).
 import { buildSyntaxIndex, buildCharacterMap, buildCodeMap } from '../lib/source-kernel/index.js'
+import { buildTableCellMaps } from '../lib/source-kernel/table-map.js'
 
 // PM block-level node name -> the mdast block type(s) it may structurally
 // pair with. Both sides are walked in document order (pre-order, containers
@@ -194,14 +195,23 @@ const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 // INTO one loses it (preview-only) — always freshly evaluated, never stale.
 export const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
 
-// PM/mdast types whose subtree is intentionally NOT walked into for
-// pairing purposes: `table` is recorded as ONE opaque pair. A typical PM
-// table schema wraps cell content in `table_cell > paragraph`, but GFM
-// `tableCell` in mdast holds phrasing content directly (no paragraph
-// wrapper) — descending into both subtrees would zip a PM `paragraph` pair
-// against no mdast counterpart and null the WHOLE document. Treating the
-// table as opaque (no interior offsets, like an atom) keeps every other
-// block in the document mappable.
+// PM/mdast types whose subtree is intentionally NOT walked into by the
+// DOCUMENT-level zip: `table` occupies exactly ONE slot on both sides. A PM
+// table has four container levels (table / row / cell / paragraph) where
+// mdast has three (table / tableRow / tableCell -> phrasing directly), so
+// descending into both subtrees here would zip a PM `paragraph` against no
+// mdast counterpart and null the WHOLE document.
+//
+// Since Plan 5 Task 4 that no longer means "a table is one opaque leaf": the
+// interior is zipped SEPARATELY by `buildTableCellMaps`
+// (lib/source-kernel/table-map.js), which consumes the extra PM level itself
+// and hands back one editable pair per CELL. Keeping the table opaque at THIS
+// level is what makes that safe — a disagreement inside a table (a ragged
+// row, a PM shape the sub-zip doesn't recognize) can never shift the
+// document-level correspondence, because the document-level zip still saw one
+// slot on each side; the table simply degrades back to the single opaque pair
+// this constant originally described. See the INVARIANT block at the top of
+// this file: table interiors are outside it by construction.
 const OPAQUE_TYPES = new Set(['table'])
 
 // Walk every descendant of the PM doc, collecting the ones whose type name
@@ -555,6 +565,51 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       const ordered = !!md.ordered
       if (pmType === 'ordered_list' && !ordered) return null
       if (pmType === 'bullet_list' && ordered) return null
+    }
+
+    // GFM table (Plan 5 Task 4). The document-level zip above consumed the
+    // table as ONE slot on each side (see OPAQUE_TYPES); its INTERIOR is
+    // zipped here by `buildTableCellMaps`, which owns the 4-level PM vs
+    // 3-level mdast mismatch and returns one pair per CELL — the PM
+    // `table_cell > paragraph` wrapper paired with the mdast `tableCell`,
+    // whose `|` delimiters and padding spaces are gap bytes.
+    //
+    // Each cell pair then goes through the SAME two content guards every
+    // other textblock pair does (PM's own content size vs the kernel's
+    // decoded visible length, then the endpoint cross-check), so a cell is
+    // served only on the evidence a paragraph would need.
+    //
+    // Failure is layered exactly like everywhere else in this file:
+    //   * the sub-zip returning null is a STRUCTURAL statement about this one
+    //     table (ragged rows, a PM shape it doesn't recognize, a delimiter
+    //     row it can't recover) -> the table degrades to the single opaque
+    //     non-editable pair it was before this task, and the rest of the
+    //     document keeps its map;
+    //   * one cell failing its own content proof degrades only THAT cell
+    //     (charMap null), leaving its siblings editable.
+    // Note the table itself gets NO pair when its cells map: the cell pairs
+    // cover its editable surface, and a whole-table pair sitting in front of
+    // them would shadow them in `degradedPairAt`'s "which block is read-only"
+    // scan (editor-kernel-mode.js).
+    if (pmType === 'table') {
+      const table = buildTableCellMaps(markdown, md, pm.node, pm.pos)
+      if (!table) {
+        blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap: null })
+        continue
+      }
+      for (const cell of table.cells) {
+        let cellMap = cell.charMap
+        if (cellMap && cell.pmNode.content.size !== cellMap.visibleLength) cellMap = null
+        if (cellMap && !blockEndpointsAgree(markdown, cell.pmNode, cellMap)) cellMap = null
+        blockPairs.push({
+          mdBlock: cell.mdBlock,
+          pmNode: cell.pmNode,
+          pmPos: cell.pmPos,
+          charMap: cellMap,
+          tableCell: true
+        })
+      }
+      continue
     }
 
     const editable = pm.node.isTextblock &&

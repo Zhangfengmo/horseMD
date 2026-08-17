@@ -602,6 +602,20 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
           bisectsLineEnding(pair?.charMap, text, rawTo)) {
         return { ok: false, code: KERNEL_CODES.UNMAPPED }
       }
+      // Table cell (Plan 5 Task 4): inside a GFM cell the `|` byte is the
+      // COLUMN DELIMITER, so writing a literal one would split the cell — the
+      // raw source would grow a column the ProseMirror doc does not have, and
+      // the next reparse would show a differently-shaped table than the one
+      // the user was typing into. Adding/removing columns is explicitly out of
+      // this phase's scope, so fail closed rather than commit bytes whose
+      // reparse changes the structure. (A line break can't reach here: the
+      // `allowNewline` relaxation in `plainSliceText` is granted only to
+      // `code_block` textblocks. The DELETE side needs no guard — a cell
+      // pair's charMap covers only that cell's content units, so every
+      // resolved raw range is already confined between its delimiters.)
+      if (pair?.tableCell && step.insertText.includes('|')) {
+        return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+      }
     }
     if (edits.length && rawFrom < edits[edits.length - 1].to) {
       // A later step's mapped raw range starts before the previous step's
