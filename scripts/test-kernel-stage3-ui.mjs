@@ -146,8 +146,14 @@ const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
 // `ending + ending` at the caret, i.e. exactly one extra blank line.
 // P6-1 (2026-08-17): the inline-math paragraph is now TYPABLE around its
 // atom, so step 9's 'W' at the paragraph end is a real byte commit — it used
-// to be a refusal. The atom itself stays untouchable (step 9 proves that with
-// a delete ACROSS it, which must leave S8b intact).
+// to be a refusal. The formula itself must SURVIVE every step in this file:
+// step 10(b) uses this paragraph as the "the inline-math cure really mapped
+// this block" proof, and that proof only means something while the atom is
+// still in it. (P6-1b made deleting an atom whole a legal commit; its byte
+// contract is pinned headlessly in scripts/test-kernel-gateway.mjs A3/A3b/A5/
+// A6/A8, which can assert the exact removed bytes for every atom kind — this
+// session deliberately keeps its own atom step a REFUSAL so the snapshot chain
+// below still carries '$x^2$'.)
 const S8b = S8.replace('行内公式 $x^2$ 结束。', '行内公式 $x^2$ 结束。W')
 const S9 = S8b.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
 const S10 = S9.replace('行内公式 $x^2$ 结束。W\n', '行内公式 $x^2$ 结束。W\n\n\n')
@@ -875,8 +881,8 @@ async function run() {
     //    refuse WITHOUT writing bytes. The paragraph holding INLINE math is
     //    now TYPABLE around the formula (P6 Task 1 relaxed
     //    `textblockProfile` to admit inline atoms), so typing there is a real
-    //    byte commit; what is still refused is a step that INTERSECTS the
-    //    `math_inline` atom. Neither refusal may raise a dialog.
+    //    byte commit; a range that leaves the paragraph is still refused with
+    //    zero bytes. Neither refusal may raise a dialog.
     // ============================================================
     await revealMathCodeMirror(evaluate, send)
     await clickMathCmLineEnd(evaluate, send)
@@ -899,24 +905,32 @@ async function run() {
     await assertSource(evaluate, S8b,
       'typing in the inline-math paragraph must now commit byte-exact, next to the untouched $x^2$')
 
-    // ...and the atom itself is still untouchable. Dispatched directly (the
-    // same channel step 8's AttrStep uses) because a drag-selection across a
-    // KaTeX-rendered formula is not reliably addressable by character rects;
-    // the transaction still travels the real dispatch-veto path, which is
-    // exactly what this asserts.
+    // ...and a step that leaves the paragraph is still refused with zero bytes.
+    // (P6-1b admits a step that swallows an atom WHOLE — its exact removed
+    // bytes are pinned headlessly for every atom kind in
+    // scripts/test-kernel-gateway.mjs. What this session keeps is the
+    // end-to-end proof that a refusal really travels the dispatch-veto path
+    // and writes nothing: the range below starts at the atom and runs past the
+    // paragraph's end, so `sameParent` refuses it and '$x^2$' survives for
+    // step 10(b)'s inline-math cure proof.) Dispatched directly, the same
+    // channel step 8's AttrStep uses, because a drag-selection across a
+    // KaTeX-rendered formula is not reliably addressable by character rects.
     const atomCross = await evaluate(`(() => {
       const v = window.__hmStage3View
       if (!v) return 'no-view'
       let pos = null
       v.state.doc.descendants((node, p) => { if (pos === null && node.type.name === 'math_inline') pos = p })
       if (pos === null) return 'no-math-inline'
-      v.dispatch(v.state.tr.delete(pos, pos + 1))
+      const $pos = v.state.doc.resolve(pos)
+      const end = $pos.end()
+      if (end <= pos + 1) return 'atom-at-block-end'
+      v.dispatch(v.state.tr.delete(pos, end + 2))
       return 'dispatched'
     })()`)
     assert.equal(atomCross, 'dispatched', 'the inline-math atom must be locatable (positive control)')
     await sleep(400)
     await assertSource(evaluate, S8b,
-      'a step CROSSING the inline-math atom must not change a single byte')
+      'a range leaving the inline-math paragraph must not change a single byte')
     assert.equal(app.dialogs.length, 0, 'no dialog from either math refusal')
 
     // ============================================================

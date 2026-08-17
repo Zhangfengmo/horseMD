@@ -12,7 +12,7 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, __atomGuards } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/index.js'
 
@@ -1713,8 +1713,14 @@ const withSelection = (state, from, to) =>
     assert.equal(committed.ok, true, committed.code)
     assert.equal(committed.applied.doc.text, '片段 <span>内联</span>X 结束。\n')
   }
-  // A deletion that swallows the fragment is still refused (the atom guard).
-  assert.equal(classifyTransactions([state.tr.delete(4, 5)], state).kind, 'blocked')
+  // A deletion that swallows the fragment WHOLE commits since P6-1b, removing
+  // all fourteen of its bytes and nothing else — a half-deleted tag is what
+  // the guard exists to prevent, and that shape stays unrepresentable.
+  {
+    const { committed } = commitOf(md, map, state, state.tr.delete(4, 5))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '片段  结束。\n')
+  }
 }
 
 console.log('PASS kernel gateway')
@@ -2293,13 +2299,19 @@ console.log('PASS kernel gateway (link tooltip: wrap/edit/unwrap/insert classifi
 //   'a[^1]b'         footnoteReference[1,5)  vis 1 -> 1/1/1  vis 2 -> 5/5/5
 //
 // So an insert at either atom EDGE is byte-exact, and this task allows it.
-// A step that INTERSECTS an atom is refused (plan Global Constraints: "the
-// relaxation only admits steps that intersect no atom; it adds no ability to
-// edit atom interiors"). Note that a whole-atom DELETION is, per the probe,
-// also byte-provable ('a![x](y.png)b' minus the atom resolves to raw [1,12),
-// exactly the image's own bytes) — it is refused here by plan constraint, not
-// because it was found unprovable. That is recorded in the task report as the
-// obvious next relaxation.
+//
+// P6 TASK 1b WIDENED THIS to whole-atom deletion ("select an image, press
+// Backspace" — the most common thing a user does to an image, which used to
+// toast a refusal). The probe above already contained the proof: the image's
+// PM range [2,3) resolves through `pmPosToRawStart(2) = 1` and
+// `pmPosToRaw(3) = 12`, i.e. EXACTLY the atom unit's own [1,12) bytes. So a
+// range that CONTAINS one or more whole atoms (with or without surrounding
+// text) commits; a range that only PARTIALLY overlaps an atom stays refused,
+// as does a range swallowing a MARKED atom (a linked image's '[' / '](url)'
+// delimiters are invisible to the marked-run guard, which walks text children
+// only — deleting the atom alone would strand them). Both halves are proved:
+// PM-side by `stepRespectsAtoms`, raw-side by `rangeSplitsAtomUnit` inside
+// `commitPlainText`, before any byte is written.
 //
 // HARD BREAKS ARE THE EXCEPTION and stay refused. Probed:
 //
@@ -2350,16 +2362,74 @@ const atomBytes = ({ md, state, map }, tr) => {
   assert.equal(atom.nodeSize, 1, 'an inline image occupies exactly one PM position')
 }
 
-// A3: any step INTERSECTING the atom is refused — delete it, delete across
-// it from either side, or type over it as a selection replacement.
+// A3 (rewritten by P6-1b): a step that swallows the atom WHOLE now commits,
+// and the bytes removed are exactly the atom's own — alone, together with the
+// text on either side, or together with the entire paragraph content. Typing
+// OVER a selected atom is the same proof (the raw range is replaced, not just
+// removed).
 {
   const f = atomFixture('a![x](y.png)b\n', doc(p(text('a'), img('y.png'), text('b'))))
-  for (const [from, to] of [[2, 3], [1, 3], [2, 4], [1, 4]]) {
-    const classified = classifyTransactions([f.state.tr.delete(from, to)], f.state)
-    assert.equal(classified.kind, 'blocked', `delete(${from},${to}) must be refused`)
-    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
-  }
-  assert.equal(classifyTransactions([f.state.tr.replaceWith(2, 3, text('Z'))], f.state).kind, 'blocked')
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'ab\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 3)), { kind: 'plain-text', text: 'b\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 4)), { kind: 'plain-text', text: 'a\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 4)), { kind: 'plain-text', text: '\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(2, 3, text('Z'))),
+    { kind: 'plain-text', text: 'aZb\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(1, 4, text('Z'))),
+    { kind: 'plain-text', text: 'Z\n' })
+}
+
+// A3b: the atom at the paragraph's START and at its END — the two boundary
+// shapes where the resolved range touches the block's own first/last byte.
+{
+  const head = atomFixture('![x](y.png)tail\n', doc(p(img('y.png'), text('tail'))))
+  assert.deepEqual(atomBytes(head, head.state.tr.delete(1, 2)), { kind: 'plain-text', text: 'tail\n' })
+  const tail = atomFixture('head![x](y.png)\n', doc(p(text('head'), img('y.png'))))
+  assert.deepEqual(atomBytes(tail, tail.state.tr.delete(5, 6)), { kind: 'plain-text', text: 'head\n' })
+}
+
+// A3c: a PARTIAL overlap of an atom must still be refused — the rule the
+// widening rests on. No LIVE inline atom can express such a step (every one is
+// a nodeSize-1 leaf, pinned by A2: any range meeting it must contain it), so
+// the two guards are exercised directly against a synthetic wider node. That
+// is the only way to state the contract for the inline-node-with-content a
+// future schema could introduce, instead of leaving it as an unwritten
+// consequence of today's node sizes.
+{
+  const { stepRespectsAtoms, rangeSplitsAtomUnit } = __atomGuards
+  // children: text[1,2) atom[2,5) text[5,6) — a three-position inline node.
+  const wide = (marks = []) => ({
+    forEach: (fn) => {
+      fn({ isText: true, nodeSize: 1 })
+      fn({ isText: false, nodeSize: 3, marks })
+      fn({ isText: true, nodeSize: 1 })
+    }
+  })
+  const respects = (from, to, marks) => stepRespectsAtoms(wide(marks), 1, from, to)
+  assert.equal(respects(2, 5), true, 'the whole node is admissible')
+  assert.equal(respects(1, 6), true, 'the whole node plus surrounding text is admissible')
+  assert.equal(respects(3, 5), false, 'a range starting inside it is refused')
+  assert.equal(respects(2, 4), false, 'a range ending inside it is refused')
+  assert.equal(respects(3, 4), false, 'a range strictly inside it is refused')
+  assert.equal(respects(3, 3), false, 'a caret strictly inside it is refused')
+  assert.equal(respects(2, 2), true, 'a caret on its left edge is admissible')
+  assert.equal(respects(5, 5), true, 'a caret on its right edge is admissible')
+  assert.equal(respects(1, 6, [{}]), false, 'a MARKED node swallowed whole is refused')
+
+  // The raw half, on the same shape: an `atom` unit spanning bytes [4,9).
+  const units = { units: [{ kind: 'char', rawStart: 3, rawEnd: 4, width: 1 }, { kind: 'atom', rawStart: 4, rawEnd: 9, width: 1 }, { kind: 'char', rawStart: 9, rawEnd: 10, width: 1 }] }
+  assert.equal(rangeSplitsAtomUnit(units, 4, 9), false, 'exactly the atom bytes')
+  assert.equal(rangeSplitsAtomUnit(units, 3, 10), false, 'the atom bytes plus its neighbours')
+  assert.equal(rangeSplitsAtomUnit(units, 3, 4), false, 'disjoint on the left')
+  assert.equal(rangeSplitsAtomUnit(units, 9, 10), false, 'disjoint on the right')
+  assert.equal(rangeSplitsAtomUnit(units, 5, 9), true, 'a range starting inside the atom bytes')
+  assert.equal(rangeSplitsAtomUnit(units, 4, 8), true, 'a range ending inside the atom bytes')
+  assert.equal(rangeSplitsAtomUnit(units, 3, 6), true, 'a range half-covering the atom bytes')
+  assert.equal(rangeSplitsAtomUnit(units, 6, 6), true, 'a caret strictly inside the atom bytes')
+  assert.equal(rangeSplitsAtomUnit(units, 4, 4), false, 'a caret on the atom bytes left edge')
+  assert.equal(rangeSplitsAtomUnit(units, 9, 9), false, 'a caret on the atom bytes right edge')
+  assert.equal(rangeSplitsAtomUnit(null, 4, 9), false, 'a map without units answers false')
+  assert.equal(rangeSplitsAtomUnit({ units: null }, 4, 9), false, 'a virtual/hand-built map answers false')
 }
 
 // A4: deletions that do NOT touch the atom commit normally, on both sides.
@@ -2369,7 +2439,8 @@ const atomBytes = ({ md, state, map }, tr) => {
   assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'a![x](y.png)cd\n' })
   assert.deepEqual(atomBytes(f, f.state.tr.delete(4, 5)), { kind: 'plain-text', text: 'ab![x](y.png)d\n' })
   assert.deepEqual(atomBytes(f, f.state.tr.delete(5, 6)), { kind: 'plain-text', text: 'ab![x](y.png)c\n' })
-  assert.equal(classifyTransactions([f.state.tr.delete(3, 4)], f.state).kind, 'blocked')
+  // and the atom deleted together with one character of text on each side
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 5)), { kind: 'plain-text', text: 'ad\n' })
 }
 
 // A5: BETWEEN two adjacent atoms — the boundary shared by two atom units.
@@ -2378,9 +2449,12 @@ const atomBytes = ({ md, state, map }, tr) => {
   assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 1)), { kind: 'plain-text', text: 'X![a](1.png)![b](2.png)\n' })
   assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)), { kind: 'plain-text', text: '![a](1.png)X![b](2.png)\n' })
   assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)), { kind: 'plain-text', text: '![a](1.png)![b](2.png)X\n' })
-  for (const [from, to] of [[1, 2], [2, 3], [1, 3]]) {
-    assert.equal(classifyTransactions([f.state.tr.delete(from, to)], f.state).kind, 'blocked')
-  }
+  // each atom deleted on its own, and BOTH deleted by one range (the P6-1b
+  // "two adjacent atoms" case: the resolved range must be exactly the union of
+  // the two atom units' bytes, with nothing between them left behind).
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 2)), { kind: 'plain-text', text: '![b](2.png)\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)), { kind: 'plain-text', text: '![a](1.png)\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 3)), { kind: 'plain-text', text: '\n' })
 }
 
 // A6: inline math and inline HTML take the identical route.
@@ -2388,12 +2462,14 @@ const atomBytes = ({ md, state, map }, tr) => {
   const m = atomFixture('a$x^2$b\n', doc(p(text('a'), mathInline('x^2'), text('b'))))
   assert.deepEqual(atomBytes(m, m.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX$x^2$b\n' })
   assert.deepEqual(atomBytes(m, m.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a$x^2$Xb\n' })
-  assert.equal(classifyTransactions([m.state.tr.delete(2, 3)], m.state).kind, 'blocked')
+  assert.deepEqual(atomBytes(m, m.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'ab\n' })
 
   const h = atomFixture('a<span>q</span>b\n', doc(p(text('a'), inlineHtml('<span>q</span>'), text('b'))))
   assert.deepEqual(atomBytes(h, h.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX<span>q</span>b\n' })
   assert.deepEqual(atomBytes(h, h.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a<span>q</span>Xb\n' })
-  assert.equal(classifyTransactions([h.state.tr.delete(2, 3)], h.state).kind, 'blocked')
+  // the whole coalesced fragment is ONE atom unit, so deleting the single PM
+  // position removes all of '<span>q</span>' — never half a tag.
+  assert.deepEqual(atomBytes(h, h.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'ab\n' })
 }
 
 // A7: the atom guard STACKS with the P4-3.5 marked-run guard rather than
@@ -2435,7 +2511,27 @@ const atomBytes = ({ md, state, map }, tr) => {
     { kind: 'plain-text', text: 'a![x](y.png)Xb\r\n\r\nnext\r\n' })
   assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 6)),
     { kind: 'plain-text', text: 'a![x](y.png)b\r\n\r\nXnext\r\n' })
-  assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'blocked')
+  // ...and the same is true of the P6-1b deletions: the atom's bytes are all
+  // that leave, every '\r\n' in the document survives byte-identical.
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)),
+    { kind: 'plain-text', text: 'ab\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 4)),
+    { kind: 'plain-text', text: '\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(2, 3, text('Z'))),
+    { kind: 'plain-text', text: 'aZb\r\n\r\nnext\r\n' })
+}
+
+// A8b: CRLF with TWO adjacent atoms, and with the atom at the block's start —
+// the shapes where a resolved endpoint sits closest to a line ending.
+{
+  const md = '![a](1.png)![b](2.png)\r\n\r\nnext\r\n'
+  const f = atomFixture(md, doc(p(img('1.png'), img('2.png')), p(text('next'))))
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 2)),
+    { kind: 'plain-text', text: '![b](2.png)\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)),
+    { kind: 'plain-text', text: '![a](1.png)\r\n\r\nnext\r\n' })
+  assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 3)),
+    { kind: 'plain-text', text: '\r\n\r\nnext\r\n' })
 }
 
 // A9: hard breaks stay refused, under BOTH the legacy fixture spelling and
@@ -2500,7 +2596,15 @@ const atomBytes = ({ md, state, map }, tr) => {
   // Real typing at PM 3 INHERITS the link mark from the atom, so the
   // pre-existing plain-slice guard refuses it — unchanged by this task.
   assert.equal(classifyTransactions([f.state.tr.insertText('X', 3)], f.state).kind, 'blocked')
+  // Deleting the atom stays REFUSED even after P6-1b, and this is the reason
+  // the whole-atom rule carries its unmarked condition: the link's own '[' and
+  // '](url)' bytes belong to no unit, so the resolved range would be the
+  // image's [2,13) alone and the source would keep 'a[](url)b' — orphaned
+  // delimiters, the P4-2 corruption shape. `stepRespectsMarkedRuns` cannot
+  // catch it (it walks TEXT children only), so `stepRespectsAtoms` does.
   assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'blocked')
+  assert.equal(classifyTransactions([f.state.tr.delete(1, 4)], f.state).kind, 'blocked')
+  assert.equal(classifyTransactions([f.state.tr.replaceWith(2, 3, text('Z'))], f.state).kind, 'blocked')
 }
 
-console.log('PASS kernel gateway (P6-1: typing around inline atoms; hard breaks still refused)')
+console.log('PASS kernel gateway (P6-1: typing around inline atoms; P6-1b: whole-atom deletion; hard breaks still refused)')

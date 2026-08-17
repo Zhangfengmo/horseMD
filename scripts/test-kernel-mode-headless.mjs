@@ -1863,13 +1863,16 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.map.pmPosToRaw(4), 16)
 }
 
-// Case 16: fail-closed is preserved for steps that touch the fragment itself.
+// Case 16: the fragment atom, end to end through the live dispatch path.
 // P6-1 relaxed `textblockProfile` (editor-kernel-gateway.js) to admit inline
-// ATOMS, so typing AROUND the fragment now commits (asserted first, since that
-// is the coverage this case used to deny); what stays refused is a step that
-// INTERSECTS the atom — its raw syntax span is indivisible, and this task adds
-// no ability to edit or remove it. PM layout: content start 1, 'a ' 1..3, the
-// html atom 3..4, ' b' 4..6.
+// ATOMS, so typing AROUND the fragment commits; P6-1b then admitted a step
+// that swallows the atom WHOLE (its resolved raw range is exactly the
+// fragment's own bytes). What stays refused is a step that only PARTIALLY
+// covers an atom — unrepresentable for a nodeSize-1 leaf, pinned directly on
+// the guard in scripts/test-kernel-gateway.mjs — and any step whose shape the
+// gateway does not classify at all, which is what the generic-message positive
+// control below rides on. PM layout: content start 1, 'a ' 1..3, the html atom
+// 3..4, ' b' 4..6; the second paragraph's content starts at 8.
 {
   const md = 'a <span>x</span> b\n\n甲乙\n'
   const h = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
@@ -1879,11 +1882,22 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, 'Za <span>x</span> b\n\n甲乙\n',
     'and commits byte-exactly, leaving the fragment untouched')
 
+  const w = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
+  assert.equal(w.controller.attachAfterCreate(), true)
+  assert.equal(dispatchThrough(w, w.view.state.tr.delete(3, 4)), undefined,
+    'deleting the fragment WHOLE is admitted since P6-1b')
+  assert.equal(w.controller.kernel.doc.text, 'a  b\n\n甲乙\n',
+    'and removes exactly the fragment bytes — no half tag left behind')
+
   const g = makeHarness(md, doc(p(text('a '), ih('<span>x</span>'), text(' b')), p(text('甲乙'))))
   assert.equal(g.controller.attachAfterCreate(), true)
   const before = g.notifications.length
-  const verdict = dispatchThrough(g, g.view.state.tr.delete(3, 4))
-  assert.deepEqual(verdict, { veto: true }, 'a step intersecting the fragment atom is refused')
+  // A range spanning TWO paragraphs: not a single-textblock edit, so the
+  // gateway refuses it outright (`sameParent`). Chosen deliberately as the
+  // carrier for the message control below — the paragraph it starts in is
+  // fully mapped, so a "read-only" message here would be over-reporting.
+  const verdict = dispatchThrough(g, g.view.state.tr.delete(5, 9))
+  assert.deepEqual(verdict, { veto: true }, 'a cross-block range step is refused')
   assert.equal(g.controller.kernel.doc.text, md, 'kernel bytes untouched')
   assert.ok(g.notifications.length > before, 'the refusal is surfaced, never silent')
   // Positive control for the P5-2.5 block-scoped message: this paragraph is

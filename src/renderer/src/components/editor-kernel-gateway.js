@@ -116,8 +116,11 @@ const TYPABLE_INLINE_ATOMS = new Set(['image', 'html', 'math_inline', 'footnote_
 // per step. A paragraph carrying an inline image / formula / HTML fragment
 // used to be untypable in its ENTIRETY (the largest coverage hole blocking
 // kernel mode from becoming the default); now it types everywhere except
-// across the atom itself, guarded by:
-//  3. no step may INTERSECT an atom (`stepAvoidsAtoms` below).
+// PARTLY across an atom, guarded by:
+//  3. no step may PARTIALLY overlap an atom, and any atom a step swallows
+//     WHOLE must be unmarked (`stepRespectsAtoms` below), with the raw half
+//     of that same contract re-proved on the bytes in `commitPlainText`
+//     (`rangeSplitsAtomUnit`).
 // The byte contract at the atom's own edges was probed, not assumed: for
 // 'a![x](y.png)b' the units are char[0,1) atom[1,12) char[12,13), and BOTH
 // atom boundaries resolve to a single byte through all three resolvers
@@ -175,11 +178,13 @@ const stepRespectsMarkedRuns = (parent, blockContentStart, from, to) => {
   return ok
 }
 
-// Guard 3 of the relaxation above (P6 Task 1): a step's range [from, to) must
-// not INTERSECT any inline atom in the textblock. Same walk shape as
-// `stepRespectsMarkedRuns` — the parent's children in PM coordinates, starting
-// at the block's content position — deliberately, so the two guards cannot
-// drift apart in how they enumerate a textblock.
+// Guard 3 of the relaxation above (P6 Task 1, widened by P6 Task 1b to admit
+// WHOLE-atom deletion): a step's range [from, to) may not PARTIALLY overlap an
+// inline atom in the textblock; an atom the range swallows entirely is allowed
+// through, provided it carries no marks (see WHOLE-ATOM RULE below). Same walk
+// shape as `stepRespectsMarkedRuns` — the parent's children in PM coordinates,
+// starting at the block's content position — deliberately, so the two guards
+// cannot drift apart in how they enumerate a textblock.
 //
 // THE BOUNDARY RULE, stated explicitly because it is the one genuinely
 // ambiguous case: an insert exactly AT an atom's edge is ALLOWED, on BOTH
@@ -193,18 +198,43 @@ const stepRespectsMarkedRuns = (parent, blockContentStart, from, to) => {
 // Concretely: 'a![x](y.png)b' + 'X' at the left edge commits
 // 'aX![x](y.png)b', and at the right edge 'a![x](y.png)Xb'.
 //
+// THE WHOLE-ATOM RULE (P6 Task 1b). "Select an image and press Backspace" is
+// a high-frequency operation, and it IS byte-provable: for 'a![x](y.png)b' the
+// image occupies PM [2,3), whose ends resolve through `pmPosToRawStart(2) = 1`
+// and `pmPosToRaw(3) = 12` — exactly the atom unit's own [1,12) span, i.e. the
+// `![x](y.png)` bytes and nothing else. The same holds for a range that
+// swallows an atom together with neighbouring TEXT (both ends then resolve
+// inside text units, and the atom's bytes sit strictly between them). So a
+// range that CONTAINS an atom is admitted; only a PARTIAL overlap stays
+// refused.
+//
+// Two conditions keep that admission honest:
+//  a) the swallowed atom must carry NO MARKS. `stepRespectsMarkedRuns` walks
+//     TEXT children only, so a linked image ('a[![x](y.png)](url)b') is
+//     invisible to it — deleting the atom alone would resolve to the image's
+//     bytes and strand the link's own '[' and '](url)' delimiters, the exact
+//     P4-2 orphaned-delimiter corruption. Refused here rather than widening
+//     the marked-run walk, which would change a proof that is currently green.
+//  b) the raw range the map actually resolves must be re-checked against the
+//     charMap's own atom units before any bytes are written — see
+//     `rangeSplitsAtomUnit` in `commitPlainText`. The PM-side containment
+//     above is a statement about the PROJECTION; the byte contract is a
+//     statement about the SOURCE, and this file proves both rather than
+//     inferring one from the other.
+//
 // So only these are refused:
 //  - a ZERO-WIDTH insert strictly INSIDE an atom (`atomFrom < from < atomTo`).
 //    Unreachable for today's atoms — every one of them is a PM leaf of
 //    nodeSize 1, so no position exists between its two edges — but written
 //    for the range rather than for the constant so an inline node with
 //    content could never slip through unproven.
-//  - any NON-EMPTY range overlapping an atom, i.e. deleting or typing over
-//    one. Per probe a whole-atom deletion is in fact byte-provable (the
-//    resolved raw range is exactly the atom's own bytes); it is refused here
-//    because the plan's Global Constraints admit only steps that intersect no
-//    atom. Relaxing THAT is a separate, separately-proven change.
-const stepAvoidsAtoms = (parent, blockContentStart, from, to) => {
+//  - a NON-EMPTY range that overlaps an atom only PARTIALLY. Also
+//    unrepresentable for a nodeSize-1 leaf (any range meeting it must contain
+//    it), and likewise written for the general case so a future inline node
+//    with content cannot slip through: half of such a node's raw syntax would
+//    survive the delete.
+//  - a NON-EMPTY range containing a MARKED atom (condition (a)).
+const stepRespectsAtoms = (parent, blockContentStart, from, to) => {
   let offset = blockContentStart
   let ok = true
   parent.forEach((child) => {
@@ -216,10 +246,47 @@ const stepAvoidsAtoms = (parent, blockContentStart, from, to) => {
       if (from > atomFrom && from < atomTo) ok = false
       return
     }
-    if (from < atomTo && to > atomFrom) ok = false
+    if (to <= atomFrom || from >= atomTo) return // disjoint
+    if (from > atomFrom || to < atomTo) ok = false // partial overlap
+    else if (child.marks && child.marks.length) ok = false // marked atom
   })
   return ok
 }
+
+// The RAW half of the whole-atom contract (condition (b) above). Given the
+// offsets `commitPlainText` actually resolved for a step, every `atom` unit in
+// the block's character map must be either fully OUTSIDE [from, to) or fully
+// INSIDE it. An atom whose bytes are only partly covered would leave a
+// fragment of its markdown syntax behind ('![x](y.pn'), which reparses as
+// something else entirely.
+//
+// This runs for EVERY non-virtual step, not only atom-bearing ones: it is an
+// invariant of the resolved range, and stating it universally means a future
+// resolver change cannot quietly reintroduce a split atom in a path nobody
+// thought to guard. It is a no-op for the shapes that were already accepted
+// (a block with no atom units has nothing to check, and the boundary tables
+// resolve a text-only range to offsets that stop at an adjacent atom's edge).
+// Maps without a `units` array (`virtualCharMap`, hand-built test maps) carry
+// no atom units and answer `false`, matching `bisectsLineEnding`'s posture.
+const rangeSplitsAtomUnit = (charMap, from, to) => {
+  const units = charMap?.units
+  if (!Array.isArray(units)) return false
+  for (const unit of units) {
+    if (unit?.kind !== 'atom') continue
+    if (unit.rawEnd <= from || unit.rawStart >= to) continue // disjoint
+    if (unit.rawStart >= from && unit.rawEnd <= to) continue // fully covered
+    return true
+  }
+  return false
+}
+
+// Exported for `scripts/test-kernel-gateway.mjs` ONLY. Both guards above are
+// written for the general case — an inline node WITH CONTENT, which no node in
+// today's schema is (every inline atom is a nodeSize-1 leaf, so a partial
+// overlap is unrepresentable through a real transaction). The partial-overlap
+// rule is therefore only assertable by calling them directly; leaving it
+// untested because "it can't happen yet" is how a guard rots into a comment.
+export const __atomGuards = { stepRespectsAtoms, rangeSplitsAtomUnit }
 
 // Flattens every ReplaceStep across every changed transaction, in order,
 // validating each one against the plain/single-textblock guard. Returns
@@ -271,7 +338,7 @@ function extractPlainTextSteps(transactions, oldState) {
       // a bare caret insert is exactly the case whose "is this inside the
       // atom or at its edge?" answer the guard pins.
       if (profile.hasAtom &&
-          !stepAvoidsAtoms($from.parent, $from.start(), step.from, step.to)) {
+          !stepRespectsAtoms($from.parent, $from.start(), step.from, step.to)) {
         return null
       }
       const allowNewline = $from.parent.type?.name === 'code_block'
@@ -1059,6 +1126,13 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       const text = kernel.doc.text
       if (bisectsLineEnding(pair?.charMap, text, rawFrom) ||
           bisectsLineEnding(pair?.charMap, text, rawTo)) {
+        return { ok: false, code: KERNEL_CODES.UNMAPPED }
+      }
+      // Whole-atom contract, raw half (P6 Task 1b — see `rangeSplitsAtomUnit`).
+      // The classification guard proved the PM range never cuts an atom in
+      // two; this proves the RESOLVED BYTES don't either, before a single one
+      // is written.
+      if (rangeSplitsAtomUnit(pair?.charMap, rawFrom, rawTo)) {
         return { ok: false, code: KERNEL_CODES.UNMAPPED }
       }
       // Table cell (Plan 5 Task 4): inside a GFM cell the `|` byte is the
