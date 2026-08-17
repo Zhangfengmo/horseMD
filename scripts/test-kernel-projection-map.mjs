@@ -66,6 +66,16 @@ const schema = new Schema({
     // block-level ATOM whose mdast counterpart (in the kernel's plugin-free
     // parse) is the plain `paragraph > image` wrapper.
     'image-block': { group: 'block', atom: true, attrs: { src: { default: '' } } },
+    // YAML front matter (editor-frontmatter.js `frontmatterSchema`): a
+    // block-level ATOM holding the raw YAML in `attrs.value`, whose
+    // `parseMarkdown.match` is `node.type === 'yaml'`. Declared with the same
+    // `atom/isolating/defining` flags the real schema uses; `atom` is the one
+    // that matters here — it makes `isTextblock` false, which is what keeps
+    // the pair read-only.
+    frontmatter: { group: 'block', atom: true, isolating: true, defining: true, attrs: { value: { default: '' } } },
+    // preset-commonmark's thematic break — needed by the front-matter negative
+    // control (a mid-document `---` must NOT be read as front matter).
+    hr: { group: 'block', atom: true },
     text: { group: 'inline' }
   },
   marks: {}
@@ -1854,3 +1864,105 @@ console.log('PASS kernel projection map (inline html)')
 }
 
 console.log('PASS kernel projection map (per-block degradation)')
+
+// ===========================================================================
+// P6 Task 2 — YAML FRONT MATTER PAIRS INSTEAD OF DEGRADING THE DOCUMENT
+// ===========================================================================
+// Before this task the kernel's unified chain had no `remark-frontmatter`, so
+// a leading `---` block parsed as `thematicBreak + setext heading` (TWO blocks,
+// both of the wrong type) against PM's ONE `frontmatter` atom — which is not
+// even in PM_TO_MD, so `flattenPm` recorded no slot for it at all. The very
+// first pair mismatched and `buildProjectionMap` returned null, i.e. EVERY
+// document with front matter fell back to legacy in its entirety. This repo's
+// own guide pages carry front matter, so that was not a corner case.
+//
+// The fix is a pairing, not an editing surface: `frontmatter` is a PM ATOM, so
+// `pm.node.isTextblock` is false and the pair is served with `charMap: null` —
+// the same read-only-leaf posture `table` / block math / block HTML have. The
+// assertions below pin BOTH halves: the body is fully editable with exact
+// bytes, AND the front matter itself resolves no offset.
+const fm = (value) => schema.node('frontmatter', { value })
+
+// F1: the map builds, the body block is editable, and its offsets are the
+// BODY's — not shifted by the front matter's own bytes.
+{
+  const md = '---\ntitle: x\n---\n\n正文一\n\n正文二\n'
+  //           0123 4      12  16 17  18            (yaml [0,16), body at 18)
+  const map = buildProjectionMap(md, doc(fm('title: x'), p(text('正文一')), p(text('正文二'))))
+  assert.ok(map, 'a front-matter document must map instead of degrading whole-document')
+  assert.equal(map.blockPairs.length, 3)
+  assert.equal(map.blockPairs[0].mdBlock.type, 'yaml', 'the front matter pairs with the mdast yaml node')
+  assert.equal(map.blockPairs[0].charMap, null, 'the front-matter block is a read-only leaf')
+  assert.ok(map.blockPairs[1].charMap, 'the first body paragraph is editable')
+  assert.ok(map.blockPairs[2].charMap, 'the second body paragraph is editable')
+  // PM: frontmatter atom [0,1), paragraph1 open at 1 (content 2..5), close 6,
+  // paragraph2 open 6 (content 7..10).
+  assert.equal(map.pmPosToRaw(2), 18, 'body paragraph 1 starts at the byte after the blank line')
+  assert.equal(map.pmPosToRaw(5), 21)
+  assert.equal(map.pmPosToRaw(7), 23, 'body paragraph 2 offsets are unshifted too')
+  assert.equal(map.pmPosToRaw(10), 26)
+  assert.equal(md.slice(18, 21), '正文一')
+  assert.equal(md.slice(23, 26), '正文二')
+  // Nothing inside the front matter's own bytes may resolve to a PM position.
+  for (const raw of [0, 3, 8, 15]) {
+    assert.equal(map.rawToPmPos(raw), null, `raw ${raw} is inside the read-only front matter`)
+  }
+}
+
+// F2: CRLF. The yaml node spans '\r\n'-terminated lines, so the body's offsets
+// move by the extra '\r' bytes — the pairing must simply follow the kernel's
+// own parse, with no line-ending special case.
+{
+  const md = '---\r\ntitle: x\r\n---\r\n\r\n正文一\r\n'
+  const map = buildProjectionMap(md, doc(fm('title: x'), p(text('正文一'))))
+  assert.ok(map, 'a CRLF front-matter document must map')
+  assert.equal(map.blockPairs[0].charMap, null)
+  assert.ok(map.blockPairs[1].charMap)
+  assert.equal(map.pmPosToRaw(2), 22)
+  assert.equal(map.pmPosToRaw(5), 25)
+  assert.equal(md.slice(22, 25), '正文一')
+}
+
+// F3: front matter is ONLY the leading block. A genuine `---` thematic break
+// mid-document must still pair as `hr`/`thematicBreak` — the negative control
+// that the plugin's default 'yaml' preset was not silently widened.
+{
+  const md = '甲\n\n---\n\n乙\n'
+  const map = buildProjectionMap(md, doc(p(text('甲')), schema.node('hr'), p(text('乙'))))
+  assert.ok(map, 'a mid-document thematic break must not be read as front matter')
+  assert.equal(map.blockPairs[1].mdBlock.type, 'thematicBreak')
+  assert.ok(map.blockPairs[0].charMap)
+  assert.ok(map.blockPairs[2].charMap)
+  // PM: paragraph1 [0,3), hr [3,4), paragraph2 open 4 (content 5..6).
+  assert.equal(map.pmPosToRaw(5), 8)
+  assert.equal(md.slice(8, 9), '乙')
+}
+
+// F4: front matter followed immediately by a heading, and front matter as the
+// document's ONLY block — the two shapes where the pair sits next to the
+// document's own boundaries.
+{
+  const withHeading = buildProjectionMap('---\na: 1\n---\n\n# 标题\n',
+    doc(fm('a: 1'), schema.node('heading', { level: 1 }, [text('标题')])))
+  assert.ok(withHeading)
+  assert.equal(withHeading.blockPairs[0].charMap, null)
+  assert.ok(withHeading.blockPairs[1].charMap, 'the heading after the front matter is editable')
+  assert.equal(withHeading.pmPosToRaw(2), 16)
+
+  const alone = buildProjectionMap('---\na: 1\n---\n', doc(fm('a: 1')))
+  assert.ok(alone, 'a document that is nothing but front matter still maps')
+  assert.equal(alone.blockPairs.length, 1)
+  assert.equal(alone.blockPairs[0].charMap, null)
+}
+
+// F5: the pairing stays fail-closed on a real structural disagreement — a PM
+// `frontmatter` node where the source has no yaml block at all (and vice
+// versa) must reject the WHOLE map, exactly like every other type mismatch.
+{
+  assert.equal(buildProjectionMap('甲\n', doc(fm('a: 1'), p(text('甲')))), null,
+    'a PM front-matter node with no yaml block in the source rejects the map')
+  assert.equal(buildProjectionMap('---\na: 1\n---\n\n甲\n', doc(p(text('甲')))), null,
+    'a source yaml block with no PM counterpart rejects the map')
+}
+
+console.log('PASS kernel projection map (front matter pairs, stays read-only)')

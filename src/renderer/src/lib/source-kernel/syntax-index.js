@@ -8,6 +8,7 @@ import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import remarkFrontmatter from 'remark-frontmatter'
 import { QUOTE_PREFIX } from '../markdown-preservation/block-prefix.js'
 import { injectHighlightNodes } from './highlight-syntax.js'
 import {
@@ -38,7 +39,31 @@ import {
 // remark-math only contributes micromark/mdast-util extensions (no tree
 // TRANSFORM), so the "parse only, never runSync" rule above is unaffected:
 // every node it produces carries a real `position`.
-const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath)
+//
+// remark-frontmatter (P6 Task 2) — same reason, same rule. The editor chain
+// mounts it (editor-crepe-setup.js:365, `options: undefined` i.e. the default
+// 'yaml' preset) and `editor-frontmatter.js` gives the resulting mdast `yaml`
+// node its own block-level PM node (`frontmatter`, an ATOM holding the raw
+// YAML in `attrs.value`). Without the plugin here the kernel read
+// `---\ntitle: x\n---` as a thematicBreak plus a setext heading — two blocks
+// of the wrong types where PM has one — so the very first pair mismatched and
+// the WHOLE document degraded to legacy. Frontmatter is a common shape (this
+// repo's own guide uses it), which made that one of the two largest remaining
+// document-level degradations.
+//
+// SCOPE: pairing only. The `frontmatter` PM node is an atom, so
+// `buildProjectionMap`'s `editable` test (`pm.node.isTextblock`) is false for
+// it and it pairs with `charMap: null` — an opaque read-only leaf, the posture
+// tables / block math / block HTML already have. Editing the YAML through the
+// kernel is NOT claimed; the existing rich-mode card
+// (`renderFrontmatterNodeView` -> `handleFrontmatterValueChange`) is a
+// separate, legacy-side path.
+//
+// The default preset matches the editor's exactly (both `'yaml'`, i.e. `---`
+// fences only, only at the very start of the document), so a `---` sitting
+// mid-document is still a thematicBreak to BOTH chains — verified, not
+// assumed, in scripts/test-source-kernel-index.mjs.
+const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkFrontmatter)
 
 // The kernel's own parse, exposed for commands that must PROVE a candidate
 // rewrite reparses to the document they intend (Plan 5 Task 5's

@@ -349,3 +349,58 @@ console.log('PASS source-kernel syntax index')
 }
 
 console.log('PASS source-kernel syntax index (inline html is phrasing)')
+
+// ===========================================================================
+// P6 Task 2 — YAML FRONT MATTER IS PARSED, NOT MISREAD
+// ===========================================================================
+// The kernel chain now mounts `remark-frontmatter` with the same default
+// preset the editor chain uses (editor-crepe-setup.js passes
+// `options: undefined`), because without it a leading `---` block parsed as
+// `thematicBreak + setext heading` and every front-matter document degraded
+// whole-document. remark-frontmatter contributes micromark/mdast-util
+// EXTENSIONS only — no tree transform — so this file's "only parse, never
+// runSync" rule is untouched and every node still carries a real position.
+{
+  const idx = buildSyntaxIndex('---\ntitle: x\n---\n\n正文\n')
+  const top = idx.tree.children.map((c) => c.type)
+  assert.deepEqual(top, ['yaml', 'paragraph'],
+    'a leading --- block is ONE yaml node, not thematicBreak + setext heading')
+  const yaml = idx.tree.children[0]
+  assert.equal(yaml.position.start.offset, 0)
+  assert.equal(yaml.position.end.offset, 16, 'the yaml node spans its own fences exactly')
+  assert.equal(yaml.value, 'title: x')
+  assert.equal(idx.tree.children[1].position.start.offset, 18)
+
+  // `yaml` is deliberately NOT in this module's BLOCKS set: it is a read-only
+  // leaf on the projection side, so every structural command resolving an
+  // offset inside it must find no block and fail closed.
+  for (const offset of [0, 3, 8, 15]) {
+    assert.equal(idx.blockAt(offset), null, `offset ${offset} inside the front matter has no block`)
+  }
+  assert.equal(idx.blockAt(18)?.type, 'paragraph', 'the body block still resolves (positive control)')
+}
+
+// CRLF front matter: same single node, offsets simply follow the extra bytes.
+{
+  const idx = buildSyntaxIndex('---\r\ntitle: x\r\n---\r\n\r\n正文\r\n')
+  assert.deepEqual(idx.tree.children.map((c) => c.type), ['yaml', 'paragraph'])
+  assert.equal(idx.tree.children[0].position.end.offset, 18)
+  assert.equal(idx.tree.children[1].position.start.offset, 22)
+  assert.equal(idx.dominantEnding, '\r\n')
+}
+
+// Negative control: the default preset matches only at the very start of the
+// document, so an ordinary `---` divider is still a thematicBreak and a `---`
+// UNDER a paragraph is still a setext heading. Widening the preset (e.g. to
+// allow `+++`, or anchoring anywhere) would break this and would also silently
+// diverge from the editor chain.
+{
+  assert.deepEqual(buildSyntaxIndex('甲\n\n---\n\n乙\n').tree.children.map((c) => c.type),
+    ['paragraph', 'thematicBreak', 'paragraph'])
+  assert.deepEqual(buildSyntaxIndex('text\n---\ntitle: x\n---\n').tree.children.map((c) => c.type),
+    ['heading', 'heading'])
+  assert.deepEqual(buildSyntaxIndex('+++\ntitle = "x"\n+++\n\n甲\n').tree.children.map((c) => c.type),
+    ['paragraph', 'paragraph'], 'TOML front matter is NOT enabled — the editor does not enable it either')
+}
+
+console.log('PASS source-kernel syntax index (front matter)')

@@ -61,13 +61,17 @@
 //      `blocked` and vetoes it.
 //   5. `createMathBlockPromotionPlugin` (editor-math.js) replacing typed
 //      `$$x$$` with a `code_block` (PM gains blocks) -> same two layers as 4.
-//   6. `remark-frontmatter` (editor chain only): the kernel's processor has
-//      no frontmatter extension, so `---\ntitle: x\n---` is
-//      `thematicBreak + setext heading` to it while PM holds ONE
-//      `frontmatter` node (not in PM_TO_MD, so `flattenPm` records no slot
-//      at all) -> the very first pair is a type mismatch, and the counts
-//      differ too. A frontmatter document degrades entirely; it never serves
-//      a wrong offset.
+//   6. `remark-frontmatter` — FIXED in P6 Task 2, recorded here because the
+//      shape it used to produce is instructive. The kernel's processor had no
+//      frontmatter extension, so `---\ntitle: x\n---` was
+//      `thematicBreak + setext heading` to it while PM held ONE `frontmatter`
+//      node (not in PM_TO_MD, so `flattenPm` recorded no slot at all) -> the
+//      very first pair was a type mismatch and the counts differed too, so
+//      every frontmatter document degraded ENTIRELY. Both chains now mount
+//      the same plugin with the same preset (syntax-index.js) and the pair is
+//      declared in PM_TO_MD, so this is one slot on each side. It stays a
+//      READ-ONLY leaf (`frontmatter` is an atom -> `editable` false ->
+//      `charMap: null`), so it still never serves an offset.
 // None of these can produce "same count, different correspondence": a merge
 // only removes, a fill/split/promotion only adds, and NOTHING in either chain
 // REORDERS blocks. A future plugin that removes one block and adds another in
@@ -144,6 +148,17 @@ const PM_TO_MD = {
   // and INLINE html atoms are excluded from block pairing entirely by
   // `flattenPm`/`flattenMd`.
   html: ['html'],
+  // YAML front matter (P6 Task 2). `editor-frontmatter.js` declares a
+  // block-level `frontmatter` ATOM whose `parseMarkdown.match` is
+  // `node.type === 'yaml'`, i.e. exactly the node `remark-frontmatter`
+  // produces — and since this task the kernel's own chain mounts that same
+  // plugin with the same default preset (see syntax-index.js), so both sides
+  // now see ONE block here instead of PM's one against the kernel's
+  // thematicBreak + setext heading. No shape guard is needed beyond the type
+  // pair: `yaml` has no children, `frontmatter` is an atom, and the atom makes
+  // `editable` false below, so the pair is served with `charMap: null` — a
+  // read-only leaf that can never resolve an offset, let alone write one.
+  frontmatter: ['yaml'],
   // Crepe's `@milkdown/components` image-block: a standalone (own-line) image
   // is rendered as a block-level `image-block` ATOM, not a paragraph wrapping
   // an inline image — its remark plugin REPLACES any mdast paragraph whose
