@@ -35,7 +35,7 @@ import { convertListAtSelection, getListConversionContext } from './editor-list-
 import { normalizeReviewMarkupMarkdown } from '../reviewMarkup.js'
 import { REVIEW_KINDS } from './editor-review.js'
 import { createEditorApi } from './editor-api.js'
-import { createKernelMode, pushKernelDiagnostic } from './editor-kernel-mode.js'
+import { createKernelMode } from './editor-kernel-mode.js'
 import { useEditorLightboxControls } from './editor-lightbox.js'
 import { applyImageText, createConfiguredCrepe } from './editor-crepe-setup.js'
 import { mountEditorDomBindings } from './editor-dom-bindings.js'
@@ -394,7 +394,14 @@ export default function Editor({
           getT: (key) => tRef.current(key),
           onChange: (markdown, opts) => onChange?.(markdown, opts),
           onStructureChange: () => onStructureChange?.(),
-          onStatusChange: (status) => onKernelStatusRef.current?.(status)
+          onStatusChange: (status) => onKernelStatusRef.current?.(status),
+          // The tab just fell back to legacy: restore Milkdown's
+          // `markdownUpdated` channel, which kernel mode deliberately never
+          // registered (see `registerMarkdownUpdated` below). A degraded tab
+          // publishes through that handler and nothing else, so without this
+          // it would be undirtiable and a save would write the frozen initial
+          // content.
+          onLegacyFallback: () => registerMarkdownUpdated()
         })
       : null
     if (kernelController) cleanups.push(() => kernelController.dispose())
@@ -1358,22 +1365,29 @@ export default function Editor({
     // parsed+inserted in the background — those dispatches fire markdownUpdated
     // too, and we must ignore them so tab.content isn't spammed with partial
     // docs. Only real user edits propagate.
-    crepe.on((api) => {
-      api.markdownUpdated((_ctx, md) => {
-        // Kernel mode: the serializer callback is diagnostics-only. It must
-        // never advance lastMarkdownRef/canonicalMarkdownRef or publish —
-        // kernel.doc.text is the sole source authority for this tab. A
-        // DEGRADED kernel tab is fully legacy-owned, though: its edits are
-        // published only by this handler, so it must fall through — gating it
-        // here would leave the tab undirtiable and let save write the frozen
-        // initial content.
-        if (kernelController && !kernelController.isDegraded()) {
-          pushKernelDiagnostic({
-            type: 'markdown-updated',
-            length: typeof md === 'string' ? md.length : null
-          })
-          return
-        }
+    //
+    // KERNEL MODE SKIPS THIS CHANNEL ENTIRELY (perf, plan §9 item 1). Milkdown's
+    // listener plugin serializes the WHOLE document on every debounced change,
+    // but only `if (listeners.markdownUpdated.length > 0)`
+    // (@milkdown/plugin-listener/lib/index.js) — so the ~40 % of a real
+    // per-keystroke cost that serializer represents disappears by simply not
+    // registering. That is only sound because a live kernel tab consumed
+    // nothing from it: the handler returned immediately after pushing a
+    // `markdown-updated` diagnostic that nothing in src/ or scripts/ reads
+    // (scripts/test-kernel-stage3-ui.mjs excludes it from its fatal list by
+    // name). The listener plugin's own `prevDoc` bookkeeping advances
+    // regardless of whether any listener is registered, and its `prevMarkdown`
+    // is only ever passed to the callback as an argument this handler ignores.
+    //
+    // A DEGRADED tab is the opposite: it is fully legacy-owned and this handler
+    // is its ONLY publisher, so the registration is restored the moment
+    // degradation is decided. `degraded` is set in exactly one place
+    // (`attachAfterCreate`, editor-kernel-mode.js), which reports it through
+    // `onLegacyFallback` below; `crepe.on` after create() pushes onto the same
+    // live ListenerManager array the debounced handler reads, so nothing is
+    // lost — every callback a degraded tab could have needed is either after
+    // that point, or was already dropped by the early return this replaces.
+    const handleMarkdownUpdated = (_ctx, md) => {
         const canonical = canonicalForSource(md)
         if (programmaticReplaceRef.current) {
           // replaceAll can publish more than one Markdown transaction. Keep all
@@ -1660,8 +1674,17 @@ export default function Editor({
           }
           userEditUntil = Date.now() + 1000
         }
-      })
-    })
+    }
+    // Idempotent: the degradation edge fires once, but a future second caller
+    // must never install a duplicate listener (Milkdown would then serialize
+    // once and invoke the handler twice).
+    let markdownUpdatedRegistered = false
+    const registerMarkdownUpdated = () => {
+      if (markdownUpdatedRegistered) return
+      markdownUpdatedRegistered = true
+      crepe.on((api) => { api.markdownUpdated(handleMarkdownUpdated) })
+    }
+    if (!kernelModeEnabled) registerMarkdownUpdated()
 
     const runCreate = () =>
       crepe

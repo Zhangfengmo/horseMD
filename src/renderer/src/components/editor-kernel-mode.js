@@ -69,7 +69,8 @@ export function createKernelMode({
   getT,
   onChange,
   onStructureChange,
-  onStatusChange
+  onStatusChange,
+  onLegacyFallback
 }) {
   const kernel = {
     doc: createMarkdownDocument(initialContent ?? ''),
@@ -393,6 +394,17 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'attach-unmappable', chunked: chunkedLoad })
       notifyUnmappable()
       publishStatus()
+      // THE degradation edge, announced exactly once (this is the only place
+      // `degraded` is ever set). The host uses it to hand the tab back to the
+      // legacy pipeline wholesale — most importantly to register Milkdown's
+      // `markdownUpdated` listener, which a live kernel tab deliberately does
+      // NOT register (Editor.jsx) because the serializer run behind it is pure
+      // waste there, but which is the ONLY publisher a degraded tab has.
+      try {
+        onLegacyFallback?.({ chunked: chunkedLoad, reason: degradeReason })
+      } catch {
+        pushKernelDiagnostic({ type: 'legacy-fallback-notify-failed' })
+      }
       return false
     }
     kernel.map = map

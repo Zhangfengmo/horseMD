@@ -498,10 +498,21 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
 // notification; from then on handleTransactions passes EVERYTHING through
 // (legacy behavior — even a drop) and every keymap handler returns false.
 {
-  const h = makeHarness('甲乙\n', doc(p(text('甲')), p(text('乙'))))
+  const fallbacks = []
+  const h = makeHarness('甲乙\n', doc(p(text('甲')), p(text('乙'))), {
+    onLegacyFallback: (info) => fallbacks.push(info)
+  })
   assert.equal(h.controller.attachAfterCreate(), false)
   assert.ok(h.notifications.length >= 1, 'degradation is announced, never silent')
   assert.equal(h.controller.kernel.map, null)
+  // Perf plan §9 item 1: kernel mode does not register Milkdown's
+  // `markdownUpdated` listener (the serializer behind it is pure waste for a
+  // live kernel tab), so the DEGRADED tab — whose only publisher IS that
+  // handler — depends on this callback firing exactly once at the degradation
+  // edge. A missing/duplicated call is silent data loss or a double publish.
+  assert.equal(fallbacks.length, 1, 'legacy fallback announced exactly once')
+  assert.equal(fallbacks[0].chunked, false)
+  assert.equal(fallbacks[0].reason, 'unmappable')
 
   const oldState = h.view.state
   const drop = oldState.tr.insertText('X', 1)
@@ -568,6 +579,29 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
     'a void legacy result propagates (no ?? fallback to the refusal path)')
   assert.equal(api.applyReviewMarkup('insert'), true)
   assert.equal(h.notifications.length, notifBefore, 'no unsupported-API toast in degraded mode')
+}
+
+// Case 6b: the SAME callback must NOT fire for a tab that attaches. The whole
+// `markdownUpdated`-skipping optimization rests on this asymmetry — a spurious
+// call would re-register Milkdown's serializer on a healthy kernel tab (giving
+// the cost back), and a missing one on a degraded tab is data loss (Case 6).
+// The chunked flavour is asserted too, because that is the fallback the
+// >CHUNK_THRESHOLD band takes and its reason string is user-visible.
+{
+  const attachedFallbacks = []
+  const ok = makeHarness('甲乙\n', doc(p(text('甲乙'))), {
+    onLegacyFallback: (info) => attachedFallbacks.push(info)
+  })
+  assert.equal(ok.controller.attachAfterCreate(), true)
+  assert.deepEqual(attachedFallbacks, [], 'an attached tab never announces a legacy fallback')
+
+  const chunkedFallbacks = []
+  const chunked = makeHarness('甲乙\n', doc(p(text('甲')), p(text('乙'))), {
+    chunkedLoad: true,
+    onLegacyFallback: (info) => chunkedFallbacks.push(info)
+  })
+  assert.equal(chunked.controller.attachAfterCreate(), false)
+  assert.deepEqual(chunkedFallbacks, [{ chunked: true, reason: 'chunked' }])
 }
 
 // Case 7 (wiring guard): before attachAfterCreate has run (Crepe still
