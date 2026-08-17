@@ -252,14 +252,15 @@ console.log('PASS source-kernel history')
   assert.equal(d.text, 'aXYb\n')
   assert.equal(h.depth(), 2)
 
-  // Pop, pretend the apply failed, roll back.
+  // Pop, pretend the apply failed (the document is therefore still at the
+  // revision the replay was built against), roll back.
   const first = h.undo(d)
   assert.ok(first)
   assert.equal(h.depth(), 1, 'the pop really did move the group')
-  assert.equal(h.rollbackReplay(), true, 'rollbackReplay must report that it restored something')
+  assert.equal(h.rollbackReplay(d), true, 'rollbackReplay must report that it restored something')
   assert.equal(h.depth(), 2, 'the group must be back on the undo stack')
   // ONE-SHOT: an immediate second call has nothing pending.
-  assert.equal(h.rollbackReplay(), false, 'a second rollback with nothing pending must be a no-op')
+  assert.equal(h.rollbackReplay(d), false, 'a second rollback with nothing pending must be a no-op')
 
   // The very next undo returns the SAME transaction (the pointer was
   // restored too — without that, `lastKnownRevision` was one ahead of the
@@ -285,7 +286,56 @@ console.log('PASS source-kernel history')
   assert.equal(committed.ok, true)
   h.record(committed, forward)
   d = committed.doc
-  assert.equal(h.rollbackReplay(), false, 'record() must disarm a pending rollback')
+  assert.equal(h.rollbackReplay(d), false, 'record() must disarm a pending rollback')
+}
+
+// (4) `rollbackReplay` is keyed to the document revision the replay was built
+//     against, so a SUCCESSFUL replay can never be rolled back (re-review
+//     round 2, finding C1). `pop` arms unconditionally and `rollbackReplay`
+//     is public on the history object, so without this key a late call would
+//     push a group back onto a stack that has already moved past it — exactly
+//     re-creating the frozen stack this round removed:
+//       doc 'aXb\n', depth 2, next undo -> null.
+{
+  let d = createMarkdownDocument('ab\n')
+  const h = createSourceHistory()
+  const step = (txn) => {
+    const r = applySourceTransaction(d, txn)
+    assert.equal(r.ok, true)
+    h.record(r, txn)
+    d = r.doc
+  }
+  step({ baseRevision: 0, from: 1, to: 1, insert: 'X', intent: 'insert-text' })
+  h.breakGroup()
+  step({ baseRevision: 1, from: 2, to: 2, insert: 'Y', intent: 'insert-text' })
+  assert.equal(h.depth(), 2)
+
+  // A replay that SUCCEEDS: the document advances.
+  const txn = h.undo(d)
+  assert.ok(txn)
+  const applied = applySourceTransaction(d, txn)
+  assert.equal(applied.ok, true)
+  d = applied.doc
+  assert.equal(d.text, 'aXb\n')
+  assert.equal(h.depth(), 1)
+
+  // A late/mistaken rollback must be REFUSED — the document is no longer at
+  // the revision the replay was built against.
+  assert.equal(h.rollbackReplay(d), false,
+    'rollbackReplay must refuse once the replay actually landed')
+  assert.equal(h.depth(), 1, 'the refused rollback may not resurrect the group')
+  // …and the stack is still healthy: the next undo works instead of null.
+  const next = h.undo(d)
+  assert.ok(next, 'the next undo must NOT be null (this is the frozen-stack shape)')
+  d = applySourceTransaction(d, next).doc
+  assert.equal(d.text, 'ab\n')
+
+  // A rollback with no document, or the wrong one, is refused too.
+  const popped = h.undo(d)
+  assert.equal(popped, null, 'nothing left to undo')
+  assert.equal(h.rollbackReplay(), false, 'a rollback with no document is refused')
+  assert.equal(h.rollbackReplay(createMarkdownDocument('other\n')), false,
+    'a rollback carrying a foreign document is refused')
 }
 
 console.log('PASS source-kernel history (CRLF chokepoint: inverses stay appliable, refusals never freeze the stack)')

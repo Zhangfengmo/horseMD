@@ -1259,7 +1259,11 @@ export function createKernelMode({
       // this function's own redo-depth mirror with it, so a refused replay is
       // a true no-op.
       redoDepth -= direction === 'undo' ? 1 : -1
-      const restored = kernel.history.rollbackReplay?.()
+      // `kernel.doc` is untouched on this path (applyKernelTransaction only
+      // advances it after every check passes), so its revision still equals
+      // the one the replay was built against — which is exactly the proof
+      // `rollbackReplay` requires before it will restore anything.
+      const restored = kernel.history.rollbackReplay?.(kernel.doc)
       pushKernelDiagnostic({
         type: 'history-replay-refused',
         direction,

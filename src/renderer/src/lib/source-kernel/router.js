@@ -27,17 +27,26 @@ export function routeStructuralKey(key, ctx) {
   // check at the top covers Enter / Tab / Shift-Tab / Backspace / Delete
   // together.
   //
-  // CONTRACT CHANGE, stated rather than implied (re-review Minor #4): at this
-  // one offset Backspace and Delete used to answer `not-structural` — a
-  // "use the text path" signal, which `structuralHandler` turns into `return
-  // false` so ProseMirror produces its own deletion transaction, which the
-  // gateway's plain-text path then refuses via its own `bisectsLineEnding`
-  // guard. They now answer `unsupported-structure`, which the handler
-  // swallows with a toast. The BYTES are identical either way (both end in
-  // zero writes); what changes is that the refusal is now immediate and
-  // visible instead of arriving one layer down. That is the intended posture
-  // — `not-structural` claims "this is ordinary text editing here", which is
-  // false at an offset no text edit may target either.
+  // CONTRACT CHANGE, stated rather than implied (re-review Minor #4). The
+  // guard sits at the TOP of this function, so at this one offset it changes
+  // the answer for THREE of the five keys, not just the delete pair:
+  //  * Backspace / Delete used to answer `not-structural` — a "use the text
+  //    path" signal, which `structuralHandler` turns into `return false` so
+  //    ProseMirror produces its own deletion transaction, which the gateway's
+  //    plain-text path then refuses via its own `bisectsLineEnding` guard.
+  //    Now they refuse here, one layer earlier.
+  //  * Tab outside a list used to answer `not-structural` too, which the
+  //    handler turns into `insertPlainTextAtSelection('\t')` — that path is
+  //    itself guarded now (replace-text.js), so it also ended in a refusal,
+  //    just later.
+  //  * Shift-Tab outside a list used to be swallowed SILENTLY (`return true`,
+  //    no message). It now produces a toast. This is the one user-visible
+  //    difference, and it is the intended one.
+  // The BYTES are identical in every case (all of them end in zero writes);
+  // what changes is that the refusal is immediate and visible instead of
+  // arriving one layer down or not at all. `not-structural` asserts "this is
+  // ordinary text editing here", which is false at an offset no text edit may
+  // target either.
   if (splitsCrlfPair(index.text, offset)) return { ok: false, code: 'unsupported-structure' }
   const item = index.listItemAt(offset)
   switch (key) {

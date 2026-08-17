@@ -125,6 +125,10 @@ export function createSourceHistory() {
     if (!group) return null
     const previousRevision = lastKnownRevision
     const previousCoalescing = coalescing
+    // The revision the caller is holding RIGHT NOW, i.e. before it applies
+    // what we are about to return. `rollbackReplay` requires the caller's
+    // document to still be at this revision — see its own comment.
+    const revisionBeforeReplay = doc.revision
     fromStack.pop()
     toStack.push(group)
     const transaction = build(group, doc.revision)
@@ -135,10 +139,19 @@ export function createSourceHistory() {
     // after an undo/redo silently re-merges into a group that was already
     // popped off (and re-pushed onto) the opposite stack, corrupting both.
     coalescing = false
-    pendingRollback = () => {
-      // Only valid while this group is still the one `pop` just moved — the
-      // caller consumes it immediately after a failed apply, and `record`
-      // (a successful commit of any kind) disarms it.
+    pendingRollback = (currentDoc) => {
+      // Guarded on THREE things, because this is a public method on the
+      // history object and its safety must not rest on caller discipline
+      // (re-review round 2, finding C1 — `pop` arms unconditionally, so a
+      // late call after a SUCCESSFUL replay would push the group back onto a
+      // stack that has already moved past it and re-create exactly the frozen
+      // stack this whole round removed):
+      //  1. the caller's document must still be at the revision `pop` was
+      //     built against — a successful apply advances it, so this alone
+      //     makes "roll back a replay that actually landed" impossible;
+      //  2. this group must still be the one `pop` moved;
+      //  3. `record` (any successful commit) disarms the whole thing.
+      if (!currentDoc || currentDoc.revision !== revisionBeforeReplay) return false
       if (toStack[toStack.length - 1] !== group) return false
       toStack.pop()
       fromStack.push(group)
@@ -154,12 +167,14 @@ export function createSourceHistory() {
     undo: (doc) => pop(undoStack, redoStack, doc, buildInverseTransaction),
     redo: (doc) => pop(redoStack, undoStack, doc, buildForwardTransaction),
     // Put the last undo/redo back exactly as it was, for a caller whose
-    // apply of the returned transaction FAILED (see `pendingRollback`).
-    // Returns true when something was actually restored.
-    rollbackReplay: () => {
+    // apply of the returned transaction FAILED. `doc` is the caller's CURRENT
+    // document: it must still be at the revision the replay was built
+    // against, which is what proves the apply did not land (see
+    // `pendingRollback`). Returns true when something was actually restored.
+    rollbackReplay: (doc) => {
       const rollback = pendingRollback
       pendingRollback = null
-      return rollback ? rollback() : false
+      return rollback ? rollback(doc) : false
     },
     breakGroup: () => {
       coalescing = false

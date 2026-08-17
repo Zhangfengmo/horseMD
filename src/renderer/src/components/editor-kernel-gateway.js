@@ -775,26 +775,36 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 // given; out of scope, recorded rather than left implicit.
 //
 // COST. One mdast parse per table-cell keystroke — measured
-// `parseKernelMarkdown` at 22 ms @12 KB, 42 ms @40 KB, 161 ms @184 KB, so the
-// naive "parse both sides" version was up to 3x the per-keystroke parse work
-// in a large document (the accepted path already pays one parse via
-// `bindMap` -> `buildProjectionMap` -> `buildSyntaxIndex`). The BEFORE side is
-// trivially cacheable: keystroke N's candidate text IS keystroke N+1's
-// baseline text, byte-identical, and `kernel.doc.text` does not change between
-// commits. `signatureFor` below is a one-slot memo keyed on the EXACT string
-// (identity/equality on the immutable text — never a hash, never a revision
-// number, so a cache hit is proof the bytes are the same), which makes the
-// steady state exactly ONE parse per table-cell keystroke. The single slot is
-// deliberate: computing the candidate evicts the baseline, which is precisely
-// the entry the next keystroke needs.
-let memoText = null
-let memoSignature = null
+// `parseKernelMarkdown` on table-heavy content at 30 ms @12 KB, 81 ms @40 KB,
+// 750 ms @184 KB, so the naive "parse both sides" version was up to ~4.5x the
+// per-keystroke parse work in a large document (the accepted path already pays
+// one parse via `bindMap` -> `buildProjectionMap` -> `buildSyntaxIndex`). The
+// BEFORE side is trivially cacheable: keystroke N's candidate text IS
+// keystroke N+1's baseline text, byte-identical, and `kernel.doc.text` does
+// not change between commits. `signatureFor` below is a one-slot-PER-DOCUMENT
+// memo keyed on the EXACT string (equality on the immutable text — never a
+// hash, never a revision number, so a cache hit is proof the bytes are the
+// same), which makes the steady state exactly ONE parse per table-cell
+// keystroke. The single slot per document is deliberate: computing the
+// candidate evicts that document's baseline, which is precisely the entry its
+// next keystroke needs.
+//
+// PER DOCUMENT, not module-global (re-review round 2, finding C2). HorseMD
+// keeps every tab's editor mounted, so a module-level slot means two tabs
+// typed alternately thrash it to a 0% hit rate — 40 parses for 20 keystrokes,
+// worse than no cache at all — and it pins one full document string alive for
+// the process lifetime. Keying a WeakMap on the caller's `kernel` state object
+// (one per editor instance, see editor-kernel-mode.js) gives each document its
+// own slot and lets the entry die with the editor. A caller without an object
+// to key on (hand-built `kernel` literals in older tests) simply parses, which
+// is the pre-memo behavior.
+const tableSignatureMemo = new WeakMap()
 
-const signatureFor = (text) => {
-  if (text === memoText) return memoSignature
+const signatureFor = (memoKey, text) => {
+  const slot = memoKey && typeof memoKey === 'object' ? tableSignatureMemo.get(memoKey) : null
+  if (slot && slot.text === text) return slot.signature
   const signature = tableStructureSignature(parseKernelMarkdown(text))
-  memoText = text
-  memoSignature = signature
+  if (memoKey && typeof memoKey === 'object') tableSignatureMemo.set(memoKey, { text, signature })
   return signature
 }
 
@@ -812,13 +822,13 @@ const tableStructureSignature = (tree) => {
 // Fail-closed on a parse failure of EITHER side (an unparseable candidate is
 // exactly the case that must not be committed, and an unparseable baseline
 // means there is nothing to prove the candidate against).
-function tableStructurePreserved(beforeText, afterText) {
+function tableStructurePreserved(memoKey, beforeText, afterText) {
   try {
     // Baseline FIRST (the common cache hit), candidate second (the miss that
     // becomes the next keystroke's hit) — see `signatureFor`'s comment for
     // why the order is what makes the one-slot memo work.
-    const baseline = signatureFor(beforeText)
-    return baseline === signatureFor(afterText)
+    const baseline = signatureFor(memoKey, beforeText)
+    return baseline === signatureFor(memoKey, afterText)
   } catch {
     return false
   }
@@ -1043,7 +1053,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   // (editor-kernel-mode.js's `plain-text` case) advances `kernel.doc` from
   // `committed.applied`, so a refusal here means the bytes were never
   // published and the PM transaction is vetoed with the view untouched.
-  if (touchedTableCell && !tableStructurePreserved(kernel.doc.text, result.doc.text)) {
+  if (touchedTableCell && !tableStructurePreserved(kernel, kernel.doc.text, result.doc.text)) {
     return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
   }
   return { ok: true, applied: result, transaction }

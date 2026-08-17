@@ -1595,7 +1595,37 @@ const withSelection = (state, from, to) =>
       'the padded table survives, which is exactly why the commit is allowed')
   }
 
-  // (e) the proof is SCOPED to table cells: the same byte in an ordinary
+  // (e) TWO DOCUMENTS ALTERNATING (re-review round 2, finding C2). The
+  //     baseline-signature memo is per-`kernel` (a WeakMap), because HorseMD
+  //     keeps every tab's editor mounted and a module-global slot would thrash
+  //     to a 0% hit rate when two tabs are typed alternately. Correctness must
+  //     not depend on which document was touched last: alternate commits into
+  //     a COMPACT and a PADDED table and assert each keeps its own verdict.
+  {
+    const padded = '| a | b |\n| - | - |\n| c | d |\n'
+    const compactKernel = { doc: createMarkdownDocument(compact) }
+    const paddedKernel = { doc: createMarkdownDocument(padded) }
+    const paddedMap = buildProjectionMap(padded, state.doc)
+    for (let round = 0; round < 3; round += 1) {
+      // The compact table refuses the backslash every time…
+      const refused = commitPlainText({
+        kernel: compactKernel, map, transactions: [state.tr.insertText('\\', 5)], oldState: state
+      })
+      assert.equal(refused.ok, false, `round ${round}: the compact cell must still refuse`)
+      assert.equal(compactKernel.doc.text, compact)
+      // …while the padded one accepts it every time, byte-exact.
+      const accepted = commitPlainText({
+        kernel: paddedKernel, map: paddedMap, transactions: [state.tr.insertText('\\', 5)], oldState: state
+      })
+      assert.equal(accepted.ok, true, `round ${round}: the padded cell must still commit (${accepted.code})`)
+      assert.equal(accepted.applied.doc.text, '| a\\ | b |\n| - | - |\n| c | d |\n')
+      // Advance the padded document so the next round's baseline differs,
+      // which is exactly the interleaving that evicts a shared single slot.
+      paddedKernel.doc = createMarkdownDocument(padded)
+    }
+  }
+
+  // (f) the proof is SCOPED to table cells: the same byte in an ordinary
   //     paragraph never pays for a reparse and never refuses.
   {
     const plain = doc(p(text('ab')))
