@@ -97,11 +97,14 @@
 // (or their raw span) resolves to `null`: `html` (no reliable character-level
 // decode contract) and `table` (treated as one opaque leaf — see
 // OPAQUE_TYPES below). `code_block` (Plan 3 Task 3) gets a real,
-// prefix-aware charMap via `buildCodeMap` — EXCEPT when it pairs with mdast
-// `math` (a `$$` delimiter pair is not a GFM fence; see the `codeReadOnly`
-// branch). A language Crepe renders as a PREVIEW (mermaid/latex) is NOT an
-// exception any more — see the ADR that replaced `READONLY_CODE_LANGUAGES`
-// below for why a preview is outside this module's subject entirely.
+// prefix-aware charMap via `buildCodeMap`, with NO type or language
+// exceptions as of 2026-08-18: it pairs with mdast `code` AND mdast `math`
+// (`$$..$$`), and a language Crepe renders as a diagram/formula PREVIEW
+// (mermaid/latex) is mapped like any other. See the ADR that replaced
+// `READONLY_CODE_LANGUAGES` below for why a preview is outside this module's
+// subject entirely, and the `code_block` branch's own comment for what block
+// math needed proven. A block `buildCodeMap` cannot prove (e.g. the
+// list-indented form) still degrades to `charMap: null` per-block.
 // See docs referenced by Task 1 brief:
 // scripts/test-editor-source-map.mjs for the hand-built-PM-schema precedent
 // and src/renderer/src/lib/source-kernel/character-map.js for the unit
@@ -192,9 +195,9 @@ const MD_BLOCK_TYPES = new Set(Object.values(PM_TO_MD).flat())
 // returned an EMPTY-but-not-null units array for any code block, a false
 // "proof" of alignment). Plan 3 Task 3 gives it a real mapper instead
 // (`buildCodeMap`, prefix-aware for blockquote/list-indented fences) —
-// see the `pmType === 'code_block'` branch below, which still forces
-// non-editable for the one case whose SHAPE the code-block domain's
-// commands cannot spell: pairing with mdast `math`.
+// see the `pmType === 'code_block'` branch below, which as of 2026-08-18
+// forces non-editable for NOTHING: mdast `code` and mdast `math` are both
+// mapped, and a block that cannot be proven degrades on that evidence alone.
 const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 
 // ==========================================================================
@@ -738,113 +741,143 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     // is exactly what `virtual` means to editor-kernel-mode.js.
     let virtual = false
     if (editable && pmType === 'code_block') {
-      // mdast `math` shares the PM `code_block` type but stays NON-EDITABLE
-      // here (Plan 5 Task 1 kept this deliberately; that task's goal was
-      // healing the whole-document degradation, not editing TeX).
+      // BLOCK MATH (`$$..$$`, mdast `math`) IS MAPPED HERE TOO (2026-08-18).
       //
-      // The LANGUAGE half of this condition is gone — see the
-      // `READONLY_CODE_LANGUAGES` ADR above for the proof that a preview is
-      // outside this module's subject. What remains is a statement about the
-      // block's SHAPE, not about how it is rendered: a `$$..$$` delimiter
-      // pair is not a GFM fence, and two commands in the code-block domain
-      // refuse it on exactly that ground —
-      // `changeCodeLanguage`/`exitCodeBlock` (commands/code-language.js,
-      // commands/code-exit.js) both require `block.type === 'code'`, because
-      // a `$$` pair has nowhere to spell an info string and no closing fence
-      // run to write after.
+      // It used to be forced non-editable alongside the preview languages,
+      // for two stated reasons. The first was the language gate, which is
+      // gone (see the ADR above). The second was that `changeCodeLanguage`
+      // and `exitCodeBlock` (commands/code-language.js, commands/code-exit.js)
+      // both require `block.type === 'code'`, because a `$$` delimiter pair
+      // has nowhere to spell an info string and no closing fence run to write
+      // after. That is TRUE and stays true — but it is a statement about two
+      // OTHER operations, each of which enforces it at its OWN command:
+      //   * a language switch is refused by `changeCodeLanguage` itself, and
+      //     the refusal vetoes the PM transaction inside `dispatchTransaction`
+      //     BEFORE `view.updateState`, so the "PM language switched away while
+      //     the source still says `$$`" transient the old comment worried
+      //     about cannot occur;
+      //   * Mod-Enter is refused by `exitCodeBlock` itself (notify + swallow).
+      // Neither needs this pair's charMap to be null, and keeping the whole
+      // block unwritable to enforce them was over-broad: it made the TEXT
+      // read-only to protect two operations that were already fail-closed.
       //
-      // (Measured 2026-08-18, for the record: `buildCodeMap` DOES map an
-      // mdast `math` node byte-exactly — visibleLength 6, linePrefix '' /
-      // '> ', lineEnding '\n' / '\r\n' for the plain and quoted LF and CRLF
-      // forms of `$$\nE=mc^2\n$$` — and fails closed on the list-indented
-      // form. So the character mapping is NOT what blocks it.)
-      const codeReadOnly = md.type === 'math'
-      if (!codeReadOnly) {
-        charMap = buildCodeMap(markdown, md)
-        // `buildCodeMap` fails closed (null) for a content shape it can't
-        // prove byte-for-byte, most commonly a blockquote/list-indented
-        // fence whose per-line prefix a BLANK content line can't reproduce
-        // (e.g. a quoted fence's blank line written as a bare '>' instead of
-        // '> ' — see code-map.js's own `text.startsWith(prefix, line.start)`
-        // guard). That is a property of THIS ONE block's content, not a
-        // structural PM/mdast disagreement — degrade only this pair to
-        // non-editable (final-review fix, 2026-08-16; `charMap` stays `null`,
-        // same contract as the math/table/image-block pairs) instead of rejecting
-        // the WHOLE map, so the rest of the document (including any OTHER
-        // code block) stays fully mappable. The check below only runs when
-        // `buildCodeMap` DID prove a charMap, and since P5-2.5 it degrades
-        // the same way (see the generic branch's own P5-2.5 comment): a
-        // size disagreement is a statement about THIS block's content, and
-        // every invariant that proves the two trees are ALIGNED (counts,
-        // types, shapes) stays whole-map fail-closed.
-        //
-        // Same structural (not textual) consistency check as the generic
-        // path below: PM's own content size must equal the kernel's decoded
-        // visible length. Milkdown's own code_block parseMarkdown runner
-        // (`state.addText(node.value)`) inserts the mdast `.value` string
-        // into the PM text child completely verbatim, so `content.size`
-        // (== textContent.length for a text-only content model, no atoms)
-        // equals `value.length` exactly. This holds for ANY line-ending
-        // style, including CRLF: remark does NOT normalize a code node's
-        // (or a prose text node's) line endings — verified against the real
-        // parser — and `buildCodeMap` matches that by construction, every
-        // unit it produces has width 1 and consumes exactly one `value` JS
-        // char (see code-map.js's own header comment), so `visibleLength`
-        // always equals `value.length` too. No separate empty-textblock
-        // guard is needed here (unlike the generic path below):
-        // buildCodeMap's own empty-value case already anchors to the real
-        // content start (right after the open fence line's ending), never
-        // to the block's own marker position.
-        if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
-        // Endpoint cross-check (see `blockEndpointsAgree` + the INVARIANT
-        // block at the top of this file): a code block's units are
-        // char/linebreak only, so this compares the fence content's first and
-        // last literal byte against PM's own code text.
-        if (charMap && !blockEndpointsAgree(markdown, pm.node, charMap)) charMap = null
-        // ADR (2026-08-17) — the former "non-'\n' lineEnding => non-editable"
-        // gate is REMOVED here. It never described a defect in THIS module's
-        // math: the identity asserted right above (`content.size ===
-        // visibleLength`) holds byte-for-byte for '\r\n' and lone-'\r'
-        // blocks too, because remark keeps a `code` node's line endings
-        // verbatim and `buildCodeMap` emits one width-1 unit per `value`
-        // char (a '\r' is its own `char` unit, the following '\n' the
-        // `linebreak` unit that also spans the next line's prefix). Measured
-        // for '```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n': content.size ===
-        // visibleLength === 20; for the '> '-quoted CRLF fence: 4.
-        //
-        // The gate existed because the VENDORED `@milkdown/components`
-        // CodeMirrorBlock node view applied CM6 coordinates directly as PM
-        // offsets while CM6's `Text` model structurally DISCARDS '\r' — so
-        // every CM position past a block's first line break undercounted the
-        // dropped bytes and a one-char edit could silently commit to the
-        // wrong raw range. That defect is fixed at its source by
-        // `editor-codeblock-crlf.js` (prototype patch: a bijective CM<->PM
-        // position map per call, inserted breaks spelled with the block's
-        // dominant ending, `update()` diffing on LF-normalized text,
-        // `setSelection` mapped both ways), locked by
-        // `scripts/test-codeblock-crlf-ui.mjs`. With the bridge honest, the
-        // whole reason for the narrowing is gone.
-        //
-        // What replaces it is a NARROWER, byte-provable guard one layer
-        // down, in `editor-kernel-gateway.js` `commitPlainText`: an inserted
-        // line break must ALREADY be spelled exactly as this block's raw
-        // source spells it (`charMap.lineEnding`), and the gateway only adds
-        // the per-line prefix — it never re-spells a break. That refuses the
-        // one residual shape the bridge cannot serve (a code block whose
-        // CURRENT text holds no '\r' at all — a single-line or empty fence
-        // in a CRLF document — where the bridge's own `hasCarriageReturn`
-        // fast path delegates to the vendor and an inserted break arrives as
-        // a bare '\n'), while leaving every other CRLF edit (typing,
-        // deleting, joining lines, adding lines in a multi-line CRLF fence)
-        // fully editable. See that function's comment for the trace.
-      }
+      // What text editing itself needs, proven rather than assumed:
+      //  M1. `buildCodeMap` is type-agnostic — it reads `.value` +
+      //      `.position` and proves every unit byte-for-byte. Measured
+      //      2026-08-18 across plain/quoted x LF/CRLF x single/multi-line/
+      //      empty: visibleLength always equals `value.length`, linePrefix
+      //      '' / '> ', lineEnding '\n' / '\r\n'. The list-indented form
+      //      still fails closed, degrading that ONE pair.
+      //  M2. The PM content is the same verbatim text a fence produces:
+      //      Crepe's `visitMathBlock` (feature/latex) rewrites the mdast
+      //      `math` node to `{type:'code', lang:'LaTeX', value}` — copying
+      //      `value` unchanged — BEFORE the PM parse, so the block goes
+      //      through the identical `state.addText(node.value)` runner. Hence
+      //      `content.size === visibleLength` holds for `$$` exactly as it
+      //      does for ```fenced.
+      //  M3. There IS an edit affordance, and it is the same one: the
+      //      vendored CodeMirrorBlock mounts CodeMirror unconditionally and
+      //      Crepe's latex `renderPreview` (KaTeX) only supplies the preview
+      //      panel + its Edit toggle.
+      //  M4. Whitespace inside `$$` is CONTENT, not a dead byte — measured:
+      //      trailing space/2-spaces/tab and a leading space all survive the
+      //      reparse verbatim. So the block-trailing-space respelling
+      //      (`spellBlockTailInsert`) correctly excludes `math` from its
+      //      allowlist, and no heading/trailing whitespace command fires here.
+      //  M5. Every ordinary edit round-trips exactly: typing at the start /
+      //      middle / end, Enter (including the quoted form's per-line `> `
+      //      prefix expansion) and CRLF Enter all reparse to precisely the
+      //      inserted value.
+      //
+      // The one shape that does NOT round-trip is a user typing a `$$` LINE
+      // inside the block, which closes it early. The bytes written are still
+      // exactly what was typed — this is the same semantics as typing ``` on
+      // its own line inside a fence, and it is caught downstream by
+      // `verifyPlainTextProjection`'s reconcile, not silently absorbed.
+      charMap = buildCodeMap(markdown, md)
+      // `buildCodeMap` fails closed (null) for a content shape it can't
+      // prove byte-for-byte, most commonly a blockquote/list-indented
+      // fence whose per-line prefix a BLANK content line can't reproduce
+      // (e.g. a quoted fence's blank line written as a bare '>' instead of
+      // '> ' — see code-map.js's own `text.startsWith(prefix, line.start)`
+      // guard). That is a property of THIS ONE block's content, not a
+      // structural PM/mdast disagreement — degrade only this pair to
+      // non-editable (final-review fix, 2026-08-16; `charMap` stays `null`,
+      // same contract as the table/image-block pairs) instead of rejecting
+      // the WHOLE map, so the rest of the document (including any OTHER
+      // code block) stays fully mappable. The check below only runs when
+      // `buildCodeMap` DID prove a charMap, and since P5-2.5 it degrades
+      // the same way (see the generic branch's own P5-2.5 comment): a
+      // size disagreement is a statement about THIS block's content, and
+      // every invariant that proves the two trees are ALIGNED (counts,
+      // types, shapes) stays whole-map fail-closed.
+      //
+      // Same structural (not textual) consistency check as the generic
+      // path below: PM's own content size must equal the kernel's decoded
+      // visible length. Milkdown's own code_block parseMarkdown runner
+      // (`state.addText(node.value)`) inserts the mdast `.value` string
+      // into the PM text child completely verbatim, so `content.size`
+      // (== textContent.length for a text-only content model, no atoms)
+      // equals `value.length` exactly. This holds for ANY line-ending
+      // style, including CRLF: remark does NOT normalize a code node's
+      // (or a prose text node's) line endings — verified against the real
+      // parser — and `buildCodeMap` matches that by construction, every
+      // unit it produces has width 1 and consumes exactly one `value` JS
+      // char (see code-map.js's own header comment), so `visibleLength`
+      // always equals `value.length` too. No separate empty-textblock
+      // guard is needed here (unlike the generic path below):
+      // buildCodeMap's own empty-value case already anchors to the real
+      // content start (right after the open fence line's ending), never
+      // to the block's own marker position.
+      if (charMap && pm.node.content.size !== charMap.visibleLength) charMap = null
+      // Endpoint cross-check (see `blockEndpointsAgree` + the INVARIANT
+      // block at the top of this file): a code block's units are
+      // char/linebreak only, so this compares the fence content's first and
+      // last literal byte against PM's own code text.
+      if (charMap && !blockEndpointsAgree(markdown, pm.node, charMap)) charMap = null
+      // ADR (2026-08-17) — the former "non-'\n' lineEnding => non-editable"
+      // gate is REMOVED here. It never described a defect in THIS module's
+      // math: the identity asserted right above (`content.size ===
+      // visibleLength`) holds byte-for-byte for '\r\n' and lone-'\r'
+      // blocks too, because remark keeps a `code` node's line endings
+      // verbatim and `buildCodeMap` emits one width-1 unit per `value`
+      // char (a '\r' is its own `char` unit, the following '\n' the
+      // `linebreak` unit that also spans the next line's prefix). Measured
+      // for '```js\r\nlet a = 1\r\nlet b = 2\r\n```\r\n': content.size ===
+      // visibleLength === 20; for the '> '-quoted CRLF fence: 4.
+      //
+      // The gate existed because the VENDORED `@milkdown/components`
+      // CodeMirrorBlock node view applied CM6 coordinates directly as PM
+      // offsets while CM6's `Text` model structurally DISCARDS '\r' — so
+      // every CM position past a block's first line break undercounted the
+      // dropped bytes and a one-char edit could silently commit to the
+      // wrong raw range. That defect is fixed at its source by
+      // `editor-codeblock-crlf.js` (prototype patch: a bijective CM<->PM
+      // position map per call, inserted breaks spelled with the block's
+      // dominant ending, `update()` diffing on LF-normalized text,
+      // `setSelection` mapped both ways), locked by
+      // `scripts/test-codeblock-crlf-ui.mjs`. With the bridge honest, the
+      // whole reason for the narrowing is gone.
+      //
+      // What replaces it is a NARROWER, byte-provable guard one layer
+      // down, in `editor-kernel-gateway.js` `commitPlainText`: an inserted
+      // line break must ALREADY be spelled exactly as this block's raw
+      // source spells it (`charMap.lineEnding`), and the gateway only adds
+      // the per-line prefix — it never re-spells a break. That refuses the
+      // one residual shape the bridge cannot serve (a code block whose
+      // CURRENT text holds no '\r' at all — a single-line or empty fence
+      // in a CRLF document — where the bridge's own `hasCarriageReturn`
+      // fast path delegates to the vendor and an inserted break arrives as
+      // a bare '\n'), while leaving every other CRLF edit (typing,
+      // deleting, joining lines, adding lines in a multi-line CRLF fence)
+      // fully editable. See that function's comment for the trace.
     } else if (editable) {
       // Editable (textblock) pairs MUST carry a proof of lossless character
       // alignment. No charMap (the kernel couldn't prove this block's units)
       // — or a charMap whose decoded visible length disagrees with PM's own
       // content size — means THIS BLOCK is unprovable, so it degrades to a
       // non-editable leaf (`charMap = null`, exactly the posture
-      // math/table/image-block/block-HTML pairs already have)
+      // table/image-block/block-HTML pairs already have)
       // and the rest of the document keeps its map.
       //
       // P5-2.5 — why per-BLOCK, not per-DOCUMENT (this used to `return null`):

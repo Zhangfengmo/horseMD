@@ -1033,21 +1033,21 @@ console.log('--- kernel projection map ---')
 }
 
 // Case 18 (REWRITTEN 2026-08-18): the two shapes that share PM
-// `code_block(language='LaTeX')` are decided SEPARATELY, by the mdast type —
-// which is the kernel's own parse of the raw bytes, not a rendering hint.
+// `code_block(language='LaTeX')` are BOTH editable, and each is mapped
+// against its OWN raw bytes — which is what makes serving them safe.
 //
-// Crepe's own math-block feature (@milkdown/crepe's blockLatexSchema) reuses
-// the plain codeBlockSchema for a `$$...$$` block, so on the PM side a math
-// block is indistinguishable in shape from a real ```latex fence. The
-// distinguishing evidence is `md.type`:
-//   * a literal ```latex fence  -> mdast `code`  -> EDITABLE (an ordinary GFM
-//     fence; `changeCodeLanguage`/`exitCodeBlock` can both spell it);
-//   * a `$$..$$` block          -> mdast `math`  -> read-only, because a `$$`
-//     delimiter pair is not a fence at all.
+// Crepe's math-block feature (@milkdown/crepe's blockLatexSchema +
+// `visitMathBlock`) reuses the plain codeBlockSchema for a `$$...$$` block,
+// so on the PM side a math block is indistinguishable in shape from a real
+// ```latex fence. The projection map never has to tell them apart from the PM
+// node: the pairing is positional and each pair's offsets come from its own
+// mdast node, so a `$$` pair's boundaries are the `$$` block's bytes and a
+// fence pair's are the fence's. `md.type` is recorded here only to prove the
+// two fixtures really are the two different shapes.
+//
 // The kernel's chain DOES mount remark-math (syntax-index.js, Plan 5 Task 1),
-// so both branches are reachable with a real parse — the old comment here
-// claiming `md.type === 'math'` was unreachable is stale and is corrected by
-// the second half of this case.
+// so the `math` branch is reachable with a real parse — the old comment here
+// claiming otherwise was stale.
 {
   const md = 'p1\n\n```latex\nx^2\n```\n\np2\n'
   const d = doc(
@@ -1061,6 +1061,7 @@ console.log('--- kernel projection map ---')
   assert.equal(map.blockPairs[1].mdBlock.type, 'code')
   assert.ok(map.blockPairs[1].charMap, 'a literal ```latex FENCE must be editable')
   assert.equal(map.blockPairs[1].charMap.visibleLength, 3)
+  assert.equal(map.pmPosToRaw(map.blockPairs[1].pmPos + 1), md.indexOf('x^2'))
 
   // Same PM shape, but the raw bytes are a `$$` block -> mdast `math`.
   const mathMd = 'p1\n\n$$\nx^2\n$$\n\np2\n'
@@ -1070,8 +1071,54 @@ console.log('--- kernel projection map ---')
     p(text('p2'))
   ))
   assert.ok(mathMap, 'doc with a $$ math block must still map')
-  assert.equal(mathMap.blockPairs[1].mdBlock.type, 'math')
-  assert.equal(mathMap.blockPairs[1].charMap, null, '$$ math must stay non-editable')
+  const mathPair = mathMap.blockPairs[1]
+  assert.equal(mathPair.mdBlock.type, 'math')
+  assert.ok(mathPair.charMap, '$$ math must now be editable')
+  assert.equal(mathPair.charMap.visibleLength, 3)
+  // The content boundaries are the TeX's own bytes — never a `$` delimiter.
+  assert.equal(mathPair.charMap.visibleToRaw(0), mathMd.indexOf('x^2'))
+  assert.equal(mathPair.charMap.visibleToRaw(3), mathMd.indexOf('x^2') + 3)
+  assert.equal(mathMap.pmPosToRaw(mathPair.pmPos + 1), mathMd.indexOf('x^2'))
+}
+
+// Case 18b: block math in its other provable forms — quoted (per-line `> `
+// prefix) and CRLF — plus the ONE form that must still fail closed to that
+// single pair: a list-indented `$$` block, whose content lines `buildCodeMap`
+// cannot reproduce byte-for-byte. The neighbours keep their maps either way.
+{
+  const quoted = '> $$\n> E=mc^2\n> $$\n\nafter\n'
+  const qMap = buildProjectionMap(quoted, doc(
+    schema.node('blockquote', null, [schema.node('code_block', { language: 'LaTeX' }, text('E=mc^2'))]),
+    p(text('after'))
+  ))
+  assert.ok(qMap, 'quoted math doc must map')
+  const qPair = qMap.blockPairs.find((pair) => pair.mdBlock?.type === 'math')
+  assert.ok(qPair?.charMap, 'quoted $$ math must be editable')
+  assert.equal(qPair.charMap.linePrefix, '> ')
+  assert.equal(qPair.charMap.visibleLength, 6)
+
+  const crlf = '$$\r\na\r\nb\r\n$$\r\n'
+  const cMap = buildProjectionMap(crlf, doc(schema.node('code_block', { language: 'LaTeX' }, text('a\r\nb'))))
+  assert.ok(cMap, 'CRLF math doc must map')
+  assert.ok(cMap.blockPairs[0].charMap, 'CRLF $$ math must be editable')
+  assert.equal(cMap.blockPairs[0].charMap.visibleLength, 'a\r\nb'.length)
+  assert.equal(cMap.blockPairs[0].charMap.lineEnding, '\r\n')
+
+  // Fail-closed, per-block: a quoted `$$` block whose blank content line is
+  // written as a bare '>' instead of '> ' — buildCodeMap's per-line prefix
+  // check cannot reproduce that line byte-for-byte (the same shape Case 19
+  // pins for a fence). ONLY this pair degrades; the trailing paragraph keeps
+  // its own byte-correct map.
+  const ragged = '> $$\n> a\n>\n> b\n> $$\n\nafter\n'
+  const rMap = buildProjectionMap(ragged, doc(
+    schema.node('blockquote', null, [schema.node('code_block', { language: 'LaTeX' }, text('a\n\nb'))]),
+    p(text('after'))
+  ))
+  assert.ok(rMap, 'an unprovable math block must not reject the whole map')
+  assert.equal(rMap.blockPairs.find((pair) => pair.mdBlock?.type === 'math').charMap, null,
+    'an unprovable math block degrades to a read-only leaf')
+  assert.ok(rMap.blockPairs[rMap.blockPairs.length - 1].charMap,
+    'the trailing paragraph keeps its own map')
 }
 
 // Case 19 (final-review finding, 2026-08-16): `buildCodeMap` returning null
@@ -1160,9 +1207,10 @@ console.log('--- kernel projection map ---')
 //     break a paragraph without the extension) while PM had a `code_block`
 //     (language 'LaTeX') -> `PM_TO_MD.code_block` has no 'paragraph' entry,
 //     so the allowed-type check nulled the WHOLE map.
-// Both healed by pairing the real math nodes. Block math stays NON-EDITABLE
-// (charMap null) — it occupies a structural slot so every OTHER block in the
-// document keeps its own map.
+// Both healed by pairing the real math nodes. Block math was NON-EDITABLE
+// then; since 2026-08-18 it carries a real `buildCodeMap` charMap (see the
+// `code_block` branch's own comment for what that needed proven), so this
+// case now asserts the mapped offsets rather than their absence.
 const mi = (value) => schema.node('math_inline', { value })
 const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s)] : [])
 
@@ -1184,11 +1232,18 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
   assert.ok(map, 'math-bearing document must map (this is the degradation fix)')
   assert.equal(map.blockPairs.length, 3)
 
-  // Block math: paired, but never editable.
+  // Block math: paired AND editable, addressing the TeX's own bytes. The
+  // code_block sits at pmPos 7, so its content start is 8 and the raw offset
+  // there is the 'E' of 'E=mc^2' — inside the delimiters, never on a '$'.
   assert.equal(map.blockPairs[1].mdBlock.type, 'math')
   assert.equal(map.blockPairs[1].pmNode.type.name, 'code_block')
-  assert.equal(map.blockPairs[1].charMap, null, 'block math stays non-editable')
-  assert.equal(map.pmPosToRaw(8), null, 'no offset inside block math resolves')
+  assert.ok(map.blockPairs[1].charMap, 'block math is editable')
+  assert.equal(map.blockPairs[1].charMap.visibleLength, 6)
+  assert.equal(map.pmPosToRaw(8), md.indexOf('E=mc^2'))
+  assert.equal(map.pmPosToRaw(14), md.indexOf('E=mc^2') + 6)
+  assert.equal(md[map.pmPosToRaw(8)], 'E')
+  // …and the inverse direction agrees.
+  assert.deepEqual(map.rawToPmPos(md.indexOf('E=mc^2')), { pos: 8, atom: false })
 
   // Inline math paragraph: fully mapped, the `$...$` bytes are ONE atom.
   assert.equal(map.pmPosToRaw(1), 0)   // before 'a'
@@ -1212,8 +1267,9 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
 }
 
 // Case M2: quoted block math. mdast `blockquote > math` [2,18] pairs against
-// PM `blockquote > code_block(LaTeX)`; the quote occupies a slot, the math a
-// non-editable one, and a following paragraph still maps.
+// PM `blockquote > code_block(LaTeX)`; the quote occupies a slot, the math an
+// EDITABLE one carrying the quote's per-line '> ' prefix (2026-08-18 — it was
+// a non-editable slot before), and a following paragraph still maps.
 {
   const md = '> $$\n> E=mc^2\n> $$\n\n甲\n'
   const d = doc(
@@ -1224,7 +1280,14 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
   assert.ok(map, 'quoted block math must map')
   assert.equal(map.blockPairs.length, 3)
   assert.equal(map.blockPairs[1].mdBlock.type, 'math')
-  assert.equal(map.blockPairs[1].charMap, null)
+  const qCharMap = map.blockPairs[1].charMap
+  assert.ok(qCharMap, 'quoted block math is editable')
+  assert.equal(qCharMap.visibleLength, 6)
+  // The prefix a newline typed here must be expanded with — the whole reason
+  // buildCodeMap exposes it (see commitPlainText's break expansion).
+  assert.equal(qCharMap.linePrefix, '> ')
+  assert.equal(qCharMap.lineEnding, '\n')
+  assert.equal(qCharMap.visibleToRaw(0), md.indexOf('E=mc^2'))
   // '> $$\n> E=mc^2\n> $$\n' is 19 bytes, blank line 19, 甲 20.
   assert.equal(map.pmPosToRaw(map.blockPairs[2].pmPos + 1), 20)
 }

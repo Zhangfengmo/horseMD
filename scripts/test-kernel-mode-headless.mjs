@@ -1309,12 +1309,29 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   mermaid.view.posAtDOM = () => 1
   assert.equal(mermaid.controller.isCmBlockEditable({ dom: {} }), true, 'mermaid block must now be editable')
 
-  // The still-blocked code shape: a `$$` block pairs with mdast `math`, whose
-  // delimiters no code-block command can spell, so it never claims a charMap.
+  // Block math (`$$..$$`, mdast `math`) is editable too since 2026-08-18 —
+  // same always-mounted CodeMirror, and buildCodeMap proves its bytes. Typed
+  // here end to end so this is a byte assertion, not just a gate flag: the
+  // insert must land INSIDE the delimiters.
   const mathBlock = makeHarness('$$\nE=mc^2\n$$\n', doc(cb('LaTeX', 'E=mc^2')))
   assert.equal(mathBlock.controller.attachAfterCreate(), true)
   mathBlock.view.posAtDOM = () => 1
-  assert.equal(mathBlock.controller.isCmBlockEditable({ dom: {} }), false, '$$ math must stay non-editable')
+  assert.equal(mathBlock.controller.isCmBlockEditable({ dom: {} }), true, '$$ math must now be editable')
+  assert.equal(dispatchThrough(mathBlock, mathBlock.view.state.tr.insertText('X', 1)), undefined)
+  await flushMicrotasks()
+  assert.equal(mathBlock.controller.kernel.doc.text, '$$\nXE=mc^2\n$$\n',
+    'the insert must land inside the $$ delimiters, never on one')
+
+  // …and the still-blocked code shape is the one buildCodeMap cannot prove:
+  // a quoted math block whose blank content line is a bare '>' rather than
+  // '> ', so its per-line prefix contract fails. Fail-closed per block.
+  const raggedMath = makeHarness('> $$\n> a\n>\n> b\n> $$\n', doc(
+    schema.node('blockquote', null, [cb('LaTeX', 'a\n\nb')])
+  ))
+  assert.equal(raggedMath.controller.attachAfterCreate(), true)
+  raggedMath.view.posAtDOM = () => 2
+  assert.equal(raggedMath.controller.isCmBlockEditable({ dom: {} }), false,
+    'an unprovable math block stays non-editable')
 }
 
 // Case T5c: runExitCode at document end — exit bytes are written
@@ -1918,12 +1935,14 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.attachAfterCreate(), true,
     'a document containing inline AND block math attaches (no degradation)')
 
-  // Block math is paired but non-editable (charMap null) — it occupies a
-  // structural slot so the rest of the document stays mapped.
+  // Block math is paired AND (since 2026-08-18) editable, addressing the
+  // TeX's own bytes; the rest of the document stays mapped either way.
   const pairs = h.controller.kernel.map.blockPairs
   assert.equal(pairs.length, 3)
   assert.equal(pairs[1].mdBlock.type, 'math')
-  assert.equal(pairs[1].charMap, null, 'block math stays read-only for now')
+  assert.ok(pairs[1].charMap, 'block math is editable')
+  assert.equal(pairs[1].charMap.visibleLength, 'E=mc^2'.length)
+  assert.equal(pairs[1].charMap.visibleToRaw(0), md.indexOf('E=mc^2'))
 
   // Type 'X' between 甲 and 乙. PM: paragraph1 nodeSize 7, code_block
   // nodeSize 8 -> paragraph3 at pos 15, content start 16, caret 17.
@@ -2650,17 +2669,19 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(healthy.reason, null)
 }
 {
-  // A document carrying a block the kernel serves as a read-only leaf (block
-  // math: `code_block` paired with mdast `math`, charMap null by construction)
-  // reports 'partial', and the count matches the pairs `degradedPairAt` would
-  // answer for.
-  const md = 'a $x$ b\n\n$$\nE=mc^2\n$$\n\n\u7532\u4e59\n'
+  // A document carrying a block the kernel serves as a read-only leaf reports
+  // 'partial', and the count matches the pairs `degradedPairAt` would answer
+  // for. The fixture is an `image-block`: a PM ATOM, so `isTextblock` is false
+  // and it can never claim a charMap \u2014 a structural read-only leaf, not a
+  // policy one. (This used to be a `$$` math block; block math became editable
+  // 2026-08-18, so it no longer demonstrates the state under test.)
+  const md = '![a](x.png)\n\n\u7532\u4e59\n'
   const h = makeHarness(md, stubParse(md))
   assert.equal(h.controller.attachAfterCreate(), true)
   const status = h.controller.getKernelStatus()
   const readOnlyPairs = h.controller.kernel.map.blockPairs
     .filter((pair) => !pair.charMap && !pair.virtual)
-  assert.ok(readOnlyPairs.length > 0, 'fixture sanity: the math block is a read-only leaf')
+  assert.ok(readOnlyPairs.length > 0, 'fixture sanity: the image-block is a read-only leaf')
   assert.equal(status.state, 'partial')
   assert.equal(status.readOnlyBlocks, readOnlyPairs.length,
     'the reported count is exactly the pairs the per-block toast speaks for')
