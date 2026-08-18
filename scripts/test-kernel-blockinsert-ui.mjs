@@ -1,4 +1,5 @@
-// Kernel-mode block-INSERT slash items end-to-end UI regression (/table, /js).
+// Kernel-mode block-INSERT slash items end-to-end UI regression (/table, /js,
+// /mermaid, /math).
 //
 // The headless suites (scripts/test-source-kernel-blockinsert.mjs + Cases I1-I4
 // in scripts/test-kernel-mode-headless.mjs) prove the COMMAND and the
@@ -40,6 +41,10 @@ const LINES = [
   '',
   '戊己庚辛',
   '',
+  '壬癸子丑',
+  '',
+  '寅卯辰巳',
+  '',
   '尾段落。',
   ''
 ]
@@ -53,6 +58,15 @@ const FIXTURE_LF = LINES.join('\n')
 const TABLE = ['|  |  |  |', '| --- | --- | --- |', '|  |  |  |'].join('\n')
 const TABLE_TYPED = ['| 表头 |  |  |', '| --- | --- | --- |', '|  |  |  |'].join('\n')
 const CODE = ['```javascript', '', '```'].join('\n')
+// Preview-backed blocks (2026-08-18). Both used to keep the phase-1 refusal:
+// `/mermaid` because a preview-rendered fence was paired `charMap: null`, and
+// `/math` because block math was. Both pairings are gone (see the ADR that
+// replaced `READONLY_CODE_LANGUAGES` in editor-kernel-projection-map.js), so
+// the items route like every other insert — and this fixture is what proves
+// the created block is actually TYPABLE in the real app rather than a
+// good-looking dead end.
+const MERMAID = ['```mermaid', '', '```'].join('\n')
+const MATH = ['$$', '', '$$'].join('\n')
 
 async function waitFor(fn, message, tries = 60) {
   for (let i = 0; i < tries; i += 1) {
@@ -91,7 +105,14 @@ async function readSource(evaluate, message) {
 }
 
 async function assertSource(evaluate, expected, message) {
-  assert.equal(await readSource(evaluate, message), expected, message)
+  const actual = await readSource(evaluate, message)
+  // Node truncates long strings in assertion diffs, which makes a byte-level
+  // failure in a multi-block document unreadable. Print both in full first.
+  if (actual !== expected) {
+    console.error('  actual  :', JSON.stringify(actual))
+    console.error('  expected:', JSON.stringify(expected))
+  }
+  assert.equal(actual, expected, message)
 }
 
 async function toggleKernelMode(evaluate) {
@@ -325,18 +346,96 @@ async function run() {
       `the caret must land inside the new code block, got ${JSON.stringify(codeCaret)}`)
 
     // ============================================================
-    // 3) The refused items stay refused and visibly disabled — a dead item is
-    //    a bug, but so is an item that looks alive and writes nothing.
+    // 2b) `/mermaid` — a PREVIEW-backed fence. Same route as `/js` (it is a
+    //     language item, id `code:mermaid`), but the block it creates renders
+    //     a diagram instead of its text once it has content, which is exactly
+    //     why this item was refused until block previews stopped implying
+    //     read-only. The created block is EMPTY, so `renderPreview` returns
+    //     nothing and CodeMirror is visible immediately — asserted, not
+    //     assumed, because an item that drops the caret into a hidden editor
+    //     would be the "fake feature" this whole check exists to prevent.
+    // ============================================================
+    await selectBlock(evaluate, send, '壬癸子丑')
+    await runSlashItem(evaluate, send, 'mermaid', 'code:mermaid')
+
+    const mermaidCaret = await caretHome(evaluate)
+    console.log('  [/mermaid] ->', JSON.stringify({ caret: mermaidCaret }))
+    assert.ok(mermaidCaret && (mermaidCaret.kind === 'codemirror' || mermaidCaret.kind === 'code-block'),
+      `the caret must land inside the new mermaid block, got ${JSON.stringify(mermaidCaret)}`)
+    // The caret's OWN block must be the new (empty) one, and its CodeMirror
+    // host must be VISIBLE — an empty block renders no preview, so nothing may
+    // be hiding the editor the caret just landed in. Both facts are read off
+    // the same block so a caret parked in a DIFFERENT code block (the
+    // javascript one from step 2) cannot satisfy this vacuously.
+    assert.deepEqual(await evaluate(`(() => {
+      const block = document.activeElement?.closest?.('.milkdown-code-block')
+      if (!block) return null
+      return {
+        empty: (block.querySelector('.cm-content')?.textContent || '') === '',
+        language: block.querySelector('.language-button')?.textContent?.trim()?.toLowerCase() || null,
+        visible: !block.querySelector('.codemirror-host')?.classList.contains('hidden')
+      }
+    })()`), { empty: true, language: 'mermaid', visible: true },
+      'the caret must sit in the NEW, empty mermaid block, with a VISIBLE CodeMirror rather than a preview it is trapped behind')
+
+    // Type WITHOUT toggling the view first: this is the real user flow (insert
+    // then type), and it is the whole point of the item — a source-mode round
+    // trip in between would drop CM focus and prove nothing about the caret
+    // the insert itself left behind.
+    await typeTextLikeUser(send, 'graph TD', { delayMs: delay })
+    await sleep(500)
+
+    const afterMermaid = FIXTURE_LF
+      .replace('甲乙丙丁', () => TABLE_TYPED).replace('戊己庚辛', () => CODE)
+      .replace('壬癸子丑', () => ['```mermaid', 'graph TD', '```'].join('\n'))
+    await assertSource(evaluate, afterMermaid,
+      `/mermaid must commit a mermaid fence whose empty content line is immediately typable (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
+    // 2c) `/math` — a `$$` block, the other preview-backed shape. Its
+    //     delimiters are not a GFM fence, so it is its own insert target
+    //     (BLOCK_INSERT_TARGETS.math) with its own reparse proof.
+    // ============================================================
+    await selectBlock(evaluate, send, '寅卯辰巳')
+    await runSlashItem(evaluate, send, 'math', 'math', { activate: 'click' })
+
+    const mathCaret = await caretHome(evaluate)
+    console.log('  [/math] ->', JSON.stringify({ caret: mathCaret }))
+    assert.ok(mathCaret && (mathCaret.kind === 'codemirror' || mathCaret.kind === 'code-block'),
+      `the caret must land inside the new $$ block, got ${JSON.stringify(mathCaret)}`)
+    assert.deepEqual(await evaluate(`(() => {
+      const block = document.activeElement?.closest?.('.milkdown-code-block')
+      if (!block) return null
+      return {
+        empty: (block.querySelector('.cm-content')?.textContent || '') === '',
+        visible: !block.querySelector('.codemirror-host')?.classList.contains('hidden')
+      }
+    })()`), { empty: true, visible: true },
+      'the caret must sit in the NEW, empty $$ block, with a VISIBLE CodeMirror')
+
+    await typeTextLikeUser(send, 'E=mc^2', { delayMs: delay })
+    await sleep(500)
+    const afterMath = afterMermaid.replace('寅卯辰巳', () => ['$$', 'E=mc^2', '$$'].join('\n'))
+    await assertSource(evaluate, afterMath,
+      `/math must commit a $$ block whose empty content line is immediately typable (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
+    // 3) The still-refused items stay refused and visibly disabled — a dead
+    //    item is a bug, but so is an item that looks alive and writes nothing.
+    //    `/image` is the standing example: Crepe's `image-block` is a PM ATOM
+    //    with no content expression, so a created card has no caret home. Its
+    //    src/alt/title BYTES are writable (commands/image-attrs.js); what is
+    //    missing is a UI, and inventing one is not this item's job.
     // ============================================================
     await selectBlock(evaluate, send, '尾段落。')
-    await typeTextLikeUser(send, '/math', { delayMs: delay })
+    await typeTextLikeUser(send, '/image', { delayMs: delay })
     await waitFor(() => evaluate(`document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item').length > 0`),
-      'slash menu did not open for the /math query', 25)
-    const mathDisabled = await evaluate(`(() => {
-      const li = document.querySelector('.milkdown-slash-menu[data-show="true"] .hm-slash-item[data-id="math"]')
+      'slash menu did not open for the /image query', 25)
+    const imageDisabled = await evaluate(`(() => {
+      const li = document.querySelector('.milkdown-slash-menu[data-show="true"] .hm-slash-item[data-id="image"]')
       return li ? li.classList.contains('disabled') : null
     })()`)
-    assert.equal(mathDisabled, true, '/math must still be visibly disabled in kernel mode')
+    assert.equal(imageDisabled, true, '/image must still be visibly disabled in kernel mode')
     await pressKey(send, { key: 'Escape', code: 'Escape' })
     await sleep(200)
 
@@ -348,17 +447,20 @@ async function run() {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
     const disk = await readFile(file, 'utf8')
+    const eol = (block) => block.split('\n').join(EOL)
     const expectedDisk = LINES.join(EOL)
-      .replace('甲乙丙丁', TABLE_TYPED.split('\n').join(EOL))
-      .replace('戊己庚辛', CODE.split('\n').join(EOL))
-      .replace('尾段落。', '/math')
+      .replace('甲乙丙丁', () => eol(TABLE_TYPED))
+      .replace('戊己庚辛', () => eol(CODE))
+      .replace('壬癸子丑', () => eol(['```mermaid', 'graph TD', '```'].join('\n')))
+      .replace('寅卯辰巳', () => eol(['$$', 'E=mc^2', '$$'].join('\n')))
+      .replace('尾段落。', () => '/image')
     assert.equal(disk, expectedDisk, 'disk bytes must match the kernel-derived expectation exactly')
     if (crlf) {
       assert.equal(/(?<!\r)\n/.test(disk), false, 'a CRLF document must not gain a lone LF anywhere')
     }
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
-    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table and /js commit their block bytes, project, and land a typable caret`)
+    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js, /mermaid and /math commit their block bytes, project, and land a typable caret in a VISIBLE editor; /image stays visibly refused`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

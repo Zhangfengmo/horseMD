@@ -194,7 +194,8 @@ const refuses = (label, text, offset, target, language) => {
 }
 
 // Targets this command deliberately does not own (see its own ADR).
-refuses('math target', '/math\n', 5, 'math')
+// (`math` moved OUT of this list on 2026-08-18, once block math became an
+// editable pair — see section 9 below for its own proof.)
 refuses('divider target', '/hr\n', 3, 'divider')
 refuses('task target', '/task\n', 5, 'task')
 refuses('image target', '/img\n', 4, 'image')
@@ -273,10 +274,99 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 //    unblocked for a target this command does not own.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'table'])
+  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'math', 'table'])
   assert.equal(BLOCK_INSERT_TARGETS.code.language, true)
   assert.equal(BLOCK_INSERT_TARGETS.table.language, false)
+  // A `$$` delimiter pair has no info string, so an info string is refused
+  // rather than silently dropped.
+  assert.equal(BLOCK_INSERT_TARGETS.math.language, false)
   assert.ok(Object.isFrozen(BLOCK_INSERT_TARGETS))
+}
+
+// ---------------------------------------------------------------------------
+// 9. `$$` block math (2026-08-18). Same two-axis proof as every other target;
+//    what is asserted here is the part that is SPECIFIC to this shape — that
+//    the caret anchor the command returns is exactly the anchor the empty
+//    block's OWN charMap serves, so the first typed character lands on the
+//    empty content line and not on the closing delimiter.
+// ---------------------------------------------------------------------------
+{
+  const mathAnchorAgrees = (text, label) => {
+    const doc = createMarkdownDocument(text)
+    const offset = text.indexOf('/math') + '/math'.length
+    const routed = insertBlockFromQuery({
+      doc, index: buildSyntaxIndex(text), offset, target: 'math'
+    })
+    assert.equal(routed.ok, true, `${label}: ${routed.code}`)
+    const applied = applySourceTransaction(doc, routed.transaction)
+    assert.equal(applied.ok, true, label)
+    const out = applied.doc.text
+
+    // The written block reparses as an EMPTY math block…
+    const index = buildSyntaxIndex(out)
+    const mathNode = (function find(node) {
+      if (node.type === 'math') return node
+      for (const child of node.children || []) {
+        const hit = find(child)
+        if (hit) return hit
+      }
+      return null
+    })(index.tree)
+    assert.ok(mathNode, `${label}: the written bytes must reparse as a math block`)
+    assert.equal(mathNode.value, '', `${label}: the new block must be empty`)
+
+    // …and the command's anchor IS `emptyCodeMap`'s own anchor for it.
+    const charMap = buildCodeMap(out, mathNode)
+    assert.ok(charMap, `${label}: the empty math block must be mappable`)
+    assert.equal(routed.transaction.selection.anchor, charMap.visibleToRaw(0),
+      `${label}: the caret anchor must be the block's own content anchor`)
+
+    // Typing there produces exactly the block on screen — the load-bearing
+    // property the empty content line exists for (a missing one would put the
+    // anchor on the closing `$$` and commit an unterminated block).
+    const anchor = routed.transaction.selection.anchor
+    const typed = out.slice(0, anchor) + 'x' + out.slice(anchor)
+    const typedMath = (function find(node) {
+      if (node.type === 'math') return node
+      for (const child of node.children || []) {
+        const hit = find(child)
+        if (hit) return hit
+      }
+      return null
+    })(buildSyntaxIndex(typed).tree)
+    assert.equal(typedMath?.value, 'x', `${label}: the first typed character must become the block's content`)
+    return out
+  }
+
+  assert.equal(mathAnchorAgrees('/math', 'bare document'), '$$\n\n$$')
+  assert.equal(mathAnchorAgrees('前置\n\n/math\n\n后置\n', 'mid-document'),
+    '前置\n\n$$\n\n$$\n\n后置\n')
+  // CRLF: the delimiters and the empty content line all use the document's
+  // dominant ending, never a mixed-ending file.
+  assert.equal(mathAnchorAgrees('前置\r\n\r\n/math\r\n\r\n后置\r\n', 'CRLF mid-document'),
+    '前置\r\n\r\n$$\r\n\r\n$$\r\n\r\n后置\r\n')
+
+  // An info string is refused — there is nowhere to spell one.
+  assert.equal(insertBlockFromQuery({
+    doc: createMarkdownDocument('/math'),
+    index: buildSyntaxIndex('/math'),
+    offset: 5,
+    target: 'math',
+    language: 'tex'
+  }).code, 'unsupported-structure')
+
+  // Non-top-level contexts stay refused, exactly like the other targets: the
+  // command only ever walks the ROOT's children.
+  for (const [text, label] of [['- /math\n', 'list item'], ['> /math\n', 'blockquote']]) {
+    const routed = insertBlockFromQuery({
+      doc: createMarkdownDocument(text),
+      index: buildSyntaxIndex(text),
+      offset: text.indexOf('/math') + '/math'.length,
+      target: 'math'
+    })
+    assert.equal(routed.ok, false, `${label}: a non-top-level insert must refuse`)
+    assert.equal(routed.code, 'unsupported-structure')
+  }
 }
 
 console.log('ok - source kernel block-insert')

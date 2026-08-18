@@ -146,28 +146,27 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 //  2. `SLASH_LANGUAGE_NAMES` — the menu's own language table. An id shaped
 //     like `code:<x>` that this menu never generates is not routed (no string
 //     pattern-matching a language name into existence).
-//  3. `PREVIEW_SLASH_LANGUAGES` — a MENU-side hold, not a kernel one. As of
-//     2026-08-18 editor-kernel-projection-map.js pairs a ```mermaid /
-//     ```latex fence EDITABLY (see the ADR that replaced its
-//     `READONLY_CODE_LANGUAGES`), so these no longer create a block the user
-//     cannot type into. They are held back one more step purely so the
-//     "created block is typable in the real app" claim is proven by a UI
-//     fixture before the items ship — this set is the single place to empty
-//     when it is. It is declared HERE, not imported from the projection map:
-//     which languages render a preview is a display fact about the slash
-//     menu, and the byte-mapping module must not carry a display opinion.
+// (A third filter used to sit here — `READONLY_CODE_LANGUAGES`, removing
+// `/mermaid` because a preview-rendered block was paired `charMap: null` and
+// so could not be typed into. That pairing is gone as of 2026-08-18: see the
+// ADR that replaced that set in editor-kernel-projection-map.js. `/mermaid`
+// now routes like every other language, and the created block is typable —
+// proven in the real app by scripts/test-kernel-blockinsert-ui.mjs. There was
+// never a `/latex` item to unblock: `latex` is not in the menu's own
+// `LANGUAGES` table.)
 //
 // Absent on purpose, each for a probed reason recorded in
-// lib/source-kernel/commands/block-insert.js: `math` (block math pairs
-// read-only), `task` (bare `- [ ] ` is not a task item to remark-gfm at all),
-// `image` (an image-block is an atom — no caret home), `divider` (a thematic
-// break is a PM leaf with no text position), `text` (a fully-empty top-level
-// paragraph has no raw representation).
-const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code' })
-const PREVIEW_SLASH_LANGUAGES = new Set(['mermaid', 'latex'])
-const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES
-  .filter((name) => !PREVIEW_SLASH_LANGUAGES.has(name))
-  .map((name) => 'code:' + name))
+// lib/source-kernel/commands/block-insert.js: `task` (bare `- [ ] ` is not a
+// task item to remark-gfm at all), `image` (an image-block is an atom — no
+// caret home), `divider` (a thematic break is a PM leaf with no text
+// position), `text` (a fully-empty top-level paragraph has no raw
+// representation).
+//
+// `math` joined the routed set on 2026-08-18, once block math became editable
+// — before that the item would have created a block with no caret position
+// inside it for the formula the user was about to type.
+const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code', math: 'math' })
+const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES.map((name) => 'code:' + name))
 
 function kernelSlashInsertRoute(id) {
   const direct = KERNEL_INSERT_ITEMS[id]
@@ -380,17 +379,20 @@ export function createConfiguredCrepe({
       // without a route would dispatch legacy PM structural steps the gateway
       // then vetoes — a silently dead menu entry).
       //
-      // The block-INSERT items (`/table`, `/code`, `/js` …) are unblocked the
-      // same way again, through `kernelSlashInsertRoute` + `blockInsert` ->
-      // `runInsertBlockFromQuery`, which writes the new block's BYTES and
-      // strips the query in ONE kernel transaction. That resolver is the single
-      // source of truth for both halves here too.
+      // The block-INSERT items (`/table`, `/code`, `/js`, `/mermaid`, `/math`
+      // …) are unblocked the same way again, through `kernelSlashInsertRoute`
+      // + `blockInsert` -> `runInsertBlockFromQuery`, which writes the new
+      // block's BYTES and strips the query in ONE kernel transaction. That
+      // resolver is the single source of truth for both halves here too.
       //
-      // Everything still absent (task, divider, text, image, math, and the
-      // preview-only languages `/mermaid` and `/latex`) keeps the phase-1
+      // Everything still absent (task, divider, text, image) keeps the phase-1
       // refusal message. Each is refused for a probed reason recorded in
       // lib/source-kernel/commands/block-type.js and
-      // lib/source-kernel/commands/block-insert.js.
+      // lib/source-kernel/commands/block-insert.js. `/image` in particular is
+      // NOT an oversight: Crepe's `image-block` is a PM ATOM whose schema has
+      // no content expression at all, so there is no caret position inside the
+      // created card — its `src`/`alt`/`title` BYTES are already writable
+      // (commands/image-attrs.js), what is missing is a UI to edit them.
       //
       // THE DEGRADED-TAB HOLE (2026-08-17, "the slash items do nothing"):
       // `kernelMode` is the tab's SETTING, not the kernel's live authority.

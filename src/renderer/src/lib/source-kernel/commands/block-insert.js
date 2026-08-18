@@ -50,6 +50,12 @@
 //   * code   -> the offset right after the OPEN fence line's own ending,
 //     which is `code-map.js`'s `emptyCodeMap` anchor verbatim
 //     (`openLine.end + openLine.ending.length`).
+//   * math   -> the SAME anchor, for the same reason. An mdast `math` node is
+//     mapped by `buildCodeMap` exactly like a `code` node (both expose
+//     `.value` + `.position`, and neither has children), so the empty-content
+//     case lands on `emptyCodeMap` identically. The open "fence" here is the
+//     `$$` delimiter line, whose length happens to be 2 instead of 3+; the
+//     anchor arithmetic is written from the built bytes either way.
 // The controller then commits with `requireMap: true`, so the anchor is
 // additionally proven to resolve through the REBUILT projection map before
 // any byte, history entry or view change happens (editor-kernel-mode.js's
@@ -58,12 +64,6 @@
 // block-type route uses.
 //
 // DELIBERATELY ABSENT, each for a probed reason (see the task report):
-//   * math (`$$` block) — `editor-kernel-projection-map.js` pairs an mdast
-//     `math` block with a PM `code_block` and forces it NON-EDITABLE
-//     (`codeReadOnly`), so the created block would be read-only: there is no
-//     caret position inside it for the formula the user is about to type.
-//     Block-math EDITING is its own domain; until it exists, creating one
-//     through the kernel would hand the user a block they cannot fill.
 //   * task list (`- [ ] `) — probed directly against the kernel's processor:
 //     `- [ ] ` with NO content is not a task item to remark-gfm at all
 //     (`listItem.checked === null`, and `[ ]` comes back as ordinary
@@ -87,7 +87,12 @@ import { parseKernelMarkdown } from '../syntax-index.js'
 // rather than silently dropping it.
 export const BLOCK_INSERT_TARGETS = Object.freeze({
   table: Object.freeze({ language: false }),
-  code: Object.freeze({ language: true })
+  code: Object.freeze({ language: true }),
+  // `$$` block math (2026-08-18). Added once `editor-kernel-projection-map.js`
+  // started pairing an mdast `math` block editably: before that, creating one
+  // would have handed the user a block with no caret position inside it.
+  // A `$$` delimiter pair has no info string, so `language: false`.
+  math: Object.freeze({ language: false })
 })
 
 // A fence info string this command is willing to write verbatim. Deliberately
@@ -140,6 +145,20 @@ function buildBlock(target, language, ending) {
       anchor: open.length + ending.length
     }
   }
+  if (target === 'math') {
+    // THE EMPTY CONTENT LINE IS LOAD-BEARING here for exactly the reason it is
+    // for `code` above, and it was re-probed for this delimiter rather than
+    // assumed: `'$$' + LE + '$$'` puts `emptyCodeMap`'s anchor on the CLOSING
+    // `$$` line, so the first typed character would commit `'$$\nx$$'` — an
+    // unterminated block. One empty content line moves the anchor onto a line
+    // the user owns: `'$$\n\n$$'` still parses to `math` with `value === ''`,
+    // and typing there commits `'$$\nx\n$$'`, which reparses to exactly the
+    // block on screen.
+    return {
+      bytes: '$$' + ending + ending + '$$',
+      anchor: 2 + ending.length
+    }
+  }
   return null
 }
 
@@ -169,6 +188,12 @@ function shapeAgrees(target, node, text, language) {
     if (node.type !== 'code') return false
     if (node.value !== '') return false
     return (node.lang ?? '') === language
+  }
+  if (target === 'math') {
+    // No `lang` to check — a `$$` pair has no info string — and the empty
+    // value is what proves nothing after the delimiters was absorbed as
+    // content (the caller's span check covers the other direction).
+    return node.type === 'math' && node.value === ''
   }
   return false
 }
