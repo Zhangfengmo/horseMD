@@ -242,6 +242,19 @@ const FIXTURE_DOCS = {
   '- x\n': () => doc(bl(li(null, p(text('x')))), p()),
   '1. \n': () => doc(ol(li(null, p())), p()),
   '# /h2\n': () => doc(hd(1, text('/h2'))),
+  // Block-INSERT domain (Cases I1-I4): the slash query blocks and every
+  // document `runInsertBlockFromQuery` can produce from them. Same
+  // `withTrailingParagraph` convention as above — a document ending in a TABLE
+  // or a CODE BLOCK gains the trailing paragraph, which is also why the table
+  // fixtures carry an explicit `p()` (safeParse's own append is idempotent).
+  '/table\n': () => doc(p(text('/table'))),
+  '/js\n': () => doc(p(text('/js'))),
+  '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n': () =>
+    doc(tbl([[[''], [''], ['']], [[''], [''], ['']]]), p()),
+  '| x |  |  |\n| --- | --- | --- |\n|  |  |  |\n': () =>
+    doc(tbl([[['x'], [''], ['']], [[''], [''], ['']]]), p()),
+  '```javascript\n\n```\n': () => doc(cb('javascript'), p()),
+  '```javascript\nx\n```\n': () => doc(cb('javascript', 'x'), p()),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -2778,6 +2791,120 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.notifications.length, before,
     'a not-handled answer must not toast — the legacy command is about to run instead')
   assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'and must not touch the bytes')
+  for (const route of [{ target: 'table' }, { target: 'code', language: 'javascript' }]) {
+    assert.equal(h.controller.runInsertBlockFromQuery(route, h.view), false,
+      `a degraded tab must report '${route.target}' as NOT handled too`)
+  }
+  assert.equal(h.notifications.length, before, 'still no toast on the not-handled path')
+}
+
+// ===========================================================================
+// BLOCK INSERT (Cases I1-I4)
+// ===========================================================================
+// `runInsertBlockFromQuery` is reached exactly like `runBlockTypeFromQuery`
+// (the slash item's `run` is swapped for it, so NO PM structural transaction
+// is ever built) and carries the same contract. What is different — and what
+// these cases exist for — is that an inserted block is MULTI-LINE and has an
+// interior: the caret has to land somewhere the projection map can serve, and
+// the FOLLOW-UP KEYSTROKE is the real assertion in each case. A block the
+// kernel creates but cannot type into is worse than a blocked menu item.
+
+// Case I1: paragraph "/table" -> a GFM table skeleton whose first header cell
+// is immediately typable.
+{
+  const h = makeHarness('/table\n', doc(p(text('/table'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'table' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text,
+    '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n',
+    'the query bytes became the whole skeleton, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(tbl([[[''], [''], ['']], [[''], [''], ['']]]), p())),
+    'view reconciled to a 3-column table with one body row')
+  assert.deepEqual(h.changes.at(-1), ['|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n', false])
+
+  // The caret sits INSIDE the first header cell — table / header row / cell /
+  // paragraph = pos 4 in this schema — and the cell is served by the
+  // projection map (a cell pair with no charMap would be read-only).
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 4, 'caret is in the first header cell')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(caret), 2,
+    'and that PM position maps back to the cell content anchor')
+
+  // The follow-up keystroke: an ordinary plain-text commit into the cell.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the new table cell is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text,
+    '| x |  |  |\n| --- | --- | --- |\n|  |  |  |\n',
+    'the character lands inside the cell delimiters')
+
+  // Undo reverses the whole insert in ONE step, never leaving half a table.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/table\n', 'the original query bytes come back')
+}
+
+// Case I2: paragraph "/js" -> a fenced code block preset to that language,
+// with a typable content line. The blank content line is the point: a fence
+// written without one anchors the caret on its own CLOSING fence, and the
+// first keystroke would destroy it (pinned byte-for-byte in
+// scripts/test-source-kernel-blockinsert.mjs).
+{
+  const h = makeHarness('/js\n', doc(p(text('/js'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'code', language: 'javascript' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '```javascript\n\n```\n')
+  assert.ok(h.view.state.doc.eq(doc(cb('javascript'), p())), 'view reconciled to an empty JS block')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 1, 'caret sits inside the code block')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(caret), 14,
+    'and maps to the start of the block\'s own (empty) content line')
+
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the new code block is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '```javascript\nx\n```\n',
+    'the character becomes the block\'s content, and the closing fence survives')
+}
+
+// Case I3: a target this command does not own refuses fail-closed — nothing
+// committed, nothing reconciled, the CURRENT map untouched, and the user is
+// told. `math` is the live example: block math pairs with a PM `code_block`
+// that editor-kernel-projection-map.js forces NON-EDITABLE, so the created
+// block would have no caret position for the formula the user came to type.
+{
+  const h = makeHarness('/table\n', doc(p(text('/table'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  const before = h.notifications.length
+  for (const route of [{ target: 'math' }, { target: 'task' }, { target: 'divider' },
+    { target: 'image' }, { target: 'code', language: 'js x' }]) {
+    assert.equal(h.controller.runInsertBlockFromQuery(route, h.view), true,
+      'the slash item always swallows the invocation, success or refusal')
+    assert.equal(h.controller.kernel.doc.text, '/table\n', 'kernel bytes untouched')
+    assert.ok(h.view.state.doc.eq(doc(p(text('/table')))), 'view untouched')
+    assert.ok(h.controller.kernel.map, 'the current map is untouched too')
+  }
+  // One toast, not five: `notifyBlocked` collapses repeats of the same code
+  // inside its cooldown window. The point of the assertion is that the user is
+  // told at all — never that a refusal is silent.
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
+}
+
+// Case I4: the caret must be at the block's own end (shouldShow's
+// `atEndOfBlock` restated on the raw side) — a mid-block invocation would
+// replace content the user kept, so it refuses instead.
+{
+  const h = makeHarness('/table\n', doc(p(text('/table'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3)))
+  const before = h.notifications.length
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'table' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '/table\n', 'a mid-block caret writes nothing')
+  assert.ok(h.notifications.length > before)
 }
 
 // Case HID: heading ids are NOT content (2026-08-17 veto-divergence report).

@@ -46,6 +46,7 @@ import {
   routeStructuralKey,
   toggleBlockquote,
   setBlockTypeFromQuery,
+  insertBlockFromQuery,
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
@@ -1911,6 +1912,55 @@ export function createKernelMode({
     return true
   }
 
+  // Slash block-INSERT entry point (`/table`, `/code`, `/js` …). Same contract,
+  // same reachability and the same one-transaction rule as
+  // `runBlockTypeFromQuery` directly above: the query bytes are ALREADY in the
+  // source when the item runs, so stripping them and writing the new block
+  // must be ONE kernel transaction — a separate PM
+  // `clearTextInCurrentBlockCommand` dispatch first would leave the fully-empty
+  // top-level paragraph CommonMark cannot represent and the kernel's self-heal
+  // prunes (that ADR's probe transcript is above `runQuoteToggleFromQuery`).
+  //
+  // `route` is `{ target, language }`, resolved by the SAME function
+  // editor-crepe-setup.js derives `isBlocked` from, so an unblocked item always
+  // has a route and vice versa.
+  //
+  // `requireMap: true` is what makes an insert safe to offer at all. The
+  // command proves the BYTES (that they reparse to exactly the block it wrote,
+  // and that nothing around them changed meaning); this proves the PROJECTION —
+  // that the result document still maps AND that the caret anchor the command
+  // derived resolves through the rebuilt map. Both halves are pre-commit: a
+  // failure leaves bytes, history and view exactly as they were. A block the
+  // kernel creates but cannot map would be read-only, which is strictly worse
+  // than a refused menu item.
+  const runInsertBlockFromQuery = (route, viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    if (!kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const headRaw = kernel.map.pmPosToRaw(view.state.selection.head)
+    if (!Number.isFinite(headRaw)) {
+      notifyRefusal(KERNEL_CODES.UNMAPPED, view.state.selection.head)
+      return true
+    }
+    const routed = insertBlockFromQuery({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: headRaw,
+      target: route?.target,
+      language: route?.language
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    applyKernelTransaction(routed.transaction, view, { requireMap: true })
+    return true
+  }
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -2174,6 +2224,7 @@ export function createKernelMode({
     runQuoteToggle,
     runQuoteToggleFromQuery,
     runBlockTypeFromQuery,
+    runInsertBlockFromQuery,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's

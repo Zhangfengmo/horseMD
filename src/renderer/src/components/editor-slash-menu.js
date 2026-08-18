@@ -168,6 +168,14 @@ const LANGUAGES = [
   ['dockerfile', ['dockerfile']],
   ['graphql', ['graphql']]
 ]
+// The canonical names above, as the id suffix the language items actually
+// carry (`'code:' + name`). Exported so the kernel-mode router
+// (editor-crepe-setup.js `kernelSlashInsertRoute`) can decide whether an id it
+// sees is a REAL language item of this menu instead of pattern-matching the
+// string — an id shape that is not in this table can never be routed, so the
+// router and the menu cannot drift apart.
+export const SLASH_LANGUAGE_NAMES = Object.freeze(LANGUAGES.map(([name]) => name))
+
 // Language code-block items whose canonical name OR any alias starts with the
 // query (prefix match) — so "/j" → java/javascript/json, "/m" → mermaid/markdown,
 // "/c" → c/cpp/csharp/css, while a full "/java" still resolves exactly. Only
@@ -316,6 +324,15 @@ class SlashMenu {
     // enabled here without a route.
     this.blockTypeItems = options.blockTypeItems || null
     this.blockTypeRun = options.blockType || null
+    // Source-kernel mode (block-INSERT domain: /table, /code, /js …): the same
+    // swap again, but resolved through a FUNCTION rather than a static map,
+    // because the language items' ids are generated per keystroke
+    // (`'code:' + name`, see languageItemsFor) and a table could not list them.
+    // `insertRoute(id)` returns the kernel route (`{ target, language }`) or
+    // null; editor-crepe-setup.js derives `isBlocked` from the SAME call, so an
+    // item can never be enabled here without a route behind it.
+    this.insertRoute = options.insertRoute || null
+    this.insertRun = options.blockInsert || null
     this.items = buildItems(getT, '')
     this.filtered = []
     this.selectedIndex = 0
@@ -395,6 +412,22 @@ class SlashMenu {
           ? { ...it, run: (ctx, view) => { if (!runBlockType(items[it.id], view)) it.run(ctx, view) } }
           : it
       ))
+    }
+    if (this.insertRoute && this.insertRun) {
+      // Block-INSERT items (/table, /code, /js …). Same no-`clearThen()`
+      // contract and same legacy fallback as the two swaps above:
+      // `runInsertBlockFromQuery` owns the query strip AND the new block's
+      // bytes as ONE kernel transaction, and returns false ONLY when the
+      // kernel is not the live authority for this tab (degraded/disposed), in
+      // which case the item's own legacy command runs instead.
+      const resolveRoute = this.insertRoute
+      const runInsert = this.insertRun
+      all = all.map((it) => {
+        const route = resolveRoute(it.id)
+        return route
+          ? { ...it, run: (ctx, view) => { if (!runInsert(route, view)) it.run(ctx, view) } }
+          : it
+      })
     }
     const t = this.getT
     if (q) {

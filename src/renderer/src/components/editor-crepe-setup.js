@@ -14,7 +14,8 @@ import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirro
 import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
 import { createKernelCmExtensions } from './editor-kernel-cm-bridge.js'
-import { BLOCK_TYPE_MARKERS } from '../lib/source-kernel/index.js'
+import { BLOCK_TYPE_MARKERS, BLOCK_INSERT_TARGETS } from '../lib/source-kernel/index.js'
+import { READONLY_CODE_LANGUAGES } from './editor-kernel-projection-map.js'
 import {
   bulletListStyleSchema,
   listStyleStringifyHandler,
@@ -37,7 +38,7 @@ import {
 import { listBackspaceKeymap } from './editor-list-backspace.js'
 import { mathPreviewPlugin } from './editor-math-preview.js'
 import { createInlineMathEditingPlugin } from './editor-inline-math.js'
-import { createSlashPlugin, disableCrepeSlash } from './editor-slash-menu.js'
+import { createSlashPlugin, disableCrepeSlash, SLASH_LANGUAGE_NAMES } from './editor-slash-menu.js'
 import { toolbarAutohidePlugin } from './editor-toolbar-autohide.js'
 import { createMathBlockPromotionPlugin } from './editor-math.js'
 import {
@@ -97,6 +98,46 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
     ordered: 'ordered'
   }).filter(([, target]) => Object.hasOwn(BLOCK_TYPE_MARKERS, target))
 ))
+
+// Slash-item id -> source-kernel block-INSERT route (block-insert domain: the
+// menu items that create a NEW block instead of converting this one). Same
+// single-source-of-truth property as the block-type table above — `isBlocked`
+// and the `run` swap both go through THIS function, so an item can never be
+// enabled without a route — but expressed as a function rather than a table,
+// because the language items' ids are generated per keystroke
+// (`'code:javascript'`, see editor-slash-menu.js's `languageItemsFor`).
+//
+// Three filters, each closing a way the menu and the kernel could drift:
+//  1. `BLOCK_INSERT_TARGETS` — the kernel's own target list. A target it stops
+//     supporting drops out of the menu automatically.
+//  2. `SLASH_LANGUAGE_NAMES` — the menu's own language table. An id shaped
+//     like `code:<x>` that this menu never generates is not routed (no string
+//     pattern-matching a language name into existence).
+//  3. `READONLY_CODE_LANGUAGES` — mermaid/latex are rendered by Crepe as a
+//     PREVIEW, and editor-kernel-projection-map.js pairs such a block with
+//     `charMap: null`, i.e. read-only. Creating one through the kernel would
+//     produce a block the user cannot type into, so `/mermaid` keeps the
+//     phase-1 refusal message rather than becoming a trap. Imported from that
+//     module (the actual authority) instead of restating the list here.
+//
+// Absent on purpose, each for a probed reason recorded in
+// lib/source-kernel/commands/block-insert.js: `math` (block math pairs
+// read-only), `task` (bare `- [ ] ` is not a task item to remark-gfm at all),
+// `image` (an image-block is an atom — no caret home), `divider` (a thematic
+// break is a PM leaf with no text position), `text` (a fully-empty top-level
+// paragraph has no raw representation).
+const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code' })
+const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES
+  .filter((name) => !READONLY_CODE_LANGUAGES.has(name))
+  .map((name) => 'code:' + name))
+
+function kernelSlashInsertRoute(id) {
+  const direct = KERNEL_INSERT_ITEMS[id]
+  if (direct) return Object.hasOwn(BLOCK_INSERT_TARGETS, direct) ? { target: direct } : null
+  if (!KERNEL_LANGUAGE_IDS.has(id)) return null
+  if (!Object.hasOwn(BLOCK_INSERT_TARGETS, 'code')) return null
+  return { target: 'code', language: id.slice('code:'.length) }
+}
 
 export function applyImageText(ctx, tt) {
   try {
@@ -301,9 +342,17 @@ export function createConfiguredCrepe({
       // without a route would dispatch legacy PM structural steps the gateway
       // then vetoes — a silently dead menu entry).
       //
-      // Everything still absent from that table (task, divider, text, image,
-      // code, table, math) keeps the phase-1 refusal message. Each is refused
-      // for a probed reason recorded in lib/source-kernel/commands/block-type.js.
+      // The block-INSERT items (`/table`, `/code`, `/js` …) are unblocked the
+      // same way again, through `kernelSlashInsertRoute` + `blockInsert` ->
+      // `runInsertBlockFromQuery`, which writes the new block's BYTES and
+      // strips the query in ONE kernel transaction. That resolver is the single
+      // source of truth for both halves here too.
+      //
+      // Everything still absent (task, divider, text, image, math, and the
+      // preview-only languages `/mermaid` and `/latex`) keeps the phase-1
+      // refusal message. Each is refused for a probed reason recorded in
+      // lib/source-kernel/commands/block-type.js and
+      // lib/source-kernel/commands/block-insert.js.
       //
       // THE DEGRADED-TAB HOLE (2026-08-17, "the slash items do nothing"):
       // `kernelMode` is the tab's SETTING, not the kernel's live authority.
@@ -326,12 +375,15 @@ export function createConfiguredCrepe({
         ? {
             isBlocked: (id) => {
               if (!kernelPlugins?.isActive?.()) return null
-              return id === 'quote' || KERNEL_BLOCK_TYPE_ITEMS[id] ? null : 'kernelMode.unsupported'
+              const routed = id === 'quote' || KERNEL_BLOCK_TYPE_ITEMS[id] || kernelSlashInsertRoute(id)
+              return routed ? null : 'kernelMode.unsupported'
             },
             notify,
             quoteToggle: (view) => kernelPlugins?.runQuoteToggleFromQuery?.(view),
             blockTypeItems: KERNEL_BLOCK_TYPE_ITEMS,
-            blockType: (target, view) => kernelPlugins?.runBlockTypeFromQuery?.(target, view)
+            blockType: (target, view) => kernelPlugins?.runBlockTypeFromQuery?.(target, view),
+            insertRoute: kernelSlashInsertRoute,
+            blockInsert: (route, view) => kernelPlugins?.runInsertBlockFromQuery?.(route, view)
           }
         : undefined
     )
