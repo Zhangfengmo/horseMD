@@ -154,7 +154,16 @@ const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
 // A6/A8, which can assert the exact removed bytes for every atom kind — this
 // session deliberately keeps its own atom step a REFUSAL so the snapshot chain
 // below still carries '$x^2$'.)
-const S8b = S8.replace('行内公式 $x^2$ 结束。', '行内公式 $x^2$ 结束。W')
+// BLOCK MATH IS EDITABLE since 2026-08-18 (editor-kernel-projection-map.js's
+// "READONLY_CODE_LANGUAGES IS GONE" ADR: mdast `math` pairs with the PM
+// `code_block(LaTeX)` and `buildCodeMap` maps it like any other fence). Step 9
+// used to assert the opposite — it was written when block math was declared
+// read-only and was not re-run when that changed. It now types ONE character
+// into the formula's CodeMirror and requires the byte commit, which is a
+// STRONGER statement than the old refusal: only a genuinely mapped block can
+// produce it.
+const S8m = S8.replace('E=mc^2', 'E=mc^2X')
+const S8b = S8m.replace('行内公式 $x^2$ 结束。', '行内公式 $x^2$ 结束。W')
 const S9 = S8b.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
 const S10 = S9.replace('行内公式 $x^2$ 结束。W\n', '行内公式 $x^2$ 结束。W\n\n\n')
 const S11 = S10.replace('片段 <span>内联</span> 结束。\n', '片段 <span>内联</span> 结束。\n\n\n')
@@ -877,12 +886,13 @@ async function run() {
       'the repair reconcile must have refreshed the parse-derived caption to match the new alt')
 
     // ============================================================
-    // 9) MATH. Block math PAIRS but stays READ-ONLY (charMap null) — it must
-    //    refuse WITHOUT writing bytes. The paragraph holding INLINE math is
-    //    now TYPABLE around the formula (P6 Task 1 relaxed
-    //    `textblockProfile` to admit inline atoms), so typing there is a real
-    //    byte commit; a range that leaves the paragraph is still refused with
-    //    zero bytes. Neither refusal may raise a dialog.
+    // 9) MATH. Block math is MAPPED AND EDITABLE since 2026-08-18 (see the
+    //    S8m comment above): typing in its CodeMirror must commit byte-exact.
+    //    The paragraph holding INLINE math is typable around the formula
+    //    (P6 Task 1 relaxed `textblockProfile` to admit inline atoms), so
+    //    typing there is a real byte commit too; a range that LEAVES the
+    //    paragraph is still refused with zero bytes, and no dialog may appear
+    //    on either path.
     // ============================================================
     await revealMathCodeMirror(evaluate, send)
     await clickMathCmLineEnd(evaluate, send)
@@ -890,11 +900,11 @@ async function run() {
       "the click did not focus the block math's CodeMirror editor (positive control)")
     const mathBefore = await cmContent(evaluate)
     assert.equal(mathBefore, 'E=mc^2', 'the block math CodeMirror must hold the authored formula (positive control)')
-    await typeTextLikeUser(send, 'MATHBLOCKED', { delayMs: delay })
-    await sleep(400)
-    assert.equal(await cmContent(evaluate), mathBefore,
-      'typing into the block math changed its CodeMirror content — it is declared read-only in stage 3')
-    await assertSource(evaluate, S8, 'the block-math edit attempt must not change a single byte')
+    await typeTextLikeUser(send, 'X', { delayMs: delay })
+    await waitFor(async () => (await cmContent(evaluate)) === 'E=mc^2X',
+      'the character typed into the block math never reached its CodeMirror content')
+    await assertSource(evaluate, S8m,
+      'typing in block math must commit byte-exact — the block really is mapped')
 
     await clickBlockEndByPrefix(evaluate, send, '行内公式')
     assert.equal(await selectionBlockText(evaluate), '行内公式  结束。',
@@ -1133,7 +1143,7 @@ async function run() {
       'the compact table must reach disk with its structure intact')
     await assertNoFatalDiagnostics(evaluate, 'compact-table session')
 
-    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the math read-only refusals, the link-boundary bold refusal, save, cold reopen, the CRLF variant and the compact-table backslash refusal all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the block-math byte commit, the inline-math cross-block refusal, the link-boundary bold refusal, save, cold reopen, the CRLF variant and the compact-table backslash refusal all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
