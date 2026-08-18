@@ -4,8 +4,10 @@
 // top-level fence multi-line editing (type/Enter/Backspace, both within a
 // line and ACROSS a line boundary), quoted-fence per-line prefix expansion
 // on both insert AND delete, the language picker's AttrStep rewrite,
-// Mod-Enter exit, CM-focused kernel undo, the per-block dynamic gate
-// refusing a mermaid block, and a save + cold reopen.
+// Mod-Enter exit, CM-focused kernel undo, editing a PREVIEW-BACKED mermaid
+// fence through its Edit toggle (2026-08-18: step 7 used to assert the
+// per-block gate REFUSED that block; see its own comment), and a save +
+// cold reopen.
 //
 // The delete path matters as its own case (review round 1 finding): a
 // live DOM Backspace routes through CodeMirror's own changeset ->
@@ -283,9 +285,20 @@ const AFTER_EXIT_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
 // right before the mermaid-blocked probe (step 7) below.
 const withLang2 = (template, lang) => template.split('__LANG2__').join(lang)
 
+// Step 7 (REWRITTEN 2026-08-18) types into the mermaid fence itself, which
+// used to be refused. See the ADR that replaced `READONLY_CODE_LANGUAGES` in
+// editor-kernel-projection-map.js: the diagram preview is a SIBLING of the
+// always-mounted CodeMirror host, so the fence's PM text is its source and
+// `buildCodeMap` maps it exactly like any other fence. The typed run avoids
+// brackets/quotes (closeBrackets) and adds no second diagram header.
+const AFTER_MERMAID_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
+  '```mermaid\ngraph TD; A-->B;\n```\n',
+  '```mermaid\ngraph TD; A-->B;MERMAIDEDIT\n```\n'
+)
+
 const AFTER_MERMAID_SWITCH_TYPE_TPL = AFTER_LANG_SWITCH_TPL.replace(
   '```mermaid\ngraph TD; A-->B;\n```\n',
-  '```__LANG2__\ngraph TD; A-->B;MERMAIDNOWJS\n```\n'
+  '```__LANG2__\ngraph TD; A-->B;MERMAIDEDITMERMAIDNOWJS\n```\n'
 )
 
 async function waitFor(check, message, attempts = 80) {
@@ -704,32 +717,52 @@ async function run() {
     await sleep(200)
 
     // ============================================================
-    // 7) mermaid block: per-block gate refuses an edit attempt (no bytes,
-    //    no CM content change) even after the Edit toggle reveals CM.
+    // 7) mermaid block: the preview-backed fence is EDITABLE (2026-08-18).
+    //
+    //    This step used to assert the opposite — that the per-block gate
+    //    refused every keystroke here. The refusal came from
+    //    `READONLY_CODE_LANGUAGES`, which was a POLICY gate justified by "a
+    //    previewed block's visible text is not its source". That is true of
+    //    the diagram PANEL and false of the EDITING SURFACE: the vendored
+    //    CodeMirrorBlock mounts its CodeMirror UNCONDITIONALLY and
+    //    `previewOnlyMode` only toggles a `hidden` class on the host, so the
+    //    fence's PM text is its source, byte for byte, in both display
+    //    states. See the ADR that replaced that set in
+    //    editor-kernel-projection-map.js.
+    //
+    //    This is the one thing a headless test cannot show, and therefore
+    //    why this step exists in a UI fixture: the preview/edit state lives
+    //    in the DOM. Proven here: the Edit toggle reveals CM, the caret
+    //    lands where clicked, the typed run appears at THAT caret (not at
+    //    the block start, not past the closing fence), and the kernel's
+    //    source bytes carry it inside the fence body.
     // ============================================================
     await ensureCmVisible(evaluate, send, 'window.__hmMermaidBlock')
     await clickCmLineEnd(evaluate, send, 'window.__hmMermaidBlock', { last: true })
     // Positive control (mirrors test-kernel-nodeview-ui.mjs's read-only/
     // undo-bridge probe): prove the click actually focused the mermaid
-    // CodeMirror editor BEFORE asserting typing had no effect — otherwise a
-    // missed click would pass this step vacuously (nothing focused, nothing
-    // typed anywhere, "unchanged" trivially true).
+    // CodeMirror editor, so a missed click can never pass this step
+    // vacuously.
     const mermaidCmFocused = await cmFocused(evaluate)
     assert.ok(mermaidCmFocused.includes('cm-content'),
       `click did not focus the mermaid CodeMirror editor (activeElement: ${mermaidCmFocused})`)
-    const mermaidBefore = await cmContent(evaluate, 'window.__hmMermaidBlock')
-    await typeTextLikeUser(send, 'MERMAIDBLOCKED', { delayMs: delay })
+    await typeTextLikeUser(send, 'MERMAIDEDIT', { delayMs: delay })
+    await waitFor(async () => (await cmContent(evaluate, 'window.__hmMermaidBlock') || '').includes('MERMAIDEDIT'),
+      'MERMAIDEDIT never landed in the mermaid CodeMirror editor — a preview-backed fence must be editable')
+    // The typed run must sit at the CARET (end of the diagram line), not at
+    // the block's start: a mapping that resolved to the wrong end would still
+    // "contain" the text above.
+    assert.equal(await cmContent(evaluate, 'window.__hmMermaidBlock'), 'graph TD; A-->B;MERMAIDEDIT',
+      'the typed run must land at the caret, at the end of the diagram line')
     await sleep(300)
-    const mermaidAfter = await cmContent(evaluate, 'window.__hmMermaidBlock')
-    assert.equal(mermaidAfter, mermaidBefore,
-      'typing into the mermaid code block changed its CodeMirror content — the per-block gate must refuse it')
 
     await toggleSourceMode(evaluate)
-    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the mermaid edit-attempt probe')
-    assert.equal(shown, withLang(AFTER_LANG_SWITCH_TPL, language), 'the mermaid edit attempt must not have changed the kernel document bytes')
-    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the mermaid edit-attempt probe')
+    shown = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the mermaid edit')
+    assert.equal(shown, withLang(AFTER_MERMAID_TYPE_TPL, language),
+      'the mermaid edit must commit inside the fence body, byte-exact — fences and every other block untouched')
+    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the mermaid edit')
     await toggleSourceMode(evaluate)
-    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the mermaid-blocked verification')
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'rich view did not return after the mermaid edit verification')
     await sleep(200)
 
     // ============================================================
@@ -740,10 +773,10 @@ async function run() {
     // ============================================================
     const mermaidLang = await switchBlockLanguage(evaluate, send, 'window.__hmMermaidBlock', 'javascript')
     await sleep(200)
-    // No `ensureCmVisible` call here: step 7's mermaid-blocked probe (just
-    // above) already clicked the Edit toggle to reveal this block's
-    // CodeMirror editor, and that reveal persists across the language
-    // switch — clicking the toggle AGAIN here would just hide it back.
+    // No `ensureCmVisible` call here: step 7 (just above) already clicked the
+    // Edit toggle to reveal this block's CodeMirror editor, and that reveal
+    // persists across the language switch — clicking the toggle AGAIN here
+    // would just hide it back.
     await clickCmLineEnd(evaluate, send, 'window.__hmMermaidBlock', { last: true })
     await typeTextLikeUser(send, 'MERMAIDNOWJS', { delayMs: delay })
     await waitFor(async () => (await cmContent(evaluate, 'window.__hmMermaidBlock') || '').includes('MERMAIDNOWJS'),
@@ -779,7 +812,7 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode code-block domain UI: js multi-line edit + Backspace (within-line and cross-line-join), quoted py per-line prefix expansion on insert AND delete, language picker rewrite (both directions, including mermaid -> js switch-then-type), Mod-Enter exit, CM-focused undo groups, mermaid gate refusal (with a focus positive-control), save and cold reopen all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode code-block domain UI: js multi-line edit + Backspace (within-line and cross-line-join), quoted py per-line prefix expansion on insert AND delete, language picker rewrite (both directions, including mermaid -> js switch-then-type), Mod-Enter exit, CM-focused undo groups, mermaid preview-backed fence editing (with a focus positive-control), save and cold reopen all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

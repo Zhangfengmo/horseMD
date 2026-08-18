@@ -643,19 +643,24 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
 
 // Case 26 (final-review finding, 2026-08-16 — the from-readonly refusal was
 // LIFTED, making the language switch bidirectional): a code_block whose
-// CURRENT language is one Crepe renders as a preview (READONLY_CODE_LANGUAGES)
-// now classifies and COMMITS a switch out of it, exactly like any other
-// language switch. `commitCodeLanguage` resolves its anchor via the pair's
-// `mdBlock` fence-start fallback (no charMap needed) — see that function's
-// own comment. Case-insensitive on the CURRENT language, matching
-// editor-kernel-projection-map.js's own guard.
+// CURRENT language is one Crepe renders as a preview classifies and COMMITS
+// a switch out of it, exactly like any other language switch.
+// Case-insensitive on the CURRENT language.
+//
+// UPDATED 2026-08-18: the sanity line below used to assert the mermaid pair
+// had NO charMap. Preview-rendered languages are now paired editably (see the
+// ADR that replaced `READONLY_CODE_LANGUAGES` in
+// editor-kernel-projection-map.js), so the pair carries a real charMap — which
+// makes this case a stronger test, not a weaker one: `commitCodeLanguage` must
+// rewrite the fence's INFO STRING and leave the mapped CONTENT byte-identical.
 {
   const md = '```mermaid\ngraph TD\n```\n'
   const d = doc(cb('mermaid', 'graph TD'))
   const state = EditorState.create({ schema, doc: d })
   const map = buildProjectionMap(md, state.doc)
   assert.ok(map, 'mermaid-only fence must still structurally map')
-  assert.equal(map.blockPairs[0].charMap, null, 'sanity: the mermaid pair itself has no charMap')
+  assert.ok(map.blockPairs[0].charMap, 'sanity: the mermaid pair is editable')
+  assert.equal(map.blockPairs[0].charMap.visibleLength, 'graph TD'.length)
 
   const tr = state.tr.setNodeAttribute(0, 'language', 'js')
   const classified = classifyTransactions([tr], state)

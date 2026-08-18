@@ -15,7 +15,6 @@ import remarkFrontmatter from 'remark-frontmatter'
 import { tabAtCursorKeymap } from './editor-codeblock-tab.js'
 import { createKernelCmExtensions } from './editor-kernel-cm-bridge.js'
 import { BLOCK_TYPE_MARKERS, BLOCK_INSERT_TARGETS } from '../lib/source-kernel/index.js'
-import { READONLY_CODE_LANGUAGES } from './editor-kernel-projection-map.js'
 import {
   bulletListStyleSchema,
   listStyleStringifyHandler,
@@ -113,12 +112,16 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 //  2. `SLASH_LANGUAGE_NAMES` — the menu's own language table. An id shaped
 //     like `code:<x>` that this menu never generates is not routed (no string
 //     pattern-matching a language name into existence).
-//  3. `READONLY_CODE_LANGUAGES` — mermaid/latex are rendered by Crepe as a
-//     PREVIEW, and editor-kernel-projection-map.js pairs such a block with
-//     `charMap: null`, i.e. read-only. Creating one through the kernel would
-//     produce a block the user cannot type into, so `/mermaid` keeps the
-//     phase-1 refusal message rather than becoming a trap. Imported from that
-//     module (the actual authority) instead of restating the list here.
+//  3. `PREVIEW_SLASH_LANGUAGES` — a MENU-side hold, not a kernel one. As of
+//     2026-08-18 editor-kernel-projection-map.js pairs a ```mermaid /
+//     ```latex fence EDITABLY (see the ADR that replaced its
+//     `READONLY_CODE_LANGUAGES`), so these no longer create a block the user
+//     cannot type into. They are held back one more step purely so the
+//     "created block is typable in the real app" claim is proven by a UI
+//     fixture before the items ship — this set is the single place to empty
+//     when it is. It is declared HERE, not imported from the projection map:
+//     which languages render a preview is a display fact about the slash
+//     menu, and the byte-mapping module must not carry a display opinion.
 //
 // Absent on purpose, each for a probed reason recorded in
 // lib/source-kernel/commands/block-insert.js: `math` (block math pairs
@@ -127,8 +130,9 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // break is a PM leaf with no text position), `text` (a fully-empty top-level
 // paragraph has no raw representation).
 const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code' })
+const PREVIEW_SLASH_LANGUAGES = new Set(['mermaid', 'latex'])
 const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES
-  .filter((name) => !READONLY_CODE_LANGUAGES.has(name))
+  .filter((name) => !PREVIEW_SLASH_LANGUAGES.has(name))
   .map((name) => 'code:' + name))
 
 function kernelSlashInsertRoute(id) {
@@ -455,7 +459,17 @@ export function createConfiguredCrepe({
         copyText: (text, doneKey, doneFallback) =>
           copyText(text, getT(doneKey) || doneFallback)
       }),
-      createMermaidSplitPlugin(),
+      // Source-kernel mode (2026-08-18): NOT registered. This plugin's
+      // appendTransaction replaces one mermaid `code_block` with N, i.e. its
+      // slice carries NODE content — a shape the gateway can only classify
+      // `blocked`, which vetoes the WHOLE batch including the user's own
+      // keystroke. And it rescans the ENTIRE document on every change, so a
+      // single already-mashed 2-diagram block turned every keystroke anywhere
+      // in the document into a refusal toast. Since mermaid fences became
+      // editable in kernel mode that path is reachable by ordinary typing, so
+      // the plugin is removed rather than left to lose every race it enters.
+      // Legacy mode keeps it exactly as before.
+      ...(kernelMode ? [] : [createMermaidSplitPlugin()]),
       createSubstitutionLiveReconstructPlugin(),
       createMathBlockPromotionPlugin()
     ])

@@ -56,9 +56,14 @@
 //   4. `createMermaidSplitPlugin` (editor-mermaid.js) splitting one mermaid
 //      `code_block` into N (PM gains N-1 NON-EMPTY blocks) -> the surplus
 //      guard refuses (a non-empty code_block never qualifies as the trailing
-//      placeholder). In kernel mode it never even lands: its slice carries
-//      node content, so the gateway classifies the appendTransaction as
-//      `blocked` and vetoes it.
+//      placeholder). RETIRED in kernel mode (2026-08-18): the plugin is no
+//      longer registered at all when `kernelMode` is on
+//      (editor-crepe-setup.js), because its appendTransaction carries NODE
+//      content and could therefore only ever be classified `blocked` — which
+//      vetoes the WHOLE batch, the user's own keystroke included — while
+//      rescanning the entire document on every change, so ONE 2-diagram
+//      block refused every keystroke anywhere in the document. Legacy mode
+//      keeps it unchanged.
 //   5. `createMathBlockPromotionPlugin` (editor-math.js) replacing typed
 //      `$$x$$` with a `code_block` (PM gains blocks) -> same two layers as 4.
 //   6. `remark-frontmatter` — FIXED in P6 Task 2, recorded here because the
@@ -93,9 +98,10 @@
 // decode contract) and `table` (treated as one opaque leaf — see
 // OPAQUE_TYPES below). `code_block` (Plan 3 Task 3) gets a real,
 // prefix-aware charMap via `buildCodeMap` — EXCEPT when it pairs with mdast
-// `math` (TeX source, not the char-per-char prose/code contract) or its own
-// `attrs.language` is one Crepe renders as a preview-only diagram instead of
-// literal text (mermaid/latex) — see READONLY_CODE_LANGUAGES below.
+// `math` (a `$$` delimiter pair is not a GFM fence; see the `codeReadOnly`
+// branch). A language Crepe renders as a PREVIEW (mermaid/latex) is NOT an
+// exception any more — see the ADR that replaced `READONLY_CODE_LANGUAGES`
+// below for why a preview is outside this module's subject entirely.
 // See docs referenced by Task 1 brief:
 // scripts/test-editor-source-map.mjs for the hand-built-PM-schema precedent
 // and src/renderer/src/lib/source-kernel/character-map.js for the unit
@@ -187,28 +193,90 @@ const MD_BLOCK_TYPES = new Set(Object.values(PM_TO_MD).flat())
 // "proof" of alignment). Plan 3 Task 3 gives it a real mapper instead
 // (`buildCodeMap`, prefix-aware for blockquote/list-indented fences) —
 // see the `pmType === 'code_block'` branch below, which still forces
-// non-editable for the two cases `buildCodeMap` genuinely can't/shouldn't
-// cover: pairing with mdast `math`, and Crepe's preview-only languages.
+// non-editable for the one case whose SHAPE the code-block domain's
+// commands cannot spell: pairing with mdast `math`.
 const NON_EDITABLE_LEAF_TYPES = new Set(['html'])
 
-// `code_block` languages Crepe renders as a diagram/formula PREVIEW instead
-// of literal text (editor-crepe-setup.js's codeBlockConfig.renderPreview) —
-// their PM textContent is the SOURCE the preview is generated from, but
-// editing that source through the kernel's character-level machinery isn't
-// wired up (a later Plan 3 task). Matched case-insensitively against the PM
-// node's own `attrs.language` (Milkdown's codeBlockSchema attr).
-// Exported for reuse, but note (correction, Plan 5 Task 1 — the previous
-// wording here was stale): NOTHING outside this module currently reads it.
-// editor-kernel-gateway.js used to refuse a language switch OUT of
-// mermaid/latex, but that guard was lifted (final-review fix, 2026-08-16:
-// `commitCodeLanguage` resolves such a switch via the pair's `mdBlock` fence
-// start when `charMap` is null) and the gateway no longer imports this set —
-// only a stale comment there still names it. Once a
-// switch commits, `editor-kernel-mode.js` unconditionally rebinds the
-// projection map, so a block newly switched AWAY from one of these
-// languages gets a real `charMap` (editable) and a block newly switched
-// INTO one loses it (preview-only) — always freshly evaluated, never stale.
-export const READONLY_CODE_LANGUAGES = new Set(['mermaid', 'latex'])
+// ==========================================================================
+// ADR (2026-08-18) — `READONLY_CODE_LANGUAGES` IS GONE. READ THIS BEFORE
+// REINTRODUCING A LANGUAGE-KEYED EDITABILITY GATE.
+// ==========================================================================
+// This module used to hold `READONLY_CODE_LANGUAGES = new Set(['mermaid',
+// 'latex'])` and force `charMap: null` for any `code_block` whose
+// `attrs.language` matched, on the stated grounds that "Crepe renders these
+// as a preview, so the block's text is not an ordinary editing surface" —
+// explicitly "regardless of what buildCodeMap could prove". That was a
+// POLICY gate, not a mathematical one, and the premise it rested on is half
+// true in a way that matters:
+//
+//   TRUE  of the PREVIEW PANEL: a rendered Mermaid diagram / KaTeX formula
+//         is not the block's source text.
+//   FALSE of the EDITING SURFACE, which is what a charMap actually
+//         addresses.
+//
+// The replacement condition, proven rather than assumed (each half probed
+// against the vendored sources on 2026-08-18):
+//
+//  P1. THIS MODULE'S PROOFS NEVER READ THE DOM. All three are statements
+//      about the raw string, the kernel's own mdast, and the ProseMirror
+//      NODE: `buildCodeMap` matches every unit byte-for-byte against
+//      `mdast.value`; `pm.node.content.size === charMap.visibleLength`
+//      compares two independently derived structural counts; and
+//      `blockEndpointsAgree` compares `pmNode.textContent`. The preview is a
+//      Vue-rendered SIBLING element inside the nodeview and contributes
+//      nothing to any of them. So a preview can neither strengthen nor
+//      weaken this module's evidence — it is simply outside its subject.
+//
+//  P2. THE PM CONTENT IS IDENTICAL WITH OR WITHOUT A PREVIEW. Milkdown's
+//      `code_block` parseMarkdown runner is `state.addText(node.value)`,
+//      verbatim, for every language. A ```mermaid block's PM text IS its
+//      fence content, exactly like a ```js block's.
+//
+//  P3. THE CODEMIRROR EDITOR IS ALWAYS MOUNTED — the load-bearing fact, and
+//      the one that makes a "state-dependent charMap" unnecessary rather
+//      than merely awkward. In the vendored component
+//      (node_modules/@milkdown/components/src/code-block/view/components/
+//      code-block.tsx) `onMounted` appends `props.codemirror.dom` to the
+//      host UNCONDITIONALLY; `previewOnlyMode` is a Vue ref that only adds a
+//      `hidden` CSS CLASS to that same host div. There is no conditional
+//      mount, no unmount, and no alternate editing surface. A previewed
+//      block is therefore STRUCTURALLY IDENTICAL to an ordinary fenced block
+//      on both the PM side and the CM side; only its VISIBILITY differs.
+//
+//  P4. SO THE GATE MUST NOT BE STATE-DEPENDENT. Keying editability off the
+//      preview/edit display state would make a BYTE contract depend on a CSS
+//      class, and would reintroduce exactly the staleness window
+//      editor-kernel-cm-bridge.js's header argues against for `readOnly`
+//      facets. The honest condition is the per-block one this file already
+//      proves: `buildCodeMap` + the size check + the endpoint check.
+//
+//  P5. THE PREVIEWED STATE IS UNREACHABLE, NOT UNSAFE. While the preview is
+//      showing, the CM host carries `hidden`, so nothing can focus it and no
+//      input event can originate there. When the user clicks the toolbar's
+//      Edit toggle, the SAME always-mounted CM becomes visible and every
+//      input funnels through editor-kernel-cm-bridge.js's per-event
+//      `isEditable(cmView)` gate -> `codePairFromCm` -> `pair.charMap`,
+//      i.e. the freshly rebuilt map. (app.css additionally keeps a FOCUSED
+//      host visible — `.codemirror-host.hidden:focus-within { display:
+//      block }` — so a block being typed into does not vanish mid-edit when
+//      its first character makes the preview appear.)
+//
+// WHAT DID NOT CHANGE. mdast `math` (`$$..$$`) is still decided separately,
+// on its own evidence, by the `md.type === 'math'` branch below — lifting a
+// language name never silently lifted a different block SHAPE. And a
+// `code_block` this module cannot prove (buildCodeMap null, size
+// disagreement, endpoint disagreement) still degrades to `charMap: null`
+// per-block, exactly as before.
+//
+// One consequence worth naming: `createMermaidSplitPlugin` (editor-mermaid.js)
+// is no longer registered in kernel mode at all (editor-crepe-setup.js). Its
+// appendTransaction carries NODE content, so in kernel mode it could only
+// ever produce a `blocked` classification that vetoes the WHOLE batch —
+// including the user's own keystroke — and it rescans the entire document on
+// every change, so a single 2-diagram block made every keystroke ANYWHERE in
+// the document refuse. See case 4 in the INVARIANT block at the top of this
+// file, which that de-registration retires.
+// ==========================================================================
 
 // PM/mdast types whose subtree is intentionally NOT walked into by the
 // DOCUMENT-level zip: `table` occupies exactly ONE slot on both sides. A PM
@@ -671,38 +739,26 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     let virtual = false
     if (editable && pmType === 'code_block') {
       // mdast `math` shares the PM `code_block` type but stays NON-EDITABLE
-      // (Plan 5 Task 1 keeps this deliberately; the task's goal was healing
-      // the whole-document degradation, not editing TeX). Two independent
-      // reasons, either of which alone is sufficient:
-      //  1. the PM node's `attrs.language` for a `$$..$$` block is always
-      //     'LaTeX' (Crepe's remarkMathBlock sets it), which is already in
-      //     READONLY_CODE_LANGUAGES — Crepe renders these as a preview, so
-      //     the block's text is not an ordinary editing surface. Lifting the
-      //     math case alone would change nothing without ALSO removing
-      //     'latex' from that set, which would equally unblock a literal
-      //     ```latex fence — a different domain (preview-only code blocks),
-      //     decided by the same set on THIS module's own authority. (The
-      //     gateway does NOT consult this set: its `extractLanguageStep`
-      //     refusal was lifted 2026-08-16 and only a stale comment there
-      //     still names it — verified, there is no import.)
-      //  2. `commitCodeLanguage` (commands/code-language.js) resolves a
-      //     language switch through the block's FENCE bytes and refuses any
-      //     block whose kernel type isn't `code` — a `$$` delimiter pair has
-      //     no place to spell a language at all. Keeping this branch force-
-      //     read-only also covers the transient where a PM code_block's
-      //     language has been switched away from 'LaTeX' while the raw
-      //     source is still spelled `$$..$$`.
-      // (Measured, for the record: `buildCodeMap` DOES map an mdast `math`
-      // node byte-exactly for the plain and `> `-quoted forms — visibleLength
-      // 6 / linePrefix '' and '> ' for `$$\nE=mc^2\n$$\n` — and fails closed
-      // on the list-indented form. So the remaining blocker is the language/
-      // command semantics above, not the character mapping.)
-      // Otherwise, a language Crepe renders as a preview-only
-      // diagram/formula (mermaid/latex, checked case-insensitively on the PM
-      // node's own `attrs.language`) also stays non-editable, regardless of
-      // what buildCodeMap could prove.
-      const language = String(pm.node.attrs?.language || '').toLowerCase()
-      const codeReadOnly = md.type === 'math' || READONLY_CODE_LANGUAGES.has(language)
+      // here (Plan 5 Task 1 kept this deliberately; that task's goal was
+      // healing the whole-document degradation, not editing TeX).
+      //
+      // The LANGUAGE half of this condition is gone — see the
+      // `READONLY_CODE_LANGUAGES` ADR above for the proof that a preview is
+      // outside this module's subject. What remains is a statement about the
+      // block's SHAPE, not about how it is rendered: a `$$..$$` delimiter
+      // pair is not a GFM fence, and two commands in the code-block domain
+      // refuse it on exactly that ground —
+      // `changeCodeLanguage`/`exitCodeBlock` (commands/code-language.js,
+      // commands/code-exit.js) both require `block.type === 'code'`, because
+      // a `$$` pair has nowhere to spell an info string and no closing fence
+      // run to write after.
+      //
+      // (Measured 2026-08-18, for the record: `buildCodeMap` DOES map an
+      // mdast `math` node byte-exactly — visibleLength 6, linePrefix '' /
+      // '> ', lineEnding '\n' / '\r\n' for the plain and quoted LF and CRLF
+      // forms of `$$\nE=mc^2\n$$` — and fails closed on the list-indented
+      // form. So the character mapping is NOT what blocks it.)
+      const codeReadOnly = md.type === 'math'
       if (!codeReadOnly) {
         charMap = buildCodeMap(markdown, md)
         // `buildCodeMap` fails closed (null) for a content shape it can't
@@ -713,7 +769,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         // guard). That is a property of THIS ONE block's content, not a
         // structural PM/mdast disagreement — degrade only this pair to
         // non-editable (final-review fix, 2026-08-16; `charMap` stays `null`,
-        // same contract as mermaid/latex/math above) instead of rejecting
+        // same contract as the math/table/image-block pairs) instead of rejecting
         // the WHOLE map, so the rest of the document (including any OTHER
         // code block) stays fully mappable. The check below only runs when
         // `buildCodeMap` DID prove a charMap, and since P5-2.5 it degrades
@@ -788,7 +844,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       // — or a charMap whose decoded visible length disagrees with PM's own
       // content size — means THIS BLOCK is unprovable, so it degrades to a
       // non-editable leaf (`charMap = null`, exactly the posture
-      // mermaid/latex/math/table/image-block/block-HTML pairs already have)
+      // math/table/image-block/block-HTML pairs already have)
       // and the rest of the document keeps its map.
       //
       // P5-2.5 — why per-BLOCK, not per-DOCUMENT (this used to `return null`):

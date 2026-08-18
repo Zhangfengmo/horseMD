@@ -1276,8 +1276,11 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
 // editor's DOM resolved through view.posAtDOM into the CURRENT map's
 // blockPairs. An LF js block (charMap proven) reports editable, a CRLF block
 // now reports editable too (un-narrowing, 2026-08-17), and a failed DOM
-// resolution reports non-editable (fail-closed). A `mermaid` block is the
-// remaining always-blocked shape.
+// resolution reports non-editable (fail-closed). Since 2026-08-18 a
+// `mermaid` block reports EDITABLE too — the preview is a sibling of the
+// always-mounted CodeMirror, not a substitute for it (see the ADR that
+// replaced `READONLY_CODE_LANGUAGES`). The remaining always-blocked code
+// shape is a `$$` math block, whose mdast type is `math`, not `code`.
 {
   const h = makeHarness('```js\nab\n```\n甲\n', doc(cb('js', 'ab'), p(text('甲'))))
   assert.equal(h.controller.attachAfterCreate(), true)
@@ -1299,12 +1302,19 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   crlf.view.posAtDOM = () => 1
   assert.equal(crlf.controller.isCmBlockEditable({ dom: {} }), true, 'CRLF block must now be editable')
 
-  // The still-blocked shape: a preview-rendered language never claims a
-  // charMap, so its CM instance stays keydown-gated.
+  // A preview-rendered language is now an ordinary fence to the map: its CM
+  // instance is ungated exactly like a ```js block's.
   const mermaid = makeHarness('```mermaid\ngraph TD\n```\n', doc(cb('mermaid', 'graph TD')))
   assert.equal(mermaid.controller.attachAfterCreate(), true)
   mermaid.view.posAtDOM = () => 1
-  assert.equal(mermaid.controller.isCmBlockEditable({ dom: {} }), false, 'mermaid block must stay non-editable')
+  assert.equal(mermaid.controller.isCmBlockEditable({ dom: {} }), true, 'mermaid block must now be editable')
+
+  // The still-blocked code shape: a `$$` block pairs with mdast `math`, whose
+  // delimiters no code-block command can spell, so it never claims a charMap.
+  const mathBlock = makeHarness('$$\nE=mc^2\n$$\n', doc(cb('LaTeX', 'E=mc^2')))
+  assert.equal(mathBlock.controller.attachAfterCreate(), true)
+  mathBlock.view.posAtDOM = () => 1
+  assert.equal(mathBlock.controller.isCmBlockEditable({ dom: {} }), false, '$$ math must stay non-editable')
 }
 
 // Case T5c: runExitCode at document end — exit bytes are written
@@ -1381,16 +1391,30 @@ import { classifyBlockedCmKeydown } from '../src/renderer/src/components/editor-
   assert.ok(h.notifications.length > before, 'refusal notifies')
 }
 
-// Case T5f (final-review finding, 2026-08-16): the from-readonly
-// language-switch refusal is lifted — mermaid -> js must commit (not veto),
+// Case T5f (final-review finding, 2026-08-16; extended 2026-08-18): a
+// language switch OUT of a preview-rendered language must commit (not veto),
 // and the map's UNCONDITIONAL rebind after a code-language commit (see the
 // `code-language` case's own comment) must leave the block genuinely
 // editable on the very next transaction: switch then type, end to end.
+//
+// Since 2026-08-18 the mermaid block is editable BEFORE the switch too, so
+// step (a0) below pins that directly — the bytes land inside the fence body,
+// never on a ``` delimiter.
 {
   globalThis.__hmKernelDiagnostics = []
   const h = makeHarness('```mermaid\ngraph TD\n```\n', doc(cb('mermaid', 'graph TD'), p()))
   assert.equal(h.controller.attachAfterCreate(), true, 'mermaid-only doc must map')
-  assert.equal(h.controller.kernel.map.blockPairs[0].charMap, null, 'sanity: mermaid pair starts non-editable')
+  assert.ok(h.controller.kernel.map.blockPairs[0].charMap, 'sanity: mermaid pair is editable')
+
+  // (a0) typing into the mermaid fence itself, before any language switch.
+  const tr0 = h.view.state.tr.insertText('Z', 1)
+  assert.equal(dispatchThrough(h, tr0), undefined, 'typing into a mermaid fence must commit')
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '```mermaid\nZgraph TD\n```\n')
+  // Undo it so the rest of the case runs on the original bytes.
+  h.controller.runHistory('undo')
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '```mermaid\ngraph TD\n```\n')
 
   // (a) mermaid -> js language switch.
   const tr1 = h.view.state.tr.setNodeAttribute(0, 'language', 'js')

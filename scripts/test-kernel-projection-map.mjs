@@ -974,11 +974,20 @@ console.log('--- kernel projection map ---')
   assert.equal(map.pmPosToRaw(5), 16)
 }
 
-// Case 17: a ```mermaid code block stays non-editable even though
-// buildCodeMap could map it just fine — Crepe renders it as a diagram
-// PREVIEW (editor-crepe-setup.js's codeBlockConfig.renderPreview), not
-// literal text, so the kernel must never offer a raw-text edit path into
-// it. Matched case-insensitively against the PM node's own attrs.language.
+// Case 17 (REWRITTEN 2026-08-18): a ```mermaid code block is EDITABLE.
+//
+// This case used to assert the opposite, on the grounds that Crepe renders
+// the block as a diagram PREVIEW rather than literal text. See the ADR that
+// replaced `READONLY_CODE_LANGUAGES` in editor-kernel-projection-map.js: the
+// preview panel is a Vue-rendered SIBLING of the always-mounted CodeMirror
+// host, so it contributes nothing to `pmNode.content.size`/`textContent` and
+// nothing to the mdast — i.e. it is outside the subject of every proof this
+// module makes. The block's PM content is `state.addText(node.value)`
+// verbatim, exactly like a ```js block's.
+//
+// What must therefore hold: the pair carries a REAL charMap whose boundaries
+// are the fence CONTENT's own bytes, so a write into it lands inside the
+// fence and never on a delimiter.
 {
   const md = 'p1\n\n```mermaid\ngraph TD\n```\n\np2\n'
   const d = doc(
@@ -989,29 +998,56 @@ console.log('--- kernel projection map ---')
   const map = buildProjectionMap(md, d)
   assert.ok(map, 'doc with a mermaid code block must still map')
   assert.equal(map.blockPairs.length, 3)
-  assert.equal(map.blockPairs[1].charMap, null, 'mermaid code_block pair must stay non-editable')
-  // Language match is case-insensitive.
+  const pair = map.blockPairs[1]
+  assert.ok(pair.charMap, 'mermaid code_block pair must now be editable')
+  assert.equal(pair.charMap.visibleLength, 'graph TD'.length)
+  // Content start/end are the fence CONTENT's bytes, never the ``` markers.
+  assert.equal(md.slice(pair.charMap.visibleToRaw(0)), 'graph TD\n```\n\np2\n')
+  assert.equal(md.slice(pair.charMap.visibleToRaw(8)), '\n```\n\np2\n')
+  // The caret at the block's PM content start resolves into the fence body.
+  assert.equal(map.pmPosToRaw(pair.pmPos + 1), md.indexOf('graph TD'))
+  // Language case does not matter — nothing keys off the language any more.
   const upper = doc(
     p(text('p1')),
     schema.node('code_block', { language: 'MERMAID' }, text('graph TD')),
     p(text('p2'))
   )
-  assert.equal(buildProjectionMap(md, upper).blockPairs[1].charMap, null)
+  assert.ok(buildProjectionMap(md, upper).blockPairs[1].charMap)
 }
 
-// Case 18: the math/latex shape. Crepe's own math-block feature
-// (@milkdown/crepe's blockLatexSchema, verified by reading its source)
-// literally REUSES the plain codeBlockSchema for a `$$...$$` block — on the
-// PM side, a math block IS a `code_block` with `attrs.language === 'latex'`,
-// indistinguishable in shape from a real ```latex code fence. That's the
-// half of the guard this test can exercise with a REAL parse: the kernel's
-// own buildSyntaxIndex (syntax-index.js) registers only remark-parse +
-// remark-gfm, no remark-math, so it can never itself produce an mdast
-// `math` node to pair against — `md.type === 'math'` in
-// editor-kernel-projection-map.js's codeReadOnly check is accordingly a
-// defensive/forward-compatible branch, unreachable via today's kernel
-// parser (documented here so the next reader doesn't mistake the missing
-// coverage for an oversight).
+// Case 17b: a CRLF mermaid fence, including a multi-line diagram. The
+// `content.size === visibleLength` identity has to hold for '\r\n' too (see
+// the code_block branch's own ADR) or the pair would silently degrade.
+{
+  const md = 'p1\r\n\r\n```mermaid\r\ngraph TD\r\nA-->B\r\n```\r\n'
+  const d = doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'mermaid' }, text('graph TD\r\nA-->B'))
+  )
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'CRLF mermaid doc must map')
+  const pair = map.blockPairs[1]
+  assert.ok(pair.charMap, 'CRLF mermaid pair must be editable')
+  assert.equal(pair.charMap.visibleLength, 'graph TD\r\nA-->B'.length)
+  assert.equal(pair.charMap.lineEnding, '\r\n')
+}
+
+// Case 18 (REWRITTEN 2026-08-18): the two shapes that share PM
+// `code_block(language='LaTeX')` are decided SEPARATELY, by the mdast type —
+// which is the kernel's own parse of the raw bytes, not a rendering hint.
+//
+// Crepe's own math-block feature (@milkdown/crepe's blockLatexSchema) reuses
+// the plain codeBlockSchema for a `$$...$$` block, so on the PM side a math
+// block is indistinguishable in shape from a real ```latex fence. The
+// distinguishing evidence is `md.type`:
+//   * a literal ```latex fence  -> mdast `code`  -> EDITABLE (an ordinary GFM
+//     fence; `changeCodeLanguage`/`exitCodeBlock` can both spell it);
+//   * a `$$..$$` block          -> mdast `math`  -> read-only, because a `$$`
+//     delimiter pair is not a fence at all.
+// The kernel's chain DOES mount remark-math (syntax-index.js, Plan 5 Task 1),
+// so both branches are reachable with a real parse — the old comment here
+// claiming `md.type === 'math'` was unreachable is stale and is corrected by
+// the second half of this case.
 {
   const md = 'p1\n\n```latex\nx^2\n```\n\np2\n'
   const d = doc(
@@ -1022,7 +1058,20 @@ console.log('--- kernel projection map ---')
   const map = buildProjectionMap(md, d)
   assert.ok(map, 'doc with a latex-language code block must still map')
   assert.equal(map.blockPairs.length, 3)
-  assert.equal(map.blockPairs[1].charMap, null, 'latex-language code_block pair must stay non-editable')
+  assert.equal(map.blockPairs[1].mdBlock.type, 'code')
+  assert.ok(map.blockPairs[1].charMap, 'a literal ```latex FENCE must be editable')
+  assert.equal(map.blockPairs[1].charMap.visibleLength, 3)
+
+  // Same PM shape, but the raw bytes are a `$$` block -> mdast `math`.
+  const mathMd = 'p1\n\n$$\nx^2\n$$\n\np2\n'
+  const mathMap = buildProjectionMap(mathMd, doc(
+    p(text('p1')),
+    schema.node('code_block', { language: 'LaTeX' }, text('x^2')),
+    p(text('p2'))
+  ))
+  assert.ok(mathMap, 'doc with a $$ math block must still map')
+  assert.equal(mathMap.blockPairs[1].mdBlock.type, 'math')
+  assert.equal(mathMap.blockPairs[1].charMap, null, '$$ math must stay non-editable')
 }
 
 // Case 19 (final-review finding, 2026-08-16): `buildCodeMap` returning null
