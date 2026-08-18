@@ -50,7 +50,7 @@ import {
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, isTypableTextblock } from './editor-kernel-gateway.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -414,23 +414,85 @@ export function createKernelMode({
   // typing", and a whole-document fallback to legacy manifests as nothing at
   // all — yet legacy is the mode the byte-fidelity bug family lives in. This
   // is the machine-readable state the StatusBar renders (through the pure
-  // `describeKernelStatus`, lib/kernel-status.js) and it is derived from the
-  // SAME predicate `degradedPairAt` uses for the per-block toast, so the
-  // indicator and the toast can never contradict each other.
+  // `describeKernelStatus`, lib/kernel-status.js).
   //
   //   'off'     disposed — the kernel is gone
   //   'legacy'  attach refused; every edit runs the legacy pipeline
   //   'pending' created but not attached yet (Crepe still building the doc)
-  //   'partial' attached, but N real pairs carry no charMap (read-only blocks)
-  //   'normal'  attached, every real pair is writable
+  //   'partial' attached, but N blocks are read-only to the USER
+  //   'normal'  attached, every block the user can reach is writable
+  //
+  // ===========================================================================
+  // WHAT COUNTS AS A READ-ONLY BLOCK (rewritten 2026-08-18)
+  // ===========================================================================
+  // The count used to be `!pair.charMap && !pair.virtual` — "a pair the
+  // projection map refused". That is a statement about the MAP, and it was
+  // wrong in BOTH directions:
+  //
+  // FALSE POSITIVE (the serious one, because this file's own rule is that a
+  // false warning is worse than the silence it replaced). `blockPairs` carries
+  // one entry per structural node on BOTH sides, containers included — and a
+  // container is never a textblock, so it can never claim a charMap. Measured
+  // against a real `buildProjectionMap`: a two-item bullet list reports THREE
+  // read-only blocks (the list plus both items), a blockquote one, a `---`
+  // divider one, a frontmatter block one. In other words nearly every real
+  // document displayed 「部分块只读」 permanently. None of those is a place the
+  // user can put a caret and type: a list/blockquote/list_item's editability
+  // is entirely its children's (which have their own pairs, and are counted on
+  // their own evidence), and an `hr`/`frontmatter`/`image-block` is a
+  // structurally opaque LEAF with no text surface at all — read-only by
+  // construction, not by degradation.
+  //
+  // FALSE NEGATIVE. A block can also be untypable while holding a perfectly
+  // good charMap, because the refusal lives one layer up in
+  // editor-kernel-gateway.js's inline-shape guard (`isTypableTextblock`). The
+  // hard-break paragraph was exactly that until 2026-08-18 — a document could
+  // read 「源码内核已生效」 while one of its paragraphs refused every keystroke.
+  // Hard breaks are typable now, and the gateway's allowlist covers every
+  // inline node the live schema declares (text/image/html/hardbreak/
+  // math_inline/footnote_reference), so no shape is known to reach this today
+  // — which is precisely why the check is wired rather than argued: the next
+  // inline node type someone adds must show up in the badge, not in a bug
+  // report.
+  //
+  // So the predicate is "a block the user can see and cannot edit":
+  //   * a TEXTBLOCK with no charMap (paragraph/heading/code_block/block-HTML
+  //     wrapper the map could not prove) — a caret goes there and typing is
+  //     refused. Counted, empty or not.
+  //   * a textblock WITH a charMap whose inline shape the gateway refuses.
+  //     Counted.
+  //   * anything else (containers, opaque leaves) is counted ONLY when it is a
+  //     leaf of the pairing (no nested pair speaks for its interior) AND it
+  //     actually holds visible text. That keeps a `table` whose cells could not
+  //     be zipped — genuinely readable, genuinely uneditable — in the count,
+  //     while excluding every container and every content-less atom.
+  // `blockPairs` is in pre-order document order, so a pair's first nested pair,
+  // if it has one, is the very next entry — the containment test is O(1).
+  const pairIsReadOnlyToUser = (pair, next) => {
+    if (pair.virtual) return false
+    const node = pair.pmNode
+    if (!node) return false
+    if (node.isTextblock) return pair.charMap ? !isTypableTextblock(node) : true
+    if (pair.charMap) return false
+    const size = node.nodeSize
+    if (Number.isFinite(size) && next && Number.isFinite(next.pmPos) &&
+        next.pmPos > pair.pmPos && next.pmPos < pair.pmPos + size) {
+      return false // a nested pair speaks for this container's interior
+    }
+    try {
+      return !!node.textContent
+    } catch {
+      return false
+    }
+  }
   const getKernelStatus = () => {
     if (disposed) return { state: 'off', readOnlyBlocks: 0, blocks: 0, reason: null }
     if (degraded) return { state: 'legacy', readOnlyBlocks: 0, blocks: 0, reason: degradeReason }
     if (!attached) return { state: 'pending', readOnlyBlocks: 0, blocks: 0, reason: null }
     const pairs = kernel.map?.blockPairs || []
     let readOnlyBlocks = 0
-    for (const pair of pairs) {
-      if (!pair.charMap && !pair.virtual) readOnlyBlocks += 1
+    for (let i = 0; i < pairs.length; i += 1) {
+      if (pairIsReadOnlyToUser(pairs[i], pairs[i + 1])) readOnlyBlocks += 1
     }
     return {
       state: readOnlyBlocks > 0 ? 'partial' : 'normal',

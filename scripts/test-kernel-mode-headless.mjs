@@ -109,6 +109,16 @@ const schema = new Schema({
       atom: true,
       attrs: { src: { default: '' }, alt: { default: '' }, title: { default: '' } }
     },
+    // P6 status-indicator rewrite (2026-08-18): the two other structurally
+    // opaque LEAVES the projection map pairs and never gives a charMap —
+    // `hr` (mdast thematicBreak) and `frontmatter` (mdast yaml,
+    // src/renderer/src/components/editor-frontmatter.js). Both are atoms with
+    // no text surface; they are what the read-only COUNT must not count.
+    hr: { group: 'block', atom: true },
+    frontmatter: { group: 'block', atom: true, attrs: { value: { default: '' } } },
+    // preset-commonmark's hardbreak — typable since 2026-08-18, and the shape
+    // the status indicator's false-negative half was written for.
+    hardbreak: { group: 'inline', inline: true, atom: true },
     'image-block': {
       group: 'block',
       atom: true,
@@ -2650,9 +2660,16 @@ const toggleVia = (h, markType, from, to) => {
 // P6 Task 3 — getKernelStatus: the machine-readable degradation state
 // ===========================================================================
 // The pure presentation rule is pinned in scripts/test-kernel-status.mjs; this
-// is the half that needs a real projection map. The counted set MUST be the
-// same predicate `degradedPairAt` uses for the per-block toast, or the
-// StatusBar and the toast would contradict each other.
+// is the half that needs a real projection map.
+//
+// THE COUNTED SET WAS REWRITTEN 2026-08-18. It used to be "every pair with no
+// charMap", i.e. a statement about the MAP; it is now "every block the user
+// can see and cannot edit", a statement about what the user can DO. The old
+// rule was wrong in both directions and the cases below pin both corrections:
+// containers/opaque leaves are no longer counted (a two-item list used to
+// report THREE read-only blocks, so nearly every real document displayed the
+// warning permanently), and a textblock the GATEWAY refuses is now counted
+// even though it holds a charMap.
 {
   // Healthy document: attached, nothing read-only. The negative control — an
   // indicator here would be a false positive, which is worse than silence.
@@ -2669,22 +2686,66 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(healthy.reason, null)
 }
 {
-  // A document carrying a block the kernel serves as a read-only leaf reports
-  // 'partial', and the count matches the pairs `degradedPairAt` would answer
-  // for. The fixture is an `image-block`: a PM ATOM, so `isTextblock` is false
-  // and it can never claim a charMap \u2014 a structural read-only leaf, not a
-  // policy one. (This used to be a `$$` math block; block math became editable
-  // 2026-08-18, so it no longer demonstrates the state under test.)
-  const md = '![a](x.png)\n\n\u7532\u4e59\n'
-  const h = makeHarness(md, stubParse(md))
+  // THE FALSE POSITIVE, pinned per shape. Every one of these documents is
+  // fully editable, and every one of them reported 'partial' before the
+  // rewrite because `blockPairs` carries an entry for each CONTAINER and each
+  // opaque LEAF, none of which can ever claim a charMap.
+  const cases = [
+    ['bullet list (used to report THREE read-only blocks)', '- \u7532\n- \u4e59\n',
+      doc(bl(li(null, p(text('\u7532'))), li(null, p(text('\u4e59')))))],
+    ['blockquote', '> \u7532\u4e59\n', doc(bq(p(text('\u7532\u4e59'))))],
+    ['thematic break', '\u7532\n\n---\n\n\u4e59\n',
+      doc(p(text('\u7532')), schema.node('hr'), p(text('\u4e59')))],
+    ['front matter', '---\ntitle: x\n---\n\n\u7532\n',
+      doc(schema.node('frontmatter', { value: 'title: x' }), p(text('\u7532')))],
+    ['block image', '![a](x.png)\n\n\u7532\u4e59\n',
+      doc(ib({ src: 'x.png' }), p(text('\u7532\u4e59')))],
+    // Item 1's tie-in: a hard-break paragraph is typable now, so it must not
+    // be reported as read-only either. Before the gateway fix the map DID give
+    // it a charMap, which is exactly why the old count could not have seen it.
+    ['hard break', '\u7532  \n\u4e59\n',
+      doc(p(text('\u7532'), schema.node('hardbreak'), text('\u4e59')))],
+    ['quoted hard break', '> \u7532  \n> \u4e59\n',
+      doc(bq(p(text('\u7532'), schema.node('hardbreak'), text('\u4e59'))))]
+  ]
+  for (const [label, md, pmDoc] of cases) {
+    const h = makeHarness(md, pmDoc)
+    assert.equal(h.controller.attachAfterCreate(), true, `${label}: must attach`)
+    const status = h.controller.getKernelStatus()
+    assert.equal(status.readOnlyBlocks, 0, `${label}: no block is read-only to the user`)
+    assert.equal(status.state, 'normal', `${label}: a healthy document must not warn`)
+  }
+}
+{
+  // A document carrying a block the user can READ and cannot EDIT still
+  // reports 'partial'. The fixture is block HTML: `remarkHtmlTransformer` wraps
+  // it in a PM paragraph, so `isTextblock` is true and a caret genuinely goes
+  // there \u2014 but the projection map serves it `charMap: null` (block HTML has
+  // no character-level decode contract), so every keystroke is refused.
+  const md = '<div>x</div>\n\n\u7532\u4e59\n'
+  const h = makeHarness(md, doc(p(ih('<div>x</div>')), p(text('\u7532\u4e59'))))
   assert.equal(h.controller.attachAfterCreate(), true)
   const status = h.controller.getKernelStatus()
-  const readOnlyPairs = h.controller.kernel.map.blockPairs
-    .filter((pair) => !pair.charMap && !pair.virtual)
-  assert.ok(readOnlyPairs.length > 0, 'fixture sanity: the image-block is a read-only leaf')
   assert.equal(status.state, 'partial')
-  assert.equal(status.readOnlyBlocks, readOnlyPairs.length,
-    'the reported count is exactly the pairs the per-block toast speaks for')
+  assert.equal(status.readOnlyBlocks, 1,
+    'exactly the one block the user cannot type in \u2014 not the containers around it')
+}
+{
+  // A table whose cells could NOT be zipped is the one non-textblock pair that
+  // stays counted: it is an opaque leaf that genuinely holds visible text, so
+  // "the user can see it and cannot edit it" is true of it.
+  const md = '| a | b |\n| - | - |\n| c | d |\n'
+  const table = tbl([[['a'], ['b']], [['c'], ['d']]])
+  const h = makeHarness(md, doc(table))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const pairs = h.controller.kernel.map.blockPairs
+  const tablePair = pairs.find((pair) => pair.pmNode.type.name === 'table')
+  const status = h.controller.getKernelStatus()
+  if (tablePair) {
+    assert.equal(status.readOnlyBlocks, 1, 'an unzippable table is still reported')
+  } else {
+    assert.equal(status.readOnlyBlocks, 0, 'a zipped table is editable cell by cell')
+  }
 }
 {
   // Whole-document fallback: 'legacy', carrying the reason the toast used.
