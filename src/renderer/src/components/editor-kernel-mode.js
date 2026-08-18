@@ -39,6 +39,9 @@ import {
   createSourceHistory,
   exitCodeBlock,
   insertHeadingLeadingWhitespace,
+  spellBlockTailInsert,
+  literalTailIsStripped,
+  healableTrailingSpace,
   replaceVisibleText,
   routeStructuralKey,
   toggleBlockquote,
@@ -492,6 +495,35 @@ export function createKernelMode({
   // (dispatching synchronously here would race the pending updateState that
   // installs `newDoc` — the dispatch-veto protocol calls this while the view
   // still holds the OLD state).
+  // THE OBSERVABILITY INVARIANT (2026-08-18). `verifyPlainTextProjection` below
+  // proves the VIEW and the BYTES agree — necessary, but it is exactly the check
+  // that BOTH whitespace defects in this family walked past, because a character
+  // dropped on both sides leaves the two in perfect agreement. This is the
+  // missing half: the edit the user asked for must be OBSERVABLE in what the
+  // bytes reparse to.
+  //
+  // It reads the map `bindMap` has just rebuilt, so it costs no extra parse and
+  // no extra map build. It runs AFTER the bytes are published, so it raises a
+  // diagnostic rather than refusing — the per-shape commands
+  // (commands/heading-whitespace.js, commands/trailing-whitespace.js) are the
+  // fail-closed gates, and this is the net underneath them that makes the whole
+  // class detectable and assertable instead of invisible. See
+  // editor-kernel-gateway.js's ADR for the one known benign firing.
+  const verifyEditObservable = (expectation) => {
+    if (!expectation || !kernel.map) return
+    const pair = (kernel.map.blockPairs || []).find((candidate) => candidate.pmPos === expectation.pmPos)
+    const actual = pair?.charMap?.visibleLength
+    // An unmapped/degraded block is a different failure with its own signal.
+    if (!Number.isFinite(actual)) return
+    if (actual === expectation.expectedVisibleLength) return
+    pushKernelDiagnostic({
+      type: 'edit-unobservable',
+      expected: expectation.expectedVisibleLength,
+      actual,
+      revision: kernel.doc.revision
+    })
+  }
+
   const verifyPlainTextProjection = (newDoc) => {
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
@@ -657,6 +689,7 @@ export function createKernelMode({
         // paragraph and verifyPlainTextProjection's repair reconcile removes
         // it (the parse never contains it) and rebinds.
         bindMap(newState?.doc || null)
+        verifyEditObservable(committed.observability)
         if (newState?.doc) verifyPlainTextProjection(newState.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
@@ -1277,11 +1310,68 @@ export function createKernelMode({
       return from >= contentPos && to <= end
     }) || null
 
+  // Whitespace at a block's END — the other position CommonMark strips (see
+  // lib/source-kernel/commands/trailing-whitespace.js). Measured before this
+  // existed: Tab at a plain paragraph's end committed a literal '\t' that the
+  // reparse threw away, so the byte sat on disk forever and the view never
+  // changed; a space did the same and additionally forced a repair reconcile.
+  //
+  // This is the KEYMAP half (Tab, via `insertPlainTextAtSelection` below). Space
+  // is deliberately NOT routed here: the Space keydown is what the preset input
+  // rules ('# ', '- ', '> ', '1. ') fire on, and those all trigger at a block's
+  // visible end — swallowing the key would break every one of them. A space
+  // therefore reaches ProseMirror first and is re-spelled afterwards, on the
+  // bytes, by `commitPlainText`.
+  //
+  // Refusal contract matches `commitHeadingLeadingWhitespace`: 'skip' means the
+  // caller keeps exactly its previous behaviour.
+  const commitBlockTrailingWhitespace = (character, state, view) => {
+    if (!state?.selection?.empty) return 'skip'
+    if (!kernel.map) return 'skip'
+    const head = state.selection.head
+    const pair = editablePairForRange(head, head)
+    if (!pair?.charMap || !pair.mdBlock) return 'skip'
+    const units = pair.charMap.units
+    const last = Array.isArray(units) && units.length ? units[units.length - 1] : null
+    if (!last) return 'skip'
+    const insertAt = typeof kernel.map.pmPosToRawInsert === 'function'
+      ? kernel.map.pmPosToRawInsert(head)
+      : kernel.map.pmPosToRaw(head)
+    // Only an APPEND at the block's visible end can be the stripped position.
+    if (!Number.isFinite(insertAt) || insertAt < last.rawEnd) return 'skip'
+    const text = kernel.doc.text
+    const heal = healableTrailingSpace(text, pair.charMap)
+    if (!literalTailIsStripped(text, pair.mdBlock, insertAt) &&
+        !(heal && heal.rawEnd === insertAt)) return 'skip'
+    const routed = spellBlockTailInsert({
+      doc: kernel.doc,
+      block: pair.mdBlock,
+      offset: insertAt,
+      insert: character,
+      heal
+    })
+    if (routed.ok) {
+      applyKernelTransaction(routed.transaction, view, { requireMap: true })
+      return 'handled'
+    }
+    if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) return 'skip'
+    notifyBlocked(routed.code)
+    return 'refused'
+  }
+
   // Tab (and future plain inserts) on the not-structural path: source-first
   // character insertion through replaceVisibleText, scoped to the single
   // editable block pair that contains the selection.
   const insertPlainTextAtSelection = (insert, state, view) => {
     const { from, to } = state.selection
+    // A whitespace character appended at a block's END is not addressable as a
+    // literal byte — re-spell it (proven by reparse) before the ordinary
+    // replaceVisibleText path can write the dead one.
+    if (insert === ' ' || insert === '\t') {
+      const routed = commitBlockTrailingWhitespace(insert, state, view)
+      if (routed === 'handled') return true
+      if (routed === 'refused') return false
+    }
     const pair = editablePairForRange(from, to)
     if (!pair) {
       notifyRefusal(KERNEL_CODES.UNMAPPED, from)

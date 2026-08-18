@@ -295,6 +295,30 @@ async function run() {
     )
 
     // =====================================================================
+    // 3b) TAB at a paragraph's END. This one arrives through the KEYMAP
+    //     (`insertPlainTextAtSelection`), not through `commitPlainText`, and it
+    //     used to write a literal '\t' — a byte CommonMark strips, so it sat on
+    //     disk forever and the view never changed. Two no-break spaces now, the
+    //     user's own proportion, and each one deletable on its own.
+    // =====================================================================
+    await pressKey(send, { key: 'Tab', code: 'Tab' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'tab at a paragraph end'),
+      settled.replace('here', 'here' + NBSP + NBSP),
+      'Tab at a paragraph end must write two real no-break spaces, never a literal tab'
+    )
+    await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+    await sleep(300)
+    await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'backspace over the tab run'),
+      settled,
+      'each no-break space must delete on its own, restoring the previous bytes'
+    )
+
+    // =====================================================================
     // 4) A HEADING's end is the same shape (`## 乙` + ' ' + '丙').
     // =====================================================================
     await clickAt(evaluate, send, '乙', 1)
@@ -355,6 +379,16 @@ async function run() {
       'the saved file must be byte-identical to the kernel source view')
     assert.ok((await readFile(file, 'utf8')).includes('末段。a b hello world here'),
       'the sentence must reach disk as ordinary bytes')
+
+    // =====================================================================
+    // 7) THE OBSERVABILITY INVARIANT must have stayed silent for every one of
+    //    the shapes above. `edit-unobservable` is the diagnostic that fires when
+    //    a committed edit did NOT change what the bytes reparse to — the check
+    //    whose absence let this whole defect family ship.
+    // =====================================================================
+    const seen = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || [])
+      .filter((entry) => entry && entry.type === 'edit-unobservable'))`)
+    assert.equal(seen, '[]', `an edit was not observable in the reparse: ${seen}`)
 
     console.log('PASS kernel-mode block-trailing whitespace UI regression: a space typed at a block end is preserved AND visible, heals to ordinary bytes on the next character, and never touches a fenced block')
   } finally {

@@ -1133,6 +1133,35 @@ function tableStructurePreserved(memoKey, beforeText, afterText) {
   }
 }
 
+// THE OBSERVABILITY EXPECTATION (`result.observability`, 2026-08-18)
+// ===========================================================================
+// Both whitespace defects in this family (the heading's leading Tab and the
+// block-trailing space) shipped past every existing check for the SAME reason:
+// nothing proved that a committed edit is observable in the reparse.
+// `verifyPlainTextProjection` compares the VIEW against the reparse, which is
+// necessary but not sufficient — when a character is lost on BOTH sides the two
+// agree perfectly on a document that silently dropped it. A mapper's
+// `preserved: true` cannot establish it either.
+//
+// So a successful commit now also reports what the edited block's VISIBLE
+// length must be once the map is rebound. The caller
+// (editor-kernel-mode.js's `plain-text` case) checks it against the map it
+// rebuilds anyway, so this costs NO extra parse and no extra map build.
+//
+// WHAT IT IS NOT. It is a DETECTOR, not a gate: it runs after the bytes are
+// published, so it raises an `edit-unobservable` diagnostic rather than
+// refusing. That is deliberate for now — the per-shape commands
+// (commands/heading-whitespace.js, commands/trailing-whitespace.js) do the
+// fail-closed proving BEFORE they write, and this is the net underneath them
+// that makes the whole class machine-detectable (and assertable from a test)
+// instead of invisible.
+//
+// KNOWN BENIGN FIRING, recorded rather than special-cased: typing the final ';'
+// of a character reference ('&nbsp' + ';') legitimately collapses five visible
+// characters into one, so the length moves by -4 where +1 was expected. The
+// document is correct; the expectation is simply too crude for that shape.
+// Anything else this reports is worth investigating.
+//
 // commitPlainText: turns a `plain-text`-classified batch into ONE kernel
 // transaction and applies it. Independently re-derives the step list (it
 // does not trust a caller-supplied `classification.steps` — this function's
@@ -1165,6 +1194,10 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   const edits = []
   let cumulativeDelta = 0
   let touchedTableCell = false
+  // THE OBSERVABILITY EXPECTATION (2026-08-18). See the ADR above
+  // `commitPlainText`'s return for what this is and what it deliberately is
+  // not.
+  let observability = null
   const prefixedVirtualBlocks = new Set()
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
@@ -1359,6 +1392,10 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     let editFrom = rawFrom
     let editTo = rawTo
     let headingWhitespace = false
+    // Set only when a whitespace command re-spells the step: the bytes written
+    // then differ from what ProseMirror inserted, so the projection's expected
+    // length has to come from the command rather than from the PM step.
+    let respelledVisibleDelta = null
     if (steps.length === 1 && oldFrom === oldTo && virtualPrefix === '' &&
         (insertText === ' ' || insertText === '\t') &&
         looksLikeAtxContentStart(kernel.doc.text, rawFrom)) {
@@ -1370,6 +1407,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       if (routed.ok) {
         insertText = routed.transaction.insert
         headingWhitespace = true
+        respelledVisibleDelta = [...insertText].length
       // `not-structural` = the prefilter was a false positive (a '#' run inside
       // ordinary text, a code block, …) — leave the literal byte alone, nothing
       // about that shape changed. Anything else IS the heading content start
@@ -1428,6 +1466,9 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
             editFrom = routed.edit.from
             editTo = routed.edit.to
             insertText = routed.edit.insert
+            // The rewritten range covers exactly the healed unit (one visible
+            // character) when a heal happened, and nothing otherwise.
+            respelledVisibleDelta = [...insertText].length - (routed.healed ? 1 : 0)
           } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
             // The offset IS one CommonMark strips and no spelling could be
             // proven: writing the literal byte would be writing a byte we have
@@ -1442,6 +1483,24 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       to: editTo,
       insert: virtualPrefix + insertText
     })
+    // Record what the edited block's VISIBLE length must become, for the
+    // post-commit observability check (see the ADR on this function's return).
+    // Only the simple, overwhelmingly common shape is claimed: ONE step, into a
+    // real (non-virtual, non-code) mapped block, with no line breaks. Anything
+    // else reports nothing rather than a number it cannot justify.
+    if (steps.length === 1 && stepPair && !stepPair.virtual && stepPair.charMap &&
+        Number.isFinite(stepPair.pmPos) && Number.isFinite(stepPair.charMap.visibleLength) &&
+        stepPair.mdBlock?.type !== 'code' && !/[\r\n]/.test(step.insertText)) {
+      observability = {
+        pmPos: stepPair.pmPos,
+        // `respelledVisibleDelta` is set by the whitespace commands, which know
+        // that what they WROTE is not what ProseMirror inserted (a Tab becomes
+        // two no-break spaces; a heal replaces a whole unit). Everywhere else
+        // the projection and the source agree character for character.
+        expectedVisibleLength: stepPair.charMap.visibleLength +
+          (respelledVisibleDelta ?? step.insertText.length - (step.to - step.from))
+      }
+    }
     // PM-side delta (never the raw insert with its separator prefix, and
     // never the EXPANDED raw insert either): this rebases later steps' PM
     // coordinates, which are counted in PM's own un-normalized text units (a
@@ -1460,7 +1519,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   if (touchedTableCell && !tableStructurePreserved(kernel, kernel.doc.text, result.doc.text)) {
     return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
   }
-  return { ok: true, applied: result, transaction }
+  return { ok: true, applied: result, transaction, observability }
 }
 
 // commitTaskToggle: turns a `task-toggle`-classified batch (see

@@ -14,7 +14,7 @@ import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, __atomGuards } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
-import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/index.js'
+import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction, parseKernelMarkdown, buildCharacterMap } from '../src/renderer/src/lib/source-kernel/index.js'
 
 const schema = new Schema({
   nodes: {
@@ -2776,8 +2776,38 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     const kernel = { doc: createMarkdownDocument(markdown) }
     const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
     return committed.ok
-      ? { bytes: committed.applied.doc.text, edits: committed.transaction.edits }
+      ? {
+          bytes: committed.applied.doc.text,
+          edits: committed.transaction.edits,
+          observability: committed.observability
+        }
       : { refused: committed.code }
+  }
+
+  // THE OBSERVABILITY INVARIANT (see commitPlainText's ADR): a successful commit
+  // reports what the edited block's VISIBLE length must become, and the caller
+  // checks it against the map it rebuilds anyway. Here the expectation is
+  // checked directly against the committed bytes' own character map, which is
+  // the same statement one layer down: "the edit is present in the reparse".
+  const assertObservable = (result, markdown, label) => {
+    const expectation = result.observability
+    assert.ok(expectation, `${label}: no observability expectation was reported`)
+    const tree = parseKernelMarkdown(result.bytes)
+    let matched = null
+    const walk = (node, visit) => {
+      for (const child of node.children || []) {
+        visit(child)
+        walk(child, visit)
+      }
+    }
+    walk(tree, (node) => {
+      if (matched) return
+      const map = buildCharacterMap(result.bytes, node)
+      if (map && map.visibleLength === expectation.expectedVisibleLength) matched = node
+    })
+    assert.ok(matched,
+      `${label}: no block in the reparse has the promised visible length ` +
+      `${expectation.expectedVisibleLength} — the edit was not observable`)
   }
 
   // T1: THE REPORTED SEQUENCE. `a b` must end up as `a b`, not `ab `.
@@ -2791,6 +2821,8 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     assert.equal(decoded(second.bytes), '末段。a b')
     assert.deepEqual(second.edits, [{ from: 4, to: 5, insert: ' b' }],
       'the heal and the new character must be ONE edit')
+    assertObservable(first, first.bytes, 'the no-break space')
+    assertObservable(second, second.bytes, 'the heal')
   }
 
   // T2: a heading's end is the same shape.
@@ -2852,6 +2884,7 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     const result = type('ab\n', doc(p(text('ab'))), 2, ' ')
     assert.equal(result.bytes, 'a b\n')
     assert.deepEqual(result.edits, [{ from: 1, to: 1, insert: ' ' }])
+    assertObservable(result, result.bytes, 'an interior space')
   }
 
   // T7: the heading's LEADING whitespace command still wins at its own offset —

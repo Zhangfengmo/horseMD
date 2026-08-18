@@ -321,10 +321,13 @@ const FIXTURE_DOCS = {
     tbl([[['a', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
     p(text('甲乙'))),
   // Case 21c (e): the positive control — a Tab in the ORDINARY paragraph
-  // after the table still commits a literal tab.
-  '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\t\n': () => doc(
+  // after the table still writes source-first. Since 2026-08-18 that is TWO
+  // no-break spaces, not a literal '\t': a tab at a block's END is stripped by
+  // CommonMark, so the literal byte was a dead byte (written to disk, invisible
+  // in the view, forever). See lib/source-kernel/commands/trailing-whitespace.js.
+  '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙  \n': () => doc(
     tbl([[['a', 'left'], ['b', 'right']], [['c', 'left'], ['d', 'right']]]),
-    p(text('甲乙\t'))),
+    p(text('甲乙  '))),
   // Case 21d: a RAGGED table (body row short of a cell) — the whole table
   // degrades to one opaque pair, but cell navigation must still work.
   '| a | b |\n| :-- | --: |\n| c |\n\n甲乙\n': () => doc(
@@ -2480,12 +2483,16 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.notifications.length, notifications, 'cell navigation never toasts')
 
   // (e) POSITIVE CONTROL on the same live document: Tab in the ORDINARY
-  //     paragraph after the table still inserts a literal tab, source-first.
+  //     paragraph after the table still writes source-first — as of 2026-08-18
+  //     as TWO no-break spaces, because a literal tab at a block's END is
+  //     stripped by CommonMark and would be another invisible dead byte.
   caretAt(h.view.state.doc.content.size - 1) // end of 甲乙
   assert.equal(h.controller.structuralHandlers.Tab(h.view.state, h.view.dispatch, h.view), true)
   assert.equal(h.controller.kernel.doc.text,
-    '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\t\n',
-    'a paragraph Tab is unchanged by the table branch')
+    '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙  \n',
+    'a paragraph Tab is unchanged by the table branch, and writes REAL whitespace')
+  assert.equal(/\t/.test(h.controller.kernel.doc.text), false,
+    'a tab at a block end is stripped by CommonMark, so the literal byte must never be written')
 }
 
 // Case 21d: a DEGRADED (ragged) table still navigates — moving the caret is
