@@ -31,6 +31,7 @@ export {
   BLOCK_TRAILING_TEXT,
   NO_BREAK_SPACE
 } from './commands/trailing-whitespace.js'
+export { spellEmptyCodeInsert } from './commands/empty-code-insert.js'
 export { routeStructuralKey } from './router.js'
 export { createSourceHistory } from './history.js'
 

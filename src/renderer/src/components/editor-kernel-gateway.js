@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1360,7 +1360,58 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     //  - a '\r'-bearing break in an LF block. The bridge cannot produce one,
     //    so this is an unknown-provenance slice; fail closed.
     let insertText = step.insertText
-    if (/[\r\n]/.test(insertText)) {
+    let editFrom = rawFrom
+    let editTo = rawTo
+    // Set only when a command re-spells the step: the bytes written then differ
+    // from what ProseMirror inserted, so the projection's expected length has to
+    // come from the command rather than from the PM step.
+    let respelledVisibleDelta = null
+    // THE EMPTY FENCE (2026-08-18) — a pre-existing corruption path on the
+    // everyday write path, not a slash-menu artefact. `code-map.js`'s
+    // `emptyCodeMap` gives a zero-content fence ONE raw offset, "where a first
+    // content line would begin", which for a normally closed fence is the
+    // CLOSING FENCE's own line start. Writing the character there verbatim (what
+    // this function did before) committed '```js\nx```': the terminator
+    // destroyed, and — measured on the kernel's own parser — every block after
+    // it swallowed into the code block's value. The blockquote-prefixed shape
+    // failed twice over, the character landing in front of the closing line's
+    // own '> '.
+    //
+    // A first insert into an empty fence therefore has to OPEN A CONTENT LINE
+    // (prefix + text + this block's line ending), and `spellEmptyCodeInsert`
+    // proves that spelling by reparsing the candidate before any byte moves —
+    // including for the shape whose `linePrefix` the empty map cannot derive
+    // correctly at all (a list-marker-opened fence, where the open line's '- '
+    // is not the continuation prefix and the write would create a second list
+    // item). It owns the WHOLE spelling for this shape, breaks included, so the
+    // generic break expansion below is skipped when it fires.
+    //
+    // The prefilter is parse-free: a real (non-virtual) pair whose mdast block
+    // is `code`, whose character map is the EMPTY one, and a non-empty
+    // zero-width insert. One parse is spent on the first character typed into an
+    // empty code block and never again — the block is no longer empty.
+    let emptyFence = false
+    if (!virtualBlock && stepPair && !stepPair.virtual && stepPair.charMap &&
+        stepPair.mdBlock?.type === 'code' && stepPair.charMap.visibleLength === 0 &&
+        oldFrom === oldTo && insertText !== '') {
+      const routed = spellEmptyCodeInsert({
+        doc: kernel.doc,
+        block: stepPair.mdBlock,
+        charMap: stepPair.charMap,
+        offset: rawFrom,
+        insert: insertText
+      })
+      // No `not-structural` fall-through here, unlike the whitespace commands
+      // below: for THIS shape the pre-existing literal write is known to destroy
+      // the fence, so "could not prove a spelling" must refuse, never degrade to
+      // the byte that corrupts.
+      if (!routed.ok) return { ok: false, code: routed.code }
+      editFrom = routed.edit.from
+      editTo = routed.edit.to
+      insertText = routed.edit.insert
+      emptyFence = true
+    }
+    if (!emptyFence && /[\r\n]/.test(insertText)) {
       const pair = typeof map.pairAt === 'function' ? map.pairAt(oldFrom) : null
       const codeMap = pair?.charMap
       if (!codeMap || typeof codeMap.lineEnding !== 'string' || typeof codeMap.linePrefix !== 'string') {
@@ -1389,14 +1440,8 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // ONE step, zero-width, exactly one space or tab, no virtual separator
     // bytes, and a cheap byte-level prefilter (`looksLikeAtxContentStart`)
     // before the command's own reparse is allowed to run.
-    let editFrom = rawFrom
-    let editTo = rawTo
     let headingWhitespace = false
-    // Set only when a whitespace command re-spells the step: the bytes written
-    // then differ from what ProseMirror inserted, so the projection's expected
-    // length has to come from the command rather than from the PM step.
-    let respelledVisibleDelta = null
-    if (steps.length === 1 && oldFrom === oldTo && virtualPrefix === '' &&
+    if (!emptyFence && steps.length === 1 && oldFrom === oldTo && virtualPrefix === '' &&
         (insertText === ' ' || insertText === '\t') &&
         looksLikeAtxContentStart(kernel.doc.text, rawFrom)) {
       const routed = insertHeadingLeadingWhitespace({
@@ -1445,7 +1490,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     //     already ends in one of THIS module's own entities (the self-heal).
     // Only then is a parse spent, i.e. on spaces at a block end and on the one
     // character that follows them — never on ordinary interior typing.
-    if (!headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
+    if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
         virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
         stepPair.charMap && [...insertText].length === 1 && !/[\r\n]/.test(insertText)) {
       const text = kernel.doc.text

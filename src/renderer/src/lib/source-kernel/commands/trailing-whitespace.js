@@ -174,10 +174,21 @@ export const healableTrailingSpace = (text, charMap) => {
 //   1. the document's block structure is unchanged;
 //   2. a block of the same type still starts at the same offset;
 //   3. its span grew by exactly the byte delta;
-//   4. its decoded text is EXACTLY the expected string.
+//   4. its decoded text is EXACTLY the expected string;
+//   5. any EXTRA per-shape fact the caller needs (`matches`).
 // (4) is the one the projection check cannot make: view-vs-bytes agreement is
 // preserved when a character is lost on BOTH sides.
-export function blockEditIsObservable({ baselineTree, block, candidate, expectedText, delta }) {
+//
+// `decode` and `matches` are optional and default to this module's own
+// behaviour, so nothing about the trailing-whitespace proof changes. They exist
+// because commands/empty-code-insert.js proves the SAME five facts about a
+// value-bearing LEAF block (a fenced `code` node, whose characters live in
+// `.value` rather than in inline children, and whose info string is a second
+// thing that must survive) — one shared proof rather than a second copy that
+// can drift away from this one.
+export function blockEditIsObservable({
+  baselineTree, block, candidate, expectedText, delta, decode = blockText, matches = null
+}) {
   let candidateTree
   try {
     candidateTree = parseKernelMarkdown(candidate)
@@ -200,7 +211,8 @@ export function blockEditIsObservable({ baselineTree, block, candidate, expected
   walk(candidateTree)
   if (!found) return false
   if (found.position?.end?.offset !== end + delta) return false
-  return blockText(found) === expectedText
+  if (matches && !matches(found)) return false
+  return decode(found) === expectedText
 }
 
 // Spell ONE character appended at a block's visible end so that it survives the
