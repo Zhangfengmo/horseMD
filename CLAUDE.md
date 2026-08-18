@@ -426,6 +426,48 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   wired into the source-mode switch, `getMarkdownForTab`, and Pandoc export null
   checks. Locked by `npm run test:editor-source-verification` (the runtime gate)
   and `npm run test:roundtrip-acceptance` (the oracle).
+- **Source-authoritative kernel** (`editor-kernel-mode.js` + `editor-kernel-gateway.js`
+  + `editor-kernel-reconciler.js` + `editor-kernel-projection-map.js` +
+  `editor-kernel-cm-bridge.js` + `src/renderer/src/lib/source-kernel/`):
+  an experimental, **per-tab, default-OFF** alternate editing architecture
+  (toggled from the ▾ menu next to the status-bar rich/source button; never
+  persisted). Markdown source bytes are the sole authority — a PM transaction
+  is classified, mapped to a raw-byte edit via a `charMap` built by re-parsing
+  the live document, and committed to source directly; anything unprovable
+  vetoes fail-closed (`{ veto: true }`, PM view untouched — a swallowed
+  keystroke, never a corrupted byte). **Do not cite this file for the current
+  coverage matrix** — it changes every few commits; `docs/ai-handoff.md` §5.2d
+  is the maintained matrix (`docs/transaction-source-sync-architecture.md`'s
+  kernel section points there instead of keeping its own copy, after the two
+  drifted out of sync once). As of 2026-08-18: paragraphs/headings/lists/
+  tasks, fenced code (incl. CRLF, incl. previously preview-only mermaid/LaTeX
+  fences — the language-keyed `READONLY_CODE_LANGUAGES` gate was deleted, not
+  narrowed, because a Vue `hidden` class on the CodeMirror host is not a byte
+  fact), block math `$$..$$` (editable except `Mod-Enter` exit and the
+  language switch, each refused by its own command), bold/italic/strike/
+  inline-code/quote toggle, tables, links, image `src`, yellow highlight,
+  frontmatter documents (no longer whole-document-degrade; the frontmatter
+  block itself stays a read-only leaf), typing around an inline atom (image /
+  inline math / inline HTML / footnote ref) inside an otherwise-plain
+  paragraph, whole-atom deletion (not a *partial* overlap, not a *marked*
+  atom like a linked image — its `[`/`](url)` bytes belong to no unit), and
+  slash-menu block-type/insert items (`/h1`–`/h6`, `/ul`, `/ol`, `/table`,
+  `/code`+language incl. `/mermaid`, `/math`). Deliberately still refused:
+  hard-break paragraphs (the break's raw span stops at the line ending, so
+  the next line's continuation prefix is unaddressable — typing there would
+  demote a blockquote's `> ` to prose); `/image` `/divider` `/task` `/text`
+  (no caret home in the empty node each would create); and `/quote` itself —
+  its only reachable invocation always hits "an empty blockquote reparses to
+  zero mdast children, and PM's blockquote schema requires `block+`", so it
+  is wired but can never succeed (use the right-click "引用/取消引用" menu
+  item instead, which does work in both modes). **Not close to default-on**:
+  `.superpowers/kernel-performance-assessment.md` measured ~450 ms of
+  main-thread block per keystroke at 100 KB in the real app (two full-document
+  reparses per commit; of five identified proof-preserving optimizations, only
+  the cheapest has landed), and kernel mode cannot attach at all above
+  `CHUNK_THRESHOLD` (120 000 chars — the refusal is now a named, honest
+  message instead of a silent one, but the document still can't be edited in
+  kernel mode).
 - **List Backspace** (`editor-list-backspace.js`): Backspace on an EMPTY list
   item lifts it out of the list (Typora behavior). The CommonMark preset's
   `joinBackward` merged it into the previous item as a second paragraph — the
