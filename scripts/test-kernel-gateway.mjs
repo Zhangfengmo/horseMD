@@ -970,6 +970,168 @@ const bl = (...c) => taskSchema.node('bullet_list', null, c)
   assert.equal(ok.applied.doc.text, '```js\naX\nYb\ncd\n```\n')
 }
 
+// ---- Cases 28h–28m: THE EMPTY FENCE (2026-08-18) --------------------------
+//
+// A pre-existing corruption path on the EVERYDAY write path, reproduced in the
+// built app before the fix (report: .superpowers/sdd/2026-08-17-source-kernel-
+// default-on/empty-fence-report.md): open any document containing an empty
+// fenced code block and type ONE character.
+//
+// `code-map.js`'s `emptyCodeMap` gives a zero-content fence exactly one
+// addressable raw offset — `openLine.end + openLine.ending.length`, "where a
+// first content line would begin" — which for the ordinary spelling
+// '```js' + LE + '```' is the CLOSING FENCE's own line start. `commitPlainText`
+// wrote the character there verbatim and committed '```js\nx```': the
+// terminator destroyed, and every following block swallowed into the code
+// block's value on the next parse (asserted directly in
+// scripts/test-source-kernel-empty-code.mjs Case 1). The blockquote-prefixed
+// shape failed twice over — the anchor sits BEFORE the closing line's '> '.
+//
+// The gateway now routes this shape through `spellEmptyCodeInsert`, which
+// reparses its candidate before any byte moves. These cases pin the GATEWAY's
+// half: the classification is unchanged (still `plain-text`), the resolved
+// offset is unchanged, and the committed bytes open a terminated, correctly
+// prefixed content line — or refuse with the kernel untouched.
+
+// Case 28h: the defect itself, end to end through a real PM transaction, with a
+// following block that the pre-fix bytes swallowed.
+{
+  const md = '```js\n```\n\n尾段落。\n'
+  const d = doc(cb('js', ''), p(text('尾段落。')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a document with an empty fence must map')
+  const pair = map.blockPairs[0]
+  assert.ok(pair.charMap, 'an EMPTY fence is editable — that is why this path is reachable')
+  assert.equal(pair.charMap.visibleLength, 0)
+  // The anchor really is the closing fence's line start: raw 6 is the '`' of
+  // the closing '```'. This is the map fact the write path has to compensate
+  // for, asserted so a future map change cannot silently invalidate the fix.
+  assert.equal(pair.charMap.visibleToRaw(0), 6)
+  assert.equal(md[6], '`')
+
+  const tr = state.tr.insertText('x', 1)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 6, to: 6, insert: 'x\n' }],
+    'the write must open a TERMINATED content line, never overwrite the closing fence')
+  assert.equal(committed.applied.doc.text, '```js\nx\n```\n\n尾段落。\n')
+}
+
+// Case 28i: the BLOCKQUOTE-prefixed empty fence — the character must land after
+// the line's own '> ', which the raw anchor sits in front of.
+{
+  const md = '> ```js\n> ```\n'
+  const d = doc(bq(cb('js', '')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'a quoted empty fence must map')
+  // `blockPairs[0]` is the BLOCKQUOTE here — the code pair is its child.
+  const quotedPair = map.blockPairs.find((candidate) => candidate.pmNode?.type?.name === 'code_block')
+  assert.ok(quotedPair?.charMap, 'the quoted empty fence pair must be editable')
+  assert.equal(quotedPair.charMap.visibleToRaw(0), 8)
+  assert.equal(md.slice(8, 10), '> ', 'fixture sanity: the anchor is BEFORE the closing line\'s prefix')
+
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({
+    kernel, map, transactions: [state.tr.insertText('x', 2)], oldState: state
+  })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 8, to: 8, insert: '> x\n' }])
+  assert.equal(committed.applied.doc.text, '> ```js\n> x\n> ```\n')
+}
+
+// Case 28j: CRLF. The opened line carries the block's OWN ending — never a bare
+// '\n' injected into a CRLF document.
+{
+  const md = '```js\r\n```\r\n'
+  const d = doc(cb('js', ''))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  assert.equal(map.blockPairs[0].charMap.lineEnding, '\r\n')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({
+    kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+  })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '```js\r\nx\r\n```\r\n')
+  assert.equal(/(?<!\r)\n/.test(committed.applied.doc.text), false, 'no bare \\n in a CRLF document')
+}
+
+// Case 28k: the OTHER spelling — `commands/block-insert.js` writes the slash
+// menu's `/code` with one EMPTY CONTENT LINE ('```js\n\n```'), which is still
+// `value === ''` at the SAME anchor. That line already belongs to the block, so
+// the write must FILL it, not open a second one (terminating it again would
+// decode as 'x' plus a newline nobody typed). This is what keeps
+// scripts/test-source-kernel-blockinsert.mjs's `/code` contract green.
+{
+  const md = '```js\n\n```\n'
+  const d = doc(cb('js', ''))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  assert.equal(map.blockPairs[0].charMap.visibleToRaw(0), 6)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({
+    kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+  })
+  assert.equal(committed.ok, true, committed.code)
+  assert.deepEqual(committed.transaction.edits, [{ from: 6, to: 6, insert: 'x' }])
+  assert.equal(committed.applied.doc.text, '```js\nx\n```\n')
+}
+
+// Case 28l: a MULTI-LINE insert (a paste) into an empty fence — every interior
+// break re-opens the per-line prefix, and the run is terminated once.
+{
+  const md = '> ```js\n> ```\n'
+  const d = doc(bq(cb('js', '')))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const tr = state.tr.insertText('a\nb', 2)
+  assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '> ```js\n> a\n> b\n> ```\n')
+}
+
+// Case 28m: FAIL-CLOSED. A fence with no terminator at all ('```js' as the
+// document's last line) has its anchor at the OPEN line's own end, so the
+// pre-fix write produced '```jsx' — the character absorbed into the LANGUAGE.
+// It is spellable only by guessing which ending a terminator-less document
+// uses, so it is refused with the kernel bytes untouched. Same for a break
+// spelled differently from the block's own ending.
+{
+  const md = '```js'
+  const d = doc(cb('js', ''))
+  const state = EditorState.create({ schema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map, 'the terminator-less fence still MAPS — that is why it needs a guard')
+  assert.equal(map.blockPairs[0].charMap.visibleToRaw(0), 5)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const refused = commitPlainText({
+    kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+  })
+  assert.equal(refused.ok, false, 'a terminator-less empty fence must fail closed')
+  assert.equal(refused.code, KERNEL_CODES.UNSUPPORTED)
+  assert.equal(kernel.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+
+  const crlfMd = '```js\r\n```\r\n'
+  const crlfState = EditorState.create({ schema, doc: doc(cb('js', '')) })
+  const crlfMap = buildProjectionMap(crlfMd, crlfState.doc)
+  const crlfKernel = { doc: createMarkdownDocument(crlfMd) }
+  const mixed = commitPlainText({
+    kernel: crlfKernel, map: crlfMap, transactions: [crlfState.tr.insertText('a\nb', 1)], oldState: crlfState
+  })
+  assert.equal(mixed.ok, false, "a bare '\\n' break in a CRLF empty fence must fail closed")
+  assert.equal(mixed.code, KERNEL_CODES.UNSUPPORTED)
+  assert.equal(crlfKernel.doc.text, crlfMd)
+}
+
 // Case 21 (review fix, Plan 4 Task 2): gap-aware selection-start resolution
 // through `commitPlainText`'s own `pmPosToRawStart` — the same corruption
 // class the reviewer live-probed at the `replaceVisibleText`/character-map
