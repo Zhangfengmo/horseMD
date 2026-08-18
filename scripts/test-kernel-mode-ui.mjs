@@ -401,8 +401,8 @@ async function runSplitPolishSegment() {
 // not-structural path). Commit 2e3036b's `startBoundaries` table has no entry
 // at `visibleLength` (nothing "starts" past the last unit), so
 // `rawRangeForVisibleRange(N, N)` at block end used to return null and the
-// live UI toasted KERNEL_CODES.UNMAPPED instead of inserting a literal tab
-// (pre-plan-4 behavior, and ordinary PM/legacy behavior everywhere else).
+// live UI toasted KERNEL_CODES.UNMAPPED instead of inserting anything at all.
+// (2026-08-18: what it inserts is no longer a literal tab — see AFTER_TAB.)
 // Own isolated app session (same pattern as runSplitPolishSegment) so this
 // one extra keystroke never disturbs the main run()'s carefully-chained undo/
 // checkbox/save byte assertions.
@@ -410,7 +410,10 @@ async function runTabAtBlockEndSegment() {
   const segRoot = `/tmp/horsemd-kernel-tabend-${process.pid}`
   const file = join(segRoot, 'tabend.md')
   const initial = '段落甲\n'
-  const AFTER_TAB = '段落甲\t\n'
+  // 2026-08-18: a literal tab at a block's END is stripped by CommonMark, so it
+  // was a dead byte — written to disk, invisible in the view, forever. Tab now
+  // writes TWO no-break spaces (see lib/source-kernel/commands/trailing-whitespace.js).
+  const AFTER_TAB = '段落甲' + '\u00A0\u00A0' + '\n'
 
   await rm(segRoot, { recursive: true, force: true })
   await mkdir(segRoot, { recursive: true })
@@ -447,9 +450,9 @@ async function runTabAtBlockEndSegment() {
     await toggleSourceMode(evaluate)
     const shown = await waitFor(() => visibleSource(evaluate),
       'source view did not appear after Tab at the paragraph end')
-    assert.equal(shown, AFTER_TAB, 'Tab at a plain paragraph end must insert a literal tab, byte-exact')
+    assert.equal(shown, AFTER_TAB, 'Tab at a plain paragraph end must write two real no-break spaces, byte-exact')
 
-    console.log('PASS kernel-mode UI tab-at-block-end segment: Tab at a plain paragraph end inserts a literal tab')
+    console.log('PASS kernel-mode UI tab-at-block-end segment: Tab at a plain paragraph end writes real, surviving whitespace')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
