@@ -623,3 +623,80 @@ const unitsOf = (src, i = 0) => {
 console.log('PASS source-kernel character map (highlight)')
 
 console.log('PASS source-kernel character map (inline html)')
+
+// ===========================================================================
+// 硬换行（hard break）：续行前缀必须属于某个单元（2026-08-18）
+// ===========================================================================
+// mdast `break` 的 position 止于行尾，因此下一行的续行前缀（缩进、blockquote
+// 的 '> '）原本不属于任何单元。那个空隙是可证的字节损坏来源：紧随硬换行的
+// 可见边界解析到空隙之前的偏移，在 '> a  \n> b' 的第二行行首打字会提交
+// '> a  \nX> b'（引用标记被降级成正文），删除硬换行会得到 '> a> b'。
+// 软换行从来没有这个洞 —— `consumeSoftBreak` 把前缀吞进 `linebreak` 单元。
+// `hardBreakUnitEnd` 对硬换行做同一件事，但**证明**而不是贪婪吞：只能扩展到
+// 下一个兄弟节点自己的 start offset，且中间每个字节都必须是续行前缀字符。
+{
+  const cases = [
+    // [源码, 硬换行单元的 raw 片段, 硬换行单元后面第一个字符单元的 raw]
+    ['a  \nb\n', '  \n', 'b'],                 // 无前缀（原本就正确）
+    ['a\\\nb\n', '\\\n', 'b'],                 // 反斜杠拼写
+    ['a  \n  b\n', '  \n  ', 'b'],             // 段落续行缩进
+    ['a  \n\tb\n', '  \n\t', 'b'],             // 制表符缩进
+    ['> a  \n> b\n', '  \n> ', 'b'],           // 引用前缀 —— 本次修复的主形态
+    ['> a\\\n> b\n', '\\\n> ', 'b'],           // 引用 + 反斜杠
+    ['>> a  \n>> b\n', '  \n>> ', 'b'],        // 嵌套引用
+    ['- a  \n  b\n', '  \n  ', 'b'],           // 列表缩进
+    ['> - a  \n>   b\n', '  \n>   ', 'b'],     // 引用里的列表
+    ['a  \r\nb\r\n', '  \r\n', 'b'],           // CRLF
+    ['> a  \r\n> b\r\n', '  \r\n> ', 'b'],     // CRLF + 引用
+    ['a\\\r\nb\r\n', '\\\r\n', 'b'],           // CRLF + 反斜杠
+    ['> a  \nb\n', '  \n', 'b']                // 懒续行：没有前缀可吞
+  ]
+  for (const [src, breakRaw, nextChar] of cases) {
+    const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+    const map = buildCharacterMap(src, block.node)
+    assert.ok(map, `${JSON.stringify(src)} 必须可映射`)
+    const index = map.units.findIndex((u) => u.kind === 'atom')
+    const atom = map.units[index]
+    assert.ok(atom, `${JSON.stringify(src)} 必须有硬换行单元`)
+    assert.equal(src.slice(atom.rawStart, atom.rawEnd), breakRaw,
+      `${JSON.stringify(src)}: 硬换行单元必须吞下续行前缀`)
+    // 单元必须**连续铺满**：下一个单元从硬换行单元结束的字节开始，没有空隙。
+    const next = map.units[index + 1]
+    assert.equal(next.rawStart, atom.rawEnd, `${JSON.stringify(src)}: 不允许留下空隙`)
+    assert.equal(src.slice(next.rawStart, next.rawEnd), nextChar)
+    // 三个解析器在硬换行两侧必须给出同一个字节（这正是打字可证的条件）。
+    let visBefore = 0
+    for (let i = 0; i < index; i += 1) visBefore += map.units[i].width
+    const visAfter = visBefore + 1
+    for (const [vis, expected] of [[visBefore, atom.rawStart], [visAfter, atom.rawEnd]]) {
+      assert.equal(map.visibleToRaw(vis), expected, `${JSON.stringify(src)}: visibleToRaw(${vis})`)
+      assert.equal(map.rawStartForVisible(vis), expected, `${JSON.stringify(src)}: rawStartForVisible(${vis})`)
+      assert.equal(map.rawNeutralInsert(vis), expected, `${JSON.stringify(src)}: rawNeutralInsert(${vis})`)
+    }
+    // 整个硬换行的删除范围恰好是它自己的字节（含前缀），既不多也不少。
+    assert.deepEqual(map.rawRangeForVisibleRange(visBefore, visAfter),
+      { from: atom.rawStart, to: atom.rawEnd })
+  }
+}
+
+// 两处**证不出来**的形态：整块 fail closed（charMap 为 null → 只读块），
+// 而不是勉强给一个可能吃掉前缀的偏移。
+{
+  // 硬换行是容器（link 标签）的最后一个子节点，且后面确实跟着前缀字节：
+  // 没有下一个兄弟节点的 start offset 可以证明前缀到哪里结束。
+  const src = '> [a  \n> ](u)b\n'
+  const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+  assert.equal(buildCharacterMap(src, block.node), null)
+}
+{
+  // 同一形态但没有容器前缀：行尾之后的第一个字节不可能是前缀的一部分，
+  // 于是「没有空隙」是可证的，块保持可编辑。
+  const src = '[a  \n](u)b\n'
+  const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+  const map = buildCharacterMap(src, block.node)
+  assert.ok(map)
+  const atom = map.units.find((u) => u.kind === 'atom')
+  assert.equal(src.slice(atom.rawStart, atom.rawEnd), '  \n')
+}
+
+console.log('PASS source-kernel character map (hard break: continuation prefix folded, two shapes fail closed)')

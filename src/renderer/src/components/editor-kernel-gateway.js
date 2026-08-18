@@ -74,25 +74,45 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
 //   'html'              @milkdown/preset-commonmark $nodeSchema("html")
 //   'math_inline'       @milkdown/crepe latex feature (inline TeX in attrs)
 //   'footnote_reference' @milkdown/preset-gfm $nodeSchema("footnote_reference")
+//   'hardbreak'         @milkdown/preset-commonmark $nodeSchema("hardbreak")
+//   'hard_break'        NOT a live node name — the spelling older fixtures in
+//                       this repo use. Listed so a schema that registers it
+//                       under that name behaves identically; it can never
+//                       match the shipped schema.
 //
-// DELIBERATELY ABSENT: the hard break (live name `hardbreak`; older fixtures
-// spell it `hard_break`, so neither is listed). Every other atom's raw span
-// sits INSIDE one line, and its two visible boundaries resolve to the same
-// byte through all three charMap resolvers. A hard break does not:
+// THE HARD BREAK WAS THE ONE REFUSED ATOM UNTIL 2026-08-18, and the reason it
+// is now admitted is a fix in the character map, NOT a relaxation here. The
+// original refusal was correct on its own evidence: every other atom's raw
+// span sits INSIDE one line and its two visible boundaries resolve to the same
+// byte through all three charMap resolvers, while a hard break's span stopped
+// at the LINE ENDING —
 //
 //   'a  \n  b'    text[0,1) break[1,4) text[6,7)
 //   '> a  \n> b'  text[2,3) break[3,6) text[8,9)
 //
-// the break's raw span stops at the line ending, so the next line's
-// continuation prefix (indentation, or a blockquote's '> ') belongs to NO
-// unit. The insert boundary just after the break resolves to the PRE-gap
-// offset, and typing there would commit '> a  \nX> b' — the quote marker
-// demoted to paragraph text, the same prefix-eating shape this file's CRLF
-// guard exists for. (A SOFT break has no such hole: `consumeSoftBreak` folds
-// the continuation prefix into its `linebreak` unit, which is why soft breaks
-// were always typable.) A smaller correct relaxation beats a larger unproven
-// one, so hard breaks stay refused and are recorded in the blocking matrix.
-const TYPABLE_INLINE_ATOMS = new Set(['image', 'html', 'math_inline', 'footnote_reference'])
+// — leaving the next line's continuation prefix ('  ', '> ') in no unit at
+// all. The insert boundary just after the break then resolved to the PRE-gap
+// offset, so typing there committed '> a  \nX> b': the quote marker demoted to
+// paragraph text. The comment that stood here also named the fix it was not
+// taking: a SOFT break has no such hole because `consumeSoftBreak` folds the
+// continuation prefix into its `linebreak` unit.
+//
+// character-map.js's `hardBreakUnitEnd` now does exactly that for the hard
+// break, and PROVES the fold rather than consuming greedily — the unit may
+// only extend to the NEXT SIBLING's own start offset, and every byte in
+// between must be a continuation-prefix character. The units therefore tile
+// the block contiguously across a hard break, exactly as they do across a soft
+// one, and all three resolvers agree on ONE offset at each of the break's two
+// boundaries (pinned in scripts/test-source-kernel-charmap.mjs and, on real
+// bytes, in this module's own tests). The two shapes that cannot be proven
+// (a break at the very end of a container's children with prefix bytes after
+// it; a break whose span does not end at a line terminator) return `null` from
+// `buildCharacterMap`, so their block degrades to read-only and every commit
+// into it fails closed with UNMAPPED — the same fail-closed exit every other
+// unprovable block takes, rather than a special case here.
+const TYPABLE_INLINE_ATOMS = new Set([
+  'image', 'html', 'math_inline', 'footnote_reference', 'hardbreak', 'hard_break'
+])
 
 // Textblock inline profile (P4-3.5, Fix B; atom relaxation P6 Task 1 — both
 // replace the old blanket `isPlainTextblock` refusal). A textblock qualifies
@@ -150,6 +170,16 @@ const textblockProfile = (node) => {
   })
   return admissible ? { hasMarkedRun, hasAtom } : null
 }
+
+// Exported for editor-kernel-mode.js's `getKernelStatus` (2026-08-18). The
+// status indicator's job is to answer "can the user type here?", and a block
+// can be untypable for TWO independent reasons: the projection map refused it
+// a character map, or THIS module refuses its inline shape. Counting only the
+// first produced a false "全部就绪" for a document whose paragraph the gateway
+// blocked at every keystroke — the hard-break shape was exactly that, and the
+// indicator must not depend on nobody ever adding another one. Same function
+// the dispatch path uses, so the badge cannot disagree with the toast.
+export const isTypableTextblock = (node) => !!node?.isTextblock && textblockProfile(node) !== null
 
 // Guard 2 of the relaxation above: for a range step [from, to) inside a
 // textblock that carries marked runs, every marked run the range INTERSECTS

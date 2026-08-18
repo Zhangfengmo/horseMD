@@ -209,6 +209,7 @@
     "test:kernel-codeblock-ui": "node scripts/test-kernel-codeblock-ui.mjs",
     "test:kernel-marks-ui": "node scripts/test-kernel-marks-ui.mjs",
     "test:kernel-stage3-ui": "node scripts/test-kernel-stage3-ui.mjs",
+    "test:kernel-hardbreak-ui": "node scripts/test-kernel-hardbreak-ui.mjs",
     "test:kernel-blocktype-ui": "node scripts/test-kernel-blocktype-ui.mjs",
     "test:kernel-blockinsert-ui": "node scripts/test-kernel-blockinsert-ui.mjs && cross-env KERNEL_INSERT_CRLF=1 CDP_PORT=10047 node scripts/test-kernel-blockinsert-ui.mjs",
     "test:kernel-empty-fence-ui": "node scripts/test-kernel-empty-fence-ui.mjs",
@@ -217,7 +218,7 @@
     "test:kernel-trailing-whitespace-ui": "node scripts/test-kernel-trailing-whitespace-ui.mjs",
     "test:heading-leading-tab-source-ui": "node scripts/test-heading-leading-tab-source-ui.mjs",
     "test:scratch-heading-leading-whitespace-ui": "node scripts/test-scratch-heading-leading-whitespace-ui.mjs",
-    "test:kernel-ui": "npm run test:kernel-heading-id-ui && npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui && npm run test:kernel-marks-ui && npm run test:kernel-stage3-ui && npm run test:kernel-blocktype-ui && npm run test:kernel-blockinsert-ui && npm run test:kernel-empty-fence-ui && npm run test:kernel-math-block-ui && npm run test:kernel-heading-whitespace-ui && npm run test:kernel-trailing-whitespace-ui && npm run test:heading-leading-tab-source-ui && npm run test:scratch-heading-leading-whitespace-ui",
+    "test:kernel-ui": "npm run test:kernel-heading-id-ui && npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui && npm run test:kernel-marks-ui && npm run test:kernel-stage3-ui && npm run test:kernel-blocktype-ui && npm run test:kernel-blockinsert-ui && npm run test:kernel-empty-fence-ui && npm run test:kernel-math-block-ui && npm run test:kernel-heading-whitespace-ui && npm run test:kernel-trailing-whitespace-ui && npm run test:kernel-hardbreak-ui && npm run test:heading-leading-tab-source-ui && npm run test:scratch-heading-leading-whitespace-ui",
     "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs && node scripts/test-kernel-status.mjs"
   },
   "dependencies": {

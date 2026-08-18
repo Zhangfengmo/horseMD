@@ -76,6 +76,61 @@ function consumeSoftBreak(text, r) {
   return i
 }
 
+// HARD BREAK: the same continuation-prefix problem `consumeSoftBreak` solves,
+// solved the same way (2026-08-18). An mdast `break` is an ATOM here (one
+// width-1 unit), and its own position STOPS at the line terminator:
+//
+//   'a  \n  b'    text[0,1) break[1,4) text[6,7)
+//   '> a  \n> b'  text[2,3) break[3,6) text[8,9)
+//
+// so the next line's continuation prefix ('  ', '> ') belonged to NO unit.
+// That gap is not a cosmetic detail: the visible boundary just after the break
+// resolved to the PRE-gap offset through all three resolvers, so an insert
+// there committed '> a  \nX> b' — the quote marker demoted to paragraph text —
+// and a delete of the break resolved to [3,6), leaving '> a> b'. It is why a
+// hard break was kept out of the gateway's typable-atom allowlist, i.e. why
+// ANY paragraph containing one was wholly untypable.
+//
+// A soft break never had the hole because `consumeSoftBreak` folds the prefix
+// into its `linebreak` unit. This does the same for the hard break, but PROVES
+// the fold instead of consuming greedily: the unit may only be extended up to
+// the NEXT SIBLING's own start offset, and every byte in between must be a
+// continuation-prefix character (' ', '\t', '>' — the only characters a
+// container prefix is made of). The result is that the units tile the block
+// contiguously across the break, exactly as they do across a soft one.
+//
+// TWO SHAPES REFUSE (fail closed, whole block degrades to read-only):
+//  1. the break is the LAST child of its container, AND real prefix bytes
+//     follow it. Reachable only as a hard break at the very end of a link/
+//     emphasis label inside a prefixed container ('> [a  \n> ](u)b'): there is
+//     no following sibling whose start offset proves where the prefix ends,
+//     and the bytes after the break belong to the container's own closing
+//     syntax. The unprefixed version of that shape ('[a  \n](u)b') is NOT
+//     refused — no prefix character follows the line ending, so there is
+//     provably no gap to account for.
+//  2. a `break` node whose raw span does not end at a line terminator. No
+//     parser output does this; the check is what makes "the bytes after this
+//     unit start a new line" a verified premise rather than an assumption.
+const isContinuationPrefixChar = (ch) => ch === ' ' || ch === '\t' || ch === '>'
+
+function hardBreakUnitEnd(text, breakStart, breakEnd, nextSibling) {
+  if (!Number.isInteger(breakStart) || !Number.isInteger(breakEnd) || breakEnd <= breakStart) return null
+  const last = text[breakEnd - 1]
+  if (last !== '\n' && last !== '\r') return null
+  const nextStart = nextSibling?.position?.start?.offset
+  if (!Number.isInteger(nextStart)) {
+    // No following sibling to prove against: accept only when there is
+    // provably no continuation prefix at all (the very next byte cannot be
+    // part of one).
+    return isContinuationPrefixChar(text[breakEnd]) ? null : breakEnd
+  }
+  if (nextStart < breakEnd) return null
+  for (let i = breakEnd; i < nextStart; i += 1) {
+    if (!isContinuationPrefixChar(text[i])) return null
+  }
+  return nextStart
+}
+
 // Exported (Plan 5 Task 3) so highlight-syntax.js can derive a `text` node's
 // decoded-index -> raw-offset tables from the SAME walk the character map
 // itself uses. A highlight's byte span must be provable by exactly the rules
@@ -242,7 +297,17 @@ function collectUnits(text, node, gaps = null) {
       const s = child.position?.start?.offset
       const e = child.position?.end?.offset
       if (!Number.isInteger(s) || !Number.isInteger(e)) return null
-      units.push({ rawStart: s, rawEnd: e, width: 1, kind: 'atom' })
+      // A `break` (hard break) is the one atom whose raw span ends at a LINE
+      // ENDING, so its unit has to swallow the next line's continuation prefix
+      // the way `consumeSoftBreak` does for a soft break — see
+      // `hardBreakUnitEnd` above for the proof and the two refused shapes.
+      // `children[i]` is the following sibling: `i` was already advanced past
+      // `child`.
+      const rawEnd = child.type === 'break'
+        ? hardBreakUnitEnd(text, s, e, children[i])
+        : e
+      if (rawEnd === null) return null
+      units.push({ rawStart: s, rawEnd, width: 1, kind: 'atom' })
     } else if (child.type === 'text') {
       const t = textUnits(text, child)
       if (!t) return null

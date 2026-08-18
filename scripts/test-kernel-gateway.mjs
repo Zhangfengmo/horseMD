@@ -12,7 +12,7 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { AddMarkStep } from '@milkdown/prose/transform'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, __atomGuards } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, isTypableTextblock, __atomGuards } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { KERNEL_CODES, createMarkdownDocument, applySourceTransaction, parseKernelMarkdown, buildCharacterMap } from '../src/renderer/src/lib/source-kernel/index.js'
 
@@ -59,6 +59,11 @@ const schema = new Schema({
     // structure against mdast structure 1:1, so a quoted-fence PM fixture
     // needs this wrapper node too, not just the bare code_block.
     blockquote: { content: 'block+', group: 'block' },
+    // Mirrors @milkdown/preset-commonmark's list shapes — needed only so the
+    // HARD BREAKS section can build a LIST-INDENTED paragraph, the other
+    // continuation-prefix container besides the blockquote.
+    bullet_list: { content: 'list_item+', group: 'block' },
+    list_item: { content: 'paragraph block*', attrs: { checked: { default: null } } },
     // Plan 5 Task 4 — mirrors @milkdown/preset-gfm's real table nodes
     // (lib/index.js:88-280): `table_header_row table_row+`, `(table_header)*`
     // / `(table_cell)*`, `cellContent: 'paragraph'`. The `table` content
@@ -88,6 +93,9 @@ const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
 const cb = (language, s) => schema.node('code_block', { language }, s ? text(s) : [])
 const bq = (...c) => schema.node('blockquote', null, c)
+const hbLi = (...c) => schema.node('list_item', { checked: null }, c)
+const hbBl = (...c) => schema.node('bullet_list', null, c)
+const br = () => schema.node('hardbreak')
 const img = (src) => schema.node('image', { src })
 const mathInline = (value) => schema.node('math_inline', { value })
 const inlineHtml = (value) => schema.node('html', { value })
@@ -1314,19 +1322,27 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(committed.applied.doc.text, 'ab\n')
 }
 
-// (i) a paragraph holding a HARD BREAK keeps refusing after the P6-1 atom
-// relaxation — the break is the one inline atom that stayed out of the
-// allowlist (its raw span is a LINE ENDING whose continuation prefix belongs
-// to no charMap unit; see the P6-1 section at the end of this file for the
-// probe). Both the legacy `hard_break` fixture spelling and the LIVE
-// `hardbreak` node name are pinned, so an allowlist that keyed off the wrong
-// spelling would fail here.
+// (i) a paragraph holding a HARD BREAK types like any other (2026-08-18).
+// The break used to be the one inline atom outside the allowlist, because its
+// raw span stopped at the line ending and the next line's continuation prefix
+// belonged to no charMap unit; `hardBreakUnitEnd` (character-map.js) now folds
+// that prefix into the break's own unit, exactly as `consumeSoftBreak` always
+// did for a soft break. Both the legacy `hard_break` fixture spelling and the
+// LIVE `hardbreak` node name are exercised, so an allowlist that keyed off the
+// wrong spelling would fail here. Byte assertions, not just classification —
+// see the HARD BREAKS section at the end of this file for the full matrix.
 {
   for (const nodeName of ['hard_break', 'hardbreak']) {
+    const md = 'ab  \ncd\n'
     const d = doc(p(text('ab'), schema.nodes[nodeName].create(), text('cd')))
     const state = EditorState.create({ schema, doc: d })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map, `${nodeName}: a hard-break paragraph must map`)
     const tr = state.tr.insertText('X', 2)
-    assert.equal(classifyTransactions([tr], state).kind, 'blocked', `${nodeName} must stay refused`)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text', `${nodeName} must type`)
+    const { committed } = commitOf(md, map, state, tr)
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'aXb  \ncd\n')
   }
 }
 
@@ -2489,20 +2505,28 @@ console.log('PASS kernel gateway (link tooltip: wrap/edit/unwrap/insert classifi
 // PM-side by `stepRespectsAtoms`, raw-side by `rangeSplitsAtomUnit` inside
 // `commitPlainText`, before any byte is written.
 //
-// HARD BREAKS ARE THE EXCEPTION and stay refused. Probed:
+// HARD BREAKS WERE THE EXCEPTION UNTIL 2026-08-18. The original probe:
 //
 //   'a  \n  b'    text[0,1) break[1,4) text[6,7)   <- units [1,4) then [6,7)
 //   '> a  \n> b'  text[2,3) break[3,6) text[8,9)   <- units [3,6) then [8,9)
 //
-// A hard break's raw span STOPS at the line ending; the next line's
-// continuation prefix (indentation, or a blockquote's '> ' marker) belongs to
-// NO unit. That leaves a gap, and the insert boundary right after the break
-// resolves to the PRE-gap offset — typing there would commit
-// '> a  \nX> b', turning the quote marker into paragraph text. (A SOFT break
-// has no such hole: `consumeSoftBreak` folds the continuation prefix into the
-// `linebreak` unit, which is why soft breaks were always typable.) A smaller
-// correct relaxation beats a larger unproven one, so `break`/`hardbreak` is
-// left out of the allowlist and recorded in the blocking matrix.
+// A hard break's raw span STOPS at the line ending, so the next line's
+// continuation prefix (indentation, or a blockquote's '> ' marker) belonged to
+// NO unit. That left a gap, and the insert boundary right after the break
+// resolved to the PRE-gap offset — typing there committed '> a  \nX> b',
+// turning the quote marker into paragraph text. A SOFT break never had the
+// hole, because `consumeSoftBreak` folds the continuation prefix into its
+// `linebreak` unit — which is the fix that has now been applied to the hard
+// break too (`hardBreakUnitEnd`, character-map.js), so the units tile
+// contiguously across it:
+//
+//   'a  \n  b'    char[0,1) atom[1,6)='  \n  ' char[6,7)
+//   '> a  \n> b'  char[2,3) atom[3,8)='  \n> ' char[8,9)
+//
+// The unit is extended only up to the NEXT SIBLING's own start offset and only
+// across continuation-prefix bytes, so it is proven rather than consumed
+// greedily. See the HARD BREAKS section at the end of this file for the byte
+// matrix (both spellings, quote/list/CRLF, and the two refused shapes).
 
 const atomFixture = (md, d) => {
   const state = EditorState.create({ schema, doc: d })
@@ -2710,25 +2734,38 @@ const atomBytes = ({ md, state, map }, tr) => {
     { kind: 'plain-text', text: '\r\n\r\nnext\r\n' })
 }
 
-// A9: hard breaks stay refused, under BOTH the legacy fixture spelling and
-// the live `hardbreak` node name — see the probe in this section's header for
-// the continuation-prefix gap that makes them unprovable today. The refusal
-// is block-wide, so a paragraph mixing an image with a hard break is refused
-// too (fail-closed: one unprovable atom refuses the block, it is never
-// silently narrowed to "the safe half of the paragraph").
+// A9 (rewritten 2026-08-18): HARD BREAKS. The full matrix lives in the HARD
+// BREAKS section at the end of this file; what is pinned right here is the
+// P6-1-shaped claim — the break is now an ordinary member of the atom
+// allowlist, under BOTH spellings, and it composes with the other atoms
+// instead of refusing their paragraph wholesale.
 {
   for (const nodeName of ['hard_break', 'hardbreak']) {
+    const md = 'a  \nb\n'
     const d = doc(p(text('a'), schema.nodes[nodeName].create(), text('b')))
-    const state = EditorState.create({ schema, doc: d })
-    for (const pos of [1, 2, 3, 4]) {
-      assert.equal(classifyTransactions([state.tr.insertText('X', pos)], state).kind, 'blocked',
-        `${nodeName}: typing at PM ${pos} must stay refused`)
-    }
+    const f = atomFixture(md, d)
+    // PM 1 | a | 2 (break) 3 | b | 4    raw: a=0 break=[1,4) b=4
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 1)), { kind: 'plain-text', text: 'Xa  \nb\n' },
+      `${nodeName}: before the text`)
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)), { kind: 'plain-text', text: 'aX  \nb\n' },
+      `${nodeName}: at the break's left edge`)
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)), { kind: 'plain-text', text: 'a  \nXb\n' },
+      `${nodeName}: at the break's right edge`)
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)), { kind: 'plain-text', text: 'a  \nbX\n' },
+      `${nodeName}: after the text`)
+    // Whole-atom deletion: the raw range is exactly the break's own bytes.
+    assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)), { kind: 'plain-text', text: 'ab\n' },
+      `${nodeName}: deleting the break joins the two lines`)
   }
-  const mixed = doc(p(text('a'), img('y.png'), schema.nodes.hardbreak.create(), text('b')))
-  const mixedState = EditorState.create({ schema, doc: mixed })
-  assert.equal(classifyTransactions([mixedState.tr.insertText('X', 2)], mixedState).kind, 'blocked',
-    'an image + hard break paragraph is refused as a whole')
+  // An image AND a hard break in one paragraph: two atoms, one block, both
+  // typable. This used to be refused as a whole (the break's presence alone
+  // disqualified the paragraph).
+  const mixed = atomFixture('a![x](y.png)  \nb\n',
+    doc(p(text('a'), img('y.png'), schema.nodes.hardbreak.create(), text('b'))))
+  assert.deepEqual(atomBytes(mixed, mixed.state.tr.insertText('X', 2)),
+    { kind: 'plain-text', text: 'aX![x](y.png)  \nb\n' })
+  assert.deepEqual(atomBytes(mixed, mixed.state.tr.insertText('X', 4)),
+    { kind: 'plain-text', text: 'a![x](y.png)  \nXb\n' })
 }
 
 // A10: fail-closed chain — classification admitting the shape is NOT the
@@ -2783,7 +2820,209 @@ const atomBytes = ({ md, state, map }, tr) => {
   assert.equal(classifyTransactions([f.state.tr.replaceWith(2, 3, text('Z'))], f.state).kind, 'blocked')
 }
 
-console.log('PASS kernel gateway (P6-1: typing around inline atoms; P6-1b: whole-atom deletion; hard breaks still refused)')
+// ===========================================================================
+// HARD BREAKS (2026-08-18) — the last shape that blocked ordinary writing
+// ===========================================================================
+// A paragraph containing ANY hard break used to be untypable in its entirety.
+// The root cause was in the character map, not here: a `break`'s raw span
+// stops at the LINE ENDING, so the continuation prefix that opens the next
+// line (a blockquote's '> ', a list item's indentation) belonged to no unit,
+// and the visible boundary just after the break resolved to the PRE-gap
+// offset. `hardBreakUnitEnd` folds that prefix into the break's own unit —
+// the same thing `consumeSoftBreak` has always done for a soft break — and
+// proves the fold: the extension may only reach the NEXT SIBLING's own start
+// offset, and every byte crossed must be a continuation-prefix character.
+//
+// What follows is the BYTE matrix. The load-bearing assertion is B2's third
+// line: typing at the start of the continuation line must commit
+// '> a  \n> Xb', never '> a  \nX> b'.
+{
+  const hbFixture = (md, d) => {
+    const f = atomFixture(md, d)
+    // Sanity: the fixture really contains a hard break, and PM agrees with the
+    // kernel on the block's visible length (the identity buildProjectionMap
+    // proves — asserted here so a mis-built fixture fails loudly).
+    const map = buildCharacterMap(md, parseKernelMarkdown(md).children[0].type === 'paragraph'
+      ? parseKernelMarkdown(md).children[0]
+      : parseKernelMarkdown(md).children[0].children[0])
+    assert.ok(map, `fixture must have a character map: ${JSON.stringify(md)}`)
+    assert.ok(map.units.some((u) => u.kind === 'atom' && /[\r\n]/.test(md.slice(u.rawStart, u.rawEnd))),
+      `fixture must carry a hard-break unit: ${JSON.stringify(md)}`)
+    return f
+  }
+
+  // B1: the bare paragraph, BOTH spellings. No continuation prefix exists
+  // here, so this shape was already byte-exact before the fix — it is the
+  // control the prefixed shapes are compared against.
+  for (const [md, label] of [['a  \nb\n', 'two-space'], ['a\\\nb\n', 'backslash']]) {
+    const f = hbFixture(md, doc(p(text('a'), br(), text('b'))))
+    const line2 = md.slice(md.indexOf('\n') + 1)
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)),
+      { kind: 'plain-text', text: md.replace('a', 'aX') }, `${label}: before the break`)
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)),
+      { kind: 'plain-text', text: md.replace(line2, 'X' + line2) }, `${label}: after the break`)
+    assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)),
+      { kind: 'plain-text', text: 'ab\n' }, `${label}: deleting the break joins the lines`)
+    // Across the break: one range covering text + break + text.
+    assert.deepEqual(atomBytes(f, f.state.tr.replaceWith(1, 4, text('Z'))),
+      { kind: 'plain-text', text: 'Z\n' }, `${label}: replacing across the break`)
+  }
+
+  // B2: BLOCKQUOTE — the shape the original refusal was written for.
+  // '> a  \n> b\n' raw: '>'=0 ' '=1 'a'=2 break=[3,8)='  \n> ' 'b'=8.
+  // PM: bq@0 p@1 contentPos 2; 'a'@2, hardbreak@3, 'b'@4.
+  {
+    const md = '> a  \n> b\n'
+    const f = hbFixture(md, doc(bq(p(text('a'), br(), text('b')))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)),
+      { kind: 'plain-text', text: '> Xa  \n> b\n' }, 'quote: block start')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)),
+      { kind: 'plain-text', text: '> aX  \n> b\n' }, 'quote: before the break')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+      { kind: 'plain-text', text: '> a  \n> Xb\n' },
+      'quote: the continuation line\'s "> " marker must survive — this is the bug')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 5)),
+      { kind: 'plain-text', text: '> a  \n> bX\n' }, 'quote: block end')
+    assert.deepEqual(atomBytes(f, f.state.tr.delete(3, 4)),
+      { kind: 'plain-text', text: '> ab\n' }, 'quote: deleting the break joins the lines')
+    // The committed bytes still parse to a QUOTED paragraph, not a quote
+    // followed by loose prose — the structural half of the same claim.
+    const after = parseKernelMarkdown('> a  \n> Xb\n')
+    assert.equal(after.children[0].type, 'blockquote')
+    assert.equal(after.children[0].children[0].children[2].value, 'Xb')
+  }
+
+  // B2b: blockquote + BACKSLASH spelling — the prefix folds identically.
+  {
+    const md = '> a\\\n> b\n'
+    const f = hbFixture(md, doc(bq(p(text('a'), br(), text('b')))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+      { kind: 'plain-text', text: '> a\\\n> Xb\n' }, 'quote/backslash: after the break')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)),
+      { kind: 'plain-text', text: '> aX\\\n> b\n' }, 'quote/backslash: before the break')
+  }
+
+  // B3: LIST-INDENTED — the other continuation-prefix container. '- a  \n  b\n'
+  // raw: '-'=0 ' '=1 'a'=2 break=[3,8)='  \n  ' 'b'=8.
+  // PM: bullet_list@0 list_item@1 p@2 contentPos 3.
+  {
+    const md = '- a  \n  b\n'
+    const f = hbFixture(md, doc(hbBl(hbLi(p(text('a'), br(), text('b'))))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 5)),
+      { kind: 'plain-text', text: '- a  \n  X' + 'b\n' }, 'list: the indentation must survive')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+      { kind: 'plain-text', text: '- aX  \n  b\n' }, 'list: before the break')
+    const after = parseKernelMarkdown('- a  \n  Xb\n')
+    assert.equal(after.children[0].type, 'list')
+    assert.equal(after.children[0].children.length, 1, 'still ONE list item')
+  }
+
+  // B4: CRLF, bare and quoted. The break's unit spans '\r\n' WHOLE (plus the
+  // prefix), so no resolver can land between the CR and the LF.
+  {
+    const md = 'a  \r\nb\r\n'
+    const f = hbFixture(md, doc(p(text('a'), br(), text('b'))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 3)),
+      { kind: 'plain-text', text: 'a  \r\nXb\r\n' }, 'CRLF: after the break')
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 2)),
+      { kind: 'plain-text', text: 'aX  \r\nb\r\n' }, 'CRLF: before the break')
+    assert.deepEqual(atomBytes(f, f.state.tr.delete(2, 3)),
+      { kind: 'plain-text', text: 'ab\r\n' }, 'CRLF: deleting the break')
+  }
+  {
+    const md = '> a  \r\n> b\r\n'
+    const f = hbFixture(md, doc(bq(p(text('a'), br(), text('b')))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+      { kind: 'plain-text', text: '> a  \r\n> Xb\r\n' }, 'CRLF quote: the marker survives')
+    assert.deepEqual(atomBytes(f, f.state.tr.delete(3, 4)),
+      { kind: 'plain-text', text: '> ab\r\n' }, 'CRLF quote: deleting the break')
+  }
+
+  // B5: TWO breaks in one paragraph — each unit folds its own prefix, and the
+  // middle line is reachable from both sides.
+  {
+    const md = '> a  \n> b  \n> c\n'
+    const f = hbFixture(md, doc(bq(p(text('a'), br(), text('b'), br(), text('c')))))
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 4)),
+      { kind: 'plain-text', text: '> a  \n> Xb  \n> c\n' })
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 5)),
+      { kind: 'plain-text', text: '> a  \n> bX  \n> c\n' })
+    assert.deepEqual(atomBytes(f, f.state.tr.insertText('X', 6)),
+      { kind: 'plain-text', text: '> a  \n> b  \n> Xc\n' })
+  }
+
+  // B6: THE REFUSED SHAPE, named. A hard break at the very end of a link
+  // label inside a prefixed container: there is no following sibling whose
+  // start offset proves where the '> ' prefix ends, so `buildCharacterMap`
+  // returns null, the pair is served read-only, and every commit into it fails
+  // closed with UNMAPPED — bytes untouched. (Its UNPREFIXED twin is fine and
+  // is pinned right after: no prefix byte follows the line ending, so there is
+  // provably no gap.)
+  {
+    const md = '> [a  \n> ](u)b\n'
+    assert.equal(buildCharacterMap(md, parseKernelMarkdown(md).children[0].children[0]), null,
+      'a break ending a link label inside a quote is not provable')
+    const link = [schema.mark('link', { href: 'u' })]
+    const d = doc(bq(p(schema.text('a', link), schema.node('hardbreak', null, null, link), text('b'))))
+    const state = EditorState.create({ schema, doc: d })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map, 'the document still maps — only THIS block degrades')
+    const pair = map.blockPairs.find((entry) => entry.pmNode.type.name === 'paragraph')
+    assert.equal(pair.charMap, null, 'the paragraph is served read-only')
+    // The step is built with an explicitly UNMARKED slice so the refusal
+    // provably comes from the missing map, not from the link mark.
+    const tr = state.tr.replaceWith(5, 5, text('X'))
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text',
+      'classification admits the shape — the map is what refuses it')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, false)
+    assert.equal(committed.code, KERNEL_CODES.UNMAPPED)
+    assert.equal(kernel.doc.text, md, 'no bytes were written')
+  }
+  {
+    const md = '[a  \n](u)b\n'
+    const charMap = buildCharacterMap(md, parseKernelMarkdown(md).children[0])
+    assert.ok(charMap, 'without a container prefix the same shape IS provable')
+    const atom = charMap.units.find((u) => u.kind === 'atom')
+    assert.equal(md.slice(atom.rawStart, atom.rawEnd), '  \n',
+      'and the break unit stops exactly at the line ending')
+  }
+}
+
+// B7: `isTypableTextblock`, the predicate the STATUS INDICATOR consumes
+// (editor-kernel-mode.js `getKernelStatus`). It must be the SAME answer the
+// dispatch path gives, so the badge cannot claim a document is fully editable
+// while the gateway refuses one of its paragraphs — the exact false negative
+// the hard break used to produce. No inline node type outside the allowlist
+// exists in the live schema today (text / image / html / hardbreak /
+// math_inline / footnote_reference is the complete set), so this is pinned
+// against a synthetic one: the point is that the NEXT node type someone adds
+// shows up in the badge instead of in a bug report.
+{
+  const withUnknown = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+      hardbreak: { group: 'inline', inline: true, atom: true },
+      emoji: { group: 'inline', inline: true, atom: true, attrs: { name: { default: '' } } }
+    }
+  })
+  const para = (...c) => withUnknown.node('paragraph', null, c)
+  assert.equal(isTypableTextblock(para(withUnknown.text('ab'))), true)
+  assert.equal(isTypableTextblock(
+    para(withUnknown.text('a'), withUnknown.node('hardbreak'), withUnknown.text('b'))), true,
+  'a hard-break paragraph is typable')
+  assert.equal(isTypableTextblock(
+    para(withUnknown.text('a'), withUnknown.node('emoji', { name: 'x' }))), false,
+  'an inline node nobody probed refuses — and the indicator must see that')
+  assert.equal(isTypableTextblock(withUnknown.node('doc', null, [para()])), false,
+    'a non-textblock is never "typable"')
+  assert.equal(isTypableTextblock(null), false)
+}
+
+console.log('PASS kernel gateway (P6-1: typing around inline atoms; P6-1b: whole-atom deletion; hard breaks now type, prefix-folded)')
 
 // --- H: syncHeadingIdPlugin's heading-`id` refresh (2026-08-17 veto-divergence)
 //
@@ -3012,24 +3251,31 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
       'and it must still be part of the code block\'s value')
   }
 
-  // T4: MUST NOT TOUCH — the two-space hard break. A paragraph carrying a
-  //     hardbreak is refused WHOLESALE by this gateway (the atom allowlist
-  //     deliberately excludes `hardbreak` — see TYPABLE_INLINE_ATOMS), so the
-  //     trailing-whitespace path can never reach it. Pinned here so a future
-  //     relaxation of that allowlist has to come past this assertion; the
-  //     byte-level guard is pinned separately in
-  //     scripts/test-source-kernel-trailing-whitespace.mjs (§7b).
+  // T4: MUST NOT TOUCH — the two-space hard break's own bytes. The paragraph
+  //     is typable since 2026-08-18 (see the HARD BREAKS section), so the
+  //     block-wide refusal that used to keep this path away from it is gone,
+  //     and the BYTE-level guard is now the only thing standing: the
+  //     whitespace run before a hard break does not reach the block end, so
+  //     `literalTailIsStripped` refuses to spell it and the two spaces survive
+  //     untouched. What IS reached is the block's real tail (after 'b'), which
+  //     spells as usual. Pinned so the spelling path can never start rewriting
+  //     a break's own spaces; the byte-level guard itself is pinned separately
+  //     in scripts/test-source-kernel-trailing-whitespace.mjs (§7b).
   {
     const md = 'a  \nb\n'
     const pmDoc = doc(p(text('a'), schema.node('hardbreak'), text('b')))
-    const state = EditorState.create({ schema, doc: pmDoc })
-    const tr = state.tr.insertText(' ', 2)
-    assert.equal(classifyTransactions([tr], state).kind, 'blocked',
-      'a hardbreak-bearing paragraph is refused before any spelling decision')
-    const trEnd = state.tr.insertText(' ', 4)
-    assert.equal(classifyTransactions([trEnd], state).kind, 'blocked')
     assert.equal(parseKernelMarkdown(md).children[0].children[1].type, 'break',
       'the fixture really is a hard break')
+    // A space typed AT the break's left edge stays a literal byte: the break's
+    // whitespace run is not the block tail, so no entity is spelled — and the
+    // break itself survives (three trailing spaces are still a hard break).
+    const atBreak = type(md, pmDoc, 2, ' ')
+    assert.equal(atBreak.bytes, 'a   \nb\n', 'the break\'s own spaces are never rewritten')
+    assert.equal(parseKernelMarkdown(atBreak.bytes).children[0].children[1].type, 'break',
+      'and the hard break is still a hard break')
+    // The block's genuine tail (after 'b') takes the ordinary spelling.
+    const atEnd = type(md, pmDoc, 4, ' ')
+    assert.equal(atEnd.bytes, 'a  \nb' + NBSP + '\n')
   }
 
   // T5: a GFM table cell. Cell padding is stripped exactly like a block tail,
