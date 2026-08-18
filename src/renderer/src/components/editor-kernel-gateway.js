@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, trailingEntityTail } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1242,8 +1242,10 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // it proves it here rather than inheriting it. A correctly shaped
     // full-pair delete (PM[3,5) -> raw [9,11)) is untouched: neither end sits
     // between the two units.
+    let stepPair = null
     if (!virtualBlock) {
       const pair = typeof map.pairAt === 'function' ? map.pairAt(oldFrom) : null
+      stepPair = pair
       const text = kernel.doc.text
       if (bisectsLineEnding(pair?.charMap, text, rawFrom) ||
           bisectsLineEnding(pair?.charMap, text, rawTo)) {
@@ -1354,6 +1356,9 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // ONE step, zero-width, exactly one space or tab, no virtual separator
     // bytes, and a cheap byte-level prefilter (`looksLikeAtxContentStart`)
     // before the command's own reparse is allowed to run.
+    let editFrom = rawFrom
+    let editTo = rawTo
+    let headingWhitespace = false
     if (steps.length === 1 && oldFrom === oldTo && virtualPrefix === '' &&
         (insertText === ' ' || insertText === '\t') &&
         looksLikeAtxContentStart(kernel.doc.text, rawFrom)) {
@@ -1362,18 +1367,79 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
         offset: rawFrom,
         character: insertText
       })
-      if (routed.ok) insertText = routed.transaction.insert
+      if (routed.ok) {
+        insertText = routed.transaction.insert
+        headingWhitespace = true
       // `not-structural` = the prefilter was a false positive (a '#' run inside
       // ordinary text, a code block, …) — leave the literal byte alone, nothing
       // about that shape changed. Anything else IS the heading content start
       // with no provable spelling, so refuse rather than write the dead byte.
-      else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+      } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
         return { ok: false, code: routed.code }
       }
     }
+    // Block-TRAILING whitespace (2026-08-18) — the other end of the same block,
+    // and the far more common one: while composing prose the caret is at a
+    // block end for essentially every inter-word space. A literal space
+    // committed there is stripped by CommonMark, so it never comes back; the
+    // projection repair then pulls the view back to the (character-less) bytes
+    // and the NEXT character maps IN FRONT of the stranded byte. Typing `a b`
+    // produced source `ab ` and view `ab`. See
+    // lib/source-kernel/commands/trailing-whitespace.js for the full mechanism.
+    //
+    // `spellBlockTailInsert` commits a numeric character reference instead
+    // (proven by reparsing the candidate) and, on the NEXT character, rewrites
+    // that reference back to the literal byte in the SAME edit — so an ordinary
+    // sentence ends up as ordinary bytes and the entity exists only while the
+    // space is genuinely the last thing in the block.
+    //
+    // THE PREFILTER IS THE COST CONTRACT. Everything before the command call is
+    // parse-free and O(1)-ish, so the hot typing path pays only comparisons:
+    //   * ONE step, zero-width, exactly one code point, no virtual separator;
+    //   * a real (non-virtual) pair whose mdast block is a paragraph / heading /
+    //     table cell (`code` and `math` are excluded by the command's own
+    //     allowlist — their trailing spaces ARE content);
+    //   * the caret sits at or past the block's LAST character-map unit, i.e.
+    //     the insert is an APPEND (an interior insert is already byte-exact);
+    //   * and either the byte would be stripped (`literalTailIsStripped`, a
+    //     forward walk over the whitespace run — this is what excludes the
+    //     two-space hard break, whose run stops at a line ending) or the block
+    //     already ends in one of THIS module's own entities (the self-heal).
+    // Only then is a parse spent, i.e. on spaces at a block end and on the one
+    // character that follows them — never on ordinary interior typing.
+    if (!headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
+        virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
+        stepPair.charMap && [...insertText].length === 1 && !/[\r\n]/.test(insertText)) {
+      const text = kernel.doc.text
+      const units = stepPair.charMap.units
+      const lastUnit = Array.isArray(units) && units.length ? units[units.length - 1] : null
+      if (lastUnit && rawFrom >= lastUnit.rawEnd) {
+        const tail = trailingEntityTail(text, stepPair.charMap)
+        const stripped = literalTailIsStripped(text, stepPair.mdBlock, rawFrom)
+        if (stripped || (tail && tail.rawEnd === rawFrom)) {
+          const routed = spellBlockTailInsert({
+            doc: kernel.doc,
+            block: stepPair.mdBlock,
+            offset: rawFrom,
+            insert: insertText,
+            tail
+          })
+          if (routed.ok) {
+            editFrom = routed.edit.from
+            editTo = routed.edit.to
+            insertText = routed.edit.insert
+          } else if (stripped && routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+            // The offset IS one CommonMark strips and no spelling could be
+            // proven: writing the literal byte would be writing a byte we have
+            // just proven dead. Refuse loudly instead.
+            return { ok: false, code: routed.code }
+          }
+        }
+      }
+    }
     edits.push({
-      from: rawFrom,
-      to: rawTo,
+      from: editFrom,
+      to: editTo,
       insert: virtualPrefix + insertText
     })
     // PM-side delta (never the raw insert with its separator prefix, and

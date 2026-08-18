@@ -2740,3 +2740,127 @@ console.log('PASS kernel gateway (heading-id sync: classified view-only; meta/st
 }
 
 console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — unreachable in kernel mode, pinned fail-closed)')
+
+// --- T: block-TRAILING whitespace (2026-08-18) --------------------------------
+//
+// The bug this section pins, measured on the built app BEFORE the fix: typing
+// `a`, ` `, `b` at the end of a paragraph committed source `末段。ab ` while the
+// view showed `末段。ab`. The space is stripped by CommonMark at a block's end,
+// so the byte was dead on arrival, the projection repair pulled the view back to
+// the character-less bytes, and the NEXT character mapped IN FRONT of the
+// stranded byte. Both the file and the screen disagreed with what was typed.
+//
+// These cases drive the REAL gateway (classify -> commitPlainText) against a
+// real projection map, and every expectation is stated as committed BYTES plus
+// what those bytes reparse to — 存下来并且能被看到.
+{
+  const decoded = (markdown, index = 0) => {
+    const out = []
+    const walk = (n) => {
+      if (typeof n?.value === 'string') out.push(n.value)
+      for (const child of n?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(markdown).children[index])
+    return out.join('')
+  }
+  // Type ONE character at PM position `at` and return the committed bytes.
+  const type = (markdown, pmDoc, at, ch) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, 'the fixture must map')
+    const tr = state.tr.insertText(ch, at)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(markdown) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    return committed.ok
+      ? { bytes: committed.applied.doc.text, edits: committed.transaction.edits }
+      : { refused: committed.code }
+  }
+
+  // T1: THE REPORTED SEQUENCE. `a b` must end up as `a b`, not `ab `.
+  {
+    const first = type('末段。a\n', doc(p(text('末段。a'))), 5, ' ')
+    assert.equal(first.bytes, '末段。a&#32;\n', 'the space must be spelled portably')
+    assert.equal(decoded(first.bytes), '末段。a ', 'and it must be OBSERVABLE in the reparse')
+    const second = type(first.bytes, doc(p(text('末段。a '))), 6, 'b')
+    assert.equal(second.bytes, '末段。a b\n', 'the entity must heal back to a literal space')
+    assert.equal(decoded(second.bytes), '末段。a b')
+    assert.deepEqual(second.edits, [{ from: 4, to: 9, insert: ' b' }],
+      'the heal and the new character must be ONE edit')
+  }
+
+  // T2: a heading's end is the same shape.
+  {
+    const first = type('## 乙\n', doc(schema.node('heading', { level: 2 }, [text('乙')])), 2, ' ')
+    assert.equal(first.bytes, '## 乙&#32;\n')
+    assert.equal(decoded(first.bytes), '乙 ')
+  }
+
+  // T3: MUST NOT TOUCH — a fenced code block's trailing spaces are content.
+  //     The pair's charMap is a codeMap and the mdast block is `code`, which
+  //     the command's allowlist excludes, so the literal byte is committed
+  //     byte-for-byte exactly as before.
+  {
+    const md = '```js\nlet a = 1\n```\n'
+    const result = type(md, doc(cb('js', 'let a = 1')), 10, ' ')
+    assert.equal(result.bytes, '```js\nlet a = 1 \n```\n',
+      'a trailing space inside a fence must stay a literal byte')
+    assert.equal(parseKernelMarkdown(result.bytes).children[0].value, 'let a = 1 ',
+      'and it must still be part of the code block\'s value')
+  }
+
+  // T4: MUST NOT TOUCH — the two-space hard break. A paragraph carrying a
+  //     hardbreak is refused WHOLESALE by this gateway (the atom allowlist
+  //     deliberately excludes `hardbreak` — see TYPABLE_INLINE_ATOMS), so the
+  //     trailing-whitespace path can never reach it. Pinned here so a future
+  //     relaxation of that allowlist has to come past this assertion, and the
+  //     byte-level guard is pinned separately in
+  //     scripts/test-source-kernel-trailing-whitespace.mjs (§7b).
+  {
+    const md = 'a  \nb\n'
+    const pmDoc = doc(p(text('a'), schema.node('hardbreak'), text('b')))
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const tr = state.tr.insertText(' ', 2)
+    assert.equal(classifyTransactions([tr], state).kind, 'blocked',
+      'a hardbreak-bearing paragraph is refused before any spelling decision')
+    const trEnd = state.tr.insertText(' ', 4)
+    assert.equal(classifyTransactions([trEnd], state).kind, 'blocked')
+    assert.equal(parseKernelMarkdown(md).children[0].children[1].type, 'break',
+      'the fixture really is a hard break')
+  }
+
+  // T5: a GFM table cell. Cell padding is stripped exactly like a block tail,
+  //     so `a b` inside a cell used to become `ab`; the table must stay a table.
+  {
+    const md = '| a | b |\n| - | - |\n| c | d |\n'
+    const pmDoc = doc(tbl([['a', 'b'], ['c', 'd']]))
+    const first = type(md, pmDoc, 5, ' ')
+    assert.equal(first.bytes, '| a&#32; | b |\n| - | - |\n| c | d |\n')
+    const table = parseKernelMarkdown(first.bytes).children[0]
+    assert.equal(table.type, 'table')
+    assert.equal(table.children[0].children.length, 2, 'the column count must not change')
+  }
+
+  // T6: an INTERIOR space is untouched — the plain path is already byte-exact,
+  //     and no parse is spent (the prefilter's `rawFrom >= lastUnit.rawEnd`
+  //     gate is what keeps ordinary typing off the proof path).
+  {
+    const result = type('ab\n', doc(p(text('ab'))), 2, ' ')
+    assert.equal(result.bytes, 'a b\n')
+    assert.deepEqual(result.edits, [{ from: 1, to: 1, insert: ' ' }])
+  }
+
+  // T7: the heading's LEADING whitespace command still wins at its own offset —
+  //     `## ` (an empty heading with real marker spacing) is BOTH the ATX
+  //     content start and a block tail, and the leading command's legacy-byte
+  //     spelling (`&nbsp;`) is the one that must be committed.
+  {
+    const md = '## \n'
+    const pmDoc = doc(schema.node('heading', { level: 2 }, []))
+    const result = type(md, pmDoc, 1, ' ')
+    assert.equal(result.bytes, '## &nbsp;\n',
+      'the heading-leading command keeps precedence at the ATX content start')
+  }
+}
+
+console.log('PASS kernel gateway (block-trailing whitespace: portable spelling + self-heal; code fences, hard breaks and interior typing untouched)')

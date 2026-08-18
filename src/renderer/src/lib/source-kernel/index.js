@@ -22,6 +22,14 @@ export {
   looksLikeAtxContentStart,
   HEADING_LEADING_WHITESPACE_ENTITY
 } from './commands/heading-whitespace.js'
+export {
+  spellBlockTailInsert,
+  literalTailIsStripped,
+  trailingEntityTail,
+  blockEditIsObservable,
+  BLOCK_TRAILING_ENTITY,
+  TRAILING_ENTITY_LITERAL
+} from './commands/trailing-whitespace.js'
 export { routeStructuralKey } from './router.js'
 export { createSourceHistory } from './history.js'
 
