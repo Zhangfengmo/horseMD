@@ -20,15 +20,15 @@ export { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
 export {
   insertHeadingLeadingWhitespace,
   looksLikeAtxContentStart,
-  HEADING_LEADING_WHITESPACE_ENTITY
+  HEADING_LEADING_WHITESPACE_TEXT
 } from './commands/heading-whitespace.js'
 export {
   spellBlockTailInsert,
   literalTailIsStripped,
-  trailingEntityTail,
+  healableTrailingSpace,
   blockEditIsObservable,
-  BLOCK_TRAILING_ENTITY,
-  TRAILING_ENTITY_LITERAL
+  BLOCK_TRAILING_TEXT,
+  NO_BREAK_SPACE
 } from './commands/trailing-whitespace.js'
 export { routeStructuralKey } from './router.js'
 export { createSourceHistory } from './history.js'

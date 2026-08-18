@@ -20,8 +20,18 @@
 // keystrokes through CDP, byte assertions read from the source view and from
 // disk after a real save.
 //
-// Expected bytes are the LEGACY writer's own output for the same shapes, so a
-// document edited in either mode reads identically.
+// WHAT IS WRITTEN (2026-08-18, second iteration). The first fix wrote a
+// character REFERENCE (`&nbsp;` / `&#x9;`), byte-identical to legacy. The user
+// rejected it on sight in source mode — «源码模式里，不接受这个写法», «就是空白，
+// 类似于在源码中也是空格，tab 可能是两个» — so the source now holds REAL
+// whitespace: U+00A0, the one whitespace character CommonMark does not strip
+// after an ATX marker. ONE for a Space, TWO for a Tab.
+//
+// Legacy still writes the entity spelling and its own regressions
+// (scripts/test-heading-leading-tab-source-ui.mjs,
+// scripts/test-scratch-heading-leading-whitespace-ui.mjs) still assert it,
+// correctly. Both decode to the same character; the modes now differ only in
+// spelling, which is accepted because legacy is scheduled for removal.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -43,6 +53,7 @@ const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
 const FIXTURE = ['# 标题甲', '', '段落占位。', '', '## ', '', '末段。', ''].join('\n')
 
 const NBSP = '\u00A0'
+const NB2 = NBSP + NBSP
 
 const VISIBLE_EDITOR = `[...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`
 
@@ -240,11 +251,13 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'tab in h1'),
-      FIXTURE.replace('# 标题甲', '# &#x9;标题甲'),
-      'Tab at a heading content start must commit the legacy `&#x9;` entity'
+      FIXTURE.replace('# 标题甲', '# ' + NB2 + '标题甲'),
+      'Tab at a heading content start must commit two real no-break spaces'
     )
+    assert.ok(!/&[#a-zA-Z0-9]+;/.test(await readSource(evaluate, 'markup check')),
+      'the source must hold whitespace characters, never a character reference')
     assert.ok(
-      JSON.parse(await blockTexts(evaluate)).includes('H1:\t标题甲'),
+      JSON.parse(await blockTexts(evaluate)).includes('H1:' + NB2 + '标题甲'),
       `the Tab must be VISIBLE in the heading — got ${await blockTexts(evaluate)}`
     )
 
@@ -257,27 +270,35 @@ async function run() {
     {
       const geometry = await leadingRunGeometry(evaluate, 'h1')
       assert.ok(geometry, 'could not measure the h1 geometry')
-      assert.equal(geometry.runLength, 1, 'the heading must start with exactly one whitespace character')
+      assert.equal(geometry.runLength, 2, 'the heading must start with exactly two whitespace characters')
       assert.ok(geometry.runWidth > 1,
-        `the leading tab must PAINT, not collapse — measured ${JSON.stringify(geometry)}`)
+        `the leading run must PAINT, not collapse — measured ${JSON.stringify(geometry)}`)
       assert.ok(geometry.firstGlyphLeft > geometry.contentLeft + 1,
         `the first real glyph must be pushed right by the indent — ${JSON.stringify(geometry)}`)
     }
 
     // =====================================================================
     // 1c) IT MUST BE ADDRESSABLE AND DELETABLE. Put the caret between the
-    //     entity and the first real character with a real click, then Backspace:
-    //     the WHOLE entity must go, restoring the original bytes exactly. An
-    //     undeletable byte is the same data-integrity problem as an invisible
-    //     one.
+    //     whitespace run and the first real character with a real click, then
+    //     Backspace once per character: each press removes exactly ONE
+    //     character (which is what a real whitespace character buys over an
+    //     entity — the run is editable one column at a time), and the original
+    //     bytes come back exactly.
     // =====================================================================
-    await clickTextOffset(evaluate, send, 'h1', 1)
+    await clickTextOffset(evaluate, send, 'h1', 2)
     await pressKey(send, { key: 'Backspace', code: 'Backspace' })
     await sleep(400)
     assert.equal(
-      await readSource(evaluate, 'backspace over the entity'),
+      await readSource(evaluate, 'first backspace'),
+      FIXTURE.replace('# 标题甲', '# ' + NBSP + '标题甲'),
+      'one Backspace must delete exactly one no-break space'
+    )
+    await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'second backspace'),
       FIXTURE,
-      'Backspace after the leading entity must delete the whole `&#x9;`, restoring the original bytes'
+      'the second Backspace must restore the original bytes exactly'
     )
     {
       const geometry = await leadingRunGeometry(evaluate, 'h1')
@@ -290,7 +311,7 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 're-applied tab'),
-      FIXTURE.replace('# 标题甲', '# &#x9;标题甲'),
+      FIXTURE.replace('# 标题甲', '# ' + NB2 + '标题甲'),
       'the Tab must be re-appliable after a delete'
     )
 
@@ -300,23 +321,23 @@ async function run() {
     //    kernel's new Space keymap owns. The caret is left after the Tab by
     //    step 1, so click back to offset 0.
     // =====================================================================
-    await clickAt(evaluate, send, '\t标题甲', 0)
+    await clickAt(evaluate, send, NB2 + '标题甲', 0)
     await pressKey(send, { key: ' ', code: 'Space', text: ' ' })
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'space keydown in h1'),
-      FIXTURE.replace('# 标题甲', '# &nbsp;&#x9;标题甲'),
-      'a Space KEYDOWN at a heading content start must commit the legacy `&nbsp;` entity'
+      FIXTURE.replace('# 标题甲', '# ' + NBSP + NB2 + '标题甲'),
+      'a Space KEYDOWN at a heading content start must commit one real no-break space'
     )
     assert.ok(
-      JSON.parse(await blockTexts(evaluate)).includes(`H1:${NBSP}\t标题甲`),
-      `the Space must be VISIBLE as an NBSP — got ${await blockTexts(evaluate)}`
+      JSON.parse(await blockTexts(evaluate)).includes(`H1:${NBSP}${NB2}标题甲`),
+      `the Space must be VISIBLE — got ${await blockTexts(evaluate)}`
     )
     {
       const geometry = await leadingRunGeometry(evaluate, 'h1')
-      assert.equal(geometry.runLength, 2, 'the heading must now start with NBSP + tab')
+      assert.equal(geometry.runLength, 3, 'the heading must now start with three whitespace characters')
       assert.ok(geometry.runWidth > 1,
-        `the NBSP + tab run must PAINT — measured ${JSON.stringify(geometry)}`)
+        `the run must PAINT — measured ${JSON.stringify(geometry)}`)
     }
 
     // =====================================================================
@@ -326,13 +347,13 @@ async function run() {
     //     gateway's own defence-in-depth re-spelling — the bytes must be
     //     route-independent.
     // =====================================================================
-    await clickAt(evaluate, send, `${NBSP}\t标题甲`, 0)
+    await clickAt(evaluate, send, `${NBSP}${NB2}标题甲`, 0)
     await typeTextLikeUser(send, ' ', { delayMs: delay })
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'space insertText in h1'),
-      FIXTURE.replace('# 标题甲', '# &nbsp;&nbsp;&#x9;标题甲'),
-      'a Space arriving without a keydown must commit the same entity, not a literal byte'
+      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲'),
+      'a Space arriving without a keydown must commit the same character, not a literal byte'
     )
 
     // =====================================================================
@@ -343,8 +364,8 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'tab in empty h2'),
-      FIXTURE.replace('# 标题甲', '# &nbsp;&nbsp;&#x9;标题甲').replace('\n## \n', '\n## &#x9;\n'),
-      'Tab in an EMPTY heading must commit `## &#x9;`, the legacy byte string'
+      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲').replace('\n## \n', '\n## ' + NB2 + '\n'),
+      'Tab in an EMPTY heading must commit two real no-break spaces'
     )
 
     // =====================================================================
@@ -355,8 +376,8 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'typing after the entity'),
-      FIXTURE.replace('# 标题甲', '# &nbsp;&nbsp;&#x9;标题甲').replace('\n## \n', '\n## &#x9;乙\n'),
-      'text typed after a leading entity must land after it, not before'
+      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲').replace('\n## \n', '\n## ' + NB2 + '乙\n'),
+      'text typed after a leading whitespace run must land after it, and must not heal it away'
     )
 
     // =====================================================================
@@ -389,11 +410,11 @@ async function run() {
       'the saved file must be byte-identical to the kernel source view'
     )
     assert.ok(
-      (await readFile(file, 'utf8')).includes('# &nbsp;&nbsp;&#x9;标题甲'),
-      'the leading entities must survive to disk'
+      (await readFile(file, 'utf8')).includes('# ' + NBSP + NBSP + NB2 + '标题甲'),
+      'the leading whitespace must survive to disk'
     )
 
-    console.log('PASS kernel-mode heading leading whitespace UI regression: Tab and Space at an ATX heading content start commit the legacy entity bytes and stay visible')
+    console.log('PASS kernel-mode heading leading whitespace UI regression: Tab and Space at an ATX heading content start commit real no-break spaces and stay visible')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

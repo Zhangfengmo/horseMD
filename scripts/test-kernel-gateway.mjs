@@ -2750,10 +2750,13 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
 // the character-less bytes, and the NEXT character mapped IN FRONT of the
 // stranded byte. Both the file and the screen disagreed with what was typed.
 //
-// These cases drive the REAL gateway (classify -> commitPlainText) against a
-// real projection map, and every expectation is stated as committed BYTES plus
-// what those bytes reparse to — 存下来并且能被看到.
+// The cure writes a REAL U+00A0 (never `&nbsp;` — the user rejected markup in
+// source mode) and heals it back to an ordinary space in the same edit as the
+// character that displaces it. These cases drive the REAL gateway (classify ->
+// commitPlainText) against a real projection map, and every expectation is
+// stated as committed BYTES plus what those bytes reparse to.
 {
+  const NBSP = '\u00A0'
   const decoded = (markdown, index = 0) => {
     const out = []
     const walk = (n) => {
@@ -2780,20 +2783,21 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
   // T1: THE REPORTED SEQUENCE. `a b` must end up as `a b`, not `ab `.
   {
     const first = type('末段。a\n', doc(p(text('末段。a'))), 5, ' ')
-    assert.equal(first.bytes, '末段。a&#32;\n', 'the space must be spelled portably')
-    assert.equal(decoded(first.bytes), '末段。a ', 'and it must be OBSERVABLE in the reparse')
-    const second = type(first.bytes, doc(p(text('末段。a '))), 6, 'b')
-    assert.equal(second.bytes, '末段。a b\n', 'the entity must heal back to a literal space')
+    assert.equal(first.bytes, '末段。a' + NBSP + '\n', 'the space must be written as real whitespace')
+    assert.ok(!/&[#a-zA-Z0-9]+;/.test(first.bytes), 'and never as a character reference')
+    assert.equal(decoded(first.bytes), '末段。a' + NBSP, 'it must be OBSERVABLE in the reparse')
+    const second = type(first.bytes, doc(p(text('末段。a' + NBSP))), 6, 'b')
+    assert.equal(second.bytes, '末段。a b\n', 'the no-break space must heal to an ordinary space')
     assert.equal(decoded(second.bytes), '末段。a b')
-    assert.deepEqual(second.edits, [{ from: 4, to: 9, insert: ' b' }],
+    assert.deepEqual(second.edits, [{ from: 4, to: 5, insert: ' b' }],
       'the heal and the new character must be ONE edit')
   }
 
   // T2: a heading's end is the same shape.
   {
     const first = type('## 乙\n', doc(schema.node('heading', { level: 2 }, [text('乙')])), 2, ' ')
-    assert.equal(first.bytes, '## 乙&#32;\n')
-    assert.equal(decoded(first.bytes), '乙 ')
+    assert.equal(first.bytes, '## 乙' + NBSP + '\n')
+    assert.equal(decoded(first.bytes), '乙' + NBSP)
   }
 
   // T3: MUST NOT TOUCH — a fenced code block's trailing spaces are content.
@@ -2813,7 +2817,7 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
   //     hardbreak is refused WHOLESALE by this gateway (the atom allowlist
   //     deliberately excludes `hardbreak` — see TYPABLE_INLINE_ATOMS), so the
   //     trailing-whitespace path can never reach it. Pinned here so a future
-  //     relaxation of that allowlist has to come past this assertion, and the
+  //     relaxation of that allowlist has to come past this assertion; the
   //     byte-level guard is pinned separately in
   //     scripts/test-source-kernel-trailing-whitespace.mjs (§7b).
   {
@@ -2835,7 +2839,7 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     const md = '| a | b |\n| - | - |\n| c | d |\n'
     const pmDoc = doc(tbl([['a', 'b'], ['c', 'd']]))
     const first = type(md, pmDoc, 5, ' ')
-    assert.equal(first.bytes, '| a&#32; | b |\n| - | - |\n| c | d |\n')
+    assert.equal(first.bytes, '| a' + NBSP + ' | b |\n| - | - |\n| c | d |\n')
     const table = parseKernelMarkdown(first.bytes).children[0]
     assert.equal(table.type, 'table')
     assert.equal(table.children[0].children.length, 2, 'the column count must not change')
@@ -2852,15 +2856,19 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
 
   // T7: the heading's LEADING whitespace command still wins at its own offset —
   //     `## ` (an empty heading with real marker spacing) is BOTH the ATX
-  //     content start and a block tail, and the leading command's legacy-byte
-  //     spelling (`&nbsp;`) is the one that must be committed.
+  //     content start and a block tail, and both now write the same character.
   {
     const md = '## \n'
     const pmDoc = doc(schema.node('heading', { level: 2 }, []))
     const result = type(md, pmDoc, 1, ' ')
-    assert.equal(result.bytes, '## &nbsp;\n',
-      'the heading-leading command keeps precedence at the ATX content start')
+    assert.equal(result.bytes, '## ' + NBSP + '\n')
+    // …and the NEXT character must NOT heal it away: an ordinary space there
+    // would be eaten by the ATX marker's own spacing run again.
+    const next = type(result.bytes, doc(schema.node('heading', { level: 2 }, [text(NBSP)])), 2, '乙')
+    assert.equal(next.bytes, '## ' + NBSP + '乙\n',
+      'the heading\'s leading no-break space must survive the next keystroke')
+    assert.equal(decoded(next.bytes), NBSP + '乙')
   }
 }
 
-console.log('PASS kernel gateway (block-trailing whitespace: portable spelling + self-heal; code fences, hard breaks and interior typing untouched)')
+console.log('PASS kernel gateway (block-trailing whitespace: real no-break space + self-heal; code fences, hard breaks and interior typing untouched)')

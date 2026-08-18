@@ -4,15 +4,21 @@
 // THE BUG THIS FILE PINS. In kernel mode, typing `a b` at the END of a
 // paragraph produced source `末段。ab ` and view `末段。ab` — the space the user
 // pressed was lost from BOTH, and a dead byte was stranded on disk. CommonMark
-// strips a block's trailing whitespace run, so the space was committed at the
-// one offset where it can never come back, the projection check then repaired
-// the view to match the (character-less) bytes, and the NEXT character mapped
-// to the block's content end, i.e. in FRONT of the stranded byte.
+// strips a block's trailing ASCII whitespace run, so the space was committed at
+// the one offset where it can never come back, the projection check then
+// repaired the view to match the (character-less) bytes, and the NEXT character
+// mapped to the block's content end, i.e. in FRONT of the stranded byte.
 //
 // Because prose is composed left to right, the caret is at a block end for
 // essentially every inter-word space. This is ordinary typing, not an edge
 // case, which is why a blanket refusal was rejected: it would fire on every
 // word AND still lose the character.
+//
+// WHAT IS WRITTEN. A real U+00A0 (the one whitespace character CommonMark does
+// not strip), raw in the source — never `&nbsp;`, which the user rejected on
+// sight in source mode. It is HEALED back to an ordinary space in the same edit
+// as the character that displaces it, so a finished sentence holds exactly the
+// bytes any other editor would write.
 //
 // Every expectation below is stated as the committed FILE plus what that file
 // REPARSES to — the two halves of 存下来并且能被看到.
@@ -20,18 +26,18 @@ import assert from 'node:assert/strict'
 import {
   spellBlockTailInsert,
   literalTailIsStripped,
-  trailingEntityTail,
-  BLOCK_TRAILING_ENTITY,
-  TRAILING_ENTITY_LITERAL
+  healableTrailingSpace,
+  BLOCK_TRAILING_TEXT,
+  NO_BREAK_SPACE
 } from '../src/renderer/src/lib/source-kernel/commands/trailing-whitespace.js'
 import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
 import { parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/character-map.js'
 
-assert.equal(BLOCK_TRAILING_ENTITY[' '], '&#32;')
-assert.equal(BLOCK_TRAILING_ENTITY['\t'], '&#9;')
-assert.equal(TRAILING_ENTITY_LITERAL['&#32;'], ' ')
-assert.equal(TRAILING_ENTITY_LITERAL['&#9;'], '\t')
+const NBSP = NO_BREAK_SPACE
+assert.equal(NBSP, '\u00A0')
+assert.equal(BLOCK_TRAILING_TEXT[' '], NBSP, 'a Space is ONE no-break space')
+assert.equal(BLOCK_TRAILING_TEXT['\t'], NBSP + NBSP, 'a Tab is TWO')
 
 const doc = (text) => ({ text, revision: 3 })
 
@@ -66,8 +72,8 @@ function step(text, { type, start }, offset, insert) {
   const block = blockAt(text, type, start)
   assert.ok(block, `no ${type} block at ${start} in ${JSON.stringify(text)}`)
   const map = buildCharacterMap(text, block)
-  const tail = map ? trailingEntityTail(text, map) : null
-  const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert, tail })
+  const heal = map ? healableTrailingSpace(text, map) : null
+  const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert, heal })
   if (!routed.ok) return { refused: routed.code }
   assert.equal(routed.transaction.baseRevision, 3, 'transaction must carry the doc revision')
   const applied = applySourceTransaction(doc(text), routed.transaction)
@@ -87,49 +93,58 @@ const visible = (text, type, start) => {
 // ---------------------------------------------------------------------------
 {
   let text = '末段。a\n'
-  // the space: block-trailing, so it is spelled portably
+  // the space: block-trailing, so it is written as a character that survives
   const spaced = step(text, { type: 'paragraph', start: 0 }, 4, ' ')
-  assert.equal(spaced.bytes, '末段。a&#32;\n')
-  assert.equal(spaced.spelling, 'entity')
-  assert.equal(visible(spaced.bytes, 'paragraph', 0), '末段。a ',
+  assert.equal(spaced.bytes, '末段。a' + NBSP + '\n')
+  assert.equal(spaced.spelling, 'no-break-space')
+  assert.ok(!/&[#a-zA-Z0-9]+;/.test(spaced.bytes),
+    'the source must hold whitespace, never a character reference')
+  assert.equal(visible(spaced.bytes, 'paragraph', 0), '末段。a' + NBSP,
     'the typed space must be visible in the reparse')
   text = spaced.bytes
 
-  // the 'b': the space is no longer last, so the entity heals back to a literal
-  const healed = step(text, { type: 'paragraph', start: 0 }, 9, 'b')
-  assert.equal(healed.bytes, '末段。a b\n', 'the file must hold ordinary bytes once the space is interior')
+  // the 'b': the space is no longer last, so it heals back to an ordinary space
+  const healed = step(text, { type: 'paragraph', start: 0 }, 5, 'b')
+  assert.equal(healed.bytes, '末段。a b\n',
+    'the file must hold ordinary bytes once the space is interior')
   assert.equal(healed.healed, true)
   assert.equal(healed.spelling, 'literal')
   assert.equal(visible(healed.bytes, 'paragraph', 0), '末段。a b')
 }
 
 // ---------------------------------------------------------------------------
-// 2) TWO SPACES IN A ROW at a block end. The first heals to a literal, the
-//    second takes the entity — so both survive.
+// 2) TWO SPACES IN A ROW at a block end. The first heals to an ordinary space,
+//    the second takes the no-break form — so both survive, one at a time.
 // ---------------------------------------------------------------------------
 {
   const first = step('a\n', { type: 'paragraph', start: 0 }, 1, ' ')
-  assert.equal(first.bytes, 'a&#32;\n')
-  const second = step(first.bytes, { type: 'paragraph', start: 0 }, 6, ' ')
-  assert.equal(second.bytes, 'a &#32;\n')
+  assert.equal(first.bytes, 'a' + NBSP + '\n')
+  const second = step(first.bytes, { type: 'paragraph', start: 0 }, 2, ' ')
+  assert.equal(second.bytes, 'a ' + NBSP + '\n')
   assert.equal(second.healed, true)
-  assert.equal(second.spelling, 'entity')
-  assert.equal(visible(second.bytes, 'paragraph', 0), 'a  ', 'both spaces must survive the reparse')
+  assert.equal(visible(second.bytes, 'paragraph', 0), 'a ' + NBSP,
+    'both spaces must survive the reparse')
 
-  const third = step(second.bytes, { type: 'paragraph', start: 0 }, 7, 'x')
-  assert.equal(third.bytes, 'a  x\n')
+  const third = step(second.bytes, { type: 'paragraph', start: 0 }, 3, 'x')
+  assert.equal(third.bytes, 'a  x\n', 'and both must resolve to ordinary spaces')
   assert.equal(visible(third.bytes, 'paragraph', 0), 'a  x')
 }
 
 // ---------------------------------------------------------------------------
-// 3) A TAB at a block end takes the numeric-reference spelling too.
+// 3) A TAB at a block end takes TWO no-break spaces — the user's own
+//    proportion — and is deliberately NOT healed afterwards: a run of two
+//    could be one Tab or two Spaces, and this command never guesses.
 // ---------------------------------------------------------------------------
 {
   const tabbed = step('a\n', { type: 'paragraph', start: 0 }, 1, '\t')
-  assert.equal(tabbed.bytes, 'a&#9;\n')
-  assert.equal(visible(tabbed.bytes, 'paragraph', 0), 'a\t')
-  const after = step(tabbed.bytes, { type: 'paragraph', start: 0 }, 5, 'z')
-  assert.equal(after.bytes, 'a\tz\n')
+  assert.equal(tabbed.bytes, 'a' + NBSP + NBSP + '\n')
+  assert.equal(visible(tabbed.bytes, 'paragraph', 0), 'a' + NBSP + NBSP)
+  assert.equal(healableTrailingSpace(tabbed.bytes,
+    buildCharacterMap(tabbed.bytes, blockAt(tabbed.bytes, 'paragraph', 0))), null,
+    'a run of TWO must not be claimed by the heal')
+  assert.deepEqual(step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, 'z'),
+    { refused: 'not-structural' },
+    'so the next character falls through to the ordinary plain path')
 }
 
 // ---------------------------------------------------------------------------
@@ -137,23 +152,40 @@ const visible = (text, type, start) => {
 // ---------------------------------------------------------------------------
 {
   const spaced = step('## 乙\n\n末段。\n', { type: 'heading', start: 0 }, 4, ' ')
-  assert.equal(spaced.bytes, '## 乙&#32;\n\n末段。\n')
-  assert.equal(visible(spaced.bytes, 'heading', 0), '乙 ')
-  const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 9, '丙')
+  assert.equal(spaced.bytes, '## 乙' + NBSP + '\n\n末段。\n')
+  assert.equal(visible(spaced.bytes, 'heading', 0), '乙' + NBSP)
+  const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 5, '丙')
   assert.equal(healed.bytes, '## 乙 丙\n\n末段。\n',
     'the heading must end with the ordinary two-character text the user typed')
   assert.equal(visible(healed.bytes, 'heading', 0), '乙 丙')
 }
 
 // ---------------------------------------------------------------------------
+// 4b) THE HEAL MUST NOT FIRE where the healed space would die again: at an ATX
+//     heading's own content start the ordinary space is stripped, so the proof
+//     fails and the command falls through to the plain append — keeping the
+//     no-break space that heading-whitespace.js put there.
+// ---------------------------------------------------------------------------
+{
+  const text = '## ' + NBSP + '\n'
+  const block = blockAt(text, 'heading', 0)
+  const map = buildCharacterMap(text, block)
+  const heal = healableTrailingSpace(text, map)
+  assert.ok(heal, 'the no-break space IS a single trailing run')
+  const routed = spellBlockTailInsert({ doc: doc(text), block, offset: 4, insert: '标', heal })
+  assert.deepEqual(routed, { ok: false, code: 'not-structural' },
+    'healing at an ATX content start would delete the character — it must fall through')
+}
+
+// ---------------------------------------------------------------------------
 // 5) PRE-EXISTING dead bytes are never touched. A paragraph that already ends
-//    with two stranded spaces keeps them; the new character is inserted at the
+//    with two stranded spaces keeps them; the new character is written at the
 //    block's visible end, in front of them.
 // ---------------------------------------------------------------------------
 {
   const result = step('a  \n\nb\n', { type: 'paragraph', start: 0 }, 1, ' ')
-  assert.equal(result.bytes, 'a&#32;  \n\nb\n')
-  assert.equal(visible(result.bytes, 'paragraph', 0), 'a ')
+  assert.equal(result.bytes, 'a' + NBSP + '  \n\nb\n')
+  assert.equal(visible(result.bytes, 'paragraph', 0), 'a' + NBSP)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,25 +198,24 @@ const visible = (text, type, start) => {
   const src = '| a | b |\n| - | - |\n| c | d |\n'
   // the first cell's own span is '| a ' -> its visible end is offset 3
   const spaced = step(src, { type: 'tableCell', start: 0 }, 3, ' ')
-  assert.equal(spaced.bytes, '| a&#32; | b |\n| - | - |\n| c | d |\n')
-  assert.equal(visible(spaced.bytes, 'tableCell', 0), 'a ')
+  assert.equal(spaced.bytes, '| a' + NBSP + ' | b |\n| - | - |\n| c | d |\n')
+  assert.equal(visible(spaced.bytes, 'tableCell', 0), 'a' + NBSP)
   const rows = parseKernelMarkdown(spaced.bytes).children[0]
   assert.equal(rows.type, 'table', 'it must still be a table')
   assert.equal(rows.children.length, 2, 'header row + one body row')
   assert.equal(rows.children[0].children.length, 2, 'the column count must not change')
 
-  const healed = step(spaced.bytes, { type: 'tableCell', start: 0 }, 8, 'x')
+  const healed = step(spaced.bytes, { type: 'tableCell', start: 0 }, 4, 'x')
   assert.equal(healed.bytes, '| a x | b |\n| - | - |\n| c | d |\n')
   assert.equal(visible(healed.bytes, 'tableCell', 0), 'a x')
 }
 {
-  // compact table, last cell (its span includes the closing '|')
+  // compact table, second cell (its span includes the closing '|')
   const src = '|a|b|\n|-|-|\n|c|d|\n'
-  const cell = blockAt(src, 'tableCell', 2)
-  assert.ok(cell, 'the second cell must start at offset 2')
+  assert.ok(blockAt(src, 'tableCell', 2), 'the second cell must start at offset 2')
   const spaced = step(src, { type: 'tableCell', start: 2 }, 4, ' ')
-  assert.equal(spaced.bytes, '|a|b&#32;|\n|-|-|\n|c|d|\n')
-  assert.equal(visible(spaced.bytes, 'tableCell', 2), 'b ')
+  assert.equal(spaced.bytes, '|a|b' + NBSP + '|\n|-|-|\n|c|d|\n')
+  assert.equal(visible(spaced.bytes, 'tableCell', 2), 'b' + NBSP)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +223,6 @@ const visible = (text, type, start) => {
 // ---------------------------------------------------------------------------
 {
   // 7a) a fenced code block: trailing spaces are CONTENT and byte-preserved.
-  //     The command does not claim `code` blocks at all.
   const code = '```js\nlet a = 1 \n```\n'
   const block = blockAt(code, 'code', 0)
   assert.ok(block)
@@ -213,16 +243,15 @@ const visible = (text, type, start) => {
   assert.deepEqual(
     spellBlockTailInsert({ doc: doc(hard), block: para, offset: 3, insert: ' ' }),
     { ok: false, code: 'not-structural' })
-  // …but the END of that same paragraph (after 'b') IS claimed, and the hard
-  // break survives the rewrite untouched.
+  // …but the END of that same paragraph IS claimed, and the hard break survives.
   const atEnd = step(hard, { type: 'paragraph', start: 0 }, 5, ' ')
-  assert.equal(atEnd.bytes, 'a  \nb&#32;\n')
+  assert.equal(atEnd.bytes, 'a  \nb' + NBSP + '\n')
   const reparsed = blockAt(atEnd.bytes, 'paragraph', 0)
   assert.equal(reparsed.children[1].type, 'break', 'the hard break must still be a hard break')
-  assert.equal(decodedText(reparsed), 'ab ')
+  assert.equal(decodedText(reparsed), 'ab' + NBSP)
 
-  // 7c) an INTERIOR space (not at the block's visible end) is not this
-  //     command's shape — the plain path already commits it byte-exact.
+  // 7c) an INTERIOR space is not this command's shape — the plain path already
+  //     commits it byte-exact.
   const interior = 'ab\n'
   const iPara = blockAt(interior, 'paragraph', 0)
   assert.equal(literalTailIsStripped(interior, iPara, 1), false)
@@ -232,21 +261,18 @@ const visible = (text, type, start) => {
 }
 
 // ---------------------------------------------------------------------------
-// 8) The literalization set is CLOSED. A `&nbsp;` (heading-whitespace.js's own
-//    spelling) or any entity this module did not write is never rewritten.
+// 8) The heal claims a run of EXACTLY ONE no-break space, and re-proves the
+//    caller's span against the bytes.
 // ---------------------------------------------------------------------------
 {
-  const text = '# &nbsp;\n'
-  const heading = blockAt(text, 'heading', 0)
-  const map = buildCharacterMap(text, heading)
-  assert.equal(trailingEntityTail(text, map), null,
-    '&nbsp; is not one of this module\'s spellings')
+  const text = 'ax\n'
+  const block = blockAt(text, 'paragraph', 0)
   const routed = spellBlockTailInsert({
-    doc: doc(text), block: heading, offset: 8, insert: 'x',
-    tail: { rawStart: 2, rawEnd: 8, literal: ' ' }
+    doc: doc(text), block, offset: 2, insert: 'y',
+    heal: { rawStart: 1, rawEnd: 2 }
   })
-  assert.equal(routed.ok, false, 'a caller-supplied tail must be re-proven against the bytes')
-  assert.equal(routed.code, 'not-structural')
+  assert.deepEqual(routed, { ok: false, code: 'not-structural' },
+    'a caller-supplied heal span must be re-proven against the bytes')
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +286,6 @@ const visible = (text, type, start) => {
     assert.equal(spellBlockTailInsert({ doc: doc(text), block, offset: 1, insert }).ok, false,
       `insert ${JSON.stringify(insert)} must be refused`)
   }
-  // a block whose span does not match the document is not proven -> fall through
   assert.deepEqual(
     spellBlockTailInsert({
       doc: doc(text), offset: 1, insert: ' ',
@@ -275,33 +300,31 @@ const visible = (text, type, start) => {
 // ---------------------------------------------------------------------------
 {
   const quoted = step('> q\n', { type: 'paragraph', start: 2 }, 3, ' ')
-  assert.equal(quoted.bytes, '> q&#32;\n')
+  assert.equal(quoted.bytes, '> q' + NBSP + '\n')
   assert.equal(parseKernelMarkdown(quoted.bytes).children[0].type, 'blockquote')
-  assert.equal(visible(quoted.bytes, 'paragraph', 2), 'q ')
+  assert.equal(visible(quoted.bytes, 'paragraph', 2), 'q' + NBSP)
 
   const item = step('- item\n', { type: 'paragraph', start: 2 }, 6, ' ')
-  assert.equal(item.bytes, '- item&#32;\n')
+  assert.equal(item.bytes, '- item' + NBSP + '\n')
   assert.equal(parseKernelMarkdown(item.bytes).children[0].type, 'list')
-  assert.equal(visible(item.bytes, 'paragraph', 2), 'item ')
-  const healed = step(item.bytes, { type: 'paragraph', start: 2 }, 11, 'x')
+  assert.equal(visible(item.bytes, 'paragraph', 2), 'item' + NBSP)
+  const healed = step(item.bytes, { type: 'paragraph', start: 2 }, 7, 'x')
   assert.equal(healed.bytes, '- item x\n')
 }
 
 // ---------------------------------------------------------------------------
 // 11) IDEMPOTENCE / long run: typing a whole sentence one character at a time
-//     must produce exactly the sentence, byte for byte.
+//     must produce exactly the sentence, byte for byte — no no-break space may
+//     survive anywhere in the middle of it.
 // ---------------------------------------------------------------------------
 {
-  let text = '\n'
-  // seed a real paragraph first (the empty-document case belongs to the
-  // virtual-block path, not to this command)
-  text = 'h\n'
+  let text = 'h\n'
   let offset = 1
   for (const ch of 'ello world from horsemd') {
     const block = blockAt(text, 'paragraph', 0)
     const map = buildCharacterMap(text, block)
-    const tail = trailingEntityTail(text, map)
-    const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert: ch, tail })
+    const heal = healableTrailingSpace(text, map)
+    const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert: ch, heal })
     if (routed.ok) {
       text = applySourceTransaction(doc(text), routed.transaction).doc.text
       offset = routed.transaction.selection.head
@@ -315,4 +338,4 @@ const visible = (text, type, start) => {
   assert.equal(visible(text, 'paragraph', 0), 'hello world from horsemd')
 }
 
-console.log('PASS source-kernel block-trailing whitespace: a space typed at a block end survives as source AND as view, and heals to ordinary bytes on the next character')
+console.log('PASS source-kernel block-trailing whitespace: a space typed at a block end survives as real whitespace in the source AND in the view, and heals to an ordinary space on the next character')

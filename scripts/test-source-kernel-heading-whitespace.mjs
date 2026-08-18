@@ -10,25 +10,32 @@
 //   * Space -> committed a LITERAL ' ', '# 标题甲' -> '#  标题甲', then the
 //             kernel's own projection check fired `projection-mismatch` and
 //             repaired the VIEW back. Same dead byte, plus repair churn.
-// Both because CommonMark eats the whole spacing run between the ATX marker
-// and the content: that offset cannot hold a literal whitespace byte.
+// Both because CommonMark eats the whole ASCII spacing run between the ATX
+// marker and the content: that offset cannot hold a literal space or tab.
 //
-// Every expected byte string below is the LEGACY writer's output for the same
-// shape — see scripts/test-heading-leading-tab-source-ui.mjs ('## &#x9;') and
-// scripts/test-scratch-heading-leading-whitespace-ui.mjs ('# &#x9;' /
-// '# &nbsp;' / '# &#x9;标题' / '# &nbsp;标题'). Byte-exact agreement between
-// the two modes is the contract, so those strings are reproduced here rather
-// than re-derived.
+// WHAT IS WRITTEN INSTEAD (2026-08-18, second iteration). The first fix wrote a
+// character REFERENCE (`&nbsp;` / `&#x9;`), matching legacy's bytes. The user
+// rejected it on sight in source mode — 「源码模式里，不接受这个写法」,
+// 「就是空白，类似于在源码中也是空格，tab 可能是两个」 — so the source now holds
+// REAL whitespace characters: U+00A0 (the one whitespace character CommonMark
+// does not strip here), ONE for a Space and TWO for a Tab.
+//
+// Legacy keeps writing the entity spelling and its own regressions
+// (scripts/test-heading-leading-tab-source-ui.mjs,
+// scripts/test-scratch-heading-leading-whitespace-ui.mjs) still assert it —
+// correctly, for legacy. Both spellings decode to the SAME character; the modes
+// now differ only in how they spell it, which is accepted because legacy is
+// scheduled for removal.
 import assert from 'node:assert/strict'
-import { insertHeadingLeadingWhitespace, HEADING_LEADING_WHITESPACE_ENTITY }
+import { insertHeadingLeadingWhitespace, HEADING_LEADING_WHITESPACE_TEXT }
   from '../src/renderer/src/lib/source-kernel/commands/heading-whitespace.js'
 import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
 import { parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 
 const NBSP = '\u00A0'
 
-assert.equal(HEADING_LEADING_WHITESPACE_ENTITY[' '], '&nbsp;')
-assert.equal(HEADING_LEADING_WHITESPACE_ENTITY['\t'], '&#x9;')
+assert.equal(HEADING_LEADING_WHITESPACE_TEXT[' '], NBSP, 'a Space is ONE no-break space')
+assert.equal(HEADING_LEADING_WHITESPACE_TEXT['\t'], NBSP + NBSP, 'a Tab is TWO')
 
 const doc = (text) => ({ text, revision: 7 })
 
@@ -67,38 +74,43 @@ function firstHeadingText(text) {
 }
 
 // ---------------------------------------------------------------------------
-// 1) The two legacy fixtures, byte for byte.
+// 1) The committed bytes: real whitespace, never markup.
 // ---------------------------------------------------------------------------
-// scripts/test-heading-leading-tab-source-ui.mjs saves '## &#x9;\n'. Kernel
-// mode reaches that heading through its EMPTY-ATX-heading pairing, which is
-// only offered when the marker carries real spacing ('## ', not '##' — see
-// editor-kernel-projection-map.js `emptyAtxHeadingContentStart`), so the
-// kernel fixture is the spaced form. The committed bytes are identical.
+// Kernel mode reaches an EMPTY heading through its ATX pairing, which is only
+// offered when the marker carries real spacing ('## ', not '##' — see
+// editor-kernel-projection-map.js `emptyAtxHeadingContentStart`).
 assert.deepEqual(
   commit('# 一级标题\n\n## \n', 11, '\t'),
-  { bytes: '# 一级标题\n\n## &#x9;\n', caret: 16 },
-  'Tab in an empty h2 must commit the legacy `&#x9;` spelling'
+  { bytes: '# 一级标题\n\n## ' + NBSP + NBSP + '\n', caret: 13 },
+  'Tab in an empty h2 must commit two no-break spaces'
 )
-assert.equal(firstHeadingText('# 一级标题\n\n## &#x9;\n'), '一级标题')
+assert.deepEqual(commit('# \n', 2, '\t'), { bytes: '# ' + NBSP + NBSP + '\n', caret: 4 },
+  'Tab in the empty H1 scaffold')
+assert.deepEqual(commit('# \n', 2, ' '), { bytes: '# ' + NBSP + '\n', caret: 3 },
+  'Space in the empty H1 scaffold')
+assert.deepEqual(commit('# 标题\n', 2, '\t'), { bytes: '# ' + NBSP + NBSP + '标题\n', caret: 4 },
+  'Tab before existing heading text')
+assert.deepEqual(commit('# 标题\n', 2, ' '), { bytes: '# ' + NBSP + '标题\n', caret: 3 },
+  'Space before existing heading text')
 
-// scripts/test-scratch-heading-leading-whitespace-ui.mjs, all four cases.
-assert.deepEqual(commit('# \n', 2, '\t'), { bytes: '# &#x9;\n', caret: 7 },
-  'Tab in the empty H1 scaffold must commit `# &#x9;`')
-assert.deepEqual(commit('# \n', 2, ' '), { bytes: '# &nbsp;\n', caret: 8 },
-  'Space in the empty H1 scaffold must commit `# &nbsp;`')
-assert.deepEqual(commit('# 标题\n', 2, '\t'), { bytes: '# &#x9;标题\n', caret: 7 },
-  'Tab before existing heading text must commit `# &#x9;标题`')
-assert.deepEqual(commit('# 标题\n', 2, ' '), { bytes: '# &nbsp;标题\n', caret: 8 },
-  'Space before existing heading text must commit `# &nbsp;标题`')
+// NOT AN ENTITY. The whole reason for this iteration: nothing resembling markup
+// may appear in the source.
+for (const bytes of [
+  commit('# 标题\n', 2, ' ').bytes,
+  commit('# 标题\n', 2, '\t').bytes
+]) {
+  assert.ok(!/&[#a-zA-Z0-9]+;/.test(bytes),
+    `the source must contain whitespace, not a character reference — got ${JSON.stringify(bytes)}`)
+}
 
-// The entity is CONTENT after the reparse — the whole point.
-assert.equal(firstHeadingText('# &#x9;标题\n'), '\t标题')
-assert.equal(firstHeadingText('# &nbsp;标题\n'), NBSP + '标题')
-assert.equal(firstHeadingText('# &#x9;\n'), '\t')
-assert.equal(firstHeadingText('# &nbsp;\n'), NBSP)
+// The character is CONTENT after the reparse — the other half of the point.
+assert.equal(firstHeadingText('# ' + NBSP + NBSP + '标题\n'), NBSP + NBSP + '标题')
+assert.equal(firstHeadingText('# ' + NBSP + '标题\n'), NBSP + '标题')
+assert.equal(firstHeadingText('# ' + NBSP + NBSP + '\n'), NBSP + NBSP)
+assert.equal(firstHeadingText('# ' + NBSP + '\n'), NBSP)
 
-// The literal byte the kernel used to commit is provably lost — this is the
-// bug, stated as an assertion rather than as prose.
+// The literal ASCII byte the kernel used to commit is provably lost — this is
+// the bug, stated as an assertion rather than as prose.
 assert.equal(firstHeadingText('#  标题\n'), '标题',
   'a literal space after the ATX marker is stripped by the parser')
 assert.equal(firstHeadingText('# \t标题\n'), '标题',
@@ -111,42 +123,43 @@ for (let level = 1; level <= 6; level += 1) {
   const marker = '#'.repeat(level)
   assert.deepEqual(
     commit(`${marker} T\n`, level + 1, ' '),
-    { bytes: `${marker} &nbsp;T\n`, caret: level + 7 },
-    `h${level} leading space must commit the entity`
+    { bytes: `${marker} ${NBSP}T\n`, caret: level + 2 },
+    `h${level} leading space must commit one no-break space`
   )
 }
-assert.deepEqual(commit('> ## T\n', 5, '\t'), { bytes: '> ## &#x9;T\n', caret: 10 },
+assert.deepEqual(commit('> ## T\n', 5, '\t'), { bytes: '> ## ' + NBSP + NBSP + 'T\n', caret: 7 },
   'a quoted heading is still an ATX heading')
 
 // ---------------------------------------------------------------------------
 // 3) SECOND and THIRD leading whitespace characters — the shape the report's
 //    "press it twice" follow-up produces. Each press is again at the content
-//    start, so each commits its own entity and they chain.
+//    start, so they chain.
 // ---------------------------------------------------------------------------
-assert.deepEqual(commit('# &nbsp;标题\n', 2, ' '), { bytes: '# &nbsp;&nbsp;标题\n', caret: 8 },
-  'a second leading space must commit a second entity')
-assert.deepEqual(commit('# &nbsp;&nbsp;标题\n', 2, '\t'), { bytes: '# &#x9;&nbsp;&nbsp;标题\n', caret: 7 },
-  'a third leading whitespace character must commit its own entity')
-assert.equal(firstHeadingText('# &#x9;&nbsp;&nbsp;标题\n'), '\t' + NBSP + NBSP + '标题')
+assert.deepEqual(commit('# ' + NBSP + '标题\n', 2, ' '),
+  { bytes: '# ' + NBSP + NBSP + '标题\n', caret: 3 },
+  'a second leading space must commit a second no-break space')
+assert.deepEqual(commit('# ' + NBSP + NBSP + '标题\n', 2, '\t'),
+  { bytes: '# ' + NBSP + NBSP + NBSP + NBSP + '标题\n', caret: 4 },
+  'a third press must commit its own characters')
+assert.equal(firstHeadingText('# ' + NBSP.repeat(4) + '标题\n'), NBSP.repeat(4) + '标题')
 
-// A whitespace character typed AFTER an existing leading entity is NOT at the
-// content start any more, so it is not this command's shape at all — the
-// ordinary character path already commits a literal byte correctly there
-// (`# &nbsp; 标题` decodes to NBSP + ' ' + '标题').
-assert.deepEqual(insertHeadingLeadingWhitespace({ doc: doc('# &nbsp;标题\n'), offset: 8, character: ' ' }),
+// A whitespace character typed AFTER an existing leading no-break space is not
+// at the content start any more, so it is not this command's shape at all — the
+// ordinary character path already commits a literal byte correctly there.
+assert.deepEqual(insertHeadingLeadingWhitespace({ doc: doc('# ' + NBSP + '标题\n'), offset: 3, character: ' ' }),
   { ok: false, code: 'not-structural' },
-  'the position after an existing leading entity is not this command\'s shape')
-assert.equal(firstHeadingText('# &nbsp; 标题\n'), NBSP + ' 标题',
+  'the position after an existing leading no-break space is not this command\'s shape')
+assert.equal(firstHeadingText('# ' + NBSP + ' 标题\n'), NBSP + ' 标题',
   'a literal space that is not the first content byte survives the reparse')
 
 // ---------------------------------------------------------------------------
 // 4) Marker-first headings: the content start sits BEFORE an inline mark's own
-//    delimiter, and the entity must land outside it.
+//    delimiter, and the characters must land outside it.
 // ---------------------------------------------------------------------------
-assert.deepEqual(commit('## *a*\n', 3, '\t'), { bytes: '## &#x9;*a*\n', caret: 8 },
-  'the entity must land before an opening emphasis delimiter, not inside it')
-assert.deepEqual(commit('## `code`\n', 3, ' '), { bytes: '## &nbsp;`code`\n', caret: 9 },
-  'the entity must land before an inline-code span')
+assert.deepEqual(commit('## *a*\n', 3, '\t'), { bytes: '## ' + NBSP + NBSP + '*a*\n', caret: 5 },
+  'the run must land before an opening emphasis delimiter, not inside it')
+assert.deepEqual(commit('## `code`\n', 3, ' '), { bytes: '## ' + NBSP + '`code`\n', caret: 4 },
+  'the run must land before an inline-code span')
 
 // ---------------------------------------------------------------------------
 // 5) REFUSALS — `not-structural` (caller falls through, nothing changed) vs
@@ -157,13 +170,12 @@ const refusal = (text, offset, character) =>
 
 // Not a heading at all.
 assert.deepEqual(refusal('段落。\n', 0, ' '), { ok: false, code: 'not-structural' })
-// A paragraph's start is NOT this command's shape (a leading space there is a
-// different, unsolved problem — the kernel refuses/strips it elsewhere).
+// A paragraph's start is NOT this command's shape.
 assert.deepEqual(refusal('# T\n\n段落。\n', 5, ' '), { ok: false, code: 'not-structural' })
 // A list item's text start is NOT this command's shape.
 assert.deepEqual(refusal('- item\n', 2, ' '), { ok: false, code: 'not-structural' })
 assert.deepEqual(refusal('- item\n', 2, '\t'), { ok: false, code: 'not-structural' })
-// A heading's END is not the content start.
+// A heading's END is not the content start (it is commands/trailing-whitespace.js).
 assert.deepEqual(refusal('## Title\n', 8, ' '), { ok: false, code: 'not-structural' })
 assert.deepEqual(refusal('## Title\n', 5, ' '), { ok: false, code: 'not-structural' })
 // A bare '##' has no content position: writing anything there makes the line a
@@ -171,9 +183,8 @@ assert.deepEqual(refusal('## Title\n', 5, ' '), { ok: false, code: 'not-structur
 assert.deepEqual(refusal('# T\n\n##\n', 7, '\t'), { ok: false, code: 'not-structural' })
 // Setext headings have no ATX opening.
 assert.deepEqual(refusal('Title\n=====\n', 0, ' '), { ok: false, code: 'not-structural' })
-// Only Space and Tab. Anything else (including NBSP itself, a newline, or a
-// printable character) is somebody else's path.
-for (const character of ['\u00A0', 'x', '\n', '\r', '', undefined, null]) {
+// Only Space and Tab.
+for (const character of [NBSP, 'x', '\n', '\r', '', undefined, null]) {
   assert.deepEqual(refusal('# T\n', 2, character), { ok: false, code: 'not-structural' },
     `character ${JSON.stringify(character)} must not be claimed`)
 }
@@ -184,23 +195,22 @@ assert.deepEqual(insertHeadingLeadingWhitespace({ doc: { text: '# T\n' }, offset
 assert.deepEqual(insertHeadingLeadingWhitespace({ doc: null, offset: 2, character: ' ' }),
   { ok: false, code: 'not-structural' })
 
-// A closing sequence turns the entity into content the parser reads
-// differently ('## ##' is an EMPTY heading; '## &nbsp;##' is a heading whose
-// text is NBSP + '##'), so the decoded-text proof refuses it LOUDLY — this is
-// the branch that proves the verification is real and not decorative.
+// A closing sequence turns the run into content the parser reads differently
+// ('## ##' is an EMPTY heading; '## \u00A0##' is a heading whose text is
+// NBSP + '##'), so the decoded-text proof refuses it LOUDLY — the branch that
+// proves the verification is real and not decorative.
 assert.deepEqual(refusal('## ##\n', 3, ' '), { ok: false, code: 'unsupported-structure' },
   'an ATX closing sequence must be refused, not silently turned into text')
 
 // ---------------------------------------------------------------------------
-// 6) CRLF. The chokepoint in markdown-document.js must still see a legal edit,
-//    and the entity must not disturb the line ending.
+// 6) CRLF. The chokepoint in markdown-document.js must still see a legal edit.
 // ---------------------------------------------------------------------------
-assert.deepEqual(commit('# 标题\r\n', 2, ' '), { bytes: '# &nbsp;标题\r\n', caret: 8 },
-  'a CRLF document must commit the same entity and keep its ending')
+assert.deepEqual(commit('# 标题\r\n', 2, ' '), { bytes: '# ' + NBSP + '标题\r\n', caret: 3 },
+  'a CRLF document must commit the same characters and keep its ending')
 
 // ---------------------------------------------------------------------------
-// 7) Idempotence of the PROOF: committing twice in a row must keep producing
-//    a document whose reparse still says what the bytes say.
+// 7) Idempotence of the PROOF: committing repeatedly must keep producing a
+//    document whose reparse still says what the bytes say.
 // ---------------------------------------------------------------------------
 {
   let text = '## 标题\n\n段落。\n'
@@ -209,8 +219,8 @@ assert.deepEqual(commit('# 标题\r\n', 2, ' '), { bytes: '# &nbsp;标题\r\n', 
     assert.ok(result.bytes, `chained commit refused: ${result.refused}`)
     text = result.bytes
   }
-  assert.equal(text, '## &nbsp;&#x9;&nbsp;标题\n\n段落。\n')
-  assert.equal(firstHeadingText(text), NBSP + '\t' + NBSP + '标题')
+  assert.equal(text, '## ' + NBSP.repeat(4) + '标题\n\n段落。\n')
+  assert.equal(firstHeadingText(text), NBSP.repeat(4) + '标题')
 }
 
-console.log('PASS source-kernel heading leading whitespace: Space/Tab at an ATX heading\'s first content position commit the legacy entity bytes')
+console.log('PASS source-kernel heading leading whitespace: Space/Tab at an ATX heading\'s first content position commit real no-break spaces, never markup')

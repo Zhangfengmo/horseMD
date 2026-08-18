@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, trailingEntityTail } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1414,21 +1414,21 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       const units = stepPair.charMap.units
       const lastUnit = Array.isArray(units) && units.length ? units[units.length - 1] : null
       if (lastUnit && rawFrom >= lastUnit.rawEnd) {
-        const tail = trailingEntityTail(text, stepPair.charMap)
+        const heal = healableTrailingSpace(text, stepPair.charMap)
         const stripped = literalTailIsStripped(text, stepPair.mdBlock, rawFrom)
-        if (stripped || (tail && tail.rawEnd === rawFrom)) {
+        if (stripped || (heal && heal.rawEnd === rawFrom)) {
           const routed = spellBlockTailInsert({
             doc: kernel.doc,
             block: stepPair.mdBlock,
             offset: rawFrom,
             insert: insertText,
-            tail
+            heal
           })
           if (routed.ok) {
             editFrom = routed.edit.from
             editTo = routed.edit.to
             insertText = routed.edit.insert
-          } else if (stripped && routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+          } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
             // The offset IS one CommonMark strips and no spelling could be
             // proven: writing the literal byte would be writing a byte we have
             // just proven dead. Refuse loudly instead.

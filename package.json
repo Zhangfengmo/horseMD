@@ -211,9 +211,10 @@
     "test:kernel-stage3-ui": "node scripts/test-kernel-stage3-ui.mjs",
     "test:kernel-blocktype-ui": "node scripts/test-kernel-blocktype-ui.mjs",
     "test:kernel-heading-whitespace-ui": "node scripts/test-kernel-heading-whitespace-ui.mjs",
+    "test:kernel-trailing-whitespace-ui": "node scripts/test-kernel-trailing-whitespace-ui.mjs",
     "test:heading-leading-tab-source-ui": "node scripts/test-heading-leading-tab-source-ui.mjs",
     "test:scratch-heading-leading-whitespace-ui": "node scripts/test-scratch-heading-leading-whitespace-ui.mjs",
-    "test:kernel-ui": "npm run test:kernel-heading-id-ui && npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui && npm run test:kernel-marks-ui && npm run test:kernel-stage3-ui && npm run test:kernel-blocktype-ui && npm run test:kernel-heading-whitespace-ui && npm run test:heading-leading-tab-source-ui && npm run test:scratch-heading-leading-whitespace-ui",
+    "test:kernel-ui": "npm run test:kernel-heading-id-ui && npm run test:kernel-mode-ui && npm run test:kernel-ime-ui && npm run test:kernel-nodeview-ui && npm run test:kernel-codeblock-ui && npm run test:kernel-marks-ui && npm run test:kernel-stage3-ui && npm run test:kernel-blocktype-ui && npm run test:kernel-heading-whitespace-ui && npm run test:kernel-trailing-whitespace-ui && npm run test:heading-leading-tab-source-ui && npm run test:scratch-heading-leading-whitespace-ui",
     "test:kernel-headless": "node scripts/test-kernel-projection-map.mjs && node scripts/test-kernel-dispatch-veto.mjs && node scripts/test-kernel-gateway.mjs && node scripts/test-kernel-reconciler.mjs && node scripts/test-kernel-mode-headless.mjs && node scripts/test-kernel-composition-headless.mjs && node scripts/test-kernel-status.mjs"
   },
   "dependencies": {
