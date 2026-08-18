@@ -155,6 +155,61 @@ async function clickEmptyBlock(evaluate, send, selector) {
   await sleep(200)
 }
 
+// Rendered geometry of the first visible heading of `tag`: how wide its LEADING
+// whitespace run actually paints, and where the first non-whitespace glyph sits
+// relative to the block's content box. This is the "存下来并且能被看到" half of the
+// contract — bytes on disk and a `text` node in the projection are not enough if
+// HTML collapses the character away. (ProseMirror ships
+// `white-space: break-spaces` on `.ProseMirror`, so a leading tab paints to the
+// next `tab-size` stop and an NBSP paints as a space; this measures it rather
+// than trusting it.)
+async function leadingRunGeometry(evaluate, tag) {
+  return evaluate(`(() => {
+    const node = [...((${VISIBLE_EDITOR})?.querySelectorAll(${JSON.stringify('$TAG$')}) || [])]
+      .find((n) => n.offsetParent)
+    if (!node) return null
+    const style = getComputedStyle(node)
+    const box = node.getBoundingClientRect()
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    const text = walker.nextNode()
+    if (!text) return null
+    let run = 0
+    while (run < text.textContent.length && /\\s/.test(text.textContent[run])) run += 1
+    const lead = document.createRange()
+    lead.setStart(text, 0); lead.setEnd(text, run)
+    const rest = document.createRange()
+    rest.setStart(text, run); rest.setEnd(text, Math.min(run + 1, text.textContent.length))
+    return {
+      whiteSpace: style.whiteSpace,
+      runLength: run,
+      runWidth: lead.getBoundingClientRect().width,
+      firstGlyphLeft: rest.getBoundingClientRect().left,
+      contentLeft: box.left + parseFloat(style.paddingLeft || '0') + parseFloat(style.borderLeftWidth || '0')
+    }
+  })()`.replace('$TAG$', tag))
+}
+
+// Click at a text-node offset inside the first visible `tag` block — used to put
+// the caret BETWEEN the leading entity and the first real character, which is
+// the "can the user address it?" half of the contract.
+async function clickTextOffset(evaluate, send, tag, offset) {
+  const rect = await waitFor(() => evaluate(`(() => {
+    const node = [...((${VISIBLE_EDITOR})?.querySelectorAll(${JSON.stringify('$TAG$')}) || [])]
+      .find((n) => n.offsetParent)
+    if (!node) return null
+    node.scrollIntoView({ block: 'center' })
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    const text = walker.nextNode()
+    if (!text || text.textContent.length < ${offset}) return null
+    const range = document.createRange()
+    range.setStart(text, ${offset}); range.setEnd(text, ${offset})
+    const box = range.getBoundingClientRect()
+    return { left: box.left, top: box.top, height: box.height }
+  })()`.replace('$TAG$', tag)), `could not locate text offset ${offset} in ${tag}`)
+  await click(send, { x: rect.left, y: rect.top + Math.min(12, rect.height / 2) })
+  await sleep(250)
+}
+
 const blockTexts = (evaluate) => evaluate(`JSON.stringify(
   [...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName + ':' + n.textContent)
 )`)
@@ -194,6 +249,52 @@ async function run() {
     )
 
     // =====================================================================
+    // 1b) IT MUST BE VISIBLE. Bytes on disk and a `text` node in the projection
+    //     are only two thirds of the contract — the reported defect was a
+    //     character nobody could see. Measure the painted width of the heading's
+    //     leading whitespace run and where the first real glyph now sits.
+    // =====================================================================
+    {
+      const geometry = await leadingRunGeometry(evaluate, 'h1')
+      assert.ok(geometry, 'could not measure the h1 geometry')
+      assert.equal(geometry.runLength, 1, 'the heading must start with exactly one whitespace character')
+      assert.ok(geometry.runWidth > 1,
+        `the leading tab must PAINT, not collapse — measured ${JSON.stringify(geometry)}`)
+      assert.ok(geometry.firstGlyphLeft > geometry.contentLeft + 1,
+        `the first real glyph must be pushed right by the indent — ${JSON.stringify(geometry)}`)
+    }
+
+    // =====================================================================
+    // 1c) IT MUST BE ADDRESSABLE AND DELETABLE. Put the caret between the
+    //     entity and the first real character with a real click, then Backspace:
+    //     the WHOLE entity must go, restoring the original bytes exactly. An
+    //     undeletable byte is the same data-integrity problem as an invisible
+    //     one.
+    // =====================================================================
+    await clickTextOffset(evaluate, send, 'h1', 1)
+    await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'backspace over the entity'),
+      FIXTURE,
+      'Backspace after the leading entity must delete the whole `&#x9;`, restoring the original bytes'
+    )
+    {
+      const geometry = await leadingRunGeometry(evaluate, 'h1')
+      assert.equal(geometry.runLength, 0, 'the indent must be gone from the rendering too')
+    }
+
+    // 1d) Re-apply the Tab so the following steps start from the same state.
+    await clickAt(evaluate, send, '标题甲', 0)
+    await pressKey(send, { key: 'Tab', code: 'Tab' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 're-applied tab'),
+      FIXTURE.replace('# 标题甲', '# &#x9;标题甲'),
+      'the Tab must be re-appliable after a delete'
+    )
+
+    // =====================================================================
     // 2) Space at the first content position of the same heading, delivered as
     //    a REAL KEYDOWN — the path the user's keyboard takes, and the one the
     //    kernel's new Space keymap owns. The caret is left after the Tab by
@@ -211,6 +312,12 @@ async function run() {
       JSON.parse(await blockTexts(evaluate)).includes(`H1:${NBSP}\t标题甲`),
       `the Space must be VISIBLE as an NBSP — got ${await blockTexts(evaluate)}`
     )
+    {
+      const geometry = await leadingRunGeometry(evaluate, 'h1')
+      assert.equal(geometry.runLength, 2, 'the heading must now start with NBSP + tab')
+      assert.ok(geometry.runWidth > 1,
+        `the NBSP + tab run must PAINT — measured ${JSON.stringify(geometry)}`)
+    }
 
     // =====================================================================
     // 2b) The SAME position reached WITHOUT a keydown (Chromium's
