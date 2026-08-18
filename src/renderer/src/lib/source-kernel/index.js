@@ -17,6 +17,11 @@ export { indentListItem, outdentListItem } from './commands/indent.js'
 export { toggleBlockquote } from './commands/quote-toggle.js'
 export { setBlockTypeFromQuery, BLOCK_TYPE_MARKERS } from './commands/block-type.js'
 export { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
+export {
+  insertHeadingLeadingWhitespace,
+  looksLikeAtxContentStart,
+  HEADING_LEADING_WHITESPACE_ENTITY
+} from './commands/heading-whitespace.js'
 export { routeStructuralKey } from './router.js'
 export { createSourceHistory } from './history.js'
 

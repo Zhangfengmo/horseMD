@@ -38,6 +38,7 @@ import {
   createMarkdownDocument,
   createSourceHistory,
   exitCodeBlock,
+  insertHeadingLeadingWhitespace,
   replaceVisibleText,
   routeStructuralKey,
   toggleBlockquote,
@@ -1301,6 +1302,68 @@ export function createKernelMode({
     return applyKernelTransaction(routed.transaction, view)
   }
 
+  // Space / Tab at an ATX heading's FIRST content position — the one offset in
+  // a heading where a LITERAL whitespace byte is not addressable, because
+  // CommonMark eats the whole spacing run between the `#` marker and the
+  // content. Before this branch existed, both keys reached the ordinary
+  // character path and committed that literal byte: measured on the built app,
+  // Tab turned '## 标题乙' into '## \t标题乙' on disk with NO visible change and
+  // no diagnostic, and Space turned '# 标题甲' into '#  标题甲' plus a
+  // `projection-mismatch` repair that pulled the view straight back. Both are
+  // the user report "为啥标题前面无法使用 tab 或者空格".
+  //
+  // `insertHeadingLeadingWhitespace` (lib/source-kernel/commands/
+  // heading-whitespace.js) commits the character-entity spelling instead —
+  // byte-identical to what the LEGACY writer produces for the same shape — and
+  // proves it by reparsing the candidate before returning. Its two refusal
+  // codes are answered differently on purpose:
+  //   * `not-structural` -> 'skip': this is not that offset, so the caller
+  //     keeps EXACTLY its previous behaviour (Tab falls through to the literal
+  //     insert, Space falls through to ProseMirror).
+  //   * anything else -> 'refused': it IS that offset and the entity could not
+  //     be proven, so the key is swallowed with a toast. Falling through there
+  //     would commit the byte we just proved is dead.
+  //
+  // `pmPosToRawInsert` — not `pmPosToRaw` — resolves the caret, so a heading
+  // whose content opens with a mark ('## **b**') reports the offset BEFORE the
+  // opening delimiter, which is where the content actually starts.
+  const commitHeadingLeadingWhitespace = (character, state, view) => {
+    if (!state?.selection?.empty) return 'skip'
+    if (!kernel.map) return 'skip'
+    const head = state.selection.head
+    const insertAt = typeof kernel.map.pmPosToRawInsert === 'function'
+      ? kernel.map.pmPosToRawInsert(head)
+      : kernel.map.pmPosToRaw(head)
+    if (!Number.isFinite(insertAt)) return 'skip'
+    const routed = insertHeadingLeadingWhitespace({
+      doc: kernel.doc,
+      offset: insertAt,
+      character
+    })
+    if (routed.ok) {
+      applyKernelTransaction(routed.transaction, view, { requireMap: true })
+      return 'handled'
+    }
+    if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) return 'skip'
+    notifyBlocked(routed.code)
+    return 'refused'
+  }
+
+  // Space is NOT a structural key and must stay out of `structuralHandler`
+  // (whose unmapped-offset branch refuses loudly — that would make ordinary
+  // spaces untypable anywhere the map is incomplete). This handler answers
+  // `false` for every position except the proven heading content start, so on
+  // every other keystroke ProseMirror's own space handling, the preset input
+  // rules and the IME path are reached exactly as before.
+  const spaceHandler = (state, dispatch, viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    // Mid-composition the keydown belongs to the IME, not to us.
+    if (view.composing) return false
+    return commitHeadingLeadingWhitespace(' ', state, view) !== 'skip'
+  }
+
   const structuralHandler = (key) => (state, dispatch, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -1388,8 +1451,18 @@ export function createKernelMode({
       // handleTransactions' plain-text classification owns it (a cross-block
       // deletion classifies as blocked -> veto, still fail-closed).
       if (key === 'Backspace' || key === 'Delete') return false
-      // Tab: literal tab through the kernel (source-first).
+      // Tab: literal tab through the kernel (source-first) — UNLESS the caret
+      // sits at an ATX heading's first content position, where a literal tab
+      // is a dead byte (see `commitHeadingLeadingWhitespace`).
+      //
+      // Tab's structural routing is deliberately untouched: `routeStructuralKey`
+      // only ever returns the indent command when `index.listItemAt(offset)`
+      // finds a list item, and an ATX heading is not one — that is precisely
+      // why this code is reached from the `not-structural` branch. A heading
+      // NESTED in a list item ('- # T') still resolves the item and still
+      // indents, exactly as before, because this branch never runs for it.
       if (key === 'Tab') {
+        if (commitHeadingLeadingWhitespace('\t', state, view) !== 'skip') return true
         insertPlainTextAtSelection('\t', state, view)
         return true
       }
@@ -1756,7 +1829,10 @@ export function createKernelMode({
     redo: historyHandler('redo')
   }
 
-  const structuralKeymap = () => keymap({ ...structuralHandlers })
+  // `Space` rides in the SAME keymap slot (ahead of the preset keymaps) rather
+  // than in its own plugin, so its precedence relative to Tab/Enter is fixed by
+  // construction. prosemirror-keymap normalizes the name 'Space' to ' '.
+  const structuralKeymap = () => keymap({ ...structuralHandlers, Space: spaceHandler })
   const historyKeymap = () => keymap({
     'Mod-z': historyHandlers.undo,
     'Mod-y': historyHandlers.redo,

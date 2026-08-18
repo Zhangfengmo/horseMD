@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1338,6 +1338,38 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       insertText = codeMap.linePrefix
         ? insertText.split(codeMap.lineEnding).join(codeMap.lineEnding + codeMap.linePrefix)
         : insertText
+    }
+    // Heading leading whitespace, DEFENCE IN DEPTH (2026-08-18). The primary
+    // fix for "标题前面无法使用 tab 或者空格" is a keymap in
+    // editor-kernel-mode.js, which owns the real Space/Tab KEYDOWN and commits
+    // the entity before ProseMirror inserts anything. But a lone space can also
+    // reach this function without a keydown (Chromium's `Input.insertText`
+    // path, autocorrect/accessibility insertions), and there the old behaviour
+    // was to commit a LITERAL byte at the one offset CommonMark strips — a dead
+    // byte on disk, invisible in the view. This makes the bytes route-
+    // independent: the same command proves the same entity, or the batch is
+    // refused. It never guesses.
+    //
+    // Kept deliberately narrow so the hot typing path pays two comparisons:
+    // ONE step, zero-width, exactly one space or tab, no virtual separator
+    // bytes, and a cheap byte-level prefilter (`looksLikeAtxContentStart`)
+    // before the command's own reparse is allowed to run.
+    if (steps.length === 1 && oldFrom === oldTo && virtualPrefix === '' &&
+        (insertText === ' ' || insertText === '\t') &&
+        looksLikeAtxContentStart(kernel.doc.text, rawFrom)) {
+      const routed = insertHeadingLeadingWhitespace({
+        doc: kernel.doc,
+        offset: rawFrom,
+        character: insertText
+      })
+      if (routed.ok) insertText = routed.transaction.insert
+      // `not-structural` = the prefilter was a false positive (a '#' run inside
+      // ordinary text, a code block, …) — leave the literal byte alone, nothing
+      // about that shape changed. Anything else IS the heading content start
+      // with no provable spelling, so refuse rather than write the dead byte.
+      else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        return { ok: false, code: routed.code }
+      }
     }
     edits.push({
       from: rawFrom,
