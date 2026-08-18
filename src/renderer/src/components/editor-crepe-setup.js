@@ -62,13 +62,47 @@ import {
 
 // A "Mermaid" entry for the code-block language picker. Mermaid has no real
 // CodeMirror language; the picker only needs a language descriptor so users can
-// choose "mermaid" directly.
+// choose "mermaid" directly, and the parser below is a deliberate no-op that
+// highlights nothing.
+//
+// IT MUST STILL BE A *VALID* STREAM PARSER (bug fixed 2026-08-18). This was
+// `StreamLanguage.define(() => ({ token: () => null }))`, which is wrong twice,
+// and the consequence was far worse than "no syntax colours":
+//   1. `StreamLanguage.define(spec)` takes the StreamParser OBJECT, not a
+//      factory (@codemirror/language: `static define(spec) { return new
+//      StreamLanguage(spec) }`). Given an arrow function, `streamParser.token`
+//      was `undefined`, so every parse threw `TypeError: token is not a
+//      function` inside `readToken`.
+//   2. Even as an object, `token: () => null` never ADVANCES the stream, and
+//      `readToken` throws `Stream parser failed to advance stream.` after ten
+//      attempts. So `stream.skipToEnd()` is load-bearing, not decoration: it
+//      emits the whole line as one untyped token. (An EMPTY line never reaches
+//      `readToken` — `parseLine` routes it to `blankLine` — so skipping to the
+//      end always advances.)
+//
+// WHY IT MATTERED. The throw escapes through `cm.dispatch()`. The vendored
+// CodeMirrorBlock's `setSelection()` is
+// `cm.focus(); this.updating = true; cm.dispatch(...); this.updating = false`,
+// so a throw inside that dispatch leaves `updating` STUCK TRUE — and
+// `forwardUpdate` begins with `if (this.updating || !this.cm.hasFocus) return`.
+// The node view then accepts every keystroke into CodeMirror LOCALLY and never
+// mirrors one into ProseMirror: the user sees their diagram source on screen
+// while the document (and the file on disk) never receives it. Reproduced
+// exactly that way by `/mermaid` in scripts/test-kernel-blockinsert-ui.mjs —
+// the kernel's own source stayed an empty fence while CodeMirror showed
+// `graph TD`, with no veto, no toast and no diagnostic, because no transaction
+// was ever dispatched to have one.
 const mermaidLanguage = LanguageDescription.of({
   name: 'Mermaid',
   alias: ['mermaid', 'mmd'],
   extensions: ['mmd', 'mermaid'],
   async load() {
-    return new LanguageSupport(StreamLanguage.define(() => ({ token: () => null })))
+    return new LanguageSupport(StreamLanguage.define({
+      token(stream) {
+        stream.skipToEnd()
+        return null
+      }
+    }))
   }
 })
 
