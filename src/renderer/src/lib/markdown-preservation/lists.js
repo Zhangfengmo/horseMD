@@ -668,9 +668,28 @@ export const restoreTypedBulletMarker = ({
   // distant stale position won and made us abort, so nested `-` lists fell back
   // to Crepe's default `*`.
   const nearbyOffsetTarget = offsetTarget?.distance <= 4 ? offsetTarget : null
+  // A physical `-` / `*` / `+` / `1.` keypress proves only that the writer
+  // typed that character. It is NOT proof that an input rule turned it into a
+  // list marker: typing a literal `* ` inside an existing list item keeps it as
+  // escaped text (`\* …`) and creates no marker line at all. Both positional
+  // targets below are pure proximity heuristics, so on that keystroke they
+  // happily select a marker row the AUTHOR already owns — and the bullet branch
+  // then rewrites every row of that block. Measured on the literal-marker
+  // fixture whenever `markdownUpdated` batched two keystrokes: one stale `+`/`*`
+  // intent flipped a whole authored `- ` list to `+ ` / `* `. Require the
+  // canonical delta to have actually CREATED a marker line before a positional
+  // target may claim the intent. The ordered `1.` -> `1)` candidate carries its
+  // own per-row before/after evidence and is deliberately left untouched.
+  const previousMarkerLines = isBullet
+    ? bulletMarkerLines(previousText)
+    : listMarkerTokenLines(previousText)
+  const markerLineWasCreated = canonicalLines.length > previousMarkerLines.length
+  const positionalTarget = markerLineWasCreated
+    ? nearbyOffsetTarget || (changedLine ? { line: changedLine, distance: 0 } : null)
+    : null
   const target = orderedDefaultCandidate
     ? { line: orderedDefaultCandidate.line || orderedDefaultCandidate, distance: 0 }
-    : nearbyOffsetTarget || (changedLine ? { line: changedLine, distance: 0 } : null)
+    : positionalTarget
   if (!target) return markdown
 
   if (isOrdered) {
