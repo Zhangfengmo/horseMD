@@ -2734,18 +2734,49 @@ const toggleVia = (h, markType, from, to) => {
   // A table whose cells could NOT be zipped is the one non-textblock pair that
   // stays counted: it is an opaque leaf that genuinely holds visible text, so
   // "the user can see it and cannot edit it" is true of it.
-  const md = '| a | b |\n| - | - |\n| c | d |\n'
-  const table = tbl([[['a'], ['b']], [['c'], ['d']]])
-  const h = makeHarness(md, doc(table))
-  assert.equal(h.controller.attachAfterCreate(), true)
+  //
+  // REWRITTEN 2026-08-19 (audit item 4). The first version of this case
+  // branched on whether the table happened to zip and asserted a different
+  // count on each side — so it passed no matter which branch ran, and the
+  // opaque-leaf-with-visible-text branch of `pairIsReadOnlyToUser` had NO test
+  // that could fail: dropping every non-textblock pair from the count left the
+  // whole suite green. Both branches are pinned deterministically now.
+  //
+  // RAGGED (Case 21d's own fixture): the body row is short one cell, the
+  // table-map sub-zip refuses, and the table degrades to ONE opaque pair with
+  // no nested cell pairs — a leaf the user can read ('a b c') and cannot edit.
+  // It MUST be counted, and counted once.
+  const md = '| a | b |\n| :-- | --: |\n| c |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true, 'the ragged-table document must attach')
   const pairs = h.controller.kernel.map.blockPairs
-  const tablePair = pairs.find((pair) => pair.pmNode.type.name === 'table')
+  assert.ok(pairs.some((pair) => pair.pmNode?.type?.name === 'table'),
+    'sanity: the table itself is a pair')
+  assert.equal(pairs.filter((pair) => pair.tableCell).length, 0,
+    'sanity: no cell pair speaks for the ragged table’s interior')
   const status = h.controller.getKernelStatus()
-  if (tablePair) {
-    assert.equal(status.readOnlyBlocks, 1, 'an unzippable table is still reported')
-  } else {
-    assert.equal(status.readOnlyBlocks, 0, 'a zipped table is editable cell by cell')
-  }
+  assert.equal(status.state, 'partial', 'a readable, uneditable table must warn')
+  assert.equal(status.readOnlyBlocks, 1,
+    'exactly the table — the paragraph after it stays editable and uncounted')
+}
+{
+  // ZIPPED negative control: complete the ragged row and the same table maps
+  // cell by cell. A zipped table gets NO pair of its own — its cell pairs
+  // cover the editable surface entirely (editor-kernel-projection-map.js:
+  // "the table itself gets NO pair when its cells map") — so nothing is left
+  // for the count to claim and the document must NOT warn. This is the other
+  // half the old conditional could never distinguish.
+  const md = '| a | b |\n| :-- | --: |\n| c | d |\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true, 'the zipped-table document must attach')
+  const pairs = h.controller.kernel.map.blockPairs
+  assert.equal(pairs.some((pair) => pair.pmNode?.type?.name === 'table'), false,
+    'sanity: a zipped table leaves no opaque table pair behind')
+  assert.ok(pairs.some((pair) => pair.tableCell && pair.charMap),
+    'sanity: the interior really is spoken for by editable cell pairs')
+  const status = h.controller.getKernelStatus()
+  assert.equal(status.state, 'normal', 'a fully zipped table must not warn')
+  assert.equal(status.readOnlyBlocks, 0, 'a zipped table is editable cell by cell')
 }
 {
   // Whole-document fallback: 'legacy', carrying the reason the toast used.
