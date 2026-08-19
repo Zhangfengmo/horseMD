@@ -34,7 +34,13 @@ export {
   BLOCK_TRAILING_TEXT,
   NO_BREAK_SPACE
 } from './commands/trailing-whitespace.js'
-export { proveContentDelete, deleteClearsBlockLine } from './commands/content-delete.js'
+export {
+  proveContentDelete,
+  deleteClearsBlockLine,
+  editsClearBlockLine,
+  editsStrandBlockTail,
+  proveBatchDelete
+} from './commands/content-delete.js'
 export { spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES } from './commands/empty-code-insert.js'
 export { routeStructuralKey } from './router.js'
 export { createSourceHistory } from './history.js'

@@ -67,9 +67,16 @@
 // the corruptions above all violate, is that the block's decoded text changed
 // by exactly ONE contiguous replacement — nothing appeared anywhere else, no
 // dead byte was promoted to content, nothing was absorbed from a neighbour.
+//
+// MULTI-STEP BATCHES (2026-08-19). Everything above is reached from
+// `commitPlainText` under `steps.length === 1`. A BATCH of ReplaceSteps that
+// deletes is the same corruption class in a different coordinate space, and it
+// is answered at the bottom of this file (`batchDeleteRefusal`) — as a refusal,
+// not as a proof, because the one-contiguous-replacement sentence this file
+// proves is not true of a composition of several.
 import { parseKernelMarkdown } from '../syntax-index.js'
 import {
-  blockEditIsObservable, blockText, isOneContiguousReplacement
+  blockEditIsObservable, blockText, isOneContiguousReplacement, literalTailIsStripped
 } from './trailing-whitespace.js'
 
 const UNSUPPORTED = { ok: false, code: 'unsupported-structure' }
@@ -128,19 +135,49 @@ const decodeBlock = (node) => (
 //     operation — it produces an empty block, not a restructured document, and
 //     is deliberately left exactly as it was.
 export function deleteClearsBlockLine({ text, charMap, block, from, to, insert = '' }) {
-  if (typeof text !== 'string' || typeof insert !== 'string') return false
-  if (!Number.isInteger(from) || !Number.isInteger(to) || from >= to) return false
-  if (from < 0 || to > text.length) return false
-  if (/\S/.test(insert)) return false
+  return editsClearBlockLine({ text, charMap, block, edits: [{ from, to, insert }] })
+}
+
+// The SAME question asked of a whole BATCH of edits (2026-08-19, audit hole 6).
+// `deleteClearsBlockLine` above is a thin wrapper around this — ONE
+// implementation, so the single-step and multi-step answers can never drift
+// apart.
+//
+// Why a batch needs its own evaluation rather than a per-step loop: two steps
+// that each remove HALF of a line's content each see the other half surviving,
+// so neither of them alone reports a blanked line while their composition
+// blanks it. `edits` are raw ranges into the SAME baseline `text` (the
+// coordinate space `commitPlainText` resolves every step into), ascending and
+// non-overlapping.
+export function editsClearBlockLine({ text, charMap, block, edits }) {
+  if (typeof text !== 'string' || !Array.isArray(edits) || !edits.length) return false
+  let removes = false
+  let low = Infinity
+  let high = -Infinity
+  for (const edit of edits) {
+    const from = edit?.from
+    const to = edit?.to
+    const insert = edit?.insert ?? ''
+    if (typeof insert !== 'string') return false
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) return false
+    if (from < 0 || to > text.length) return false
+    if (/\S/.test(insert)) return false
+    if (to > from) removes = true
+    low = Math.min(low, from)
+    high = Math.max(high, to)
+  }
+  if (!removes) return false
   const blockStart = block?.position?.start?.offset
   const blockEnd = block?.position?.end?.offset
   if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return false
   const units = charMap?.units
   if (!Array.isArray(units)) return false
 
-  const lineStart = lineStartAt(text, from)
-  const lineEnd = lineEndAt(text, to)
+  const lineStart = lineStartAt(text, low)
+  const lineEnd = lineEndAt(text, high)
   if (blockStart >= lineStart && blockEnd <= lineEnd) return false // single-line block
+
+  const removed = (index) => edits.some((edit) => index >= edit.from && index < edit.to)
 
   for (const unit of units) {
     if (!Number.isInteger(unit?.rawStart) || !Number.isInteger(unit?.rawEnd)) continue
@@ -158,12 +195,162 @@ export function deleteClearsBlockLine({ text, charMap, block, from, to, insert =
     // counts as the real content it is.
     if (/[\r\n]/.test(text.slice(unit.rawStart, unit.rawEnd))) continue
     for (let index = start; index < end; index += 1) {
-      if (index >= from && index < to) continue // removed by this edit
+      if (removed(index)) continue // removed by this batch
       const ch = text[index]
       if (ch !== ' ' && ch !== '\t') return false // content survives on this line
     }
   }
   return true
+}
+
+// Compose a batch of baseline-coordinate edits into the candidate text.
+const composeEdits = (text, edits) => {
+  let out = ''
+  let cursor = 0
+  for (const edit of edits) {
+    out += text.slice(cursor, edit.from) + (edit.insert ?? '')
+    cursor = edit.to
+  }
+  return out + text.slice(cursor)
+}
+
+// Candidate offset -> baseline offset, or null when the candidate byte was
+// WRITTEN by the batch (it has no baseline counterpart, so nothing can be
+// claimed about what it used to be).
+const baselineOffsetOf = (edits, candidateOffset) => {
+  let shift = 0
+  for (const edit of edits) {
+    const insert = edit.insert ?? ''
+    const writtenStart = edit.from + shift
+    if (candidateOffset < writtenStart) return candidateOffset - shift
+    if (candidateOffset < writtenStart + insert.length) return null
+    shift += insert.length - (edit.to - edit.from)
+  }
+  return candidateOffset - shift
+}
+
+// Does a BATCH leave a literal ASCII whitespace byte stranded at the block's
+// end — the dead byte `spellBlockTailDelete` re-spells for the single-step
+// case? Same three facts that command establishes, asked of the composed
+// result: the byte survives from the baseline (it is not one the batch wrote),
+// it was CONTENT there (a width-1 `char` unit in the block's character map, the
+// check that keeps a GFM cell's own padding from reading as a false positive),
+// and CommonMark discards it at its new position.
+export function editsStrandBlockTail({ text, charMap, block, edits }) {
+  if (typeof text !== 'string' || !Array.isArray(edits) || !edits.length) return false
+  const blockStart = block?.position?.start?.offset
+  const blockEnd = block?.position?.end?.offset
+  if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return false
+  let delta = 0
+  let removes = false
+  for (const edit of edits) {
+    if (!Number.isInteger(edit?.from) || !Number.isInteger(edit?.to) || edit.from > edit.to) return false
+    if (edit.from < blockStart || edit.to > blockEnd) return false
+    if (edit.to > edit.from) removes = true
+    delta += (edit.insert ?? '').length - (edit.to - edit.from)
+  }
+  if (!removes) return false
+  const newEnd = blockEnd + delta
+  if (newEnd - 1 < blockStart) return false
+  const candidate = composeEdits(text, edits)
+  const ch = candidate[newEnd - 1]
+  if (ch !== ' ' && ch !== '\t') return false
+  const baselineAt = baselineOffsetOf(edits, newEnd - 1)
+  if (!Number.isInteger(baselineAt)) return false
+  const unit = (charMap?.units || []).find(
+    (candidateUnit) => candidateUnit?.kind === 'char' &&
+      candidateUnit.rawStart === baselineAt && candidateUnit.rawEnd === baselineAt + 1
+  )
+  if (!unit) return false
+  return literalTailIsStripped(candidate, {
+    type: block.type,
+    position: { start: { offset: blockStart }, end: { offset: newEnd } }
+  }, newEnd - 1)
+}
+
+// THE MULTI-STEP GATE (2026-08-19, audit hole 6). Both single-step delete
+// guards above are reached from `commitPlainText` under `steps.length === 1`,
+// so a BATCH of ReplaceSteps that deletes reached NEITHER: the same corruption
+// class, one coordinate space over. "Never observed in a reproduction" is not a
+// proof, and this is the one path where an unproven write is forbidden.
+//
+// HOW A BATCH IS PROVEN: STEP BY STEP, ON THE BYTES. `proveContentDelete`'s
+// decode clause states "the block's decoded text changed by exactly ONE
+// contiguous replacement", which is simply not true of a composition of
+// several — and weakening it to "N replacements" would be close to vacuous for
+// small N, i.e. a guess wearing a proof's clothes. So the batch is not proven
+// as one edit: each of its steps is applied to the previous CANDIDATE (a string
+// that is never published) and proven there with the SAME single-step proof.
+// A composition of proven steps is proven, and every intermediate document is
+// reparsed, so nothing about the sequence is taken on trust:
+//
+//   'alpha  ' LF 'bc  ' LF 'gamma'   remove 'b', then remove 'c'
+//     step 1 -> 'alpha  ' LF 'c  ' LF 'gamma'   proven (line still has content)
+//     step 2 -> 'alpha  ' LF '  ' LF 'gamma'    REFUSED (two paragraphs, both
+//                                               hard breaks gone)
+//
+// while the same two steps inside a fenced block, where an emptied line is
+// legitimate content, are proven at both stages and commit exactly as before.
+// This is what distinguishes the gate from a blanket refusal of batched
+// deletes: it refuses the corruption, not the shape.
+//
+// The composed PREFILTER decides whether any of that is worth doing, exactly as
+// on the single-step path — with one difference that is the whole reason a
+// batch needs its own evaluation: it is asked of the WHOLE batch at once,
+// because two steps that each remove half of a line's content each see the
+// other half surviving.
+//
+// TWO SHAPES ARE REFUSED WITHOUT AN ATTEMPT, both stated rather than silently
+// unhandled:
+//   * a batch that strands a literal ASCII space at the block end. The
+//     single-step path RE-SPELLS that byte U+00A0 (`spellBlockTailDelete`)
+//     under a proof about one contiguous replacement; that proof cannot speak
+//     for a composition, and writing the dead byte is the one forbidden
+//     outcome, so the batch is refused instead;
+//   * a batch that WRITES bytes into the block as well as removing them. The
+//     step-by-step proof would have to re-derive the block's span after an
+//     insert it did not prove, and an insert's own spelling has already been
+//     decided by a different command upstream. Refusing is the honest answer.
+//
+// Returns `{ ok: true }`, or `{ ok: false, code }` the caller must refuse with,
+// or `{ ok: false, code: 'not-structural' }` meaning nothing here applies and
+// the caller keeps its pre-existing behaviour.
+export function proveBatchDelete({ doc, block, charMap, edits }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Array.isArray(edits) || !edits.length) return NOT_STRUCTURAL
+  if (!edits.some((edit) => edit.to > edit.from)) return NOT_STRUCTURAL
+  if (editsStrandBlockTail({ text, charMap, block, edits })) return UNSUPPORTED
+  if (!editsClearBlockLine({ text, charMap, block, edits })) return NOT_STRUCTURAL
+  // From here the batch IS the at-risk shape, so every remaining exit is a
+  // refusal — there is no "leave it alone" left.
+  if (edits.some((edit) => (edit.insert ?? '') !== '')) return UNSUPPORTED
+
+  let candidate = text
+  let start = block?.position?.start?.offset
+  let end = block?.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return UNSUPPORTED
+  let shift = 0
+  for (const edit of edits) {
+    const from = edit.from + shift
+    const to = edit.to + shift
+    const routed = proveContentDelete({
+      doc: { text: candidate, revision: 0 },
+      block: { type: block.type, position: { start: { offset: start }, end: { offset: end } } },
+      from,
+      to,
+      insert: ''
+    })
+    // `not-structural` counts as a failure HERE (unlike on the single-step
+    // path, where it means "this command does not claim the shape"): the
+    // composed batch has already been established as the at-risk shape, so an
+    // unproven step is an unproven write.
+    if (!routed.ok) return UNSUPPORTED
+    candidate = candidate.slice(0, from) + candidate.slice(to)
+    const delta = -(to - from)
+    end += delta
+    shift += delta
+  }
+  return { ok: true }
 }
 
 // Prove that the literal delete really says what it does.

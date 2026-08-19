@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1222,6 +1222,11 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   if (!steps || !steps.length) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
 
   const edits = []
+  // Per-step bookkeeping for the MULTI-STEP delete gate below: each entry pairs
+  // the raw edit this step resolved to with the block pair it targeted, all in
+  // the SAME baseline coordinate space (`kernel.doc.text`), which is what lets
+  // the batch be judged as one composed change rather than step by step.
+  const records = []
   let cumulativeDelta = 0
   let touchedTableCell = false
   // THE OBSERVABILITY EXPECTATION (2026-08-18). See the ADR above
@@ -1655,6 +1660,12 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       to: editTo,
       insert: virtualPrefix + insertText
     })
+    records.push({
+      pair: virtualBlock ? null : stepPair,
+      from: editFrom,
+      to: editTo,
+      insert: virtualPrefix + insertText
+    })
     // Record what the edited block's VISIBLE length must become, for the
     // post-commit observability check (see the ADR on this function's return).
     // Only the simple, overwhelmingly common shape is claimed: ONE step, into a
@@ -1679,6 +1690,67 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // '\n' is exactly ONE PM character, same as any other) and know nothing
     // about raw separator/expansion bytes.
     cumulativeDelta += step.insertText.length - (step.to - step.from)
+  }
+
+  // THE MULTI-STEP DELETE GATE (2026-08-19, audit hole 6). Both delete guards
+  // above are gated on `steps.length === 1`, so a BATCH of ReplaceSteps that
+  // deletes reached neither of them — the same corruption class the audit rated
+  // Critical, one coordinate space over, and the reason it was left open is
+  // simply that no reproduction produced a multi-step delete. "Not observed" is
+  // not a proof.
+  //
+  // The PREFILTER is asked of the whole batch at once (two steps that each
+  // remove half of a line's content each see the other half surviving, so a
+  // per-step prefilter would answer "nothing was blanked" for a batch that
+  // blanks the line); the PROOF is then run step by step against intermediate
+  // candidates that are never published, because a composition of proven steps
+  // is proven and the single-step proof's own sentence — one contiguous
+  // replacement — is not true of a composition. Both live in
+  // `proveBatchDelete` (commands/content-delete.js), sharing this file's
+  // single-step prefilter implementation so the two answers cannot drift.
+  //
+  // A removing step whose pair is missing, virtual, or whose raw range escapes
+  // its own block is refused outright: it is a delete no prefilter can even be
+  // evaluated for, which is exactly the shape that must not pass unproven.
+  if (steps.length > 1 && records.some((record) => record.to > record.from)) {
+    // Grouped by TARGET BLOCK, and every step into a block that this batch
+    // deletes from belongs to its group — inserts included: a character typed
+    // onto the same line is part of the same composed result and is exactly what
+    // decides whether that line still holds content.
+    const groups = new Map()
+    for (const record of records) {
+      if (!record.pair) continue
+      if (!groups.has(record.pair)) groups.set(record.pair, [])
+      groups.get(record.pair).push(record)
+    }
+    for (const record of records) {
+      if (record.to === record.from) continue
+      const pair = record.pair
+      if (!pair || pair.virtual || !pair.charMap || !pair.mdBlock) {
+        return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+      }
+      const group = groups.get(pair)
+      const blockStart = pair.mdBlock.position?.start?.offset
+      const blockEnd = pair.mdBlock.position?.end?.offset
+      // Every step in this block's group must be inside the block's own span, or
+      // the composed change is one no prefilter can even be evaluated for —
+      // which is precisely the shape that must not pass unproven.
+      if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd) ||
+          group.some((entry) => entry.from < blockStart || entry.to > blockEnd)) {
+        return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+      }
+      const proven = proveBatchDelete({
+        doc: kernel.doc,
+        charMap: pair.charMap,
+        block: pair.mdBlock,
+        edits: group
+      })
+      // `not-structural` is this command's "nothing here applies" answer — the
+      // batch is not the at-risk shape and keeps its pre-existing bytes.
+      if (!proven.ok && proven.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        return { ok: false, code: proven.code }
+      }
+    }
   }
 
   const transaction = { baseRevision: kernel.doc.revision, edits, intent: 'insert-text' }

@@ -3698,3 +3698,125 @@ console.log('PASS kernel gateway (delete that strands a block-trailing space: re
 }
 
 console.log('PASS kernel gateway (block-trailing heal fires for multi-character inserts, not just single ASCII keystrokes)')
+
+// --- Q: MULTI-STEP (BATCHED) DELETES (2026-08-19, audit open item 6) ---------
+//
+// Both delete guards landed on 2026-08-19 are reached under
+// `steps.length === 1`, so a BATCH of ReplaceSteps that deletes reached NEITHER
+// — the same corruption class one coordinate space over. Two shapes, both
+// committed unproven before this gate existed:
+//
+//   * two steps that each remove HALF of a line's content. Neither of them
+//     ALONE blanks the line (each sees the other half surviving), so even a
+//     per-step application of the single-step prefilter would let the batch
+//     through; only the COMPOSED result blanks it. This is why the prefilter is
+//     evaluated over the whole batch rather than step by step.
+//   * a batch that strands a literal ASCII space at a block end — the dead byte
+//     the single-step path re-spells U+00A0.
+{
+  const NBSP = ' '
+  const batch = (markdown, pmDoc, build) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, `fixture must map: ${JSON.stringify(markdown)}`)
+    const tr = build(state.tr)
+    assert.ok(tr.steps.length > 1, 'the shape under test really is a multi-step batch')
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text',
+      'the shape under test really is the plain-text path')
+    const kernel = { doc: createMarkdownDocument(markdown) }
+    return {
+      kernel,
+      committed: commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    }
+  }
+
+  // Q1: the composed blank. 'alpha  \nbc  \ngamma\n' is ONE paragraph with two
+  // hard breaks; removing 'b' and 'c' as two steps leaves '  ' on line 2, which
+  // reparses as TWO paragraphs with BOTH hard breaks gone.
+  {
+    const md = 'alpha  \nbc  \ngamma\n'
+    const corrupted = 'alpha  \n  \ngamma\n'
+    const types = []
+    const walk = (node) => {
+      types.push(node.type)
+      for (const child of node.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(corrupted))
+    assert.deepEqual(types, ['root', 'paragraph', 'text', 'paragraph', 'text'],
+      'the pre-gate bytes really do restructure the document')
+    const { committed, kernel } = batch(
+      md,
+      doc(p(text('alpha'), br(), text('bc'), br(), text('gamma'))),
+      // Step 1 removes 'b' at PM 7; step 2 removes 'c', which sits at PM 7 in
+      // the doc step 1 produced. Ascending and non-overlapping in each step's
+      // own coordinate space, exactly as extractPlainTextSteps requires.
+      (tr) => tr.delete(7, 8).delete(7, 8)
+    )
+    assert.equal(committed.ok, false, 'Q1: a batch that blanks a line must fail closed')
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+    assert.equal(kernel.doc.text, md, 'Q1: bytes untouched')
+  }
+  // Q2: the same shape one step at a time still refuses (the single-step proof),
+  // so the gate is not the only thing standing between this document and the
+  // corruption — it closes the batch DOOR, it does not replace the proof.
+  {
+    const md = 'alpha  \nb  \ngamma\n'
+    const state = EditorState.create({
+      schema, doc: doc(p(text('alpha'), br(), text('b'), br(), text('gamma')))
+    })
+    const map = buildProjectionMap(md, state.doc)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.delete(7, 8)], oldState: state
+    })
+    assert.equal(committed.ok, false)
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+  }
+  // Q3: a batch that STRANDS a block-trailing ASCII space. 'ab cd' minus 'c'
+  // and 'd' leaves 'ab ' — the dead byte the single-step path re-spells.
+  // Refused here rather than re-spelled: two removals are not one contiguous
+  // replacement, so the re-spelling's own proof cannot speak for them.
+  {
+    const md = 'ab cd\n'
+    const { committed, kernel } = batch(md, doc(p(text('ab cd'))),
+      (tr) => tr.delete(4, 5).delete(4, 5))
+    assert.equal(committed.ok, false, 'Q3: a batch that strands a block-trailing space must fail closed')
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+    assert.equal(kernel.doc.text, md, 'Q3: bytes untouched')
+  }
+  // Q4: WHAT MUST STILL WORK. A multi-step batch that neither blanks a line nor
+  // strands a byte commits exactly as before — the gate is shape-specific, not a
+  // blanket refusal of every batched delete.
+  {
+    const { committed } = batch('hello world\n', doc(p(text('hello world'))),
+      (tr) => tr.delete(1, 2).delete(1, 2))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'llo world\n')
+  }
+  // Q5: a batch inside a single-line paragraph may empty it completely — that is
+  // the ordinary "clear this paragraph" operation, not a restructuring.
+  {
+    const { committed } = batch('hello\n', doc(p(text('hello'))),
+      (tr) => tr.delete(1, 3).delete(1, 4))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '\n')
+  }
+  // Q6: a batch inside a CODE block clears a line legitimately — trailing
+  // whitespace and blank lines are content there, and no guard may claim them.
+  {
+    const { committed } = batch('```\nfoo\nbar\n```\n', doc(cb('', 'foo\nbar')),
+      (tr) => tr.delete(1, 2).delete(1, 3))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '```\n\nbar\n```\n')
+  }
+  // Q7: a batch of pure INSERTS is untouched by this gate — no removal, nothing
+  // to judge, and the pre-existing multi-step insert bytes are unchanged.
+  {
+    const { committed } = batch('hello\n', doc(p(text('hello'))),
+      (tr) => tr.insertText('x', 3).insertText('y', 6))
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'hexllyo\n')
+  }
+}
+
+console.log('PASS kernel gateway (multi-step batched deletes: composed line-blanking and stranded block-tail bytes fail closed; benign batches untouched)')
