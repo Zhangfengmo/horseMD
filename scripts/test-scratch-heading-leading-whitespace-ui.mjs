@@ -1,5 +1,21 @@
-// Regression: source generated from the empty-file H1 scaffold must preserve
-// a first whitespace character already present in the heading when saving.
+// LEGACY LOCK — not a regression for any source-kernel change.
+//
+// What it pins: in LEGACY (non-kernel) mode, source generated from the
+// empty-file H1 scaffold must preserve a first whitespace character (Tab or
+// Space, alone or followed by text) already present in the heading when saving.
+// It asserts the ENTITY spelling (`&#x9;` / `&nbsp;`) and DISK BYTES ONLY —
+// nothing here checks that the character is visible, addressable or deletable
+// in the editor, so on its own it cannot tell "portable source" apart from a
+// dead byte the user can never see or remove.
+//
+// It is deliberately kept only because legacy mode still ships and must not
+// BREAK while it does. It passes unmodified against builds from before the
+// source-kernel work, so it is evidence for nothing that work changed. The
+// kernel-mode contract is a different (and stronger) one: real whitespace
+// characters (U+00A0), asserted VISIBLE, addressable and deletable, in
+// scripts/test-kernel-heading-whitespace-ui.mjs. When legacy mode is removed,
+// delete this file with it — do not "upgrade" its expectation, and never cite
+// it as proof that kernel-mode whitespace works.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -105,7 +121,7 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS scratch heading leading whitespace: Tab and Space save as portable source')
+  console.log('PASS legacy lock — scratch heading leading whitespace: Tab and Space save as portable source in LEGACY mode (entity spelling, disk bytes only; the kernel contract lives in test-kernel-heading-whitespace-ui.mjs)')
 }).catch((error) => {
   console.error(error)
   process.exitCode = 1

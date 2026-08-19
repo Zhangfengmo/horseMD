@@ -1,5 +1,20 @@
-// Regression: a literal Tab as the first content of an empty heading must be
-// saved as portable source, not treated as disposable heading whitespace.
+// LEGACY LOCK — not a regression for any source-kernel change.
+//
+// What it pins: in LEGACY (non-kernel) mode, a Tab typed as the first content
+// of an empty ATX heading must be saved as portable source rather than a byte
+// CommonMark would strip. It asserts the ENTITY spelling (`&#x9;`) and DISK
+// BYTES ONLY — there is no assertion that the character is visible, addressable
+// or deletable in the editor, so on its own it cannot tell "portable source"
+// apart from a dead byte the user can never see or remove.
+//
+// It is deliberately kept only because legacy mode still ships and must not
+// BREAK while it does. It passes unmodified against builds from before the
+// source-kernel work, so it is evidence for nothing that work changed. The
+// kernel-mode contract is a different (and stronger) one: real whitespace
+// characters (U+00A0), asserted VISIBLE, addressable and deletable, in
+// scripts/test-kernel-heading-whitespace-ui.mjs. When legacy mode is removed,
+// delete this file with it — do not "upgrade" its expectation, and never cite
+// it as proof that kernel-mode whitespace works.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -72,7 +87,7 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS heading leading Tab: empty heading saves as portable source')
+  console.log('PASS legacy lock — heading leading Tab: an empty heading saves as portable source in LEGACY mode (entity spelling, disk bytes only; the kernel contract lives in test-kernel-heading-whitespace-ui.mjs)')
 }).catch((error) => {
   console.error(error)
   process.exitCode = 1

@@ -32,6 +32,20 @@
 // scripts/test-scratch-heading-leading-whitespace-ui.mjs) still assert it,
 // correctly. Both decode to the same character; the modes now differ only in
 // spelling, which is accepted because legacy is scheduled for removal.
+//
+// COVERAGE PARITY with those two legacy locks (they are byte-only; every shape
+// they cover must have a VISIBILITY assertion here, or a dead byte could be
+// pinned on the kernel side too):
+//   * Tab at a heading WITH text .................. step 1 + 1b/1c
+//   * Tab in an EMPTY heading ..................... step 3 + 3b
+//   * Space at a heading WITH text ................ step 2 (+2b, no keydown)
+//   * Space in an EMPTY heading ................... step 4b
+//   * whitespace followed by typed text ........... step 4 (h2), step 4b (h3)
+//   * the bytes reaching the FILE ................. step 6
+// The only legacy shape without a counterpart here is the DOCUMENT ORIGIN of
+// scripts/test-scratch-heading-leading-whitespace-ui.mjs (an empty file's H1
+// scaffold rather than an opened file) — a scratch-document concern, not a
+// whitespace one.
 import assert from 'node:assert/strict'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -50,10 +64,21 @@ const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
 // because '##x' would be a PARAGRAPH — a bare '##' has no content position to
 // write to at all and stays read-only. The committed bytes are identical to
 // legacy's ('## &#x9;'); only the starting file differs.
-const FIXTURE = ['# 标题甲', '', '段落占位。', '', '## ', '', '末段。', ''].join('\n')
+// The `### ` heading exists for the EMPTY-heading Space case (step 5) — the one
+// shape the two legacy locks cover (an empty heading receiving a bare Space)
+// that had no kernel-mode counterpart with a visibility assertion.
+const FIXTURE = ['# 标题甲', '', '段落占位。', '', '## ', '', '### ', '', '末段。', ''].join('\n')
 
 const NBSP = '\u00A0'
 const NB2 = NBSP + NBSP
+
+// Every byte expectation below is the SAME document with the three headings'
+// leading runs substituted — derived from FIXTURE, never hand-spelled, so a
+// fixture change cannot leave a stale literal behind.
+const doc = ({ h1 = '', h2 = '', h3 = '' } = {}) => FIXTURE
+  .replace('# 标题甲', `# ${h1}标题甲`)
+  .replace('\n## \n', `\n## ${h2}\n`)
+  .replace('\n### \n', `\n### ${h3}\n`)
 
 const VISIBLE_EDITOR = `[...document.querySelectorAll('.ProseMirror')].find((node) => node.offsetParent)`
 
@@ -251,7 +276,7 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'tab in h1'),
-      FIXTURE.replace('# 标题甲', '# ' + NB2 + '标题甲'),
+      doc({ h1: NB2 }),
       'Tab at a heading content start must commit two real no-break spaces'
     )
     assert.ok(!/&[#a-zA-Z0-9]+;/.test(await readSource(evaluate, 'markup check')),
@@ -290,14 +315,14 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'first backspace'),
-      FIXTURE.replace('# 标题甲', '# ' + NBSP + '标题甲'),
+      doc({ h1: NBSP }),
       'one Backspace must delete exactly one no-break space'
     )
     await pressKey(send, { key: 'Backspace', code: 'Backspace' })
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'second backspace'),
-      FIXTURE,
+      doc(),
       'the second Backspace must restore the original bytes exactly'
     )
     {
@@ -311,7 +336,7 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 're-applied tab'),
-      FIXTURE.replace('# 标题甲', '# ' + NB2 + '标题甲'),
+      doc({ h1: NB2 }),
       'the Tab must be re-appliable after a delete'
     )
 
@@ -326,7 +351,7 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'space keydown in h1'),
-      FIXTURE.replace('# 标题甲', '# ' + NBSP + NB2 + '标题甲'),
+      doc({ h1: NBSP + NB2 }),
       'a Space KEYDOWN at a heading content start must commit one real no-break space'
     )
     assert.ok(
@@ -352,7 +377,7 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'space insertText in h1'),
-      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲'),
+      doc({ h1: NBSP + NBSP + NB2 }),
       'a Space arriving without a keydown must commit the same character, not a literal byte'
     )
 
@@ -364,9 +389,21 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'tab in empty h2'),
-      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲').replace('\n## \n', '\n## ' + NB2 + '\n'),
+      doc({ h1: NBSP + NBSP + NB2, h2: NB2 }),
       'Tab in an EMPTY heading must commit two real no-break spaces'
     )
+    // 3b) …AND IT MUST BE VISIBLE HERE TOO. The legacy lock for this exact
+    //     shape (scripts/test-heading-leading-tab-source-ui.mjs) asserts disk
+    //     bytes and nothing else, which is precisely how a dead byte gets
+    //     pinned: an EMPTY heading has no other glyph to reveal that its
+    //     leading run collapsed to nothing.
+    {
+      const geometry = await leadingRunGeometry(evaluate, 'h2')
+      assert.ok(geometry, 'could not measure the empty h2 geometry')
+      assert.equal(geometry.runLength, 2, 'the empty heading must hold exactly two whitespace characters')
+      assert.ok(geometry.runWidth > 1,
+        `the empty heading's run must PAINT, not collapse — measured ${JSON.stringify(geometry)}`)
+    }
 
     // =====================================================================
     // 4) Typing continues normally after the entity — the character lands
@@ -376,8 +413,42 @@ async function run() {
     await sleep(400)
     assert.equal(
       await readSource(evaluate, 'typing after the entity'),
-      FIXTURE.replace('# 标题甲', '# ' + NBSP + NBSP + NB2 + '标题甲').replace('\n## \n', '\n## ' + NB2 + '乙\n'),
+      doc({ h1: NBSP + NBSP + NB2, h2: NB2 + '乙' }),
       'text typed after a leading whitespace run must land after it, and must not heal it away'
+    )
+
+    // =====================================================================
+    // 4b) A SPACE in an EMPTY heading — the last shape the legacy locks cover
+    //     (scripts/test-scratch-heading-leading-whitespace-ui.mjs's `space`
+    //     and `space-with-text` cases) that had no kernel counterpart. Same
+    //     three-part contract as everywhere else here: bytes, VISIBILITY, and
+    //     text typed afterwards landing after the run instead of healing it.
+    // =====================================================================
+    await clickEmptyBlock(evaluate, send, 'h3')
+    await pressKey(send, { key: ' ', code: 'Space', text: ' ' })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'space in empty h3'),
+      doc({ h1: NBSP + NBSP + NB2, h2: NB2 + '乙', h3: NBSP }),
+      'a Space in an EMPTY heading must commit one real no-break space'
+    )
+    assert.ok(
+      JSON.parse(await blockTexts(evaluate)).includes('H3:' + NBSP),
+      `the Space must be VISIBLE in the empty heading — got ${await blockTexts(evaluate)}`
+    )
+    {
+      const geometry = await leadingRunGeometry(evaluate, 'h3')
+      assert.ok(geometry, 'could not measure the empty h3 geometry')
+      assert.equal(geometry.runLength, 1, 'the empty heading must hold exactly one whitespace character')
+      assert.ok(geometry.runWidth > 1,
+        `the empty heading's space must PAINT, not collapse — measured ${JSON.stringify(geometry)}`)
+    }
+    await typeTextLikeUser(send, '丙', { delayMs: delay })
+    await sleep(400)
+    assert.equal(
+      await readSource(evaluate, 'typing after the empty-heading space'),
+      doc({ h1: NBSP + NBSP + NB2, h2: NB2 + '乙', h3: NBSP + '丙' }),
+      'text typed after an empty heading’s leading space must land after it, not replace it'
     )
 
     // =====================================================================
@@ -414,7 +485,7 @@ async function run() {
       'the leading whitespace must survive to disk'
     )
 
-    console.log('PASS kernel-mode heading leading whitespace UI regression: Tab and Space at an ATX heading content start commit real no-break spaces and stay visible')
+    console.log('PASS kernel-mode heading leading whitespace UI regression: Tab and Space at an ATX heading content start — including an EMPTY heading — commit real no-break spaces, stay visible, and survive to disk')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })
