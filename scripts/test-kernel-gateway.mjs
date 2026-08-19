@@ -3928,3 +3928,157 @@ console.log('PASS kernel gateway (an insert ENDING in whitespace at a block end 
 }
 
 console.log('PASS kernel gateway (the heal is scoped to the U+00A0 this session wrote; an authored one survives editing)')
+
+// --- W: LINE-START whitespace (2026-08-20, the user's own report) ------------
+//
+// 「tab 在行开头输入容易触发内核不支持此操作」. A line's own leading whitespace is
+// block STRUCTURE in CommonMark, so a literal byte written there is not content.
+// Measured on the built app in kernel mode BEFORE this branch existed, per
+// keystroke, reading both the source view and the rendered block back:
+//   * Space at a top-level paragraph's first content position wrote a literal
+//     ' ' the reparse discarded; the projection check repaired the view and the
+//     byte stayed on disk (`projection-mismatch`, no toast).
+//   * The same at a soft-break continuation line, at both hard-break spellings'
+//     continuation lines, at a bullet/ordered item's text start and at a
+//     blockquote paragraph's text start.
+//   * Tab at a paragraph's first content position was worse still: the literal
+//     '\t' made the paragraph REPARSE AS AN INDENTED CODE BLOCK, silently.
+//
+// These cases drive the REAL gateway (classify -> commitPlainText) against a
+// real projection map. `commands/line-start-whitespace.js`'s own suite proves
+// the command; this proves the WIRING — that the branch is reachable, that its
+// prefilter lets these shapes through, and that the shapes which must keep their
+// literal bytes still do.
+{
+  const NBSP = ' '
+  const type = (markdown, pmDoc, at, ch, marks = []) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, 'the fixture must map')
+    const tr = state.tr.insertText(ch, at)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: { ...createMarkdownDocument(markdown), whitespaceMarks: marks } }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    return committed.ok
+      ? { bytes: committed.applied.doc.text, marks: committed.applied.doc.whitespaceMarks }
+      : { refused: committed.code }
+  }
+  const decoded = (markdown) => {
+    const out = []
+    const walk = (n) => {
+      if (typeof n?.value === 'string') out.push(n.value)
+      for (const child of n?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(markdown))
+    return out.join('')
+  }
+
+  // W1: a top-level paragraph's first content position — the reported shape.
+  {
+    const space = type('段落。\n', doc(p(text('段落。'))), 1, ' ')
+    assert.equal(space.bytes, NBSP + '段落。\n', 'Space must commit ONE real no-break space')
+    assert.ok(!/&[#a-zA-Z0-9]+;/.test(space.bytes), 'and never a character reference')
+    assert.equal(decoded(space.bytes), NBSP + '段落。', 'it must be OBSERVABLE in the reparse')
+    assert.deepEqual(space.marks, [{ from: 0, to: 1, ascii: ' ' }], 'the provenance ledger entry')
+
+    const tab = type('段落。\n', doc(p(text('段落。'))), 1, '\t')
+    assert.equal(tab.bytes, NBSP + NBSP + '段落。\n', 'Tab must commit TWO')
+    assert.equal(decoded(tab.bytes), NBSP + NBSP + '段落。',
+      'and the paragraph must STAY a paragraph, not become an indented code block')
+    assert.deepEqual(tab.marks, [{ from: 0, to: 2, ascii: '\t' }])
+  }
+
+  // W2: a SOFT-break continuation line's start.
+  {
+    const md = '一\n二\n'
+    const result = type(md, doc(p(text('一\n二'))), 3, ' ')
+    assert.equal(result.bytes, '一\n' + NBSP + '二\n')
+    assert.equal(decoded(result.bytes), '一\n' + NBSP + '二')
+  }
+
+  // W3: a HARD-break continuation line's start, both spellings.
+  {
+    const pmDoc = doc(p(text('a'), schema.node('hardbreak'), text('b')))
+    const twoSpace = type('a  \nb\n', pmDoc, 3, ' ')
+    assert.equal(twoSpace.bytes, 'a  \n' + NBSP + 'b\n',
+      "the hard break's own two spaces must be untouched")
+    assert.equal(decoded(twoSpace.bytes), 'a' + NBSP + 'b')
+    const backslash = type('a\\\nb\n', pmDoc, 3, '\t')
+    assert.equal(backslash.bytes, 'a\\\n' + NBSP + NBSP + 'b\n')
+    assert.equal(decoded(backslash.bytes), 'a' + NBSP + NBSP + 'b')
+  }
+
+  // W4: a bullet item's text start (Space; Tab there is the INDENT gesture and
+  // never reaches this path — see the router).
+  {
+    const result = type('- 甲\n', doc(hbBl(hbLi(p(text('甲'))))), 3, ' ')
+    assert.equal(result.bytes, '- ' + NBSP + '甲\n')
+    assert.equal(decoded(result.bytes), NBSP + '甲')
+  }
+
+  // W5: a blockquote paragraph's text start.
+  {
+    const result = type('> 甲\n', doc(bq(p(text('甲')))), 2, ' ')
+    assert.equal(result.bytes, '> ' + NBSP + '甲\n')
+    assert.equal(decoded(result.bytes), NBSP + '甲')
+  }
+
+  // W6: THE DISPLACEMENT HEAL. A line-start run stays leading forever unless the
+  // user types IN FRONT of it — then it is an ordinary interior space and the
+  // ledger restores the key that was pressed.
+  {
+    const first = type('段落。\n', doc(p(text('段落。'))), 1, '\t')
+    const second = type(first.bytes, doc(p(text(NBSP + NBSP + '段落。'))), 1, 'x', first.marks)
+    assert.equal(second.bytes, 'x\t段落。\n',
+      "the whole recorded run restores the single Tab that was pressed")
+    // …and a U+00A0 the DOCUMENT already had is never claimed (empty ledger).
+    const authored = type(NBSP + '段落。\n', doc(p(text(NBSP + '段落。'))), 1, 'x', [])
+    assert.equal(authored.bytes, 'x' + NBSP + '段落。\n',
+      'a U+00A0 this kernel did not write must survive untouched')
+  }
+
+  // W7: THE LITERAL-FIRST FALL-THROUGH. Everything that already worked must
+  // commit exactly the bytes it always did.
+  {
+    // Interior typing.
+    assert.equal(type('ab\n', doc(p(text('ab'))), 2, ' ').bytes, 'a b\n',
+      'an interior space stays a literal byte')
+    // A fenced block's leading whitespace IS content.
+    const fence = type('```\nab\n```\n', doc(cb(null, 'ab')), 1, '\t')
+    assert.equal(fence.bytes, '```\n\tab\n```\n',
+      "a code block's leading tab is real content and must be byte-exact")
+  }
+
+  // W8: A VIRTUAL placeholder refuses whitespace LOUDLY instead of silently
+  // deleting the paragraph the user just created with Enter. Measured before
+  // this guard: the byte was written, CommonMark discarded it, and the new empty
+  // paragraph vanished from the view (`map-refresh-failed`,
+  // `projection-mismatch`, no toast).
+  {
+    const md = '- 甲\n'
+    const state = EditorState.create({ schema, doc: doc(hbBl(hbLi(p(text('甲')))), p()) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map, 'the trailing-placeholder fixture must map')
+    const trailing = map.blockPairs.find((candidate) => candidate.virtual)
+    assert.ok(trailing, 'fixture sanity: there must be a virtual trailing pair')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const refused = commitPlainText({
+      kernel,
+      map,
+      transactions: [state.tr.insertText(' ', trailing.pmPos + 1)],
+      oldState: state
+    })
+    assert.equal(refused.ok, false, 'whitespace into a virtual placeholder must refuse')
+    assert.equal(refused.code, KERNEL_CODES.UNSUPPORTED)
+    // An ordinary character there is unaffected.
+    const ok = commitPlainText({
+      kernel,
+      map,
+      transactions: [state.tr.insertText('x', trailing.pmPos + 1)],
+      oldState: state
+    })
+    assert.equal(ok.ok, true, ok.code)
+  }
+}
+
+console.log('PASS kernel gateway (line-start whitespace: paragraph/continuation/hard-break/list/quote line starts commit real no-break spaces; interior typing, code fences and task items keep their literal bytes; a virtual placeholder refuses loudly)')

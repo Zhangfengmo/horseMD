@@ -42,6 +42,9 @@ import {
   spellBlockTailInsert,
   literalTailIsStripped,
   healableTrailingSpace,
+  spellLineStartWhitespace,
+  looksLikeBlockLineStart,
+  healableLineStartRun,
   replaceVisibleText,
   routeStructuralKey,
   toggleBlockquote,
@@ -1477,18 +1480,74 @@ export function createKernelMode({
     return 'refused'
   }
 
+  // Whitespace at a LINE's START — the third position CommonMark treats as
+  // structure rather than content (see
+  // lib/source-kernel/commands/line-start-whitespace.js). This is the KEYMAP
+  // half, i.e. Tab, and it is the user's own report:
+  // 「tab 在行开头输入容易触发内核不支持此操作」. Measured before this existed: Tab at
+  // a top-level paragraph's first content position committed a literal '\t' and
+  // the paragraph REPARSED AS AN INDENTED CODE BLOCK, silently; at a
+  // continuation line (soft or hard break) and at a blockquote paragraph's text
+  // start it committed a byte the reparse simply discarded.
+  //
+  // Space is deliberately NOT routed here, for the same reason it is not routed
+  // to `commitBlockTrailingWhitespace`: the Space keydown is what the preset
+  // input rules fire on. A space reaches ProseMirror first and is re-spelled
+  // afterwards, on the bytes, by `commitPlainText`.
+  //
+  // LIST INDENTATION IS UNTOUCHED. `routeStructuralKey` resolves a list item
+  // FIRST and returns the indent command for it, so this function is only ever
+  // reached from the `not-structural` branch — a caret in a list item never gets
+  // here, and Tab on an item that cannot be indented still refuses structurally.
+  //
+  // Refusal contract matches its two siblings: 'skip' means the caller keeps
+  // exactly its previous behaviour.
+  const commitLineStartWhitespace = (character, state, view) => {
+    if (!state?.selection?.empty) return 'skip'
+    if (!kernel.map) return 'skip'
+    const head = state.selection.head
+    const pair = editablePairForRange(head, head)
+    if (!pair?.charMap || !pair.mdBlock) return 'skip'
+    const insertAt = typeof kernel.map.pmPosToRawInsert === 'function'
+      ? kernel.map.pmPosToRawInsert(head)
+      : kernel.map.pmPosToRaw(head)
+    if (!Number.isFinite(insertAt)) return 'skip'
+    const text = kernel.doc.text
+    if (!looksLikeBlockLineStart(text, insertAt)) return 'skip'
+    const routed = spellLineStartWhitespace({
+      doc: kernel.doc,
+      block: pair.mdBlock,
+      offset: insertAt,
+      insert: character,
+      heal: healableLineStartRun(text, pair.charMap, kernel.doc.whitespaceMarks, insertAt)
+    })
+    if (routed.ok) {
+      applyKernelTransaction(routed.transaction, view, { requireMap: true })
+      return 'handled'
+    }
+    if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) return 'skip'
+    notifyBlocked(routed.code)
+    return 'refused'
+  }
+
   // Tab (and future plain inserts) on the not-structural path: source-first
   // character insertion through replaceVisibleText, scoped to the single
   // editable block pair that contains the selection.
   const insertPlainTextAtSelection = (insert, state, view) => {
     const { from, to } = state.selection
-    // A whitespace character appended at a block's END is not addressable as a
-    // literal byte — re-spell it (proven by reparse) before the ordinary
-    // replaceVisibleText path can write the dead one.
+    // A whitespace character appended at a block's END, or written at a line's
+    // START, is not addressable as a literal byte — re-spell it (proven by
+    // reparse) before the ordinary replaceVisibleText path can write the dead
+    // one. The block-END check runs first because it is the narrower shape (an
+    // APPEND past the block's last unit); a caret at a line start of a non-empty
+    // block never satisfies it, so the two never compete.
     if (insert === ' ' || insert === '\t') {
       const routed = commitBlockTrailingWhitespace(insert, state, view)
       if (routed === 'handled') return true
       if (routed === 'refused') return false
+      const lead = commitLineStartWhitespace(insert, state, view)
+      if (lead === 'handled') return true
+      if (lead === 'refused') return false
     }
     const pair = editablePairForRange(from, to)
     if (!pair) {

@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1553,6 +1553,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // put a space on disk that nobody could ever see again. The command claims
     // exactly the insert's own trailing whitespace run, under the same reparse
     // proof; the characters before it are byte-exact as they always were.
+    let tailWhitespace = false
     if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
         virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
         stepPair.charMap && insertText !== '' && !/[\r\n]/.test(insertText)) {
@@ -1575,6 +1576,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
             editTo = routed.edit.to
             insertText = routed.edit.insert
             pendingMarks = routed.whitespaceMarks
+            tailWhitespace = true
             // The rewritten range covers exactly the healed units (the U+00A0
             // run the heal replaced) when a heal happened, and nothing otherwise.
             respelledVisibleDelta = [...insertText].length - (routed.healedUnits || 0)
@@ -1586,6 +1588,84 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
           }
         }
       }
+    }
+    // LINE-START whitespace (2026-08-20) — the third and last position in this
+    // family, and the one the user reported directly:
+    // 「tab 在行开头输入容易触发内核不支持此操作」. A line's own leading whitespace is
+    // block STRUCTURE in CommonMark (paragraph indentation, a list marker's
+    // padding, a blockquote's `>` padding), so the byte written there is not
+    // content. Measured in the built app before this branch existed, per
+    // keystroke: Space at a paragraph's first content position wrote a literal
+    // byte the reparse discarded (view repaired back, byte permanent on disk),
+    // and the same at a soft-break continuation line, after both hard-break
+    // spellings, at a bullet/ordered item's text start and at a blockquote
+    // paragraph's text start. `spellLineStartWhitespace` re-spells the insert's
+    // own LEADING whitespace run as U+00A0 (Space -> one, Tab -> two) and proves
+    // it by reparsing the candidate — see its own header for the full matrix.
+    //
+    // THE LITERAL IS TRIED FIRST, INSIDE THE COMMAND, so nothing that already
+    // worked changes: a GFM task item's text start, for instance, already keeps
+    // its literal byte as content (the checkbox consumes exactly one following
+    // space), and the command's literal probe discovers that and answers
+    // `not-structural`.
+    //
+    // THE PREFILTER IS THE COST CONTRACT, exactly as for the two branches above:
+    //   * ONE step, zero-width, no virtual separator, a real mapped pair;
+    //   * the insert BEGINS with ASCII whitespace, or a U+00A0 run THIS kernel
+    //     wrote starts at this very offset (the displacement heal);
+    //   * and `looksLikeBlockLineStart` — a backwards walk that stops at the
+    //     first byte which cannot be part of a line's structural prefix, so
+    //     ordinary typing pays one comparison.
+    // Only then is a parse spent.
+    if (!emptyFence && !headingWhitespace && !tailWhitespace && steps.length === 1 &&
+        oldFrom === oldTo && virtualPrefix === '' && !virtualBlock && stepPair &&
+        !stepPair.virtual && stepPair.charMap && stepPair.mdBlock &&
+        insertText !== '' && !/[\r\n]/.test(insertText)) {
+      const text = kernel.doc.text
+      const opensWithWhitespace = insertText[0] === ' ' || insertText[0] === '\t'
+      const displaces = (kernel.doc.whitespaceMarks || []).some((mark) => mark?.from === rawFrom)
+      if ((opensWithWhitespace || displaces) && looksLikeBlockLineStart(text, rawFrom)) {
+        const heal = displaces
+          ? healableLineStartRun(text, stepPair.charMap, kernel.doc.whitespaceMarks, rawFrom)
+          : null
+        const routed = spellLineStartWhitespace({
+          doc: kernel.doc,
+          block: stepPair.mdBlock,
+          offset: rawFrom,
+          insert: insertText,
+          heal
+        })
+        if (routed.ok) {
+          editFrom = routed.edit.from
+          editTo = routed.edit.to
+          insertText = routed.edit.insert
+          pendingMarks = routed.whitespaceMarks
+          respelledVisibleDelta = [...insertText].length - (routed.healedUnits || 0)
+        } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+          // The offset IS one where the literal byte is proven dead and no
+          // spelling could be proven: refuse loudly rather than write it.
+          return { ok: false, code: routed.code }
+        }
+      }
+    }
+    // A VIRTUAL pair (the trailing placeholder, a split placeholder, an empty
+    // list item) has no baseline block, so the kernel's ONE observability proof
+    // — `blockEditIsObservable`, which is stated about a block that already
+    // exists — cannot be run for it. And whitespace is exactly the insert whose
+    // bytes are wrong there: the separator prefix opens a brand-new line, so an
+    // ASCII space/tab lands in that line's leading run, CommonMark discards it,
+    // and the placeholder the user just created with Enter DISAPPEARS. Measured
+    // before this guard: Enter then Space left the byte on disk, dropped the new
+    // paragraph from the view, and reported only `map-refresh-failed` +
+    // `projection-mismatch` — a silent loss.
+    //
+    // Refuse loudly instead. Tab already refused at this position
+    // (`unmapped-selection`, via the keymap's own unmapped-caret branch), so
+    // this makes the two keys agree, writes no bytes, and leaves the placeholder
+    // intact. Typing any ordinary character first, then whitespace, works
+    // unchanged — that path reaches a real block.
+    if (virtualBlock && /^[ \t]/.test(insertText)) {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
     }
     // THE DELETE SIDE (2026-08-19, audit findings). Everything above is an
     // INSERT-path design: `blockEditIsObservable` is a genuine fail-closed

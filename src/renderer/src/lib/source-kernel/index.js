@@ -35,6 +35,11 @@ export {
   NO_BREAK_SPACE
 } from './commands/trailing-whitespace.js'
 export {
+  spellLineStartWhitespace,
+  looksLikeBlockLineStart,
+  healableLineStartRun
+} from './commands/line-start-whitespace.js'
+export {
   proveContentDelete,
   deleteClearsBlockLine,
   editsClearBlockLine,
