@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1145,7 +1145,7 @@ const tableStructureSignature = (tree) => {
     for (const child of node?.children || []) visit(child)
   }
   visit(tree)
-  return out.join(' ')
+  return out.join('\x00')
 }
 
 // Fail-closed on a parse failure of EITHER side (an unparseable candidate is
@@ -1416,13 +1416,27 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // item). It owns the WHOLE spelling for this shape, breaks included, so the
     // generic break expansion below is skipped when it fires.
     //
+    // BLOCK MATH IS THE SAME SHAPE (2026-08-19, audit finding). This prefilter
+    // used to read `mdBlock?.type === 'code'`, so when `$$` block math became
+    // editable through this very function on 2026-08-18
+    // (editor-kernel-projection-map.js's `code_block: ['code','math']` ADR) the
+    // guard above simply did not apply to it and the corruption stayed fully
+    // live for math: '$$\n$$\n\nend\n' + 'x' committed '$$\nx$$\n\nend\n', which
+    // reparses to ONE math node with value 'x$$\n\nend'. The quoted spelling put
+    // the byte in front of the '> ' exactly as the fence's did. Reachable with
+    // no external file: type '$$' / '$$' in source mode, switch to rich, click
+    // into the formula, type. `EMPTY_VERBATIM_BLOCK_TYPES` is the command's own
+    // allowlist, imported rather than re-spelled here so the two can never
+    // diverge again.
+    //
     // The prefilter is parse-free: a real (non-virtual) pair whose mdast block
-    // is `code`, whose character map is the EMPTY one, and a non-empty
+    // is `code`/`math`, whose character map is the EMPTY one, and a non-empty
     // zero-width insert. One parse is spent on the first character typed into an
-    // empty code block and never again — the block is no longer empty.
+    // empty verbatim block and never again — the block is no longer empty.
     let emptyFence = false
     if (!virtualBlock && stepPair && !stepPair.virtual && stepPair.charMap &&
-        stepPair.mdBlock?.type === 'code' && stepPair.charMap.visibleLength === 0 &&
+        EMPTY_VERBATIM_BLOCK_TYPES.has(stepPair.mdBlock?.type) &&
+        stepPair.charMap.visibleLength === 0 &&
         oldFrom === oldTo && insertText !== '') {
       const routed = spellEmptyCodeInsert({
         doc: kernel.doc,
@@ -1520,9 +1534,15 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     //     already ends in one of THIS module's own entities (the self-heal).
     // Only then is a parse spent, i.e. on spaces at a block end and on the one
     // character that follows them — never on ordinary interior typing.
+    // MULTI-CHARACTER INSERTS REACH THE HEAL SINCE 2026-08-19 (audit finding).
+    // The `[...insertText].length === 1` gate here meant a PASTE (or any other
+    // multi-character insert) landing right after a block-trailing U+00A0 left
+    // it stranded forever. The command itself still claims the RE-SPELLING half
+    // for a single space/tab only (`BLOCK_TRAILING_TEXT` has no longer keys), so
+    // the only behaviour this opens is the heal, under the same reparse proof.
     if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
         virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
-        stepPair.charMap && [...insertText].length === 1 && !/[\r\n]/.test(insertText)) {
+        stepPair.charMap && insertText !== '' && !/[\r\n]/.test(insertText)) {
       const text = kernel.doc.text
       const units = stepPair.charMap.units
       const lastUnit = Array.isArray(units) && units.length ? units[units.length - 1] : null
@@ -1551,6 +1571,83 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
             return { ok: false, code: routed.code }
           }
         }
+      }
+    }
+    // THE DELETE SIDE (2026-08-19, audit findings). Everything above is an
+    // INSERT-path design: `blockEditIsObservable` is a genuine fail-closed
+    // pre-write proof, and until now NO delete path consulted it. The
+    // `observability` expectation recorded below DOES cover deletes, but it
+    // fires after publication and only logs — by which time
+    // `verifyPlainTextProjection` has repaired the VIEW to match the corrupted
+    // bytes, which is what makes this family permanent and invisible.
+    //
+    // Two distinct shapes, both proven BEFORE a byte moves:
+    //
+    //  (1) A delete that empties a physical line inside a MULTI-LINE block
+    //      leaves bytes CommonMark reads as a blank line or a setext underline:
+    //      'alpha  ' LF 'b  ' LF 'gamma' -> Backspace after 'b' -> two
+    //      paragraphs with both hard breaks gone; the nested-list spelling turns
+    //      the outer item into a HEADING and destroys a list level. The
+    //      soft-break spelling ('a' LF 'b' LF 'c') has the same shape and is
+    //      pre-existing. `proveContentDelete` reparses the candidate and
+    //      REFUSES what it cannot prove — a delete has no second spelling that
+    //      is obviously the user's intent, and inventing one (swallowing a
+    //      neighbouring line ending) is the guess this whole family began as.
+    //
+    //  (2) A delete that strands a literal ASCII space at a block END recreates
+    //      the original dead-byte defect and then misplaces the NEXT character
+    //      in front of it: 'ab c' + Backspace committed 'ab ' (view 'ab'), and
+    //      typing 'd' then produced 'abd ' — the user typed `ab d`.
+    //      `spellBlockTailDelete` re-spells that one space U+00A0 in the SAME
+    //      edit, exactly as the insert path does, so the existing heal turns it
+    //      back into an ordinary space the moment a character displaces it.
+    //
+    // Both prefilters are parse-free and the commands spend a parse only once
+    // their O(1) checks already establish the shape, so ordinary deleting pays
+    // comparisons.
+    if (steps.length === 1 && oldFrom < oldTo && virtualPrefix === '' && !virtualBlock &&
+        stepPair && !stepPair.virtual && stepPair.charMap && stepPair.mdBlock) {
+      if (deleteClearsBlockLine({
+        text: kernel.doc.text,
+        charMap: stepPair.charMap,
+        block: stepPair.mdBlock,
+        from: editFrom,
+        to: editTo,
+        insert: insertText
+      })) {
+        const routed = proveContentDelete({
+          doc: kernel.doc,
+          block: stepPair.mdBlock,
+          from: editFrom,
+          to: editTo,
+          insert: insertText
+        })
+        // No `not-structural` fall-through: the prefilter has already
+        // established that this delete blanks a line inside a multi-line block,
+        // so "could not prove it" must refuse, never degrade to the literal
+        // bytes that restructure the document.
+        if (!routed.ok) return { ok: false, code: routed.code }
+      }
+      const stranded = spellBlockTailDelete({
+        doc: kernel.doc,
+        block: stepPair.mdBlock,
+        charMap: stepPair.charMap,
+        from: editFrom,
+        to: editTo,
+        insert: insertText
+      })
+      if (stranded.ok) {
+        editFrom = stranded.edit.from
+        editTo = stranded.edit.to
+        insertText = stranded.edit.insert
+        // `respelledVisibleDelta` stays null ON PURPOSE: the re-spelling swaps
+        // one ASCII space for one U+00A0, both a width-1 `char` unit, so the
+        // block's visible length moves by exactly the PM step's own delta and
+        // the default expectation below is already the right one.
+      } else if (stranded.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        // The byte IS one CommonMark discards and no spelling could be proven
+        // (an ambiguous run, a tab): refuse rather than strand it.
+        return { ok: false, code: stranded.code }
       }
     }
     edits.push({

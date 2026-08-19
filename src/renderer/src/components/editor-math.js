@@ -63,12 +63,36 @@ export function normalizeDisplayMath(md) {
 // it normally.
 const TYPING_KEY = new PluginKey('hm-math-block-typing')
 
-export function createMathBlockPromotionPlugin() {
+// `kernelMode` (2026-08-19, audit Minor 5). In source-kernel mode the
+// `$$content$$` branch below is a KEYSTROKE LOSS, for exactly the reason
+// `createMermaidSplitPlugin` is not registered at all there
+// (editor-crepe-setup.js): its transaction's slice carries NODE content
+// (`replaceWith(..., code_block)`), a shape the gateway can only classify
+// `blocked`, so the closing '$' is swallowed here and then vetoed — the
+// character never lands anywhere.
+//
+// The plugin is not simply dropped in kernel mode, because the OTHER branch is
+// load-bearing: without it the '$' of `$$x$` reaches preset-latex's inline
+// input rule, which replaces the run with a `math_inline` NODE — the same
+// blocked-and-vetoed shape, one keystroke earlier. So in kernel mode both
+// branches insert the '$' as PLAIN TEXT: the bytes become exactly what the user
+// typed, and what `$$x$$` means is then decided by the source, which is the
+// posture the whole kernel is built on (remark-math reads it as inline math;
+// the projection reconciles the view to that). Legacy mode is untouched.
+export function createMathBlockPromotionPlugin({ kernelMode = false } = {}) {
   return new Plugin({
     key: TYPING_KEY,
     props: {
       handleTextInput(view, from, _to, text) {
         if (text !== '$') return false
+        if (kernelMode) {
+          const $at = view.state.doc.resolve(from)
+          if (!$at.parent.isTextblock) return false
+          const priorText = $at.parent.textBetween(0, $at.parentOffset, '\n') + '$'
+          if (!/\$\$([^\n$]+)\$\$?$/.test(priorText)) return false
+          view.dispatch(view.state.tr.insertText('$', from))
+          return true
+        }
         const $from = view.state.doc.resolve(from)
         const parent = $from.parent
         if (!parent.isTextblock) return false

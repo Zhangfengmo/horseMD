@@ -3318,3 +3318,383 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
 }
 
 console.log('PASS kernel gateway (block-trailing whitespace: real no-break space + self-heal; code fences, hard breaks and interior typing untouched)')
+
+// --- M: THE EMPTY $$ BLOCK (2026-08-19, audit Critical 1) ---------------------
+//
+// `64f46d5` fixed "typing into an empty fenced code block destroys its closing
+// fence". `356bdc9`, in the same series, made `$$` block math editable through
+// the SAME write path without extending that guard: `commitPlainText`'s
+// prefilter read `mdBlock?.type === 'code'` and `spellEmptyCodeInsert` refused
+// anything that was not `code`, while a `$$` block's mdast type is `math`. So
+// the corruption was fully live for math. Measured on the kernel's own parser
+// before the fix:
+//
+//   '$$\n$$\n\nend\n' + 'x' at the block's only anchor
+//     -> committed '$$\nx$$\n\nend\n'
+//     -> ONE math node, value 'x$$\n\nend'
+//
+// the closing delimiter destroyed and every following block swallowed. The
+// quoted spelling put the byte in FRONT of the '> '. Reachable in-app with no
+// external file: type '$$' / '$$' in source mode, switch to rich, click into
+// the formula, type.
+{
+  const mathValue = (markdown) => {
+    let node = null
+    const walk = (candidate) => {
+      if (node) return
+      if (candidate?.type === 'math') { node = candidate; return }
+      for (const child of candidate?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(markdown))
+    return node?.value ?? null
+  }
+  // A `$$` block projects as a `code_block` whose language Crepe's latex
+  // feature sets to 'LaTeX' (editor-kernel-projection-map.js M2) — the SAME PM
+  // shape a fence has, which is exactly why it reaches this write path.
+  const mathBlock = (value = '') => cb('LaTeX', value)
+
+  // M1: THE DEFECT ITSELF, with a following block the pre-fix bytes swallowed.
+  {
+    const md = '$$\n$$\n\nend\n'
+    const state = EditorState.create({ schema, doc: doc(mathBlock(), p(text('end'))) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map, 'a document with an empty $$ block must map')
+    const pair = map.blockPairs[0]
+    assert.equal(pair.mdBlock.type, 'math', 'fixture sanity: the mdast block IS `math`')
+    assert.ok(pair.charMap, 'an empty $$ block is editable — that is why this path is reachable')
+    assert.equal(pair.charMap.visibleLength, 0)
+    // The anchor really is the CLOSING delimiter's own line start.
+    assert.equal(pair.charMap.visibleToRaw(0), 3)
+    assert.equal(md.slice(3, 5), '$$')
+
+    const tr = state.tr.insertText('x', 1)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, committed.code)
+    assert.deepEqual(committed.transaction.edits, [{ from: 3, to: 3, insert: 'x\n' }],
+      'the write must OPEN a terminated content line, never overwrite the closing $$')
+    assert.equal(committed.applied.doc.text, '$$\nx\n$$\n\nend\n')
+    assert.equal(mathValue(committed.applied.doc.text), 'x',
+      'the character must be observable as the formula, not as a swallowed document')
+  }
+
+  // M2: the BLOCKQUOTE-prefixed empty `$$` block — the byte must land AFTER the
+  // closing line's own '> ', which the raw anchor sits in front of.
+  {
+    const md = '> $$\n> $$\n\nend\n'
+    const state = EditorState.create({ schema, doc: doc(bq(mathBlock()), p(text('end'))) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map)
+    const pair = map.blockPairs.find((candidate) => candidate.pmNode?.type?.name === 'code_block')
+    assert.ok(pair?.charMap)
+    assert.equal(pair.charMap.visibleToRaw(0), 5)
+    assert.equal(md.slice(5, 7), '> ', 'fixture sanity: the anchor is BEFORE the quote marker')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('x', 2)], oldState: state
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '> $$\n> x\n> $$\n\nend\n')
+    assert.equal(mathValue(committed.applied.doc.text), 'x')
+  }
+
+  // M3: CRLF — the opened line carries the block's OWN ending.
+  {
+    const md = '$$\r\n$$\r\n'
+    const state = EditorState.create({ schema, doc: doc(mathBlock()) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '$$\r\nx\r\n$$\r\n')
+    assert.equal(/(?<!\r)\n/.test(committed.applied.doc.text), false, 'no bare \\n in a CRLF document')
+    assert.equal(mathValue(committed.applied.doc.text), 'x')
+  }
+
+  // M4: math at the very END of the document (no trailing newline) — the shape
+  // whose anchor is the last line's own start.
+  {
+    const md = '$$\n$$'
+    const state = EditorState.create({ schema, doc: doc(mathBlock()) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '$$\nx\n$$')
+    assert.equal(mathValue(committed.applied.doc.text), 'x')
+  }
+
+  // M5: the OTHER spelling — commands/block-insert.js writes the slash menu's
+  // `/math` as '$$' LE LE '$$', an empty block that already OWNS a content
+  // line. That line must be FILLED, not doubled.
+  {
+    const md = '$$\n\n$$\n'
+    const state = EditorState.create({ schema, doc: doc(mathBlock()) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.deepEqual(committed.transaction.edits, [{ from: 3, to: 3, insert: 'x' }])
+    assert.equal(committed.applied.doc.text, '$$\nx\n$$\n')
+    assert.equal(mathValue(committed.applied.doc.text), 'x')
+  }
+
+  // M6: FAIL-CLOSED. A `$$` with no closing delimiter at all cannot be
+  // terminated without GUESSING a line ending, so it refuses with the kernel
+  // bytes untouched. (The LIST-INDENTED shape — where the derived prefix is the
+  // item marker, so writing it would create a SECOND list item — is pinned at
+  // the command level in scripts/test-source-kernel-empty-code.mjs: this
+  // fixture schema's `list_item` cannot hold a bare `code_block`.)
+  {
+    const md = '$$'
+    const state = EditorState.create({ schema, doc: doc(mathBlock()) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map, 'the unterminated $$ block still MAPS — that is why it needs a guard')
+    const kernel = { doc: createMarkdownDocument(md) }
+    const refused = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('x', 1)], oldState: state
+    })
+    assert.equal(refused.ok, false, 'an unterminated $$ block must fail closed')
+    assert.equal(refused.code, KERNEL_CODES.UNSUPPORTED)
+    assert.equal(kernel.doc.text, md, 'kernel bytes must be untouched by a refused edit')
+  }
+}
+
+console.log('PASS kernel gateway (empty $$ block: the first insert opens a terminated, prefixed content line; quoted/CRLF/EOF/fill covered, list-indented and unterminated fail closed)')
+
+// --- D: THE DELETE SIDE (2026-08-19, audit Critical 2 + Important 3 + Minor 4)
+//
+// `blockEditIsObservable` is a genuine pre-write, fail-closed proof — and until
+// this task NO delete path consulted it. `commitPlainText` did compute an
+// `observability` expectation for deletes, but it fires AFTER publication and
+// only logs, by which time `verifyPlainTextProjection` has repaired the VIEW to
+// match the corrupted bytes. That is what made this family permanent.
+//
+// Every committed-bytes string below was measured through this exact gateway
+// BEFORE the fix.
+{
+  const structure = (markdown) => {
+    const out = []
+    const walk = (node, depth) => {
+      out.push(`${'  '.repeat(depth)}${node.type}${node.type === 'heading' ? `/${node.depth}` : ''}`)
+      for (const child of node.children || []) walk(child, depth + 1)
+    }
+    walk(parseKernelMarkdown(markdown), 0)
+    return out.join('\n')
+  }
+  const decodedOf = (markdown) => {
+    const out = []
+    const walk = (node) => {
+      if (typeof node?.value === 'string') out.push(node.value)
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(markdown))
+    return out.join('')
+  }
+  const del = (markdown, pmDoc, from, to) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, `fixture must map: ${JSON.stringify(markdown)}`)
+    const tr = state.tr.delete(from, to)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text',
+      'the shape under test really is the plain-text delete path')
+    const kernel = { doc: createMarkdownDocument(markdown) }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    return { committed, kernel }
+  }
+  const refuses = (label, markdown, pmDoc, from, to) => {
+    const { committed, kernel } = del(markdown, pmDoc, from, to)
+    assert.equal(committed.ok, false, `${label}: must fail closed`)
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED, label)
+    assert.equal(kernel.doc.text, markdown, `${label}: bytes untouched`)
+  }
+
+  // D1: the hard-break paragraph. Pre-fix it committed
+  // 'alpha  \n  \ngamma\n', which reparses as TWO paragraphs with both hard
+  // breaks gone.
+  {
+    const md = 'alpha  \nb  \ngamma\n'
+    const pmDoc = doc(p(text('alpha'), br(), text('b'), br(), text('gamma')))
+    // The pre-fix bytes, stated so the assertion below is not vacuous.
+    assert.equal(structure('alpha  \n  \ngamma\n'),
+      'root\n  paragraph\n    text\n  paragraph\n    text')
+    refuses('D1 hard-break paragraph', md, pmDoc, 7, 8)
+  }
+  // D2: the same shape inside a BLOCKQUOTE.
+  refuses('D2 quoted hard break', '> alpha  \n> b  \n> gamma\n',
+    doc(bq(p(text('alpha'), br(), text('b'), br(), text('gamma')))), 8, 9)
+  // D3: the NESTED LIST — pre-fix this turned 'outer' into a setext HEADING and
+  // destroyed a list level.
+  {
+    const md = '- outer\n  - b  \n    tail\n'
+    assert.equal(structure('- outer\n  -   \n    tail\n'),
+      'root\n  list\n    listItem\n      heading/2\n        text\n      paragraph\n        text')
+    refuses('D3 nested list', md,
+      doc(hbBl(hbLi(p(text('outer')), hbBl(hbLi(p(text('b'), br(), text('tail')))))))
+      , 12, 13)
+  }
+  // D4: the SOFT-break spelling — the same shape, and PRE-EXISTING (it was not
+  // opened by the 2026-08-18 hard-break relaxation).
+  refuses('D4 soft break', 'a\nb\nc\n', doc(p(text('a\nb\nc'))), 3, 4)
+  // D5: CRLF, same shape.
+  refuses('D5 CRLF hard break', 'alpha  \r\nb  \r\ngamma\r\n',
+    doc(p(text('alpha'), br(), text('b'), br(), text('gamma'))), 7, 8)
+  // D6 (Important 3): the BACKSLASH-spelled hard break whose last line is
+  // deleted invents visible content — pre-fix 'a\\\n\n' reparses to a paragraph
+  // whose text literally reads `a\`.
+  {
+    assert.equal(decodedOf('a\\\n\n'), 'a\\',
+      'pre-fix bytes really do promote the dead escape to visible text')
+    refuses('D6 backslash hard break', 'a\\\nb\n', doc(p(text('a'), br(), text('b'))), 3, 4)
+  }
+  // D7 (Minor 4): the dead-byte leftovers — an orphaned hard-break marker, and
+  // the mirror case that strands the marker at the document start.
+  refuses('D7a orphan hard-break marker', 'a  \nb\n', doc(p(text('a'), br(), text('b'))), 3, 4)
+  refuses('D7b leading dead marker', 'a  \nb\n', doc(p(text('a'), br(), text('b'))), 1, 2)
+
+  // D8: WHAT MUST STILL WORK. Ordinary deletes are untouched — the proof only
+  // ever runs when a line loses its last content inside a multi-line block, and
+  // then only refuses what it cannot prove.
+  const survives = (label, markdown, pmDoc, from, to, expected) => {
+    const { committed } = del(markdown, pmDoc, from, to)
+    assert.equal(committed.ok, true, `${label}: ${committed.code}`)
+    assert.equal(committed.applied.doc.text, expected, label)
+  }
+  survives('D8a delete inside a word', 'hello world\n', doc(p(text('hello world'))), 3, 4,
+    'helo world\n')
+  survives('D8b empty a single-line paragraph', 'hello\n', doc(p(text('hello'))), 1, 6, '\n')
+  survives('D8c a line that still has content', 'alpha  \nbb  \ngamma\n',
+    doc(p(text('alpha'), br(), text('bb'), br(), text('gamma'))), 7, 8,
+    'alpha  \nb  \ngamma\n')
+  // Inside a fenced block an emptied line is legitimate CONTENT, and stays so.
+  survives('D8d code-block line cleared', '```\nfoo\nbar\n```\n', doc(cb('', 'foo\nbar')), 1, 4,
+    '```\n\nbar\n```\n')
+  survives('D8e quoted code-block line cleared', '> ```\n> foo\n> ```\n',
+    doc(bq(cb('', 'foo'))), 2, 5, '> ```\n> \n> ```\n')
+}
+
+console.log('PASS kernel gateway (delete side: a delete that blanks a line inside a multi-line block fails closed; ordinary deletes and code-block lines untouched)')
+
+// --- N: THE DELETE THAT STRANDS A BLOCK-TRAILING SPACE (2026-08-19, audit B) --
+//
+// The block-trailing design covered the INSERT path only. A delete that leaves a
+// literal ASCII space at a block end recreated the original dead-byte defect and
+// then misplaced the NEXT character in front of it. Measured in the built app:
+//
+//   type 'ab', Space   source 'ab<NBSP>'   view 'ab '
+//   type 'c'           source 'ab c'       view 'ab c'   (the heal)
+//   ONE Backspace      source 'ab '        view 'ab'     <- bytes != view
+//   type 'd'           source 'abd '       view 'abd'
+//
+// The user typed `a b Space c Backspace d` and expected `ab d`; the file held
+// `abd` plus a space nobody could ever see again.
+{
+  const NBSP = ' '
+  const del = (markdown, pmDoc, from, to) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, `fixture must map: ${JSON.stringify(markdown)}`)
+    const kernel = { doc: createMarkdownDocument(markdown) }
+    return {
+      kernel,
+      committed: commitPlainText({
+        kernel, map, transactions: [state.tr.delete(from, to)], oldState: state
+      })
+    }
+  }
+
+  // N1: the repro. Backspace re-spells the stranded space U+00A0 in the SAME
+  // edit, so bytes and view still agree.
+  {
+    const { committed } = del('ab c\n', doc(p(text('ab c'))), 4, 5)
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'ab' + NBSP + '\n')
+  }
+  // N2: …and the NEXT character heals it straight back to an ordinary space, so
+  // the user's `ab d` is what lands on disk.
+  {
+    const md = 'ab' + NBSP + '\n'
+    const state = EditorState.create({ schema, doc: doc(p(text('ab' + NBSP))) })
+    const map = buildProjectionMap(md, state.doc)
+    assert.ok(map)
+    const kernel = { doc: createMarkdownDocument(md) }
+    const committed = commitPlainText({
+      kernel, map, transactions: [state.tr.insertText('d', 4)], oldState: state
+    })
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'ab d\n',
+      'the full sequence must land `ab d`, not `abd`')
+  }
+  // N3: a HEADING's tail behaves identically.
+  {
+    const { committed } = del('# ab c\n', doc(schema.node('heading', { level: 1 }, [text('ab c')])), 4, 5)
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '# ab' + NBSP + '\n')
+  }
+  // N4: quoted paragraph.
+  {
+    const { committed } = del('> ab c\n', doc(bq(p(text('ab c')))), 5, 6)
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '> ab' + NBSP + '\n')
+  }
+  // N5: FAIL-CLOSED where no spelling is unambiguous — a stranded run of TWO
+  // spaces, or a stranded TAB. Two U+00A0 could be one Tab or two Spaces (the
+  // ambiguity the heal refuses to resolve), and a delete is not the place to
+  // invent that convention.
+  for (const [md, pmDoc, from, to] of [
+    ['ab  c\n', doc(p(text('ab  c'))), 5, 6],
+    ['ab\tc\n', doc(p(text('ab\tc'))), 4, 5]
+  ]) {
+    const { committed, kernel } = del(md, pmDoc, from, to)
+    assert.equal(committed.ok, false, `must fail closed: ${JSON.stringify(md)}`)
+    assert.equal(committed.code, KERNEL_CODES.UNSUPPORTED)
+    assert.equal(kernel.doc.text, md, 'bytes untouched')
+  }
+  // N6: a TABLE CELL's padding is GFM syntax, never a stranded byte — emptying
+  // a cell must keep working exactly as it did.
+  {
+    const md = '| a | b |\n| - | - |\n| c | d |\n'
+    const { committed } = del(md, doc(tbl([['a', 'b'], ['c', 'd']])), 4, 5)
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '|  | b |\n| - | - |\n| c | d |\n')
+  }
+}
+
+console.log('PASS kernel gateway (delete that strands a block-trailing space: re-spelled U+00A0 in the same edit, heals on the next character; ambiguous runs fail closed)')
+
+// --- I: THE HEAL ON A MULTI-CHARACTER INSERT (2026-08-19, audit Critical A) ---
+//
+// The heal fired from exactly one gate — `[...insertText].length === 1` — so any
+// insert that was not a single ASCII keystroke left the U+00A0 stranded. The
+// measured consequence for a user who writes Chinese: every space preceding a
+// CJK word survived as U+00A0 on disk, because an IME commit is one multi-
+// character replace. (The IME path itself commits through
+// editor-kernel-mode.js's `commitReplace`, which now runs the same command; this
+// case pins the gateway half — paste and any other multi-character insert.)
+{
+  const NBSP = ' '
+  const md = 'HorseMD' + NBSP + '\n'
+  const state = EditorState.create({ schema, doc: doc(p(text('HorseMD' + NBSP))) })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitPlainText({
+    kernel, map, transactions: [state.tr.insertText('是一个编辑器', 9)], oldState: state
+  })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'HorseMD 是一个编辑器\n')
+  assert.equal(committed.applied.doc.text.includes(NBSP), false,
+    'no U+00A0 may survive once a character has displaced it')
+}
+
+console.log('PASS kernel gateway (block-trailing heal fires for multi-character inserts, not just single ASCII keystrokes)')

@@ -117,7 +117,12 @@ const structureSignature = (tree) => {
 // `inlineCode`) are the only inline nodes carrying characters; atoms
 // (image/break/html/math) contribute nothing, which is why the structure
 // signature and the span check are part of the proof too.
-const blockText = (node) => {
+//
+// Exported since 2026-08-19 for commands/content-delete.js, which proves the
+// DELETE side of the same observability invariant and needs the identical
+// decoder (one decoder, so the two sides can never disagree about what a block
+// "says").
+export const blockText = (node) => {
   const out = []
   const walk = (n) => {
     if (typeof n?.value === 'string') out.push(n.value)
@@ -169,6 +174,27 @@ export const healableTrailingSpace = (text, charMap) => {
   return { rawStart: last.rawStart, rawEnd: last.rawEnd }
 }
 
+// Is `after` reachable from `before` by replacing exactly ONE contiguous run
+// with `insert`? Written as a forward/backward match rather than a diff so it
+// states precisely that: a common prefix, then the inserted bytes verbatim,
+// then a common suffix. With `insert === ''` (the pure-delete case) it reduces
+// to "one contiguous run removed, nothing else touched" — which is what the
+// delete side proves in place of an exact expected string (see
+// `blockEditIsObservable`'s `expectedText` note and commands/content-delete.js).
+export const isOneContiguousReplacement = (before, after, insert) => {
+  if (typeof before !== 'string' || typeof after !== 'string' ||
+      typeof insert !== 'string') return false
+  let head = 0
+  const shared = Math.min(before.length, after.length)
+  while (head < shared && before[head] === after[head]) head += 1
+  if (!after.startsWith(insert, head)) return false
+  const tail = after.slice(head + insert.length)
+  if (!before.endsWith(tail)) return false
+  // The prefix and the suffix must not overlap inside `before`, or the same
+  // bytes would be counted twice and a real change could hide between them.
+  return before.length - tail.length >= head
+}
+
 // The observability proof. Given a candidate document, the baseline block and
 // the text that block must decode to, prove that the candidate really says so:
 //   1. the document's block structure is unchanged;
@@ -186,9 +212,26 @@ export const healableTrailingSpace = (text, charMap) => {
 // `.value` rather than in inline children, and whose info string is a second
 // thing that must survive) — one shared proof rather than a second copy that
 // can drift away from this one.
+//
+// `delta` IS SIGNED (2026-08-19). Nothing here ever assumed a growing span —
+// (3) is the arithmetic identity `end + delta`, which reads a shrinking block
+// exactly as well — but until commands/content-delete.js there was no caller on
+// the negative side, so say it out loud: this is the ONE observability proof for
+// edits of either sign. Deletes must not fork a second copy of it.
+//
+// `expectedText` MAY BE OMITTED, and only then (2026-08-19). The delete side
+// cannot state an exact expected string: what ProseMirror holds after its own
+// deletion and what mdast decodes from the candidate bytes are different
+// alphabets for the same block (an inline image/hardbreak is a PM character but
+// contributes NOTHING to `blockText`; an inline `html`/`inlineMath` node is the
+// reverse), so an "expected" built from either side would refuse correct
+// documents. It supplies a `matches` predicate that proves the decoded text
+// changed by exactly ONE contiguous replacement instead. Omitting BOTH is
+// refused — a proof with no statement about content is not a proof.
 export function blockEditIsObservable({
   baselineTree, block, candidate, expectedText, delta, decode = blockText, matches = null
 }) {
+  if (expectedText === undefined && !matches) return false
   let candidateTree
   try {
     candidateTree = parseKernelMarkdown(candidate)
@@ -212,6 +255,7 @@ export function blockEditIsObservable({
   if (!found) return false
   if (found.position?.end?.offset !== end + delta) return false
   if (matches && !matches(found)) return false
+  if (expectedText === undefined) return true
   return decode(found) === expectedText
 }
 
@@ -228,8 +272,25 @@ export function blockEditIsObservable({
 //           textblock (`pair.mdBlock`) — its span is the baseline
 //   offset  the raw insert offset (the caller proved it is the block's visible
 //           end)
-//   insert  exactly one code point, no line breaks
+//   insert  the text being appended, no line breaks. The RE-SPELLING half only
+//           ever claims a single space/tab (`BLOCK_TRAILING_TEXT` has no other
+//           keys, so a longer string never matches); the HEAL half deliberately
+//           accepts any length — see below.
 //   heal    `healableTrailingSpace(...)` for this block, or null
+//
+// THE HEAL ACCEPTS MULTI-CHARACTER INSERTS SINCE 2026-08-19 (audit finding).
+// It used to refuse anything but one code point, which meant the heal fired
+// from exactly one caller on exactly one shape — a single ASCII keystroke — and
+// an IME COMMIT never reached it at all (a whole composition is one multi-char
+// replace, committed through its own path). Measured in the built app: typing
+// 'HorseMD', Space, then committing the IME word '是一个编辑器' left
+// 'HorseMD<U+00A0>是一个编辑器' on disk, and a normally-typed six-line document
+// saved with four stray U+00A0. For a user who writes Chinese, IME IS the
+// normal input path, so the heal effectively never ran. Nothing about the proof
+// changes: the candidate is still reparsed and the block must still decode to
+// exactly `baselineText` minus the U+00A0 plus ' ' plus the inserted text — an
+// insert that does not decode to itself (an unescaped '*', say) simply fails
+// that check and the heal is skipped, which is the pre-existing fall-through.
 //
 // Refusals:
 //   `not-structural`        — this shape is not claimed (or the heal could not
@@ -245,7 +306,11 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
   if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return NOT_STRUCTURAL
   if (typeof insert !== 'string' || !insert || /[\r\n]/.test(insert)) return NOT_STRUCTURAL
-  if ([...insert].length !== 1) return NOT_STRUCTURAL
+  // A multi-character insert is admitted for the HEAL only (see the header):
+  // `BLOCK_TRAILING_TEXT` is keyed by ' ' and '\t' alone, so `written` below
+  // stays undefined for anything longer and the re-spelling half is unreachable
+  // for it — exactly as before.
+  if (!insert) return NOT_STRUCTURAL
   if (!TAIL_STRIPPING_BLOCKS.has(block?.type)) return NOT_STRUCTURAL
   const blockStart = block?.position?.start?.offset
   const blockEnd = block?.position?.end?.offset
@@ -333,4 +398,172 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   // loudly. A heal that simply could not be proven is not an error — the plain
   // append is still correct, so fall through.
   return needsSpelling ? UNSUPPORTED : NOT_STRUCTURAL
+}
+
+// THE DELETE SIDE OF THE SAME RULE (2026-08-19, audit finding)
+// ===========================================================================
+// Everything above is an INSERT-path design, and a delete can put a literal
+// ASCII space at a block end just as easily — at which point the original
+// defect is back, byte for byte, plus a second one on the next keystroke.
+// Measured in the built app, one keystroke at a time (<NBSP> = U+00A0):
+//
+//   type 'ab', Space   source 'ab<NBSP>'   view 'ab '
+//   type 'c'           source 'ab c'       view 'ab c'   (the heal, correct)
+//   ONE Backspace      source 'ab '        view 'ab'     <- bytes != view
+//   type 'd'           source 'abd '       view 'abd'
+//
+// The user typed `a b Space c Backspace d` and expects `ab d`; the file holds
+// `abd` plus a space nobody can ever see again, because the stranded byte is at
+// the block end and the next insert maps IN FRONT of it. Three
+// `projection-mismatch` diagnostics fire and nothing refuses. "Type a word,
+// backspace it, retype" is one of the most common sequences in an editor.
+//
+// The cure is the same one the insert side uses and nothing new: the space that
+// the delete has just stranded is re-spelled U+00A0 IN THE SAME EDIT, proven by
+// the same reparse, so the bytes still say what ProseMirror shows and the
+// existing single-U+00A0 heal restores an ordinary space the moment a character
+// displaces it again.
+//
+// DELIBERATELY NARROW: exactly ONE stranded ASCII space is claimed.
+//   * A longer run, or a tab, is REFUSED rather than guessed at. Two U+00A0
+//     could be one Tab or two Spaces — the same ambiguity the heal refuses to
+//     resolve at the top of this file — and a delete is not the place to invent
+//     a convention. A refused Backspace is recoverable.
+//   * `insert` must be empty: a REPLACEMENT ending in whitespace is a different
+//     shape (the written bytes are not the ones already on disk) and is left to
+//     its pre-existing behaviour rather than half-claimed here.
+// Both refusals are stated at the caller as `unsupported-structure`, never as a
+// silent literal write.
+export function spellBlockTailDelete({ doc, block, charMap, from, to, insert = '' }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
+  if (insert !== '') return NOT_STRUCTURAL
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from >= to) return NOT_STRUCTURAL
+  if (from < 0 || to > text.length) return NOT_STRUCTURAL
+  if (!TAIL_STRIPPING_BLOCKS.has(block?.type)) return NOT_STRUCTURAL
+  const blockStart = block?.position?.start?.offset
+  const blockEnd = block?.position?.end?.offset
+  if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return NOT_STRUCTURAL
+  if (from < blockStart || to > blockEnd) return NOT_STRUCTURAL
+
+  // EVERY CHEAP CHECK FIRST — this runs on every Backspace, so no string is
+  // built and no parse is spent until the shape is already established.
+  //
+  // `newEnd` is where the block will end after the literal delete; the byte
+  // before it is the one at risk. Its position in the ORIGINAL text depends on
+  // which side of the removed range it sits (before it: unmoved; after it:
+  // shifted by the removed width).
+  const removed = to - from
+  const delta = -removed
+  const newEnd = blockEnd + delta
+  if (newEnd - 1 < blockStart) return NOT_STRUCTURAL
+  const originalOffset = (at) => (at < from ? at : at + removed)
+  const spaceAt = originalOffset(newEnd - 1)
+  if (!isSpaceOrTab(text[spaceAt])) return NOT_STRUCTURAL
+
+  // THE BYTE MUST HAVE BEEN CONTENT BEFORE THIS DELETE. The character map is
+  // the kernel's proven statement about which raw bytes carry content, and
+  // consulting it is what separates "a space the user typed, which this delete
+  // has just stranded" from "a byte that was always syntax". Without it a GFM
+  // TABLE CELL reads as a false positive on every cell-emptying delete: mdast
+  // gives `tableCell` a span that INCLUDES its own '| ' / ' ' padding, so
+  // `literalTailIsStripped` is true for that padding both before and after the
+  // edit — nothing was stranded, the cell simply became empty, and claiming it
+  // would have refused the ordinary "clear this cell" operation.
+  const coveringUnit = (offset) => (charMap?.units || []).find(
+    (unit) => Number.isInteger(unit?.rawStart) && unit.rawStart <= offset && offset < unit.rawEnd
+  ) || null
+  const strandedUnit = coveringUnit(spaceAt)
+  if (!strandedUnit || strandedUnit.kind !== 'char' ||
+      strandedUnit.rawStart !== spaceAt || strandedUnit.rawEnd !== spaceAt + 1) {
+    return NOT_STRUCTURAL
+  }
+
+  // Only now is a candidate string built. `literalTailIsStripped` reads only
+  // `type` and `position.end.offset`, so this stand-in block is exactly as good
+  // as a real node for the one question asked of it: does CommonMark really
+  // discard the byte at `newEnd - 1`? If it does not (a table cell with a
+  // following '|' that is not padding, a shape this predicate does not claim),
+  // the literal delete is already correct and nothing here applies.
+  const candidate = text.slice(0, from) + text.slice(to)
+  const candidateBlock = {
+    type: block.type,
+    position: { start: { offset: blockStart }, end: { offset: newEnd } }
+  }
+  if (!literalTailIsStripped(candidate, candidateBlock, newEnd - 1)) return NOT_STRUCTURAL
+
+  // FROM HERE ON THE BYTE IS PROVEN DEAD, so there is no "leave it alone" exit
+  // left: either a surviving spelling is proven, or the delete is refused.
+  // Exactly ONE ASCII space is claimed. A tab, or a run of two or more, is the
+  // ambiguity the heal at the top of this file deliberately refuses to resolve
+  // (two U+00A0 could be one Tab or two Spaces), and a delete is not the place
+  // to invent that convention — so those refuse rather than strand a byte
+  // nobody will ever see again.
+  if (text[spaceAt] !== ' ') return UNSUPPORTED
+  const beforeAt = originalOffset(newEnd - 2)
+  if (newEnd - 2 >= blockStart && isSpaceOrTab(text[beforeAt]) && coveringUnit(beforeAt)) {
+    return UNSUPPORTED
+  }
+
+  let baselineTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+  } catch {
+    return UNSUPPORTED
+  }
+  let baseline = null
+  const walk = (node) => {
+    if (baseline) return
+    if (node?.type === block.type && node.position?.start?.offset === blockStart &&
+        node.position?.end?.offset === blockEnd) {
+      baseline = node
+      return
+    }
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(baselineTree)
+  // A block this parse cannot re-find is not a reason to fall back to the
+  // literal write: the byte is already proven dead above, so this is a refusal
+  // like any other on this side of the guard.
+  if (!baseline) return UNSUPPORTED
+
+  const baselineText = blockText(baseline)
+  // THE WRITTEN BYTES: the literal delete, with the now-last ASCII space
+  // rewritten as U+00A0 — expressed as ONE edit range covering both changes, so
+  // history sees a single step exactly like the insert side's heal does.
+  const final = candidate.slice(0, newEnd - 1) + NO_BREAK_SPACE + candidate.slice(newEnd)
+  const editFrom = Math.min(from, spaceAt)
+  const editTo = Math.max(to, spaceAt + 1)
+  const written = final.slice(editFrom, editTo + delta)
+  const respelled = text.slice(0, editFrom) + written + text.slice(editTo)
+  const proven = blockEditIsObservable({
+    baselineTree,
+    block: baseline,
+    candidate: respelled,
+    delta: written.length - (editTo - editFrom),
+    // The stranded space must SURVIVE, as U+00A0, and nothing else may have
+    // moved: reading the trailing U+00A0 back as an ordinary space must leave a
+    // string reachable from the baseline by removing exactly one contiguous run
+    // — the same statement commands/content-delete.js proves, from the same
+    // helper, so the two delete guards cannot drift apart.
+    matches: (found) => {
+      const decoded = blockText(found)
+      if (!decoded.endsWith(NO_BREAK_SPACE)) return false
+      return isOneContiguousReplacement(baselineText, decoded.slice(0, -1) + ' ', '')
+    }
+  })
+  if (!proven) return UNSUPPORTED
+  const caret = editFrom + written.length
+  return {
+    ok: true,
+    edit: { from: editFrom, to: editTo, insert: written },
+    transaction: {
+      baseRevision: doc.revision,
+      from: editFrom,
+      to: editTo,
+      insert: written,
+      intent: 'block-trailing-whitespace-delete',
+      selection: { anchor: caret, head: caret }
+    }
+  }
 }

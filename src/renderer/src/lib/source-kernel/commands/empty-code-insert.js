@@ -68,11 +68,41 @@
 // terminator-less document uses, and this repo has a whole bug family from line
 // endings. A refused keystroke is recoverable; a guessed '\n' in a CRLF file is
 // a byte nobody asked for. Same for any other shape the reparse cannot confirm.
+//
+// BLOCK MATH IS THE SAME DEFECT (2026-08-19, audit finding). `$$` block math
+// became editable through this exact write path on 2026-08-18
+// (editor-kernel-projection-map.js's `code_block: ['code','math']` ADR) without
+// extending this guard, and the guard's own type check (`'code'`) plus the
+// gateway's prefilter both silently excluded it — so the corruption was fully
+// live for math while `code` was fixed. Measured on the kernel's own parser:
+//
+//     '$$' LF '$$' LF LF 'end' LF   + 'x' at the empty block's only anchor
+//       -> '$$' LF 'x$$' LF LF 'end' LF
+//       -> ONE math node, value 'x$$\n\nend'
+//
+// the closing delimiter destroyed and every following block swallowed, exactly
+// as for a fence; the quoted spelling lands the byte in FRONT of the '> ' just
+// as it did there. Nothing about the SPELLING differs between the two — a `$$`
+// block's per-line prefix, line ending and "open a content line" remedy are
+// what `buildCodeMap` proves for both, type-agnostically — so `math` joins the
+// allowlist rather than getting a parallel command that could drift. The info
+// string check (5) becomes lang AND meta so it says something true for both
+// spellings (a `math` node has no `lang`; both can carry `meta`).
+//
+// commands/block-insert.js already knew this trap: its `/math` item writes
+// '$$' LE LE '$$' precisely so the slash menu's caret lands on a line the user
+// owns. That is the 'fill' attempt below — the write path now proves the same
+// two spellings for a block the user typed by hand in source mode.
 import { parseKernelMarkdown } from '../syntax-index.js'
 import { blockEditIsObservable } from './trailing-whitespace.js'
 
 const UNSUPPORTED = { ok: false, code: 'unsupported-structure' }
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
+
+// The two mdast block types `editor-kernel-projection-map.js` pairs with a PM
+// `code_block` — the ONLY blocks that can reach this command, and the same pair
+// the gateway's prefilter must admit. Keep the two lists in step.
+export const EMPTY_VERBATIM_BLOCK_TYPES = new Set(['code', 'math'])
 
 // The decoded content of a fenced code block is its `value` — it has no
 // children, so trailing-whitespace.js's default (inline-text) decoder would
@@ -102,7 +132,7 @@ const codeValue = (node) => (typeof node?.value === 'string' ? node.value : null
 export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
   const text = doc?.text
   if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
-  if (block?.type !== 'code') return NOT_STRUCTURAL
+  if (!EMPTY_VERBATIM_BLOCK_TYPES.has(block?.type)) return NOT_STRUCTURAL
   if (charMap?.visibleLength !== 0) return NOT_STRUCTURAL
   if (typeof insert !== 'string' || insert === '') return NOT_STRUCTURAL
   if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return NOT_STRUCTURAL
@@ -176,7 +206,7 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
   let baseline = null
   const walk = (node) => {
     if (baseline) return
-    if (node?.type === 'code' && node.position?.start?.offset === blockStart &&
+    if (node?.type === block.type && node.position?.start?.offset === blockStart &&
         node.position?.end?.offset === blockEnd) {
       baseline = node
       return
@@ -202,8 +232,12 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
       // no terminator ('```js' at EOF, whose anchor is the open line's own end)
       // could absorb the character into its LANGUAGE ('```jsx') — a shape
       // `expectedText` also rejects, but for a less precise reason. Checked
-      // explicitly so the refusal is about the right fact.
-      matches: (found) => (found.lang ?? null) === (baseline.lang ?? null)
+      // explicitly so the refusal is about the right fact. `meta` is checked
+      // alongside `lang` so the clause says something true for BOTH spellings
+      // this command owns: a `math` node has no `lang` at all, and both a fence
+      // and a `$$` block can carry trailing info bytes in `meta`.
+      matches: (found) => (found.lang ?? null) === (baseline.lang ?? null) &&
+        (found.meta ?? null) === (baseline.meta ?? null)
     })
     if (!proven) continue
     const caret = offset + linePrefix.length + insert.length

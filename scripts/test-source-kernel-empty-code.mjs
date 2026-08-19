@@ -275,3 +275,120 @@ const refuse = (md, insert, why) => {
 }
 
 console.log('PASS source kernel empty fenced code block: the first insert opens a terminated, prefixed content line (or fills an existing empty one), byte-exact for LF/CRLF, bare/quoted/indented/tilde/long fences and multi-line pastes; the list-marker fence, the terminator-less fence and every mis-spelled break fail closed with bytes untouched')
+
+// ---------------------------------------------------------------------------
+// BLOCK MATH — the SAME defect, live until 2026-08-19 (audit Critical 1).
+//
+// `356bdc9` made `$$` block math editable through this same write path (mdast
+// `math`, paired with a PM `code_block` — editor-kernel-projection-map.js's
+// `code_block: ['code','math']` ADR) without extending this command's type
+// check, which read `'code'`. So the empty-fence corruption was fully live for
+// math while the fence itself was fixed. Measured on the real parser before the
+// fix: '$$\n$$\n\nend\n' + 'x' committed '$$\nx$$\n\nend\n', which reparses to
+// ONE math node whose value is 'x$$\n\nend' — the closing delimiter destroyed
+// and the whole remainder of the document swallowed.
+// ---------------------------------------------------------------------------
+{
+  const mathFixture = (md) => {
+    let node = null
+    const walk = (candidate) => {
+      if (node) return
+      if (candidate?.type === 'math') { node = candidate; return }
+      for (const child of candidate?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(md))
+    assert.ok(node, `fixture has no math node: ${JSON.stringify(md)}`)
+    return { doc: createMarkdownDocument(md), block: node, charMap: buildCodeMap(md, node) }
+  }
+  const mathValue = (md) => {
+    let node = null
+    const walk = (candidate) => {
+      if (node) return
+      if (candidate?.type === 'math') { node = candidate; return }
+      for (const child of candidate?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(md))
+    return node?.value ?? null
+  }
+  const commitMath = (md, insert) => {
+    const { doc, block, charMap } = mathFixture(md)
+    assert.ok(charMap, `fixture's empty $$ block must map: ${JSON.stringify(md)}`)
+    assert.equal(charMap.visibleLength, 0, 'fixture sanity: the block must be EMPTY')
+    const routed = spellEmptyCodeInsert({
+      doc, block, charMap, offset: charMap.visibleToRaw(0), insert
+    })
+    if (!routed.ok) return { ok: false, code: routed.code, text: doc.text }
+    const applied = applySourceTransaction(doc, {
+      baseRevision: doc.revision, edits: [routed.edit], intent: 'insert-text'
+    })
+    assert.equal(applied.ok, true, 'the command\'s own edit must apply cleanly')
+    return { ok: true, text: applied.doc.text, opened: routed.opened }
+  }
+
+  // The defect itself, plus the following block the pre-fix bytes swallowed.
+  {
+    const result = commitMath('$$\n$$\n\nend\n', 'x')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.text, '$$\nx\n$$\n\nend\n')
+    assert.equal(mathValue(result.text), 'x')
+    assert.equal(parseKernelMarkdown(result.text).children.length, 2,
+      'the paragraph after the formula must survive as its own block')
+    // The pre-fix bytes, asserted directly so this case can never go vacuous.
+    assert.equal(mathValue('$$\nx$$\n\nend\n'), 'x$$\n\nend')
+  }
+  // Quoted — the anchor sits BEFORE the closing line's own '> '.
+  {
+    const result = commitMath('> $$\n> $$\n\nend\n', 'x')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.text, '> $$\n> x\n> $$\n\nend\n')
+    assert.equal(mathValue(result.text), 'x')
+  }
+  // CRLF — the opened line carries the block's OWN ending, never a bare '\n'.
+  {
+    const result = commitMath('$$\r\n$$\r\n', 'x')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.text, '$$\r\nx\r\n$$\r\n')
+    assert.equal(/(?<!\r)\n/.test(result.text), false)
+  }
+  // At the very END of the document (no trailing line ending).
+  {
+    const result = commitMath('$$\n$$', 'x')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.text, '$$\nx\n$$')
+    assert.equal(mathValue(result.text), 'x')
+  }
+  // The 'fill' spelling commands/block-insert.js writes for the slash menu's
+  // `/math`: an empty block that already owns one content line.
+  {
+    const result = commitMath('$$\n\n$$\n', 'x')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.opened, false, 'an existing empty content line must be FILLED')
+    assert.equal(result.text, '$$\nx\n$$\n')
+  }
+  // A multi-line paste, quoted: every interior break re-opens the prefix.
+  {
+    const result = commitMath('> $$\n> $$\n', 'a\nb')
+    assert.equal(result.ok, true, result.code)
+    assert.equal(result.text, '> $$\n> a\n> b\n> $$\n')
+    assert.equal(mathValue(result.text), 'a\nb')
+  }
+  // FAIL-CLOSED, both named refusals.
+  //  * the LIST-INDENTED block: the derived prefix is the item marker '- ', so
+  //    writing it would create a SECOND list item;
+  //  * the block with NO closing delimiter: terminating it means GUESSING a
+  //    line ending, and this repo has a whole bug family from that.
+  for (const md of ['- $$\n  $$\n', '$$']) {
+    const result = commitMath(md, 'x')
+    assert.equal(result.ok, false, `must fail closed: ${JSON.stringify(md)}`)
+    assert.equal(result.code, 'unsupported-structure')
+    assert.equal(result.text, md, 'bytes untouched')
+  }
+  // A bare '\n' break in a CRLF block is still refused.
+  {
+    const result = commitMath('$$\r\n$$\r\n', 'a\nb')
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'unsupported-structure')
+  }
+}
+
+console.log('PASS source kernel empty $$ block: the same proof now covers mdast `math` — quoted / CRLF / end-of-document / fill / multi-line paste commit byte-exact, list-indented and unterminated fail closed')

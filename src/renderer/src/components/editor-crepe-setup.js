@@ -507,7 +507,10 @@ export function createConfiguredCrepe({
       // Legacy mode keeps it exactly as before.
       ...(kernelMode ? [] : [createMermaidSplitPlugin()]),
       createSubstitutionLiveReconstructPlugin(),
-      createMathBlockPromotionPlugin()
+      // Kernel mode keeps the plugin but degrades its `$$x$$` branch to a plain
+      // '$' insert — see editor-math.js: the node-replacing branch could only
+      // ever be classified `blocked` and vetoed, losing the keystroke.
+      createMathBlockPromotionPlugin({ kernelMode })
     ])
 
     ctx.update(remarkStringifyOptionsCtx, (opts) => ({

@@ -1295,12 +1295,50 @@ export function createKernelMode({
     const insert = virtualBlock && virtualBlock.raw === rawFrom
       ? virtualBlock.prefix + text
       : text
+    // THE BLOCK-TRAILING SPACE HEAL, ON THIS PATH TOO (2026-08-19, audit
+    // finding). A space typed at a block end is committed as U+00A0
+    // (commands/trailing-whitespace.js: CommonMark strips a literal one there),
+    // and it is meant to be rewritten back to an ordinary space the moment a
+    // character displaces it. That heal used to fire from ONE place — the
+    // gateway's single-code-point plain-text branch — so an IME COMMIT, which
+    // is a whole composition committed here as one multi-character replace,
+    // never reached it. For a user who writes Chinese that is the normal input
+    // path, and the measured result was a U+00A0 stranded before EVERY CJK word
+    // typed after a space ('HorseMD<U+00A0>是一个编辑器'), permanently, on disk.
+    //
+    // Same command, same reparse proof, same fall-through contract: a heal that
+    // cannot be proven answers `not-structural` and the composition commits its
+    // literal bytes exactly as before.
+    let healFrom = rawFrom
+    let healTo = rawTo
+    let healInsert = insert
+    if (!virtualBlock && rawFrom === rawTo && typeof kernel.map?.pairAt === 'function' &&
+        Number.isFinite(pmFrom)) {
+      const pair = kernel.map.pairAt(pmFrom)
+      if (pair && !pair.virtual && pair.charMap && pair.mdBlock) {
+        const heal = healableTrailingSpace(kernel.doc.text, pair.charMap)
+        if (heal && heal.rawEnd === rawFrom) {
+          const routed = spellBlockTailInsert({
+            doc: kernel.doc,
+            block: pair.mdBlock,
+            offset: rawFrom,
+            insert,
+            heal
+          })
+          if (routed.ok) {
+            healFrom = routed.edit.from
+            healTo = routed.edit.to
+            healInsert = routed.edit.insert
+          }
+        }
+      }
+    }
     kernel.history.breakGroup()
     const applied = applyKernelTransaction({
       baseRevision: kernel.doc.revision,
-      from: rawFrom,
-      to: rawTo,
-      insert,
+      from: healFrom,
+      to: healTo,
+      insert: healInsert,
       intent: 'ime-commit'
     }, view)
     kernel.history.breakGroup()
