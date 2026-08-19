@@ -46,15 +46,27 @@
 // would write, and U+00A0 exists only while the space really is the last thing
 // in the block.
 //
-// THE HEAL IS DELIBERATELY LIMITED TO A RUN OF EXACTLY ONE U+00A0. Two reasons.
-// (1) It keeps the rule unambiguous: a run of two could be one Tab or two
-// Spaces, and guessing would be exactly the "wrong success" this kernel refuses
-// to make. A Tab at a block end therefore stays two U+00A0 (which is what the
-// user asked for), and repeated Spaces still resolve correctly, one at a time:
-// ' ' -> 'a ', ' ' -> 'a  ', 'b' -> 'a  b'. (2) It minimises the
-// blast radius of the one thing this rule cannot distinguish — a U+00A0 the
-// USER put at a block end — to a single character, and only when they go on
-// typing straight after it.
+// WHAT THE HEAL CLAIMS: THE RECORDED RUN, AND ONLY IT (2026-08-19).
+// Both halves of that sentence were open audit findings, and they have the same
+// answer — the document's whitespace provenance ledger (markdown-document.js):
+//
+//  * WHICH characters. The heal used to claim any single trailing U+00A0,
+//    including one the DOCUMENT already had, so a file written elsewhere with
+//    U+00A0 for CJK spacing lost one the moment its paragraph was touched. Only
+//    a run THIS kernel wrote is claimed now; an authored one is never rewritten.
+//  * HOW MANY. The heal used to claim a run of exactly ONE, because a bare run
+//    of two is ambiguous — one Tab or two Spaces. So a Tab's two U+00A0 were
+//    never healed, and every further whitespace keystroke appended another run
+//    to them without bound ('a' + Tab + Tab + Tab left six U+00A0, none of them
+//    ever resolving to the keys that were pressed). The ledger records WHICH key
+//    each run stands for, so that ambiguity is gone: the whole recorded run
+//    heals back to exactly that key, and the accumulation ends because each new
+//    whitespace keystroke resolves the previous run to real ASCII first —
+//        'a' + Tab  ->  'a' + <2 NBSP>       (the ledger says: that run is a Tab)
+//            + Tab  ->  'a\t' + <2 NBSP>     (bounded — two, never four)
+//            + 'z'  ->  'a\t\tz'              (exactly what was pressed)
+//    Repeated Spaces resolve the same way, one at a time:
+//    ' ' -> 'a<NBSP>', ' ' -> 'a <NBSP>', 'b' -> 'a  b'.
 //
 // FAIL-CLOSED. Nothing here is decided by construction. The candidate document
 // is REPARSED and the edited block's decoded text must equal the expected string
@@ -199,22 +211,40 @@ export const literalTailIsStripped = (text, block, offset) => {
 // NOTHING; that is the fail-closed direction, and it is why the argument has no
 // permissive default.
 //
-// The run must be exactly ONE unit for now — see `spellBlockTailInsert`'s header
-// for why, and for what a longer (Tab-written) run does instead.
+// THE WHOLE RECORDED RUN IS CLAIMED, not one character (2026-08-19, audit I5′).
+// A Tab writes TWO U+00A0, and while the heal was length-limited to one, that
+// run was never healed and every further whitespace keystroke appended another
+// run to it without bound ('a' + Tab + Tab + Tab -> six U+00A0, none of them
+// ever resolving to the keys that were pressed). The length limit existed only
+// because a bare run of two is ambiguous — one Tab or two Spaces — and the
+// ledger is exactly the answer to that: it records WHICH, so the heal restores
+// what was pressed instead of guessing. A run that is not recorded, or whose
+// span does not line up with whole character-map units, is still claimed by
+// nothing.
 export const healableTrailingSpace = (text, charMap, marks = null) => {
   const units = charMap?.units
   if (!Array.isArray(units) || !units.length) return null
   const last = units[units.length - 1]
   if (last?.kind !== 'char' || last.width !== 1) return null
   if (text.slice(last.rawStart, last.rawEnd) !== NO_BREAK_SPACE) return null
-  const previous = units[units.length - 2]
-  if (previous && previous.kind === 'char' &&
-      text.slice(previous.rawStart, previous.rawEnd) === NO_BREAK_SPACE) return null
-  const mark = (marks || []).find(
-    (entry) => entry?.from === last.rawStart && entry?.to === last.rawEnd
-  )
-  if (!mark) return null
-  return { rawStart: last.rawStart, rawEnd: last.rawEnd, ascii: mark.ascii }
+  const mark = (marks || []).find((entry) => entry?.to === last.rawEnd)
+  if (!mark || !Number.isInteger(mark.from) || mark.from >= mark.to) return null
+  if (!NO_BREAK_RUN_RE.test(text.slice(mark.from, mark.to))) return null
+  if (typeof mark.ascii !== 'string' || !ASCII_WHITESPACE_RE.test(mark.ascii)) return null
+  // The recorded span must be exactly a run of whole, width-1 `char` units, so
+  // the heal replaces addressable characters and nothing else — a run that only
+  // partly covers a unit (or reaches past the block's own content) is refused.
+  let index = units.length - 1
+  let start = last.rawStart
+  while (start > mark.from) {
+    const previous = units[index - 1]
+    if (previous?.kind !== 'char' || previous.width !== 1) return null
+    if (previous.rawEnd !== start) return null
+    start = previous.rawStart
+    index -= 1
+  }
+  if (start !== mark.from) return null
+  return { rawStart: mark.from, rawEnd: mark.to, ascii: mark.ascii }
 }
 
 // Is `after` reachable from `before` by replacing exactly ONE contiguous run

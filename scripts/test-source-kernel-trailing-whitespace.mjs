@@ -141,19 +141,39 @@ const visible = (text, type, start) => {
 
 // ---------------------------------------------------------------------------
 // 3) A TAB at a block end takes TWO no-break spaces — the user's own
-//    proportion — and is deliberately NOT healed afterwards: a run of two
-//    could be one Tab or two Spaces, and this command never guesses.
+//    proportion — and the WHOLE recorded run heals back to a Tab when a
+//    character displaces it (2026-08-19, audit I5′). Before the ledger existed
+//    the run was never healed and further whitespace kept appending to it
+//    without bound.
 // ---------------------------------------------------------------------------
 {
   const tabbed = step('a\n', { type: 'paragraph', start: 0 }, 1, '\t')
   assert.equal(tabbed.bytes, 'a' + NBSP + NBSP + '\n')
   assert.equal(visible(tabbed.bytes, 'paragraph', 0), 'a' + NBSP + NBSP)
-  assert.equal(healableTrailingSpace(tabbed.bytes,
-    buildCharacterMap(tabbed.bytes, blockAt(tabbed.bytes, 'paragraph', 0)), tabbed.marks), null,
-    'a run of TWO must not be claimed by the heal')
-  assert.deepEqual(step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, 'z', tabbed.marks),
-    { refused: 'not-structural' },
-    'so the next character falls through to the ordinary plain path')
+  assert.deepEqual(tabbed.marks, [{ from: 1, to: 3, ascii: '\t' }],
+    'the ledger records the run AND which key it stands for')
+
+  // the next character heals the whole run back to the Tab that was pressed
+  const healed = step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, 'z', tabbed.marks)
+  assert.equal(healed.bytes, 'a\tz\n')
+  assert.equal(visible(healed.bytes, 'paragraph', 0), 'a\tz')
+  assert.deepEqual(healed.marks, [], 'the spent entry is dropped')
+
+  // ACCUMULATION IS BOUNDED: a second Tab resolves the first one instead of
+  // appending to it, so the run at the block end is always the last keystroke's.
+  const twice = step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, '\t', tabbed.marks)
+  assert.equal(twice.bytes, 'a\t' + NBSP + NBSP + '\n', 'two U+00A0, never four')
+  const thrice = step(twice.bytes, { type: 'paragraph', start: 0 }, 4, '\t', twice.marks)
+  assert.equal(thrice.bytes, 'a\t\t' + NBSP + NBSP + '\n')
+  const finished = step(thrice.bytes, { type: 'paragraph', start: 0 }, 5, 'z', thrice.marks)
+  assert.equal(finished.bytes, 'a\t\t\tz\n',
+    'three Tabs and a character must land exactly three Tabs and a character')
+
+  // A U+00A0 run with NO provenance is still claimed by nothing.
+  const authored = 'a' + NBSP + NBSP + '\n'
+  assert.equal(healableTrailingSpace(authored,
+    buildCharacterMap(authored, blockAt(authored, 'paragraph', 0)), []), null,
+    "a run this kernel did not write is the author's")
 }
 
 // ---------------------------------------------------------------------------
