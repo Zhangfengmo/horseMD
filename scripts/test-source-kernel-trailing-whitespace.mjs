@@ -338,4 +338,39 @@ const visible = (text, type, start) => {
   assert.equal(visible(text, 'paragraph', 0), 'hello world from horsemd')
 }
 
+// ---------------------------------------------------------------------------
+// 12) AN INSERT THAT *ENDS* IN WHITESPACE (2026-08-19, audit item 2). Pasting
+//     `hello ` at a paragraph end wrote that trailing space literally, and
+//     CommonMark strips it — the original dead byte, arriving by a route the
+//     single-character table could not see. Only the insert's own trailing run
+//     is re-spelled; everything before it is byte-exact as it always was.
+// ---------------------------------------------------------------------------
+{
+  const pasted = step('a\n', { type: 'paragraph', start: 0 }, 1, 'hello ')
+  assert.equal(pasted.bytes, 'ahello' + NBSP + '\n',
+    'the trailing space must survive; the pasted text itself must not change')
+  assert.equal(pasted.spelling, 'no-break-space')
+  assert.equal(visible(pasted.bytes, 'paragraph', 0), 'ahello' + NBSP,
+    'the pasted trailing space must be visible in the reparse')
+
+  // The interior of the paste is untouched: a space INSIDE it is an ordinary
+  // byte, because only the run at the very end lands at the block's end.
+  const inner = step('a\n', { type: 'paragraph', start: 0 }, 1, 'two words ')
+  assert.equal(inner.bytes, 'atwo words' + NBSP + '\n')
+
+  // A paste with NO trailing whitespace is not this command's business at all.
+  assert.deepEqual(step('a\n', { type: 'paragraph', start: 0 }, 1, 'hello'),
+    { refused: 'not-structural' })
+
+  // A trailing TAB takes the same two-character spelling a typed Tab does.
+  const tabbed = step('a\n', { type: 'paragraph', start: 0 }, 1, 'x\t')
+  assert.equal(tabbed.bytes, 'ax' + NBSP + NBSP + '\n')
+
+  // A HEADING's end behaves identically, and the next character still heals.
+  const heading = step('## t\n', { type: 'heading', start: 0 }, 4, 'ail ')
+  assert.equal(heading.bytes, '## tail' + NBSP + '\n')
+  const healed = step(heading.bytes, { type: 'heading', start: 0 }, 8, 'x')
+  assert.equal(healed.bytes, '## tail x\n')
+}
+
 console.log('PASS source-kernel block-trailing whitespace: a space typed at a block end survives as real whitespace in the source AND in the view, and heals to an ordinary space on the next character')

@@ -3714,7 +3714,6 @@ console.log('PASS kernel gateway (block-trailing heal fires for multi-character 
 //   * a batch that strands a literal ASCII space at a block end — the dead byte
 //     the single-step path re-spells U+00A0.
 {
-  const NBSP = ' '
   const batch = (markdown, pmDoc, build) => {
     const state = EditorState.create({ schema, doc: pmDoc })
     const map = buildProjectionMap(markdown, state.doc)
@@ -3820,3 +3819,51 @@ console.log('PASS kernel gateway (block-trailing heal fires for multi-character 
 }
 
 console.log('PASS kernel gateway (multi-step batched deletes: composed line-blanking and stranded block-tail bytes fail closed; benign batches untouched)')
+
+// --- R: AN INSERT THAT ENDS IN WHITESPACE (2026-08-19, audit open item 7) ----
+//
+// The re-spelling half was keyed by the WHOLE insert (`BLOCK_TRAILING_TEXT[' ']`),
+// so it only ever fired for a single typed Space/Tab. A paste — or any other
+// multi-character insert — whose own text ENDS in a space at a block end wrote
+// that byte literally, and CommonMark strips it: the original dead byte, by a
+// route the single-character table could not see.
+{
+  const NBSP = '\u00A0'
+  const insertAt = (markdown, pmDoc, pmPos, insert) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, `fixture must map: ${JSON.stringify(markdown)}`)
+    const kernel = { doc: createMarkdownDocument(markdown) }
+    return commitPlainText({
+      kernel, map, transactions: [state.tr.insertText(insert, pmPos)], oldState: state
+    })
+  }
+
+  // R1: the repro — pre-fix this committed 'ahello \n', a space nobody can see.
+  {
+    const committed = insertAt('a\n', doc(p(text('a'))), 2, 'hello ')
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'ahello' + NBSP + '\n')
+  }
+  // R2: the interior of the paste is untouched — only the run at the very end
+  // lands at the block's end.
+  {
+    const committed = insertAt('a\n', doc(p(text('a'))), 2, 'two words ')
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'atwo words' + NBSP + '\n')
+  }
+  // R3: a paste with no trailing whitespace keeps its pre-existing bytes.
+  {
+    const committed = insertAt('a\n', doc(p(text('a'))), 2, 'hello')
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, 'ahello\n')
+  }
+  // R4: inside a fenced block a trailing space is CONTENT and must stay ASCII.
+  {
+    const committed = insertAt('```\nfoo\n```\n', doc(cb('', 'foo')), 4, 'bar ')
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '```\nfoobar \n```\n')
+  }
+}
+
+console.log('PASS kernel gateway (an insert ENDING in whitespace at a block end is re-spelled, not written dead; code blocks and non-trailing inserts untouched)')

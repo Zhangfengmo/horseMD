@@ -1542,9 +1542,12 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // MULTI-CHARACTER INSERTS REACH THE HEAL SINCE 2026-08-19 (audit finding).
     // The `[...insertText].length === 1` gate here meant a PASTE (or any other
     // multi-character insert) landing right after a block-trailing U+00A0 left
-    // it stranded forever. The command itself still claims the RE-SPELLING half
-    // for a single space/tab only (`BLOCK_TRAILING_TEXT` has no longer keys), so
-    // the only behaviour this opens is the heal, under the same reparse proof.
+    // it stranded forever. They reach the RE-SPELLING half too (audit item 2):
+    // an insert that ENDS in whitespace at a block end wrote that trailing byte
+    // literally, and CommonMark strips it — pasting `hello ` at a paragraph end
+    // put a space on disk that nobody could ever see again. The command claims
+    // exactly the insert's own trailing whitespace run, under the same reparse
+    // proof; the characters before it are byte-exact as they always were.
     if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
         virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
         stepPair.charMap && insertText !== '' && !/[\r\n]/.test(insertText)) {

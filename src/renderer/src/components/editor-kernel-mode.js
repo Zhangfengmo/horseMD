@@ -1309,6 +1309,11 @@ export function createKernelMode({
     // Same command, same reparse proof, same fall-through contract: a heal that
     // cannot be proven answers `not-structural` and the composition commits its
     // literal bytes exactly as before.
+    // The RE-SPELLING half rides along on the same call (2026-08-19, audit item
+    // 2): a commit that ENDS in whitespace at a block end wrote that trailing
+    // byte literally, and CommonMark strips it — the original dead byte,
+    // reached from the IME route instead of the keyboard one. `literalTailIsStripped`
+    // is the same parse-free predicate the gateway's own prefilter uses.
     let healFrom = rawFrom
     let healTo = rawTo
     let healInsert = insert
@@ -1317,7 +1322,8 @@ export function createKernelMode({
       const pair = kernel.map.pairAt(pmFrom)
       if (pair && !pair.virtual && pair.charMap && pair.mdBlock) {
         const heal = healableTrailingSpace(kernel.doc.text, pair.charMap)
-        if (heal && heal.rawEnd === rawFrom) {
+        const stripped = literalTailIsStripped(kernel.doc.text, pair.mdBlock, rawFrom)
+        if ((heal && heal.rawEnd === rawFrom) || stripped) {
           const routed = spellBlockTailInsert({
             doc: kernel.doc,
             block: pair.mdBlock,
@@ -1329,6 +1335,12 @@ export function createKernelMode({
             healFrom = routed.edit.from
             healTo = routed.edit.to
             healInsert = routed.edit.insert
+          } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+            // The trailing byte IS one CommonMark discards and no surviving
+            // spelling could be proven: refuse rather than commit it. The
+            // composition session reverts the view, so nothing diverges.
+            notifyBlocked(routed.code)
+            return false
           }
         }
       }

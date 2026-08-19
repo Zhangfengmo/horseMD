@@ -78,6 +78,28 @@ export const BLOCK_TRAILING_TEXT = Object.freeze({
   '\t': NO_BREAK_SPACE + NO_BREAK_SPACE
 })
 
+// The ASCII whitespace run an insert ENDS with — the part of it that lands at
+// the block's end and is therefore the part CommonMark discards.
+const TRAILING_RUN_RE = /[ \t]*$/
+
+// That run, re-spelled character by character through the table above. A run of
+// one is the single-keystroke case this module was built for; a longer one is
+// what a PASTE or an IME commit ending in whitespace produces (2026-08-19 audit
+// item 2: `hello ` pasted at a paragraph end wrote a literal trailing space,
+// which CommonMark strips — the original dead byte, arriving by a route the
+// single-character table could not see). Returns null if any character has no
+// spelling, so the caller falls through rather than writing half a run.
+export const spellTrailingRun = (run) => {
+  if (typeof run !== 'string') return null
+  let out = ''
+  for (const ch of run) {
+    const written = BLOCK_TRAILING_TEXT[ch]
+    if (!written) return null
+    out += written
+  }
+  return out
+}
+
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
 const UNSUPPORTED = { ok: false, code: 'unsupported-structure' }
 
@@ -272,10 +294,12 @@ export function blockEditIsObservable({
 //           textblock (`pair.mdBlock`) — its span is the baseline
 //   offset  the raw insert offset (the caller proved it is the block's visible
 //           end)
-//   insert  the text being appended, no line breaks. The RE-SPELLING half only
-//           ever claims a single space/tab (`BLOCK_TRAILING_TEXT` has no other
-//           keys, so a longer string never matches); the HEAL half deliberately
-//           accepts any length — see below.
+//   insert  the text being appended, no line breaks. The RE-SPELLING half
+//           claims exactly the insert's own TRAILING whitespace run (2026-08-19)
+//           — for a single typed Space/Tab that is the whole insert and the
+//           bytes are unchanged; for a paste or an IME commit ending in
+//           whitespace it is the part that lands at the block's end. The HEAL
+//           half accepts any length — see below.
 //   heal    `healableTrailingSpace(...)` for this block, or null
 //
 // THE HEAL ACCEPTS MULTI-CHARACTER INSERTS SINCE 2026-08-19 (audit finding).
@@ -306,11 +330,6 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
   if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return NOT_STRUCTURAL
   if (typeof insert !== 'string' || !insert || /[\r\n]/.test(insert)) return NOT_STRUCTURAL
-  // A multi-character insert is admitted for the HEAL only (see the header):
-  // `BLOCK_TRAILING_TEXT` is keyed by ' ' and '\t' alone, so `written` below
-  // stays undefined for anything longer and the re-spelling half is unreachable
-  // for it — exactly as before.
-  if (!insert) return NOT_STRUCTURAL
   if (!TAIL_STRIPPING_BLOCKS.has(block?.type)) return NOT_STRUCTURAL
   const blockStart = block?.position?.start?.offset
   const blockEnd = block?.position?.end?.offset
@@ -321,7 +340,17 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   // caller's prefilter: together they decide whether the user's own source gets
   // rewritten, and `literalTailIsStripped` in particular is the one that says a
   // literal byte is known-dead.
-  const written = BLOCK_TRAILING_TEXT[insert]
+  //
+  // ONLY THE INSERT'S OWN TRAILING WHITESPACE RUN IS RE-SPELLED (2026-08-19).
+  // Everything before it lands inside the block and is byte-exact as it always
+  // was; the run is the part that ends up at the block's end, which is the one
+  // position CommonMark discards. For a single typed Space/Tab this is the whole
+  // insert and the bytes are identical to what this command has always written.
+  const trailingRun = TRAILING_RUN_RE.exec(insert)[0]
+  const spelledRun = trailingRun ? spellTrailingRun(trailingRun) : ''
+  const written = trailingRun && spelledRun !== null
+    ? insert.slice(0, insert.length - trailingRun.length) + spelledRun
+    : null
   const needsSpelling = !!written && literalTailIsStripped(text, block, offset)
   const healSpan = heal && heal.rawEnd === offset &&
     text.slice(heal.rawStart, heal.rawEnd) === NO_BREAK_SPACE
