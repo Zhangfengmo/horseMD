@@ -40,6 +40,34 @@
   空任务项先在 live 文档中降级为普通 `- [ ]` / `- [x]` 文本。裸写法不符合 GFM
   任务项规则，正因如此不再用实体伪造空复选框；源码、保存结果和其他 Markdown 工具
   对它的理解保持一致。
+- **空任务项降级的时机（裁决 2026-08-20）：降级只发生在「删除」与真正的
+  「源码 / 保存边界」，绝不发生在后台 dirty-reconcile。** 这条时机是契约的一
+  部分，和降级产物同等重要：
+  - 归属边界：`demoteEmptyTaskItemsInView()` 由 `flushMarkdown()` 在 force /
+    未提交状态下执行（保存、源码切换、导出、失焦保存），删除路径由
+    `editor-task-list.js` 的 `demoteEmptyTaskAtSelection()` 即时执行——
+    `createTaskListTransaction` 的注释本来就是这么写的。
+  - **不属于边界**：`Editor.jsx` 的 `scheduleRichDirtyReconcile(260)`。它不
+    发布任何用户可见结果，任何真实边界都会再做一次强制 flush，所以它以
+    `flushMarkdown({ background: true })` 调用；只要 live 文档里存在空任务
+    项，这次 flush 整体让位（`viewHasEmptyTaskItems()` 早退，返回 `null`，
+    不碰 committer、不改 live 文档），`hasPendingRichFlush` 保持置位，下一次
+    击键或下一个强制边界照旧提交同样的字节。
+  - 用户可见语义：输入 `- [ ] ` 后停顿一整秒，复选框仍是复选框；继续输入标签
+    正常；把标签删空仍立即降级为 `[ ]` 文本。
+  - **字节不变**：强制边界产物一字节未改（新建文档 `* [ ]\n`，已有文档
+    `甲\n\n- [ ]\n`；保存、源码切换、导出同源），由
+    `test:empty-task-typing-pause-ui` 与 `test:empty-task-list-persistence-ui`
+    锁定。这是显示时机契约，不是字节证明：fail-closed 与 verified-source gate
+    完全没有被触碰（空任务项本来就过不了 gate——候选 `- [ ]` 重解析成普通
+    列表文本，与 live 的 task item 不等价，因此在降级之前提交必然失败）。
+  - 已知遗留（另案）：`markUserEdit` 的跨块 flush 同样是未强制的，但它**仍然**
+    降级。原因是作者键入的 marker（`- ` 对上序列化器的 `* `）只有
+    markdownUpdated 路径会在 input intent 存活期内恢复；把这个调用点也标成
+    `background` 会让「在已有文档里换行敲 `- [ ] `」保住复选框，却把下一次
+    保存/源码切换的字节从 `- [ ]` 改写成 `* [ ]`。因此该调用点维持原状，代价
+    是在这种输入序列里复选框会被立即降级。要同时拿下两者，需要把 list input
+    intent 的应用下沉到 `flushMarkdown`，那是另一个裁决。
 - 新建的中间空段直接触发列表输入规则时，`preserveMiddleEmptyBlock()` 是该 raw
   槽位的唯一写入者：它以列表替换空段后，列表 input intent 只能恢复作者键入的
   marker，不能再重建同一列表，否则会额外插入物理空行。
@@ -88,6 +116,12 @@ npm run test:empty-paragraph-caret-ui
 
 # 新建文档列表 marker + 空项
 npm run test:list-marker-empty-source-ui
+
+# 空任务项降级时机：停顿一秒复选框仍在 + 强制边界字节不变 + 删除仍降级
+npm run test:empty-task-typing-pause-ui
+
+# 空任务项删除→降级→源码/保存/冷重开
+npm run test:empty-task-list-persistence-ui
 ```
 
 `test:empty-paragraph-caret-ui` 覆盖：中间空段落、尾部空段落、普通段落、

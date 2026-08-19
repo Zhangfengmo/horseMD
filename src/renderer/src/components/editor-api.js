@@ -26,7 +26,7 @@ import {
   scratchCandidateContext
 } from './editor-source-verification.js'
 import { canReuseCommittedVerifiedSource } from './editor-verified-state.js'
-import { demoteEmptyTaskItemsInView } from './editor-task-list.js'
+import { demoteEmptyTaskItemsInView, viewHasEmptyTaskItems } from './editor-task-list.js'
 
 export function createEditorApi({
   viewRef,
@@ -179,9 +179,24 @@ export function createEditorApi({
     }
   }
 
-  const flushMarkdown = ({ force = false } = {}) => {
+  // `background: true` marks the ONLY unforced, non-publishing caller: Editor's
+  // rich-dirty reconcile timer, which exists to settle a dirty hint the batched
+  // markdownUpdated callback may never send. It is not a durability boundary,
+  // so it must not perform the boundary-owned empty-task demotion (see below).
+  const flushMarkdown = ({ force = false, background = false } = {}) => {
     if (isDestroyed?.() || !crepeRef.current) return null
     try {
+      // Ruling (2026-08-20, docs/empty-paragraph-contract.md §3.1): an empty
+      // task item must SURVIVE the unforced background reconcile. Demotion
+      // stays owned by a deletion and by genuine source/save boundaries —
+      // `createTaskListTransaction`'s own contract. A timer firing 260 ms after
+      // the last keystroke is neither, and demoting there turned a checkbox the
+      // user had just typed back into literal `[ ]` text during an ordinary
+      // thinking pause. Step aside entirely rather than serialize a state the
+      // format cannot spell: nothing is published, `hasPendingRichFlush` stays
+      // raised, and the next keystroke or the next forced boundary still
+      // commits exactly the bytes it committed before.
+      if (background && !force && viewHasEmptyTaskItems(viewRef.current)) return null
       // A reading-only source toggle must not serialize an entire large
       // ProseMirror document. The flag is raised synchronously for every user
       // edit and cleared only after markdownUpdated (or this flush) commits the

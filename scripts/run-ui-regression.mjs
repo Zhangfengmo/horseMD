@@ -200,6 +200,10 @@ const standalone = [
     script: 'scripts/test-task-list-persistence-ui.mjs'
   },
   {
+    name: 'Empty task: a new checkbox survives a thinking pause, boundaries still demote',
+    script: 'scripts/test-empty-task-typing-pause-ui.mjs'
+  },
+  {
     name: 'Issues 74-75: inline math deletion and font picker names',
     script: 'scripts/test-issues-74-75-ui.mjs'
   },

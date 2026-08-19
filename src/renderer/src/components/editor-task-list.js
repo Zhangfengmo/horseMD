@@ -185,6 +185,17 @@ export function demoteEmptyTaskItemsInView(view) {
   return true
 }
 
+// An empty task item is a rich-only transient with no GFM spelling, so every
+// durability boundary demotes it.  A caller that is NOT such a boundary (the
+// unforced background dirty-reconcile, which publishes nothing to the user and
+// is superseded by the forced flush every real boundary performs) uses this to
+// recognize the state and step aside instead of rewriting the live document.
+export function viewHasEmptyTaskItems(view) {
+  const state = view?.state
+  if (!state) return false
+  return emptyTasksInDocument(state).length > 0
+}
+
 export function createTaskListInputPlugin() {
   return new Plugin({
     key: taskListInputKey,

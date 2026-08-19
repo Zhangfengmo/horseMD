@@ -300,6 +300,15 @@ export default function Editor({
       // bounded source mapper can safely own. Commit the completed block while
       // the next block has not mutated yet. Continuous typing in one block
       // remains batched, so this does not serialize the document per keypress.
+      //
+      // This one deliberately stays a demoting flush. It is ALSO unforced, and
+      // it does demote an empty task item created by the same keystroke (the
+      // freshly built task list reports a transient block key while its node
+      // view remounts) — but the typed list marker (`- ` vs the serializer's
+      // `* `) is restored only by the markdownUpdated path, and only while its
+      // input intent is alive. Marking this call `background` therefore keeps
+      // the checkbox alive at the cost of rewriting the author's marker at the
+      // next save/source boundary. See docs/empty-paragraph-contract.md §3.1.
       if (
         richFlushPending &&
         pendingRichBlockKey &&
@@ -320,12 +329,17 @@ export default function Editor({
     // callback, but HorseMD's immediate dirty hint must then be cleared. This
     // one-shot reconciliation runs only after a real DOM mutation and only
     // while the regular listener has not already settled the change.
+    //
+    // It is UNFORCED and publishes nothing the user can see, so it is not a
+    // durability boundary: `background: true` keeps it out of the boundary-owned
+    // empty-task demotion (editor-api.js `flushMarkdown`), which used to turn a
+    // just-typed checkbox back into literal `[ ]` text after a 260 ms pause.
     const scheduleRichDirtyReconcile = (delayMs = 260) => {
       if (richDirtyReconcileTimer) clearTimeout(richDirtyReconcileTimer)
       richDirtyReconcileTimer = window.setTimeout(() => {
         richDirtyReconcileTimer = 0
         if (destroyed || !richFlushPending) return
-        const markdown = apiRef.current?.flushMarkdown?.()
+        const markdown = apiRef.current?.flushMarkdown?.({ background: true })
         if (typeof markdown === 'string') onChange?.(markdown, false)
       }, delayMs)
     }

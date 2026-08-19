@@ -133,6 +133,7 @@
     "test:issues-70-72-ui": "node scripts/test-issues-70-72-ui.mjs",
     "test:task-list-persistence-ui": "node scripts/test-task-list-persistence-ui.mjs",
     "test:empty-task-list-persistence-ui": "node scripts/test-empty-task-list-persistence-ui.mjs",
+    "test:empty-task-typing-pause-ui": "node scripts/test-empty-task-typing-pause-ui.mjs",
     "test:issues-74-75-ui": "node scripts/test-issues-74-75-ui.mjs",
     "test:pdf-latex-ui": "node scripts/test-pdf-latex-ui.mjs",
     "test:pdf-rendered-ui": "node scripts/test-pdf-rendered-formats-ui.mjs",

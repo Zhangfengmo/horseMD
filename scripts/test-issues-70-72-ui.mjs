@@ -112,20 +112,20 @@ async function testOutlineFoldState() {
   }
 }
 
-async function testTaskListInput() {
+async function testTaskListInput({ name, port, pauseMs }) {
   await mkdir(dir, { recursive: true })
-  const file = join(dir, 'task-issue72.md')
+  const file = join(dir, `${name}.md`)
   await writeFile(file, '')
 
   const app = await launchBuiltElectron({
-    profileDir: join(dir, 'profile-task'),
-    port: Number(process.env.CDP_PORT_TASK || 9471),
+    profileDir: join(dir, `profile-${name}`),
+    port,
     appArgs: [file]
   })
   try {
     await sleep(1200)
     await activateTab(app.evaluate, '欢迎')
-    await activateTab(app.evaluate, 'task-issue72')
+    await activateTab(app.evaluate, name)
     await waitFor(app.evaluate, `!!(${visiblePm})`, 'task fixture editor')
 
     await app.evaluate(`(() => {
@@ -143,16 +143,22 @@ async function testTaskListInput() {
     // this as one paste transaction, or a regression in the intermediate
     // ordinary-list state stays invisible.
     //
-    // The marker and its label are ONE typing stream, deliberately not two
-    // awaited calls. A label-less task is a documented rich-only transient: the
-    // app demotes it back to literal `[ ]` text at any durability boundary, and
-    // Editor.jsx's rich-dirty reconcile makes one of those fire 260 ms after the
-    // last edit (`demoteEmptyTaskItemsInView` via `flushMarkdown`). Every extra
-    // await between the closing `] ` and the first label character is another
-    // place a stalled test process can spend that budget and report an
-    // input-rule regression that never happened — measured: a 300 ms gap here
-    // fails 2/2, a 200 ms gap passes 2/2.
-    await typeTextLikeUser(app.send, '* [ ] 牛逼')
+    // Two variants run. The continuous one types the marker and its label as
+    // ONE stream, so the empty-task window is a single ordinary inter-character
+    // gap. The paused one stops after the marker for a full second: the
+    // background dirty-reconcile (260 ms) used to demote the new checkbox back
+    // to literal `[ ]` text there, and the ruling of 2026-08-20 moved that
+    // demotion out of the unforced path — see docs/empty-paragraph-contract.md
+    // §3.1 and scripts/test-empty-task-typing-pause-ui.mjs. Both variants must
+    // now pass; a stalled test process can no longer manufacture a fake
+    // input-rule regression either.
+    if (pauseMs) {
+      await typeTextLikeUser(app.send, '* [ ] ')
+      await sleep(pauseMs)
+      await typeTextLikeUser(app.send, '牛逼')
+    } else {
+      await typeTextLikeUser(app.send, '* [ ] 牛逼')
+    }
     await sleep(600)
 
     const snapshot = JSON.parse(await app.evaluate(`(() => {
@@ -182,5 +188,14 @@ async function testTaskListInput() {
 }
 
 const outline = await testOutlineFoldState()
-const taskControls = await testTaskListInput()
-console.log(`PASS issues 70-72 UI: ${JSON.stringify({ outline, taskControls })}`)
+const taskControls = await testTaskListInput({
+  name: 'task-issue72',
+  port: Number(process.env.CDP_PORT_TASK || 9471),
+  pauseMs: 0
+})
+const pausedTaskControls = await testTaskListInput({
+  name: 'task-issue72-pause',
+  port: Number(process.env.CDP_PORT_TASK_PAUSE || 9520),
+  pauseMs: 1000
+})
+console.log(`PASS issues 70-72 UI: ${JSON.stringify({ outline, taskControls, pausedTaskControls })}`)
