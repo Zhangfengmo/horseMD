@@ -105,6 +105,13 @@ const FIXTURE = [
 
 const FAR_PARAGRAPH = '远段落用于打字测试。'
 const TYPED = '东南西北中'
+// The mermaid fence's single source line, and the text section 5.5 APPENDS to
+// it to prove a previewed fence is genuinely editable (both the CodeMirror
+// view AND the kernel's source bytes). The appended statement keeps the
+// diagram VALID, so the probe never depends on how the renderer reports a
+// parse error.
+const MERMAID_CODE = 'graph TD; A-->B;'
+const MERMAID_TYPED = ' B-->C;'
 const FAR_PARAGRAPH_AFTER_TYPING = FAR_PARAGRAPH + TYPED
 
 // Derived directly from FIXTURE by string substitution: both edits below are
@@ -150,7 +157,7 @@ const MERMAID_PREVIEW_SVG = (editorExpr) =>
     ?.querySelector('.preview svg')`
 
 // Same block, without descending into the preview svg — used by the
-// real-read-only/undo-bridge section below to reach the toolbar's
+// editable-fence/undo-bridge section below to reach the toolbar's
 // `.preview-toggle-button` (only rendered when `renderPreview` produces
 // something, i.e. only for this mermaid block, not the always-editor-visible
 // `js` block section 5 already probes).
@@ -657,12 +664,24 @@ async function run() {
     await waitFor(async () => (await evaluate(`(${VISIBLE_EDITOR})?.querySelector('.cm-content')?.textContent`)) === cmTextBefore,
       'CM-focused Mod-z did not undo the typed code-block character through kernel history')
 
+    // Edit the visible source textarea in place (used by 5.5's byte proof and
+    // by 5.8's projection-sync regression). Defined here so both sections can
+    // reach it; `evaluate` is a `let` binding in this scope, so the closure
+    // still resolves to the live CDP session after the cold-reopen relaunch.
+    const editSourceMarker = async (from, to) => evaluate(`(() => {
+      const ta = [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)
+      if (!ta) return false
+      const idx = ta.value.indexOf(${JSON.stringify(from)})
+      if (idx < 0) return false
+      ta.setRangeText(${JSON.stringify(to)}, idx, idx + ${JSON.stringify(from)}.length, 'end')
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`)
+
     // ============================================================
-    // 5.5) Real CodeMirror read-only + undo bridge (source-kernel
-    //      integration Plan 3 Task 1 — two LIVE defects, both reachable
-    //      here even though section 5 above (same fixture, `js` block)
-    //      happens to click a point that is off-screen at that point in the
-    //      script and so never actually proves anything).
+    // 5.5) A previewed fence is EDITABLE, and a CM-focused Mod-z is the
+    //      KERNEL's undo — the two halves of the code-block bridge, probed
+    //      on the mermaid block (the fixture's only PREVIEWED fence).
     // ============================================================
     // Reached via the toolbar's Hide/Edit toggle rather than the always-
     // editor-visible `js` block: `.preview-toggle-button` only renders when
@@ -678,7 +697,7 @@ async function run() {
       block?.scrollIntoView({ block: 'center' })
       return !!block
     })()`)
-    assert.ok(mermaidToggle, 'mermaid code block not found for the read-only/undo-bridge probe')
+    assert.ok(mermaidToggle, 'mermaid code block not found for the editable/undo-bridge probe')
     await sleep(400)
     const togglePoint = await evaluate(`(() => {
       const block = (${MERMAID_BLOCK(VISIBLE_EDITOR)})
@@ -707,20 +726,15 @@ async function run() {
     const mermaidCmFocused = await evaluate(`document.activeElement?.className || ''`)
     assert.ok(mermaidCmFocused.includes('cm-content'), `click did not focus the mermaid CodeMirror editor (activeElement: ${mermaidCmFocused})`)
 
-    // Defect 1: `EditorState.readOnly`'s combine takes only the HIGHEST-
-    // precedence value, and Milkdown's CodeMirrorBlock nodeview registers
-    // its own same-precedence, earlier-in-source-order readOnly extension —
-    // so a bare (unwrapped) `CmEditorState.readOnly.of(true)` appended to
-    // the feature's `extensions` array loses and CodeMirror stays genuinely
-    // editable. This assertion fails on the pre-fix build (RED).
-    const mermaidCmBeforeType = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
-    await typeTextLikeUser(send, 'BLOCKED', { delayMs: delay })
-    await sleep(300)
-    const mermaidCmAfterType = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
-    assert.equal(mermaidCmAfterType, mermaidCmBeforeType,
-      'typing into the mermaid code block via the Edit toggle changed its content — CodeMirror is not really read-only in kernel mode')
+    // The pre-probe content of this block, and the baseline every assertion
+    // below measures against. Held FIXED across the undo/redo bridge probe
+    // (which must not touch this block at all) and restored exactly by the
+    // editable-fence probe that follows it.
+    const mermaidCmBaseline = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
+    assert.equal(mermaidCmBaseline, MERMAID_CODE,
+      `the mermaid block did not start from the fixture's own source: ${JSON.stringify(mermaidCmBaseline)}`)
 
-    // Defect 2: the nodeview's own `codeMirrorKeymap()` binds Mod-z/Mod-y/
+    // Part A: the nodeview's own `codeMirrorKeymap()` binds Mod-z/Mod-y/
     // Shift-Mod-z directly to `@milkdown/prose/history`'s undo/redo at
     // default precedence, and `stopEvent()` on a CM-originated event
     // returns true, so a PM-level keymap (the kernel's own historyKeymap)
@@ -745,7 +759,7 @@ async function run() {
     await waitFor(async () => (await paragraphTexts(evaluate)).includes('z'),
       'Mod-z inside the mermaid code block did not reach kernel history (slash replace was not undone)')
     const mermaidCmAfterUndo = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
-    assert.equal(mermaidCmAfterUndo, mermaidCmBeforeType,
+    assert.equal(mermaidCmAfterUndo, mermaidCmBaseline,
       "Mod-z inside the mermaid code block changed its OWN CodeMirror content (must route through the kernel, not CodeMirror's/prosemirror-history's own undo)")
 
     // Redo (Shift-Mod-z) must symmetrically reach `runHistory('redo')` and
@@ -758,15 +772,55 @@ async function run() {
     await waitFor(async () => (await paragraphTexts(evaluate)).includes('/'),
       'Shift-Mod-z inside the mermaid code block did not redo through kernel history (slash replace was not restored)')
     const mermaidCmAfterRedo = await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)
-    assert.equal(mermaidCmAfterRedo, mermaidCmBeforeType,
+    assert.equal(mermaidCmAfterRedo, mermaidCmBaseline,
       "Shift-Mod-z inside the mermaid code block changed its OWN CodeMirror content (must route through the kernel)")
 
+    // Part B: a PREVIEWED fence is an EDITABLE fence.
+    //
+    // This segment used to assert the opposite — that CodeMirror inside a
+    // ```mermaid block was genuinely read-only in kernel mode (a
+    // `READONLY_CODE_LANGUAGES` policy gate that forced `charMap: null` for
+    // every previewed fence). `c173ca0` deleted that gate on purpose: the
+    // rendered preview is a SIBLING of an always-mounted CodeMirror, none of
+    // the kernel's three code-block proofs reads the DOM, and every shape of
+    // this fence maps byte-exactly — so the refusal was protecting nothing
+    // while costing the user the ability to edit their own diagram.
+    //
+    // The replacement is strictly stronger than the refusal it replaces: it
+    // is not enough for the keystroke to appear in CodeMirror (that is
+    // exactly the symptom `ed60fe2`'s wedged `updating` flag produced while
+    // the document never received a byte). The typed text must also be
+    // PRESENT IN THE KERNEL'S SOURCE BYTES, asserted byte-for-byte against
+    // the same derived expectation the save/reopen section uses.
+    //
+    // 'End' first so the insertion column is deterministic regardless of
+    // where the click's own hit-test landed within the line.
+    await pressKey(send, { key: 'End', code: 'End', delayMs: delay })
+    await typeTextLikeUser(send, MERMAID_TYPED, { delayMs: delay })
+    await waitFor(async () =>
+      (await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)) === MERMAID_CODE + MERMAID_TYPED,
+    'typing into the previewed mermaid fence did not reach its CodeMirror (a previewed fence must be editable — c173ca0)')
+
     await toggleSourceMode(evaluate)
-    const sourceAfterCmProbe = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the read-only/undo-bridge probe')
+    const sourceWithMermaidEdit = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the mermaid typing probe')
+    assert.equal(sourceWithMermaidEdit, SAVED.replace(MERMAID_CODE, MERMAID_CODE + MERMAID_TYPED),
+      'text typed into the previewed mermaid fence never reached the kernel source bytes (CodeMirror showed it, the document never received it)')
+
+    // Revert through the source textarea (a kernel-owned replaceMarkdown, not
+    // a CM-local edit) so the derived SAVED/AFTER_TYPING expectations the
+    // sections below assert stay valid.
+    assert.ok(await editSourceMarker(MERMAID_CODE + MERMAID_TYPED, MERMAID_CODE), 'could not revert the mermaid typing probe')
+    const sourceAfterCmProbe = await waitFor(async () => {
+      const value = await visibleSource(evaluate)
+      return value === SAVED ? value : null
+    }, 'reverting the mermaid typing probe did not restore the exact pre-probe source bytes')
     assert.equal(sourceAfterCmProbe, SAVED,
-      'kernel document bytes do not match the derived expectation after the CM read-only/undo-bridge probe (typing must stay blocked; undo/redo must round-trip back to the pre-probe state)')
+      'kernel document bytes do not match the derived expectation after the CM editable/undo-bridge probe (undo/redo must round-trip; the mermaid edit must revert exactly)')
     await toggleSourceMode(evaluate)
-    await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the read-only/undo-bridge probe')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('填充六'), 'did not return to rich mode after the editable/undo-bridge probe')
+    await waitFor(async () =>
+      (await evaluate(`(${MERMAID_BLOCK(VISIBLE_EDITOR)})?.querySelector('.cm-content')?.textContent`)) === mermaidCmBaseline,
+    'the mermaid CodeMirror did not follow the kernel back to its pre-probe content')
     await sleep(200)
 
     // ============================================================
@@ -786,15 +840,6 @@ async function run() {
     // to pick up a fresh value on its own).
     const JS_MARKER = 'function greet(name) {'
     const JS_MARKER_EDITED = 'function greet(name) { // hm-projection-sync-probe'
-    const editSourceMarker = async (from, to) => evaluate(`(() => {
-      const ta = [...document.querySelectorAll('textarea.source-editor')].find((node) => node.offsetParent)
-      if (!ta) return false
-      const idx = ta.value.indexOf(${JSON.stringify(from)})
-      if (idx < 0) return false
-      ta.setRangeText(${JSON.stringify(to)}, idx, idx + ${JSON.stringify(from)}.length, 'end')
-      ta.dispatchEvent(new Event('input', { bubbles: true }))
-      return true
-    })()`)
 
     await toggleSourceMode(evaluate)
     const sourceBeforeProjectionEdit = await waitFor(() => visibleSource(evaluate), 'source view did not appear for the projection-sync regression')
@@ -852,7 +897,7 @@ async function run() {
     assert.equal(reopened, SAVED, 'cold reopen must reproduce the saved kernel-mode bytes exactly, byte-for-byte')
     assert.equal(app.dialogs.length, 0, 'no rebuild prompt may appear on cold reopen')
 
-    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click refuse structural operations while the selection toolbar and format submenu are live (no item disabled); save and cold reopen match the kernel-derived byte string')
+    console.log('PASS kernel-mode node-view identity + blocked-matrix UI: CodeMirror/image/table identity and scroll position survive a far edit; slash/right-click refuse structural operations while the selection toolbar and format submenu are live (no item disabled); a previewed mermaid fence is editable down to the source bytes and a CM-focused Mod-z/Shift-Mod-z is the kernel’s own history; save and cold reopen match the kernel-derived byte string')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
