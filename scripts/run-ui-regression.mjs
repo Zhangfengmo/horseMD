@@ -81,13 +81,6 @@ const sessions = [
     tests: [{ script: 'scripts/test-lightbox-ui.mjs' }]
   },
   {
-    name: 'Table scroll and table controls',
-    port: 9484,
-    profileDir: '/tmp/horsemd-ui-regression-table',
-    appArgs: [fixture('table-scroll.md')],
-    tests: [{ script: 'scripts/test-table-scroll-ui.mjs' }]
-  },
-  {
     name: 'Issues 66-67: split outline and bold/sidebar shortcuts',
     port: 9485,
     profileDir: '/tmp/horsemd-ui-regression-66-67',
@@ -97,6 +90,16 @@ const sessions = [
 ]
 
 const standalone = [
+  {
+    // NOT a session test: this script starts (and device-emulates) its own
+    // hidden app. Running it inside a session launched a SECOND Electron on the
+    // same port, which Chromium leaves without a DevTools server — so every
+    // assertion silently ran against the session's app while the test's own
+    // instance idled in the background for the whole run.
+    name: 'Table scroll and table controls',
+    script: 'scripts/test-table-scroll-ui.mjs',
+    env: { CDP_PORT: '9484' }
+  },
   {
     name: 'Transaction-first source sync: atomic plain-text mapper',
     script: 'scripts/test-source-transaction-sync.mjs'
