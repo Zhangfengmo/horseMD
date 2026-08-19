@@ -192,7 +192,41 @@ export const literalTailIsStripped = (text, block, offset) => {
   let index = offset
   while (index < end && isSpaceOrTab(text[index])) index += 1
   if (index >= end) return true
-  return block.type === 'tableCell' && text[index] === '|'
+  if (block.type === 'tableCell' && text[index] === '|') return true
+  return block.type === 'heading' && headingTailIsStripped(text, end, index)
+}
+
+// The two heading shapes whose VISIBLE end is not the block's end (2026-08-19,
+// audit I3′). Both were unclaimed above, so a space typed there was written as a
+// literal byte that CommonMark discards — a dead byte, and `edit-unobservable`
+// did not even fire for it.
+//
+//   ATX with a CLOSING SEQUENCE: '## x ##'. The optional closing run of '#' may
+//     be preceded by any amount of whitespace, so '## x  ##' still says 'x'.
+//     Claimed when the run is followed by '#'s and then nothing but whitespace
+//     to the block's end — '## x ###foo' is NOT a closing sequence and is not
+//     claimed, so the byte there stays literal (and is real content).
+//
+//   SETEXT: 'text' LF '----'. The heading's span runs THROUGH its underline, so
+//     the whitespace run at the end of the content stops at a line ending rather
+//     than at the block end. Claimed only when everything after that line ending
+//     is exactly the underline — which is also what keeps a MULTI-LINE setext
+//     heading's interior line endings out of it (a run stopping there could be
+//     the two-space hard break's own syntax, the shape this predicate has always
+//     refused to claim).
+const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/
+const headingTailIsStripped = (text, end, index) => {
+  const ch = text[index]
+  if (ch === '#') {
+    let at = index
+    while (at < end && text[at] === '#') at += 1
+    while (at < end && isSpaceOrTab(text[at])) at += 1
+    return at >= end
+  }
+  if (ch !== '\n' && ch !== '\r') return false
+  let at = index
+  at += text[at] === '\r' && text[at + 1] === '\n' ? 2 : 1
+  return SETEXT_UNDERLINE_RE.test(text.slice(at, end))
 }
 
 // Does the block END in a U+00A0 THIS KERNEL WROTE? Returns

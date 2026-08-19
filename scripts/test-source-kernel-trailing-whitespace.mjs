@@ -456,4 +456,63 @@ const visible = (text, type, start) => {
   assert.deepEqual(clobbered.doc.whitespaceMarks, [], 'an overwritten entry is dropped')
 }
 
+// ---------------------------------------------------------------------------
+// 14) THE TWO HEADING SHAPES WHOSE VISIBLE END IS NOT THE BLOCK END
+//     (2026-08-19, audit I3′). A setext heading's span runs through its
+//     underline, and an ATX heading's may end with a closing '#' run — so the
+//     whitespace run typed at the CONTENT end stops somewhere
+//     `literalTailIsStripped` did not claim, and the byte was written literally
+//     and then discarded by CommonMark. A dead byte, with not even an
+//     `edit-unobservable` diagnostic to show for it.
+// ---------------------------------------------------------------------------
+{
+  // The literal write really is discarded — stated first, so the assertions
+  // below are not vacuous.
+  for (const [dead, expected] of [
+    ['text \n----\n', 'text'],
+    ['## x  ##\n', 'x'],
+    ['a\nb \n----\n', 'a\nb']
+  ]) {
+    assert.equal(visible(dead, 'heading', 0), expected,
+      `the literal byte in ${JSON.stringify(dead)} is discarded by CommonMark`)
+  }
+
+  // SETEXT: the space at the content end survives, and the heading is still a
+  // setext heading of the same depth.
+  {
+    const spaced = step('text\n----\n', { type: 'heading', start: 0 }, 4, ' ')
+    assert.equal(spaced.bytes, 'text' + NBSP + '\n----\n')
+    assert.equal(visible(spaced.bytes, 'heading', 0), 'text' + NBSP)
+    assert.equal(parseKernelMarkdown(spaced.bytes).children[0].depth, 2)
+    const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 5, 'x', spaced.marks)
+    assert.equal(healed.bytes, 'text x\n----\n')
+  }
+  // …including the CRLF spelling and the multi-line form (where only the LAST
+  // content line's run is claimed — an interior one could be a hard break).
+  {
+    const crlf = step('text\r\n----\r\n', { type: 'heading', start: 0 }, 4, ' ')
+    assert.equal(crlf.bytes, 'text' + NBSP + '\r\n----\r\n')
+    const last = step('a\nb\n----\n', { type: 'heading', start: 0 }, 3, ' ')
+    assert.equal(last.bytes, 'a\nb' + NBSP + '\n----\n')
+    assert.deepEqual(step('a\nb\n----\n', { type: 'heading', start: 0 }, 1, ' '),
+      { refused: 'not-structural' },
+      'an INTERIOR line ending is not claimed — that run could be a hard break')
+  }
+  // ATX WITH A CLOSING SEQUENCE.
+  {
+    const spaced = step('## x ##\n', { type: 'heading', start: 0 }, 4, ' ')
+    assert.equal(spaced.bytes, '## x' + NBSP + ' ##\n')
+    assert.equal(visible(spaced.bytes, 'heading', 0), 'x' + NBSP)
+    const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 5, 'y', spaced.marks)
+    assert.equal(healed.bytes, '## x y ##\n')
+    assert.equal(visible(healed.bytes, 'heading', 0), 'x y')
+  }
+  // …and a '#' run that is NOT a closing sequence is ordinary content, so the
+  // literal byte there is correct and must stay literal.
+  assert.deepEqual(step('## x ###foo\n', { type: 'heading', start: 0 }, 4, ' '),
+    { refused: 'not-structural' })
+  assert.equal(literalTailIsStripped('## x ###foo\n',
+    blockAt('## x ###foo\n', 'heading', 0), 4), false)
+}
+
 console.log('PASS source-kernel block-trailing whitespace: a space typed at a block end survives as real whitespace in the source AND in the view, and heals to an ordinary space on the next character')
