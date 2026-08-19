@@ -570,8 +570,10 @@ export function createKernelMode({
   // diagnostic rather than refusing — the per-shape commands
   // (commands/heading-whitespace.js, commands/trailing-whitespace.js) are the
   // fail-closed gates, and this is the net underneath them that makes the whole
-  // class detectable and assertable instead of invisible. See
-  // editor-kernel-gateway.js's ADR for the one known benign firing.
+  // class detectable and assertable instead of invisible. The one known benign
+  // firing is recorded in editor-kernel-gateway.js, in the ADR headed
+  // `THE OBSERVABILITY EXPECTATION (result.observability, 2026-08-18)` —
+  // directly above `commitPlainText`.
   const verifyEditObservable = (expectation) => {
     if (!expectation || !kernel.map) return
     const pair = (kernel.map.blockPairs || []).find((candidate) => candidate.pmPos === expectation.pmPos)

@@ -1229,9 +1229,9 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   const records = []
   let cumulativeDelta = 0
   let touchedTableCell = false
-  // THE OBSERVABILITY EXPECTATION (2026-08-18). See the ADR above
-  // `commitPlainText`'s return for what this is and what it deliberately is
-  // not.
+  // THE OBSERVABILITY EXPECTATION (2026-08-18). See the ADR headed
+  // `THE OBSERVABILITY EXPECTATION` directly above this function for what this
+  // is and what it deliberately is not.
   let observability = null
   // U+00A0 runs this batch writes, in POST-edit coordinates, for the document's
   // whitespace provenance ledger (markdown-document.js): the heal may only ever
@@ -1677,7 +1677,8 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       insert: virtualPrefix + insertText
     })
     // Record what the edited block's VISIBLE length must become, for the
-    // post-commit observability check (see the ADR on this function's return).
+    // post-commit observability check (see the ADR directly above this
+    // function).
     // Only the simple, overwhelmingly common shape is claimed: ONE step, into a
     // real (non-virtual, non-code) mapped block, with no line breaks. Anything
     // else reports nothing rather than a number it cannot justify.

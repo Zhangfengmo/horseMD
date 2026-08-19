@@ -267,10 +267,15 @@ export function createConfiguredCrepe({
           previewOnly ? t('mermaid.editCode') : t('mermaid.hideCode'),
         // Kernel mode (Plan 3 Task 5): code blocks are editable per-block —
         // the bridge consults `isCmBlockEditable(cmView)` at EVERY input
-        // event (typing/IME/paste/drop/cut/keydown), so LF blocks with a
-        // proven charMap edit natively (CM -> forwardUpdate -> gateway
-        // commit) while mermaid/latex/math and non-LF blocks stay blocked
-        // with zero staleness. A CM-focused undo/redo must reach the SAME
+        // event (typing/IME/paste/drop/cut/keydown), so any block with a
+        // proven charMap edits natively (CM -> forwardUpdate -> gateway
+        // commit) and anything unprovable stays blocked, with zero staleness.
+        // The gate is the charMap, never the language or the line ending:
+        // `READONLY_CODE_LANGUAGES` is GONE (c173ca0 — a preview is a sibling
+        // element, not the editing surface, so mermaid/latex fences edit like
+        // any other), `$$` block math is editable too (356bdc9), and CRLF
+        // blocks are modelled by `buildCodeMap` and carried through the
+        // bridge's own `crlfForwardUpdate`. A CM-focused undo/redo must reach the SAME
         // kernel history `runHistory` entry point PM-focused Mod-z uses,
         // never prosemirror-history, and Mod-Enter routes to the kernel's
         // own exit-code command instead of PM's exitCode (see
