@@ -2,8 +2,79 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { splitsCrlfPair } from './character-map.js'
 
+// THE WHITESPACE PROVENANCE LEDGER (2026-08-19, audit I4′)
+// ===========================================================================
+// commands/trailing-whitespace.js writes a U+00A0 where CommonMark would strip
+// an ASCII space, and HEALS it back to the ASCII character the user actually
+// pressed the moment another character displaces it. The heal used to claim ANY
+// single trailing U+00A0 — including one the DOCUMENT already had. A file
+// authored elsewhere that uses U+00A0 for CJK spacing therefore lost one the
+// first time the paragraph was touched: this kernel rewriting a character it
+// never wrote, which is exactly what it exists to prevent.
+//
+// The cure is provenance, and it is deliberately NOT a marker in the file (the
+// bytes are the user's, and a byte-level marker would be a second, invisible
+// encoding of the same character — the entity spelling the user already
+// rejected). It is a SESSION-SCOPED record: a list of raw ranges this kernel
+// itself wrote, carried on the document and remapped by this function, which is
+// the single chokepoint every kernel write passes through. Nothing persists to
+// disk, so a reopened file starts with an empty ledger and every U+00A0 in it is
+// treated as the user's — the fail-closed direction (a preserved, visible
+// character beats one this kernel silently rewrote).
+//
+// Each entry is `{ from, to, ascii }`: the raw span of the written U+00A0 run
+// and the ASCII whitespace it stands for (' ' or '\t'), so the heal restores
+// what was pressed rather than guessing between "one Tab" and "two Spaces".
+const NBSP_ONLY = /^\u00A0+$/
+
+// Remap the ledger across one transaction's edits, then re-validate it against
+// the resulting bytes. An entry is DROPPED when the edit touches it at all
+// (the bytes it described are gone or rewritten) and when its span no longer
+// reads as a pure U+00A0 run — so a stale entry can never outlive the character
+// it was recorded for, whatever route rewrote it.
+const remapWhitespaceMarks = (marks, edits, nextText) => {
+  const out = []
+  for (const mark of marks || []) {
+    if (!Number.isInteger(mark?.from) || !Number.isInteger(mark?.to) || mark.from >= mark.to) continue
+    let from = mark.from
+    let to = mark.to
+    let dropped = false
+    let delta = 0
+    for (const edit of edits) {
+      const insert = String(edit.insert ?? '')
+      if (edit.from < mark.to && edit.to > mark.from) { dropped = true; break }
+      if (edit.to <= mark.from) delta += insert.length - (edit.to - edit.from)
+    }
+    if (dropped) continue
+    from += delta
+    to += delta
+    if (from < 0 || to > nextText.length) continue
+    if (!NBSP_ONLY.test(nextText.slice(from, to))) continue
+    out.push({ from, to, ascii: mark.ascii })
+  }
+  return out
+}
+
+// Entries a transaction ADDS, already expressed in the post-edit coordinate
+// space by the command that wrote the bytes. Validated here rather than trusted:
+// the span must really hold U+00A0 in the committed text, and `ascii` must be
+// the whitespace it stands for.
+const acceptWhitespaceMarks = (marks, nextText) => {
+  const out = []
+  for (const mark of marks || []) {
+    if (!Number.isInteger(mark?.from) || !Number.isInteger(mark?.to) || mark.from >= mark.to) continue
+    if (mark.from < 0 || mark.to > nextText.length) continue
+    if (typeof mark.ascii !== 'string' || !/^[ \t]+$/.test(mark.ascii)) continue
+    if (!NBSP_ONLY.test(nextText.slice(mark.from, mark.to))) continue
+    out.push({ from: mark.from, to: mark.to, ascii: mark.ascii })
+  }
+  return out
+}
+
 export function createMarkdownDocument(text) {
-  return { text: String(text ?? ''), revision: 0 }
+  // A document created from BYTES has no provenance by construction: every
+  // U+00A0 in it is the author's until this kernel writes one itself.
+  return { text: String(text ?? ''), revision: 0, whitespaceMarks: [] }
 }
 
 const normalizeEdits = (txn) => {
@@ -121,7 +192,19 @@ export function applySourceTransaction(doc, txn) {
   parts.push(doc.text.slice(cursor))
   // Caret positioned after the last inserted text in new coordinates, accounting for preceding edits' deltas
   const caret = trailingCaret(edits)
-  const next = { text: parts.join(''), revision: doc.revision + 1 }
+  const nextText = parts.join('')
+  const next = {
+    text: nextText,
+    revision: doc.revision + 1,
+    // The provenance ledger travels with the document through the one function
+    // every kernel write passes through, so no caller can forget to maintain it
+    // and no path can write a U+00A0 that is not recorded (or record one it did
+    // not write — both halves are re-validated against the committed bytes).
+    whitespaceMarks: [
+      ...remapWhitespaceMarks(doc.whitespaceMarks, edits, nextText),
+      ...acceptWhitespaceMarks(txn.whitespaceMarks, nextText)
+    ]
+  }
   // The inverse's selection is the inverse's OWN caret, computed against the
   // restored (post-inverse) document — NOT the forward transaction's
   // selection, which is a coordinate for the post-forward document and is

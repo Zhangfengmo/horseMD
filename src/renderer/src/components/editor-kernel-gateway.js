@@ -1233,6 +1233,11 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   // `commitPlainText`'s return for what this is and what it deliberately is
   // not.
   let observability = null
+  // U+00A0 runs this batch writes, in POST-edit coordinates, for the document's
+  // whitespace provenance ledger (markdown-document.js): the heal may only ever
+  // rewrite a character THIS kernel wrote. Only the single-step whitespace
+  // commands produce them, so the coordinates need no rebasing.
+  let pendingMarks = null
   const prefixedVirtualBlocks = new Set()
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
@@ -1555,7 +1560,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       const units = stepPair.charMap.units
       const lastUnit = Array.isArray(units) && units.length ? units[units.length - 1] : null
       if (lastUnit && rawFrom >= lastUnit.rawEnd) {
-        const heal = healableTrailingSpace(text, stepPair.charMap)
+        const heal = healableTrailingSpace(text, stepPair.charMap, kernel.doc.whitespaceMarks)
         const stripped = literalTailIsStripped(text, stepPair.mdBlock, rawFrom)
         if (stripped || (heal && heal.rawEnd === rawFrom)) {
           const routed = spellBlockTailInsert({
@@ -1569,9 +1574,10 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
             editFrom = routed.edit.from
             editTo = routed.edit.to
             insertText = routed.edit.insert
-            // The rewritten range covers exactly the healed unit (one visible
-            // character) when a heal happened, and nothing otherwise.
-            respelledVisibleDelta = [...insertText].length - (routed.healed ? 1 : 0)
+            pendingMarks = routed.whitespaceMarks
+            // The rewritten range covers exactly the healed units (the U+00A0
+            // run the heal replaced) when a heal happened, and nothing otherwise.
+            respelledVisibleDelta = [...insertText].length - (routed.healedUnits || 0)
           } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
             // The offset IS one CommonMark strips and no spelling could be
             // proven: writing the literal byte would be writing a byte we have
@@ -1648,6 +1654,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
         editFrom = stranded.edit.from
         editTo = stranded.edit.to
         insertText = stranded.edit.insert
+        pendingMarks = stranded.whitespaceMarks
         // `respelledVisibleDelta` stays null ON PURPOSE: the re-spelling swaps
         // one ASCII space for one U+00A0, both a width-1 `char` unit, so the
         // block's visible length moves by exactly the PM step's own delta and
@@ -1756,7 +1763,12 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     }
   }
 
-  const transaction = { baseRevision: kernel.doc.revision, edits, intent: 'insert-text' }
+  const transaction = {
+    baseRevision: kernel.doc.revision,
+    edits,
+    intent: 'insert-text',
+    ...(pendingMarks?.length ? { whitespaceMarks: pendingMarks } : {})
+  }
   const result = applySourceTransaction(kernel.doc, transaction)
   if (!result.ok) return { ok: false, code: result.code }
   // The reparse proof runs BEFORE this function reports success — the caller

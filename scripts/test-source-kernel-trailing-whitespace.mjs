@@ -39,7 +39,11 @@ assert.equal(NBSP, '\u00A0')
 assert.equal(BLOCK_TRAILING_TEXT[' '], NBSP, 'a Space is ONE no-break space')
 assert.equal(BLOCK_TRAILING_TEXT['\t'], NBSP + NBSP, 'a Tab is TWO')
 
-const doc = (text) => ({ text, revision: 3 })
+// THE PROVENANCE LEDGER travels on the document (markdown-document.js), and the
+// heal may only ever claim a U+00A0 THIS kernel wrote — so every sequence below
+// carries the ledger forward exactly as the live kernel does. `marks` defaults
+// to the empty ledger a freshly opened file has.
+const doc = (text, marks = []) => ({ text, revision: 3, whitespaceMarks: marks })
 
 const blocksOf = (text) => {
   const out = []
@@ -68,17 +72,22 @@ const decodedText = (node) => {
 // The whole point of the module: a committed edit must be OBSERVABLE. So every
 // step here goes through the real transaction applier and then reports what the
 // resulting bytes actually decode to for the edited block.
-function step(text, { type, start }, offset, insert) {
+function step(text, { type, start }, offset, insert, marks = []) {
   const block = blockAt(text, type, start)
   assert.ok(block, `no ${type} block at ${start} in ${JSON.stringify(text)}`)
   const map = buildCharacterMap(text, block)
-  const heal = map ? healableTrailingSpace(text, map) : null
-  const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert, heal })
+  const heal = map ? healableTrailingSpace(text, map, marks) : null
+  const routed = spellBlockTailInsert({ doc: doc(text, marks), block, offset, insert, heal })
   if (!routed.ok) return { refused: routed.code }
   assert.equal(routed.transaction.baseRevision, 3, 'transaction must carry the doc revision')
-  const applied = applySourceTransaction(doc(text), routed.transaction)
+  const applied = applySourceTransaction(doc(text, marks), routed.transaction)
   assert.ok(applied.ok, `applySourceTransaction refused: ${applied.code}`)
-  return { bytes: applied.doc.text, spelling: routed.spelling, healed: routed.healed }
+  return {
+    bytes: applied.doc.text,
+    marks: applied.doc.whitespaceMarks,
+    spelling: routed.spelling,
+    healed: routed.healed
+  }
 }
 
 // Convenience: what the user sees for the block that starts at `start`.
@@ -104,7 +113,7 @@ const visible = (text, type, start) => {
   text = spaced.bytes
 
   // the 'b': the space is no longer last, so it heals back to an ordinary space
-  const healed = step(text, { type: 'paragraph', start: 0 }, 5, 'b')
+  const healed = step(text, { type: 'paragraph', start: 0 }, 5, 'b', spaced.marks)
   assert.equal(healed.bytes, '末段。a b\n',
     'the file must hold ordinary bytes once the space is interior')
   assert.equal(healed.healed, true)
@@ -119,13 +128,13 @@ const visible = (text, type, start) => {
 {
   const first = step('a\n', { type: 'paragraph', start: 0 }, 1, ' ')
   assert.equal(first.bytes, 'a' + NBSP + '\n')
-  const second = step(first.bytes, { type: 'paragraph', start: 0 }, 2, ' ')
+  const second = step(first.bytes, { type: 'paragraph', start: 0 }, 2, ' ', first.marks)
   assert.equal(second.bytes, 'a ' + NBSP + '\n')
   assert.equal(second.healed, true)
   assert.equal(visible(second.bytes, 'paragraph', 0), 'a ' + NBSP,
     'both spaces must survive the reparse')
 
-  const third = step(second.bytes, { type: 'paragraph', start: 0 }, 3, 'x')
+  const third = step(second.bytes, { type: 'paragraph', start: 0 }, 3, 'x', second.marks)
   assert.equal(third.bytes, 'a  x\n', 'and both must resolve to ordinary spaces')
   assert.equal(visible(third.bytes, 'paragraph', 0), 'a  x')
 }
@@ -140,9 +149,9 @@ const visible = (text, type, start) => {
   assert.equal(tabbed.bytes, 'a' + NBSP + NBSP + '\n')
   assert.equal(visible(tabbed.bytes, 'paragraph', 0), 'a' + NBSP + NBSP)
   assert.equal(healableTrailingSpace(tabbed.bytes,
-    buildCharacterMap(tabbed.bytes, blockAt(tabbed.bytes, 'paragraph', 0))), null,
+    buildCharacterMap(tabbed.bytes, blockAt(tabbed.bytes, 'paragraph', 0)), tabbed.marks), null,
     'a run of TWO must not be claimed by the heal')
-  assert.deepEqual(step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, 'z'),
+  assert.deepEqual(step(tabbed.bytes, { type: 'paragraph', start: 0 }, 3, 'z', tabbed.marks),
     { refused: 'not-structural' },
     'so the next character falls through to the ordinary plain path')
 }
@@ -154,7 +163,7 @@ const visible = (text, type, start) => {
   const spaced = step('## 乙\n\n末段。\n', { type: 'heading', start: 0 }, 4, ' ')
   assert.equal(spaced.bytes, '## 乙' + NBSP + '\n\n末段。\n')
   assert.equal(visible(spaced.bytes, 'heading', 0), '乙' + NBSP)
-  const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 5, '丙')
+  const healed = step(spaced.bytes, { type: 'heading', start: 0 }, 5, '丙', spaced.marks)
   assert.equal(healed.bytes, '## 乙 丙\n\n末段。\n',
     'the heading must end with the ordinary two-character text the user typed')
   assert.equal(visible(healed.bytes, 'heading', 0), '乙 丙')
@@ -170,9 +179,12 @@ const visible = (text, type, start) => {
   const text = '## ' + NBSP + '\n'
   const block = blockAt(text, 'heading', 0)
   const map = buildCharacterMap(text, block)
-  const heal = healableTrailingSpace(text, map)
-  assert.ok(heal, 'the no-break space IS a single trailing run')
-  const routed = spellBlockTailInsert({ doc: doc(text), block, offset: 4, insert: '标', heal })
+  // The ledger is seeded by hand with exactly what a Space typed there would
+  // have recorded, so this case tests the PROOF and not the provenance gate.
+  const marks = [{ from: 3, to: 4, ascii: ' ' }]
+  const heal = healableTrailingSpace(text, map, marks)
+  assert.ok(heal, 'the no-break space IS a single trailing run this kernel wrote')
+  const routed = spellBlockTailInsert({ doc: doc(text, marks), block, offset: 4, insert: '标', heal })
   assert.deepEqual(routed, { ok: false, code: 'not-structural' },
     'healing at an ATX content start would delete the character — it must fall through')
 }
@@ -205,7 +217,7 @@ const visible = (text, type, start) => {
   assert.equal(rows.children.length, 2, 'header row + one body row')
   assert.equal(rows.children[0].children.length, 2, 'the column count must not change')
 
-  const healed = step(spaced.bytes, { type: 'tableCell', start: 0 }, 4, 'x')
+  const healed = step(spaced.bytes, { type: 'tableCell', start: 0 }, 4, 'x', spaced.marks)
   assert.equal(healed.bytes, '| a x | b |\n| - | - |\n| c | d |\n')
   assert.equal(visible(healed.bytes, 'tableCell', 0), 'a x')
 }
@@ -269,7 +281,7 @@ const visible = (text, type, start) => {
   const block = blockAt(text, 'paragraph', 0)
   const routed = spellBlockTailInsert({
     doc: doc(text), block, offset: 2, insert: 'y',
-    heal: { rawStart: 1, rawEnd: 2 }
+    heal: { rawStart: 1, rawEnd: 2, ascii: ' ' }
   })
   assert.deepEqual(routed, { ok: false, code: 'not-structural' },
     'a caller-supplied heal span must be re-proven against the bytes')
@@ -308,7 +320,7 @@ const visible = (text, type, start) => {
   assert.equal(item.bytes, '- item' + NBSP + '\n')
   assert.equal(parseKernelMarkdown(item.bytes).children[0].type, 'list')
   assert.equal(visible(item.bytes, 'paragraph', 2), 'item' + NBSP)
-  const healed = step(item.bytes, { type: 'paragraph', start: 2 }, 7, 'x')
+  const healed = step(item.bytes, { type: 'paragraph', start: 2 }, 7, 'x', item.marks)
   assert.equal(healed.bytes, '- item x\n')
 }
 
@@ -320,13 +332,16 @@ const visible = (text, type, start) => {
 {
   let text = 'h\n'
   let offset = 1
+  let marks = []
   for (const ch of 'ello world from horsemd') {
     const block = blockAt(text, 'paragraph', 0)
     const map = buildCharacterMap(text, block)
-    const heal = healableTrailingSpace(text, map)
-    const routed = spellBlockTailInsert({ doc: doc(text), block, offset, insert: ch, heal })
+    const heal = healableTrailingSpace(text, map, marks)
+    const routed = spellBlockTailInsert({ doc: doc(text, marks), block, offset, insert: ch, heal })
     if (routed.ok) {
-      text = applySourceTransaction(doc(text), routed.transaction).doc.text
+      const applied = applySourceTransaction(doc(text, marks), routed.transaction)
+      text = applied.doc.text
+      marks = applied.doc.whitespaceMarks
       offset = routed.transaction.selection.head
     } else {
       assert.equal(routed.code, 'not-structural', `unexpected refusal for ${JSON.stringify(ch)}`)
@@ -369,8 +384,56 @@ const visible = (text, type, start) => {
   // A HEADING's end behaves identically, and the next character still heals.
   const heading = step('## t\n', { type: 'heading', start: 0 }, 4, 'ail ')
   assert.equal(heading.bytes, '## tail' + NBSP + '\n')
-  const healed = step(heading.bytes, { type: 'heading', start: 0 }, 8, 'x')
+  const healed = step(heading.bytes, { type: 'heading', start: 0 }, 8, 'x', heading.marks)
   assert.equal(healed.bytes, '## tail x\n')
+}
+
+// ---------------------------------------------------------------------------
+// 13) PROVENANCE (2026-08-19, audit I4′). The heal used to claim ANY single
+//     trailing U+00A0, so a document that ALREADY used one — a file authored
+//     elsewhere with U+00A0 for CJK spacing — lost it the first time that
+//     paragraph was touched: this kernel rewriting a character it never wrote.
+//     Only a run recorded in the document's own session ledger is claimed.
+// ---------------------------------------------------------------------------
+{
+  // A file just opened: the ledger is empty, so the U+00A0 in it is the
+  // author's and survives every keystroke.
+  const authored = '甲' + NBSP + '\n'
+  const block = blockAt(authored, 'paragraph', 0)
+  const map = buildCharacterMap(authored, block)
+  assert.equal(healableTrailingSpace(authored, map, []), null,
+    "a U+00A0 with no provenance is the author's and must never be claimed")
+  assert.deepEqual(step(authored, { type: 'paragraph', start: 0 }, 2, '乙'),
+    { refused: 'not-structural' },
+    'so the next character falls through and the character is preserved')
+
+  // The SAME bytes, once this kernel is the one that wrote them, do heal.
+  const typed = step('甲\n', { type: 'paragraph', start: 0 }, 1, ' ')
+  assert.equal(typed.bytes, authored, 'the bytes are identical either way')
+  assert.deepEqual(typed.marks, [{ from: 1, to: 2, ascii: ' ' }],
+    'the ledger records the span and the key that was pressed')
+  const healed = step(typed.bytes, { type: 'paragraph', start: 0 }, 2, '乙', typed.marks)
+  assert.equal(healed.bytes, '甲 乙\n')
+
+  // The ledger is re-validated against the committed bytes, so an entry can
+  // never outlive the character it was recorded for: once the heal has spent
+  // it, nothing is left claiming that offset.
+  assert.deepEqual(healed.marks, [], 'a spent entry is dropped')
+
+  // An entry whose span is no longer a U+00A0 run is dropped too, whatever
+  // rewrote it — the ledger cannot vouch for bytes it does not match.
+  const applied = applySourceTransaction(
+    doc('甲' + NBSP + '\n', [{ from: 1, to: 2, ascii: ' ' }]),
+    { baseRevision: 3, edits: [{ from: 0, to: 1, insert: '乙' }], intent: 'insert-text' }
+  )
+  assert.ok(applied.ok)
+  assert.deepEqual(applied.doc.whitespaceMarks, [{ from: 1, to: 2, ascii: ' ' }],
+    'an untouched entry shifts with the bytes it describes')
+  const clobbered = applySourceTransaction(
+    doc('甲' + NBSP + '\n', [{ from: 1, to: 2, ascii: ' ' }]),
+    { baseRevision: 3, edits: [{ from: 1, to: 2, insert: 'x' }], intent: 'insert-text' }
+  )
+  assert.deepEqual(clobbered.doc.whitespaceMarks, [], 'an overwritten entry is dropped')
 }
 
 console.log('PASS source-kernel block-trailing whitespace: a space typed at a block end survives as real whitespace in the source AND in the view, and heals to an ordinary space on the next character')

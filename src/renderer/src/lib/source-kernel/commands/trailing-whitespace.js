@@ -81,6 +81,8 @@ export const BLOCK_TRAILING_TEXT = Object.freeze({
 // The ASCII whitespace run an insert ENDS with — the part of it that lands at
 // the block's end and is therefore the part CommonMark discards.
 const TRAILING_RUN_RE = /[ \t]*$/
+const NO_BREAK_RUN_RE = /^\u00A0+$/
+const ASCII_WHITESPACE_RE = /^[ \t]+$/
 
 // That run, re-spelled character by character through the table above. A run of
 // one is the single-keystroke case this module was built for; a longer one is
@@ -181,10 +183,25 @@ export const literalTailIsStripped = (text, block, offset) => {
   return block.type === 'tableCell' && text[index] === '|'
 }
 
-// Does the block's character map end in a run of EXACTLY ONE U+00A0? Returns
-// `{ rawStart, rawEnd }` for that unit, or null. A longer run is deliberately
-// not claimed (see the header): two U+00A0 could be one Tab or two Spaces.
-export const healableTrailingSpace = (text, charMap) => {
+// Does the block END in a U+00A0 THIS KERNEL WROTE? Returns
+// `{ rawStart, rawEnd, ascii }` — the span and the ASCII whitespace it stands
+// for — or null.
+//
+// PROVENANCE IS THE GATE (2026-08-19, audit I4′). Before this, the heal claimed
+// ANY single trailing U+00A0, so a file authored elsewhere that uses U+00A0 for
+// CJK spacing lost one the first time that paragraph was touched: the kernel
+// rewriting a character it never wrote, which is the failure it exists to
+// prevent. `marks` is the document's session-scoped ledger
+// (markdown-document.js): only a run this kernel itself wrote — and that the
+// ledger still vouches for byte-for-byte — is claimed, and the recorded ASCII is
+// what the heal restores, so nothing is guessed about which key was pressed.
+// A document with no ledger (a file just opened, a hand-built test map) claims
+// NOTHING; that is the fail-closed direction, and it is why the argument has no
+// permissive default.
+//
+// The run must be exactly ONE unit for now — see `spellBlockTailInsert`'s header
+// for why, and for what a longer (Tab-written) run does instead.
+export const healableTrailingSpace = (text, charMap, marks = null) => {
   const units = charMap?.units
   if (!Array.isArray(units) || !units.length) return null
   const last = units[units.length - 1]
@@ -193,7 +210,11 @@ export const healableTrailingSpace = (text, charMap) => {
   const previous = units[units.length - 2]
   if (previous && previous.kind === 'char' &&
       text.slice(previous.rawStart, previous.rawEnd) === NO_BREAK_SPACE) return null
-  return { rawStart: last.rawStart, rawEnd: last.rawEnd }
+  const mark = (marks || []).find(
+    (entry) => entry?.from === last.rawStart && entry?.to === last.rawEnd
+  )
+  if (!mark) return null
+  return { rawStart: last.rawStart, rawEnd: last.rawEnd, ascii: mark.ascii }
 }
 
 // Is `after` reachable from `before` by replacing exactly ONE contiguous run
@@ -352,8 +373,13 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
     ? insert.slice(0, insert.length - trailingRun.length) + spelledRun
     : null
   const needsSpelling = !!written && literalTailIsStripped(text, block, offset)
+  // The caller's heal span is re-proven against the bytes AND against its own
+  // recorded spelling — a span that is not a pure U+00A0 run, or that claims to
+  // stand for something other than ASCII whitespace, is not healed.
   const healSpan = heal && heal.rawEnd === offset &&
-    text.slice(heal.rawStart, heal.rawEnd) === NO_BREAK_SPACE
+    Number.isInteger(heal.rawStart) && heal.rawStart < heal.rawEnd &&
+    NO_BREAK_RUN_RE.test(text.slice(heal.rawStart, heal.rawEnd)) &&
+    typeof heal.ascii === 'string' && ASCII_WHITESPACE_RE.test(heal.ascii)
     ? heal
     : null
   if (!needsSpelling && !healSpan) return NOT_STRUCTURAL
@@ -388,16 +414,24 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   // user the character they just typed.
   const attempts = []
   if (healSpan) {
-    if (!baselineText.endsWith(NO_BREAK_SPACE)) return NOT_STRUCTURAL
+    if (!NO_BREAK_RUN_RE.test(baselineText.slice(-(heal.rawEnd - heal.rawStart)))) return NOT_STRUCTURAL
+    // THE RECORDED ASCII, not a hardcoded space: the ledger says which key was
+    // pressed, so a Tab-written run restores a Tab rather than the kernel
+    // guessing between "one Tab" and "two Spaces".
+    const healed = healSpan.ascii
+    const runLength = healSpan.rawEnd - healSpan.rawStart
     attempts.push({
       from: healSpan.rawStart,
       to: healSpan.rawEnd,
-      write: ' ' + suffix,
-      expected: baselineText.slice(0, -1) + ' ' + suffix
+      write: healed + suffix,
+      expected: baselineText.slice(0, -runLength) + healed + suffix,
+      healedUnits: runLength
     })
   }
   if (needsSpelling) {
-    attempts.push({ from: offset, to: offset, write: written, expected: baselineText + written })
+    attempts.push({
+      from: offset, to: offset, write: written, expected: baselineText + written, healedUnits: 0
+    })
   }
 
   for (const attempt of attempts) {
@@ -407,18 +441,32 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
       baselineTree, block: baseline, candidate, expectedText: attempt.expected, delta
     })) continue
     const caret = attempt.from + attempt.write.length
+    // What this edit writes as U+00A0, in POST-edit coordinates, so the ledger
+    // can vouch for it on the NEXT keystroke. Only the re-spelled tail run is
+    // recorded; a heal that restores ASCII records nothing (and the entry it
+    // replaced is dropped by the remap, because the edit covers it).
+    const marks = needsSpelling
+      ? [{
+          from: attempt.from + attempt.write.length - spelledRun.length,
+          to: attempt.from + attempt.write.length,
+          ascii: trailingRun
+        }]
+      : []
     return {
       ok: true,
       spelling: needsSpelling ? 'no-break-space' : 'literal',
       healed: attempt.to > attempt.from,
+      healedUnits: attempt.healedUnits,
       edit: { from: attempt.from, to: attempt.to, insert: attempt.write },
+      whitespaceMarks: marks,
       transaction: {
         baseRevision: doc.revision,
         from: attempt.from,
         to: attempt.to,
         insert: attempt.write,
         intent: 'block-trailing-whitespace',
-        selection: { anchor: caret, head: caret }
+        selection: { anchor: caret, head: caret },
+        whitespaceMarks: marks
       }
     }
   }
@@ -583,16 +631,22 @@ export function spellBlockTailDelete({ doc, block, charMap, from, to, insert = '
   })
   if (!proven) return UNSUPPORTED
   const caret = editFrom + written.length
+  // The re-spelled byte joins the document's provenance ledger exactly like an
+  // inserted one (markdown-document.js): it stands for the ASCII space that was
+  // there before this delete, so the next character heals it back to that space.
+  const marks = [{ from: newEnd - 1, to: newEnd, ascii: ' ' }]
   return {
     ok: true,
     edit: { from: editFrom, to: editTo, insert: written },
+    whitespaceMarks: marks,
     transaction: {
       baseRevision: doc.revision,
       from: editFrom,
       to: editTo,
       insert: written,
       intent: 'block-trailing-whitespace-delete',
-      selection: { anchor: caret, head: caret }
+      selection: { anchor: caret, head: caret },
+      whitespaceMarks: marks
     }
   }
 }

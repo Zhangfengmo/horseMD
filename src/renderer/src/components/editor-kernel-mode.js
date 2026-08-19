@@ -1317,11 +1317,12 @@ export function createKernelMode({
     let healFrom = rawFrom
     let healTo = rawTo
     let healInsert = insert
+    let healMarks = null
     if (!virtualBlock && rawFrom === rawTo && typeof kernel.map?.pairAt === 'function' &&
         Number.isFinite(pmFrom)) {
       const pair = kernel.map.pairAt(pmFrom)
       if (pair && !pair.virtual && pair.charMap && pair.mdBlock) {
-        const heal = healableTrailingSpace(kernel.doc.text, pair.charMap)
+        const heal = healableTrailingSpace(kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks)
         const stripped = literalTailIsStripped(kernel.doc.text, pair.mdBlock, rawFrom)
         if ((heal && heal.rawEnd === rawFrom) || stripped) {
           const routed = spellBlockTailInsert({
@@ -1335,6 +1336,7 @@ export function createKernelMode({
             healFrom = routed.edit.from
             healTo = routed.edit.to
             healInsert = routed.edit.insert
+            healMarks = routed.whitespaceMarks
           } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
             // The trailing byte IS one CommonMark discards and no surviving
             // spelling could be proven: refuse rather than commit it. The
@@ -1351,7 +1353,8 @@ export function createKernelMode({
       from: healFrom,
       to: healTo,
       insert: healInsert,
-      intent: 'ime-commit'
+      intent: 'ime-commit',
+      ...(healMarks?.length ? { whitespaceMarks: healMarks } : {})
     }, view)
     kernel.history.breakGroup()
     return applied
@@ -1453,7 +1456,7 @@ export function createKernelMode({
     // Only an APPEND at the block's visible end can be the stripped position.
     if (!Number.isFinite(insertAt) || insertAt < last.rawEnd) return 'skip'
     const text = kernel.doc.text
-    const heal = healableTrailingSpace(text, pair.charMap)
+    const heal = healableTrailingSpace(text, pair.charMap, kernel.doc.whitespaceMarks)
     if (!literalTailIsStripped(text, pair.mdBlock, insertAt) &&
         !(heal && heal.rawEnd === insertAt)) return 'skip'
     const routed = spellBlockTailInsert({

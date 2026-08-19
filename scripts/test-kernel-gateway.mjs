@@ -3173,17 +3173,24 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     return out.join('')
   }
   // Type ONE character at PM position `at` and return the committed bytes.
-  const type = (markdown, pmDoc, at, ch) => {
+  //
+  // `marks` is the document's whitespace PROVENANCE ledger
+  // (markdown-document.js): the heal may only ever rewrite a U+00A0 this kernel
+  // itself wrote, so a sequence must carry it forward exactly as the live
+  // controller does (`kernel.doc` is one object across keystrokes). It defaults
+  // to the empty ledger a freshly opened file has.
+  const type = (markdown, pmDoc, at, ch, marks = []) => {
     const state = EditorState.create({ schema, doc: pmDoc })
     const map = buildProjectionMap(markdown, state.doc)
     assert.ok(map, 'the fixture must map')
     const tr = state.tr.insertText(ch, at)
     assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
-    const kernel = { doc: createMarkdownDocument(markdown) }
+    const kernel = { doc: { ...createMarkdownDocument(markdown), whitespaceMarks: marks } }
     const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
     return committed.ok
       ? {
           bytes: committed.applied.doc.text,
+          marks: committed.applied.doc.whitespaceMarks,
           edits: committed.transaction.edits,
           observability: committed.observability
         }
@@ -3222,7 +3229,7 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     assert.equal(first.bytes, '末段。a' + NBSP + '\n', 'the space must be written as real whitespace')
     assert.ok(!/&[#a-zA-Z0-9]+;/.test(first.bytes), 'and never as a character reference')
     assert.equal(decoded(first.bytes), '末段。a' + NBSP, 'it must be OBSERVABLE in the reparse')
-    const second = type(first.bytes, doc(p(text('末段。a' + NBSP))), 6, 'b')
+    const second = type(first.bytes, doc(p(text('末段。a' + NBSP))), 6, 'b', first.marks)
     assert.equal(second.bytes, '末段。a b\n', 'the no-break space must heal to an ordinary space')
     assert.equal(decoded(second.bytes), '末段。a b')
     assert.deepEqual(second.edits, [{ from: 4, to: 5, insert: ' b' }],
@@ -3310,7 +3317,8 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
     assert.equal(result.bytes, '## ' + NBSP + '\n')
     // …and the NEXT character must NOT heal it away: an ordinary space there
     // would be eaten by the ATX marker's own spacing run again.
-    const next = type(result.bytes, doc(schema.node('heading', { level: 2 }, [text(NBSP)])), 2, '乙')
+    const next = type(result.bytes, doc(schema.node('heading', { level: 2 }, [text(NBSP)])), 2, '乙',
+      result.marks)
     assert.equal(next.bytes, '## ' + NBSP + '乙\n',
       'the heading\'s leading no-break space must survive the next keystroke')
     assert.equal(decoded(next.bytes), NBSP + '乙')
@@ -3614,20 +3622,27 @@ console.log('PASS kernel gateway (delete side: a delete that blanks a line insid
   }
 
   // N1: the repro. Backspace re-spells the stranded space U+00A0 in the SAME
-  // edit, so bytes and view still agree.
+  // edit, so bytes and view still agree — and RECORDS it in the document's
+  // whitespace provenance ledger, which is what lets N2 heal it.
+  let strandedMarks = null
   {
     const { committed } = del('ab c\n', doc(p(text('ab c'))), 4, 5)
     assert.equal(committed.ok, true, committed.code)
     assert.equal(committed.applied.doc.text, 'ab' + NBSP + '\n')
+    strandedMarks = committed.applied.doc.whitespaceMarks
+    assert.deepEqual(strandedMarks, [{ from: 2, to: 3, ascii: ' ' }],
+      're-spelling a stranded space records it as this kernel\'s own')
   }
   // N2: …and the NEXT character heals it straight back to an ordinary space, so
-  // the user's `ab d` is what lands on disk.
+  // the user's `ab d` is what lands on disk. The ledger is carried forward
+  // exactly as the live controller does (`kernel.doc` is one object across
+  // keystrokes).
   {
     const md = 'ab' + NBSP + '\n'
     const state = EditorState.create({ schema, doc: doc(p(text('ab' + NBSP))) })
     const map = buildProjectionMap(md, state.doc)
     assert.ok(map)
-    const kernel = { doc: createMarkdownDocument(md) }
+    const kernel = { doc: { ...createMarkdownDocument(md), whitespaceMarks: strandedMarks } }
     const committed = commitPlainText({
       kernel, map, transactions: [state.tr.insertText('d', 4)], oldState: state
     })
@@ -3687,7 +3702,12 @@ console.log('PASS kernel gateway (delete that strands a block-trailing space: re
   const state = EditorState.create({ schema, doc: doc(p(text('HorseMD' + NBSP))) })
   const map = buildProjectionMap(md, state.doc)
   assert.ok(map)
-  const kernel = { doc: createMarkdownDocument(md) }
+  // The ledger says this U+00A0 is the one THIS kernel wrote for the Space the
+  // user pressed a keystroke earlier (markdown-document.js) — without
+  // provenance the heal would not claim it, and must not.
+  const kernel = {
+    doc: { ...createMarkdownDocument(md), whitespaceMarks: [{ from: 7, to: 8, ascii: ' ' }] }
+  }
   const committed = commitPlainText({
     kernel, map, transactions: [state.tr.insertText('是一个编辑器', 9)], oldState: state
   })
@@ -3867,3 +3887,44 @@ console.log('PASS kernel gateway (multi-step batched deletes: composed line-blan
 }
 
 console.log('PASS kernel gateway (an insert ENDING in whitespace at a block end is re-spelled, not written dead; code blocks and non-trailing inserts untouched)')
+
+// --- S: THE HEAL'S PROVENANCE (2026-08-19, audit open item I4′) --------------
+//
+// The heal claimed ANY single trailing U+00A0, so a file authored elsewhere that
+// uses U+00A0 for CJK spacing lost one the moment its paragraph was touched —
+// this kernel rewriting a character it never wrote, which is the failure it
+// exists to prevent. The document now carries a session-scoped ledger of the
+// U+00A0 runs THIS kernel wrote (markdown-document.js), and nothing else is
+// claimed. Nothing is written to the file: a reopened document starts with an
+// empty ledger, so its U+00A0 are all the author's.
+{
+  const NBSP = ' '
+  const typeInto = (markdown, pmDoc, at, ch, marks) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, 'the fixture must map')
+    const kernel = { doc: { ...createMarkdownDocument(markdown), whitespaceMarks: marks } }
+    return commitPlainText({
+      kernel, map, transactions: [state.tr.insertText(ch, at)], oldState: state
+    })
+  }
+  const md = '甲' + NBSP + '\n'
+  const pmDoc = doc(p(text('甲' + NBSP)))
+
+  // S1: a file just opened — empty ledger, so the author's U+00A0 survives.
+  {
+    const committed = typeInto(md, pmDoc, 3, '乙', [])
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '甲' + NBSP + '乙\n',
+      "a U+00A0 this kernel did not write must never be rewritten")
+  }
+  // S2: byte-identical document, but the ledger says the kernel wrote it — then
+  // and only then does it heal back to the ASCII space that was pressed.
+  {
+    const committed = typeInto(md, pmDoc, 3, '乙', [{ from: 1, to: 2, ascii: ' ' }])
+    assert.equal(committed.ok, true, committed.code)
+    assert.equal(committed.applied.doc.text, '甲 乙\n')
+  }
+}
+
+console.log('PASS kernel gateway (the heal is scoped to the U+00A0 this session wrote; an authored one survives editing)')
