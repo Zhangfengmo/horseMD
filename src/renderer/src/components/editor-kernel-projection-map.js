@@ -366,6 +366,19 @@ function flattenMd(tree, index) {
         result.push({ syntheticEmptyItemParagraph: true, item })
         return
       }
+      // An EMPTY BLOCKQUOTE ('>' alone on its line) is the same shape one
+      // container over, and it was the reason `/quote` could never succeed:
+      // mdast gives the blockquote ZERO children, ProseMirror's `blockquote` is
+      // `content: "block+"` and the transformer's `createAndFill` therefore
+      // fills one empty paragraph in, so the PM side always had one node more
+      // than the mdast side. Unsynthesized, that mismatch rejected the WHOLE
+      // map — which is why `runQuoteToggleFromQuery` had to refuse a shape
+      // whose bytes were perfectly correct, and why ANY document containing a
+      // bare '>' line silently degraded to legacy in its entirety.
+      if (node.type === 'blockquote' && (!node.children || node.children.length === 0)) {
+        result.push({ syntheticEmptyQuoteParagraph: true, node })
+        return
+      }
     }
     for (const child of node.children || []) walk(child)
   }
@@ -415,6 +428,30 @@ const virtualCharMap = (rawOffset) => {
 //
 // Returns null (never a number) when the shape is not provable, so the caller
 // can keep its existing fail-closed branch.
+// An EMPTY BLOCKQUOTE's content start, derived from its own raw bytes exactly
+// as the empty-heading rule above derives a heading's — no text search, no
+// guess, just CommonMark's block-quote grammar: the marker is up to 3 spaces of
+// indentation, one '>', and OPTIONALLY one space or tab, all of which the parser
+// consumes. Typing at the offset right after that prefix commits '> x' (or
+// '>x'), which reparses as the same blockquote holding one paragraph.
+//
+// The marker (plus its one optional space) must be the WHOLE first line. A line
+// like '>  ' (two spaces) is refused rather than anchored: only the first space
+// belongs to the marker, so typed text would land after a space the paragraph
+// then strips — a dead byte, which is precisely what this kernel must not
+// write. Such a blockquote stays read-only (charMap null), fail-closed.
+const EMPTY_QUOTE_MARKER_RE = /^ {0,3}>[ \t]?/
+const emptyQuoteContentStart = (markdown, node) => {
+  const start = node?.position?.start?.offset
+  const end = node?.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null
+  let lineEnd = start
+  while (lineEnd < end && markdown[lineEnd] !== '\n' && markdown[lineEnd] !== '\r') lineEnd += 1
+  const opening = markdown.slice(start, lineEnd).match(EMPTY_QUOTE_MARKER_RE)
+  if (!opening) return null
+  return start + opening[0].length === lineEnd ? lineEnd : null
+}
+
 const EMPTY_ATX_HEADING_RE = /^ {0,3}#{1,6}[ \t]+$/
 const emptyAtxHeadingContentStart = (markdown, md) => {
   if (md?.type !== 'heading') return null
@@ -631,6 +668,24 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     // valid item). A bare marker with no spacing ('-') would turn typed text
     // into '-x', which is not a list item at all — that pairing stays
     // non-editable (typing there is refused, fail-closed).
+    // Synthetic wrapper for an EMPTY BLOCKQUOTE's PM auto-filled paragraph (see
+    // flattenMd). Editable exactly when the marker prefix is provable from the
+    // bytes — see `emptyQuoteContentStart` for the one shape it refuses and why.
+    if (md.syntheticEmptyQuoteParagraph) {
+      if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
+      const anchor = emptyQuoteContentStart(markdown, md.node)
+      const editable = Number.isInteger(anchor)
+      blockPairs.push({
+        mdBlock: null,
+        pmNode: pm.node,
+        pmPos: pm.pos,
+        charMap: editable ? virtualCharMap(anchor) : null,
+        virtual: editable,
+        insertPrefix: editable ? '' : undefined
+      })
+      continue
+    }
+
     if (md.syntheticEmptyItemParagraph) {
       if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
       const item = md.item

@@ -2128,4 +2128,56 @@ const fm = (value) => schema.node('frontmatter', { value })
     'a source yaml block with no PM counterpart rejects the map')
 }
 
+// Q1-Q4: THE EMPTY BLOCKQUOTE (2026-08-19). mdast gives a '>' line ZERO
+// children; ProseMirror's `blockquote` is `content: "block+"` and the Milkdown
+// transformer's `createAndFill` always puts an empty paragraph inside — so the
+// PM side had one node more than the mdast side and the WHOLE map was rejected.
+// Two consequences, both real: `/quote` (which commits exactly these bytes)
+// could never succeed, and ANY document merely CONTAINING a bare '>' line
+// degraded to legacy in its entirety.
+//
+// Synthesized exactly like an empty list item's auto-filled paragraph: a
+// VIRTUAL editable pair anchored right after the marker.
+{
+  const bq = (...c) => schema.node('blockquote', null, c)
+
+  // Q1: the bare marker. The anchor is the offset right after '>', which is
+  // where typed text must land ('>' + 'x' -> '>x', still one blockquote).
+  {
+    const map = buildProjectionMap('>\n', doc(bq(p())))
+    assert.ok(map, 'an empty blockquote must not reject the map')
+    const pair = map.blockPairs[map.blockPairs.length - 1]
+    assert.equal(pair.virtual, true)
+    assert.equal(pair.charMap.visibleToRaw(0), 1, 'the anchor sits after the marker')
+    assert.equal(pair.insertPrefix, '', 'no separator bytes: the line is already the quote')
+  }
+  // Q2: the marker's one optional space is part of the marker, so the anchor
+  // moves past it.
+  {
+    const map = buildProjectionMap('> \n', doc(bq(p())))
+    assert.ok(map)
+    assert.equal(map.blockPairs[map.blockPairs.length - 1].charMap.visibleToRaw(0), 2)
+  }
+  // Q3: FAIL-CLOSED on the shape whose anchor is not provable. Only the FIRST
+  // space belongs to the marker, so text typed after a second one would land
+  // behind a byte the paragraph then strips — the dead byte this kernel must
+  // never write. That blockquote stays read-only instead.
+  {
+    const map = buildProjectionMap('>  \n', doc(bq(p())))
+    assert.ok(map, 'the document still maps')
+    const pair = map.blockPairs[map.blockPairs.length - 1]
+    assert.equal(pair.charMap, null, 'but the quote itself is not typable')
+    assert.equal(pair.virtual, false)
+  }
+  // Q4: the rest of the document keeps its own map — this was the wider
+  // regression: one bare '>' line used to take the whole file to legacy.
+  {
+    const md = '甲\n\n>\n\n乙\n'
+    const map = buildProjectionMap(md, doc(p(text('甲')), bq(p()), p(text('乙'))))
+    assert.ok(map, 'a mid-document empty blockquote must not reject the map')
+    assert.equal(map.pmPosToRaw(1), 0)
+    assert.equal(md.slice(map.pmPosToRaw(8), map.pmPosToRaw(8) + 1), '乙')
+  }
+}
+
 console.log('PASS kernel projection map (front matter pairs, stays read-only)')

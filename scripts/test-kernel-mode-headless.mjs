@@ -2256,33 +2256,49 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, bytesBefore, 'the controls committed nothing either')
 }
 
-// Case 20 (P5-2.5 review item 6): `requireMap`'s OTHER caller,
-// `runQuoteToggleFromQuery`, was only pinned by the UI suite. It refuses
-// fail-closed: the bytes it would commit ('>' alone on its line) reparse to a
-// blockquote with ZERO mdast children while ProseMirror's `block+` blockquote
-// always holds at least an empty paragraph — pmBlocks 2 vs mdBlocks 1, a
-// COUNT mismatch, so the whole map is null and the guard's FIRST half
-// refuses. (The anchor half P5-2.5 added is unreachable for this command:
-// its result document can never build a map at all. It is exercised by the
-// highlight route — Case M4 — instead.)
+// Case 20 (2026-08-19): `/quote` COMMITS. This case used to pin the opposite —
+// the command had never once succeeded since it was written, because the bytes
+// it commits ('>' alone on its line) reparse to a blockquote with ZERO mdast
+// children while ProseMirror's `block+` blockquote always holds at least an
+// empty paragraph: pmBlocks 2 vs mdBlocks 1, a COUNT mismatch, so the whole map
+// was null and `requireMap` refused. The menu therefore offered an item that
+// could only ever fail.
+//
+// The mismatch is now synthesized exactly like an empty list item's
+// (editor-kernel-projection-map.js `syntheticEmptyQuoteParagraph`), so the
+// result document maps, the caret has a provable home, and the follow-up
+// keystroke commits — which is the whole point: a block the kernel creates but
+// cannot map would be read-only, i.e. worse than a refused menu item.
 {
-  globalThis.__hmKernelDiagnostics = []
   const h = makeHarness('/quote\n', doc(p(text('/quote'))))
   assert.equal(h.controller.attachAfterCreate(), true)
   // Caret at the end of the query text, which is what `shouldShow` guarantees.
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
-  const before = h.notifications.length
   assert.equal(h.controller.runQuoteToggleFromQuery(h.view), true,
-    'the slash item always swallows the invocation, success or refusal')
-  assert.equal(h.controller.kernel.doc.text, '/quote\n', 'kernel bytes untouched')
-  assert.ok(h.view.state.doc.eq(doc(p(text('/quote')))), 'view untouched')
-  assert.ok(h.controller.kernel.map, 'the CURRENT map is untouched too (no lock-up)')
-  assert.ok(h.notifications.length > before, 'the refusal notifies')
-  assert.ok(
-    globalThis.__hmKernelDiagnostics.some((entry) =>
-      entry.type === 'projection-unmappable-refused' && entry.intent === 'wrap-blockquote'),
-    'the pre-commit map guard is the refusing party'
-  )
+    'the slash item always swallows the invocation')
+  assert.equal(h.controller.kernel.doc.text, '>\n',
+    'the query bytes became a real, empty blockquote in ONE commit')
+  // The trailing empty paragraph is `withTrailingParagraph`'s own append after a
+  // non-paragraph final block, the same convention every list/code fixture in
+  // this file uses.
+  assert.ok(h.view.state.doc.eq(doc(bq(p()), p())),
+    'view reconciled to an empty blockquote')
+  assert.ok(h.controller.kernel.map, 'the result document maps')
+  assert.equal(h.view.state.selection.head, 2, 'caret sits inside the quote')
+
+  // The follow-up keystroke: an ordinary plain-text commit through the empty
+  // quote's derived single-point anchor.
+  const oldState = h.view.state
+  assert.equal(dispatchThrough(h, oldState.tr.insertText('x', 2)), undefined,
+    'typing into the new blockquote is NOT vetoed')
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '>x\n', 'the text lands after the marker')
+
+  // Undo reverses the whole conversion in one step.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '>\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/quote\n', 'the original query bytes come back')
 }
 
 // Case 21 (Plan 5 Task 4): typing inside a GFM table CELL commits byte-exact

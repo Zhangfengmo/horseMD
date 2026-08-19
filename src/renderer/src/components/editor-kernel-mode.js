@@ -1957,19 +1957,28 @@ export function createKernelMode({
       intent: 'wrap-blockquote',
       selection: { anchor: queryStart + 1, head: queryStart + 1 }
     }
-    // `requireMap: true` (deeper architectural finding, probed): a bare '>'
-    // marker with nothing else on its line reparses to a blockquote mdast
-    // node with ZERO children (`processor.parse('> \n')` — confirmed
-    // directly) — but ProseMirror's blockquote schema is `content: "block+"`
-    // and can never hold zero children, so this ONE shape (a blockquote
-    // whose ENTIRE content is empty) can never round-trip through the
-    // projection map no matter how the edit is built; legacy's
-    // `wrapInBlockTypeCommand` never hits this because it wraps the LIVE PM
-    // node directly (an empty paragraph already satisfies "block+"), with no
-    // byte reparse involved. Refusing here (fail-closed, same pattern as
-    // highlight's M4 pin) keeps this command's failure mode "nothing
-    // happens, toast shown" instead of committing byte-correct-but-then
-    // silently degrading `kernel.map` to null.
+    // WHY THIS COMMAND USED TO BE UNREACHABLE, AND WHAT CHANGED (2026-08-19).
+    // A bare '>' marker with nothing else on its line reparses to a blockquote
+    // mdast node with ZERO children, while ProseMirror's blockquote schema is
+    // `content: "block+"` and the Milkdown transformer's `createAndFill` always
+    // gives it an empty paragraph. That was a COUNT mismatch (2 PM blocks vs 1
+    // mdast block), so the result document's map was null and `requireMap`
+    // refused — every single time. The item was enabled in the slash menu and
+    // had never once succeeded.
+    //
+    // The mismatch is now synthesized in editor-kernel-projection-map.js
+    // (`syntheticEmptyQuoteParagraph`), exactly as the identical shape one
+    // container over — an empty list item's auto-filled paragraph — has always
+    // been: the empty blockquote pairs as a VIRTUAL editable block anchored at
+    // the raw offset right after its marker, so the caret has a provable home
+    // and the next keystroke commits '>x'. (It also un-degrades every document
+    // that merely CONTAINS a bare '>' line: before, that one node rejected the
+    // whole map and dropped the file to legacy.)
+    //
+    // `requireMap: true` stays, and is now a real gate rather than a permanent
+    // refusal: it proves, pre-commit, that the RESULT document maps AND that
+    // this command's own caret anchor resolves through it, leaving bytes,
+    // history and view untouched if it does not.
     applyKernelTransaction(combined, view, { requireMap: true })
     return true
   }
