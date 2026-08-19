@@ -2180,4 +2180,59 @@ const fm = (value) => schema.node('frontmatter', { value })
   }
 }
 
+// ===========================================================================
+// KNOWN LIMITATION, PINNED (2026-08-20) — A CRLF SOFT-WRAPPED BLOCK DEGRADES
+// ===========================================================================
+// Not a contract: a RECORD of a defect this task deliberately did not fix, so
+// the follow-up starts from a locked measurement instead of a rediscovery.
+//
+// `textUnits` (lib/source-kernel/character-map.js) treats the '\r' of a CRLF
+// soft break as an ordinary width-1 `char` unit and only the '\n' as the
+// `linebreak` — pinned per shape in scripts/test-source-kernel-charmap.mjs. The
+// editor's ProseMirror holds ONE character for that line ending, so the block's
+// `visibleLength` is `content.size + 1` per soft break, the size check below
+// nulls its charMap, and the block is read-only.
+//
+// It hits LISTS hardest and that is how it reached a user report: a bullet item
+// that wraps onto a continuation line is the everyday shape, so in a CRLF file
+// such an item cannot be typed in and Tab there says 「只读」 — correctly, but
+// about a block that should never have degraded. Measured in the built app on
+// '- 项乙二\r\n  续行乙': the status line reports 「部分块只读」 at load, before any
+// gesture. The LF spelling of the same document is fully editable (asserted
+// here as the control, so the pin cannot silently become vacuous).
+//
+// The fix is a genuine WIDENING (a CRLF pair is one line ending, hence one
+// width-1 `linebreak` unit spanning both bytes plus any continuation prefix),
+// but it rewrites the unit model for every CRLF block and must be landed with
+// the full CRLF battery — `splitsCrlfPair`/`bisectsLineEnding`, the U+00A0 heal
+// ledger, code-map and table-map — not as a rider on another change.
+{
+  const listDoc = (s) => doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(text(s))])
+  ]))
+  // CONTROL: the LF spelling maps and is editable.
+  {
+    const md = '- 甲\n  乙\n'
+    const map = buildProjectionMap(md, listDoc('甲\n乙'))
+    assert.ok(map, 'the LF soft-wrapped list item maps')
+    const pair = map.blockPairs[map.blockPairs.length - 1]
+    assert.equal(pair.pmNode.type.name, 'paragraph')
+    assert.ok(pair.charMap, 'and is editable — the wrapped item itself is not the problem')
+  }
+  // THE LIMITATION: the same item spelled with CRLF degrades to read-only.
+  {
+    const md = '- 甲\r\n  乙\r\n'
+    const map = buildProjectionMap(md, listDoc('甲\n乙'))
+    assert.ok(map, 'the document still maps — only the one block degrades')
+    const pair = map.blockPairs[map.blockPairs.length - 1]
+    assert.equal(pair.pmNode.type.name, 'paragraph')
+    assert.equal(pair.charMap, null,
+      'KNOWN LIMITATION: a CRLF soft-wrapped list item is read-only. If this ' +
+      'now carries a charMap, the widening landed — delete this pin.')
+    assert.equal(buildCharacterMap(md, map.blockPairs[map.blockPairs.length - 1].mdBlock).visibleLength,
+      pair.pmNode.content.size + 1,
+      'and the cause is exactly one extra unit per CRLF soft break')
+  }
+}
+
 console.log('PASS kernel projection map (front matter pairs, stays read-only)')

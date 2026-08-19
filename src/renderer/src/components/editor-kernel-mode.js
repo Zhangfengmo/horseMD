@@ -54,6 +54,7 @@ import {
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, isTypableTextblock } from './editor-kernel-gateway.js'
+import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
@@ -190,12 +191,22 @@ export function createKernelMode({
   // block-read-only toast never suppresses (or is suppressed by) a generic
   // one.
   const BLOCK_READ_ONLY = 'block-read-only'
-  const notifyBlockReadOnly = () => {
+  const notifyBlockReadOnly = (pair) => {
     // The diagnostic is pushed on EVERY refusal (no cooldown): it is the
     // machine-readable record a test/bug report needs, and suppressing it
     // would make a second refusal in the same window invisible. Only the
     // user-facing toast is rate-limited.
-    pushKernelDiagnostic({ type: BLOCK_READ_ONLY, revision: kernel.doc.revision })
+    //
+    // `block` names the PM node type the message is ABOUT (structural metadata,
+    // never content). Without it the diagnostic could not distinguish "the
+    // paragraph the caret is in is unprovable" from "the enclosing bullet_list
+    // was blamed" — which is exactly how the 2026-08-20 mis-attribution stayed
+    // invisible while its own diagnostic was being recorded.
+    pushKernelDiagnostic({
+      type: BLOCK_READ_ONLY,
+      revision: kernel.doc.revision,
+      block: pair?.pmNode?.type?.name ?? null
+    })
     const now = Date.now()
     if (now - (lastNotifyAt.get(BLOCK_READ_ONLY) || 0) < NOTIFY_COOLDOWN_MS) return
     lastNotifyAt.set(BLOCK_READ_ONLY, now)
@@ -204,29 +215,25 @@ export function createKernelMode({
       'This paragraph is read-only in the source kernel (its source could not be proven); the rest of the document still edits normally'
     ))
   }
-  // Is `pmPos` inside a REAL pair the projection map degraded to non-editable
-  // (`charMap: null`)? Resolved by the pair's own NODE span — a degraded pair
-  // has no charMap, so it has no content range to search with (`pairAt` skips
-  // it by design). Virtual pairs are excluded: a placeholder is never a
-  // "read-only block", and non-editable-by-construction leaves (table,
-  // image-block, block HTML, mermaid/latex/math code blocks) are reported the
-  // same way on purpose — from the user's seat they are the same situation:
-  // this block cannot be edited here, the rest of the document can.
-  const degradedPairAt = (pmPos) => {
-    if (!Number.isFinite(pmPos)) return null
-    for (const pair of kernel.map?.blockPairs || []) {
-      if (pair.charMap || pair.virtual) continue
-      const node = pair.pmNode
-      const size = node?.nodeSize
-      if (!Number.isFinite(size)) continue
-      if (pmPos > pair.pmPos && pmPos < pair.pmPos + size) return pair
-    }
-    return null
-  }
+  // Is `pmPos` inside a block that is READ-ONLY TO THE USER? Resolved by the
+  // pair's own NODE span (a degraded pair has no charMap, so it has no content
+  // range to search with — `pairAt` skips it by design), through the SAME
+  // predicate `getKernelStatus` counts with (lib/kernel-status.js
+  // `readOnlyPairAt`/`pairIsReadOnlyToUser`). It used to carry a private copy
+  // of the pre-2026-08-18 rule (`!charMap && !virtual`, first match wins),
+  // which answered YES for every list / list item / blockquote in the document
+  // and made a perfectly ordinary structural refusal inside a bullet list claim
+  // the paragraph was permanently unprovable — see that module's header for the
+  // measurement. Non-editable-by-construction leaves (table, image-block, block
+  // HTML, math) are still reported this way on purpose: from the user's seat
+  // they are the same situation.
+  const degradedPairAt = (pmPos) =>
+    readOnlyPairAt(kernel.map?.blockPairs, pmPos, isTypableTextblock)
   // Refusal reporter for the paths that hold a PM position: a degraded block
   // gets the block-scoped message, everything else keeps the generic one.
   const notifyRefusal = (code, pmPos) => {
-    if (degradedPairAt(pmPos)) notifyBlockReadOnly()
+    const pair = degradedPairAt(pmPos)
+    if (pair) notifyBlockReadOnly(pair)
     else notifyBlocked(code)
   }
   // Where a refused BATCH was trying to write, in `oldState` coordinates. The
@@ -469,25 +476,11 @@ export function createKernelMode({
   //     actually holds visible text. That keeps a `table` whose cells could not
   //     be zipped — genuinely readable, genuinely uneditable — in the count,
   //     while excluding every container and every content-less atom.
-  // `blockPairs` is in pre-order document order, so a pair's first nested pair,
-  // if it has one, is the very next entry — the containment test is O(1).
-  const pairIsReadOnlyToUser = (pair, next) => {
-    if (pair.virtual) return false
-    const node = pair.pmNode
-    if (!node) return false
-    if (node.isTextblock) return pair.charMap ? !isTypableTextblock(node) : true
-    if (pair.charMap) return false
-    const size = node.nodeSize
-    if (Number.isFinite(size) && next && Number.isFinite(next.pmPos) &&
-        next.pmPos > pair.pmPos && next.pmPos < pair.pmPos + size) {
-      return false // a nested pair speaks for this container's interior
-    }
-    try {
-      return !!node.textContent
-    } catch {
-      return false
-    }
-  }
+  // The rule itself lives in lib/kernel-status.js — the SAME function the
+  // per-block toast resolves through (`degradedPairAt` above), so the badge and
+  // the message cannot disagree. It was a private copy here until 2026-08-20,
+  // and the copy that stayed behind in `degradedPairAt` is precisely what
+  // drifted.
   const getKernelStatus = () => {
     if (disposed) return { state: 'off', readOnlyBlocks: 0, blocks: 0, reason: null }
     if (degraded) return { state: 'legacy', readOnlyBlocks: 0, blocks: 0, reason: degradeReason }
@@ -495,7 +488,7 @@ export function createKernelMode({
     const pairs = kernel.map?.blockPairs || []
     let readOnlyBlocks = 0
     for (let i = 0; i < pairs.length; i += 1) {
-      if (pairIsReadOnlyToUser(pairs[i], pairs[i + 1])) readOnlyBlocks += 1
+      if (pairIsReadOnlyToUser(pairs[i], pairs[i + 1], isTypableTextblock)) readOnlyBlocks += 1
     }
     return {
       state: readOnlyBlocks > 0 ? 'partial' : 'normal',

@@ -18,6 +18,8 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { toggleMark } from '@milkdown/prose/commands'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
+import { readOnlyPairAt } from '../src/renderer/src/lib/kernel-status.js'
+import { isTypableTextblock } from '../src/renderer/src/components/editor-kernel-gateway.js'
 import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
@@ -2052,6 +2054,122 @@ const toggleVia = (h, markType, from, to) => {
     `a non-degraded refusal keeps the generic message, got: ${g.notifications.at(-1)}`)
   assert.ok(!g.notifications.at(-1).includes('read-only'),
     'a non-degraded refusal must not claim the block is read-only')
+}
+
+// ===========================================================================
+// Case 16b (2026-08-20) — A REFUSAL INSIDE A CONTAINER IS NOT A READ-ONLY BLOCK
+// ===========================================================================
+// The user's report: 「Tab 和无序列表的搭配使用等还有问题,会报错「只读」」. Measured in
+// the built app: with the caret anywhere inside a bullet list, a refused
+// structural key raised 「此段落在内核模式下暂为只读（源码无法证明对应关系）」 while
+// the status line said, at the same instant, that every block was editable. The
+// recorded hits for that position were `bullet_list` and `list_item` — the
+// paragraph the caret was in had a perfectly good charMap.
+//
+// Cause: `degradedPairAt` (the toast's predicate) kept the pre-2026-08-18 rule
+// `!pair.charMap && !pair.virtual` and returned the FIRST match. `blockPairs`
+// carries one entry per structural node on both sides, containers included, and
+// a container is never a textblock — so it can never claim a charMap, always
+// answers yes, and (being pre-order) always comes first. The status COUNT had
+// been fixed for exactly this on 2026-08-18; the toast's copy had not.
+//
+// Case 16 above is the same control for a bare paragraph — which is why the bug
+// survived it: with no container in the document there was nothing to blame.
+{
+  // '- 甲' item1: bullet_list 0, list_item 1, paragraph 2 (content 3, '甲' at 3,
+  // ends 5), item ends 6. item2: list_item 6, paragraph 7 (content 8), ends 11.
+  // bullet_list ends 12; trailing paragraph '丙' at 12 (content 13).
+  const md = '- 甲\n- 乙\n\n丙\n'
+  const build = () => doc(
+    bl(li(null, p(text('甲'))), li(null, p(text('乙')))),
+    p(text('丙'))
+  )
+  const h = makeHarness(md, build())
+  assert.equal(h.controller.attachAfterCreate(), true, 'the list document must attach')
+  const pairs = h.controller.kernel.map.blockPairs
+  const byType = pairs.map((pair) => pair.pmNode.type.name)
+  assert.deepEqual(byType,
+    ['bullet_list', 'list_item', 'paragraph', 'list_item', 'paragraph', 'paragraph'],
+    'sanity: containers really do occupy pairs of their own')
+  for (const name of ['bullet_list', 'list_item']) {
+    assert.equal(pairs.find((pair) => pair.pmNode.type.name === name).charMap, null,
+      `sanity: a ${name} pair can never carry a charMap — that is why it must not be blamed`)
+  }
+  assert.equal(h.controller.getKernelStatus().readOnlyBlocks, 0,
+    'every block of this document is editable — the premise of the whole case')
+
+  // THE GESTURE: a selection anchored inside the FIRST list item's text and
+  // extended into the second item's — a cross-textblock range, which the
+  // gateway refuses outright. Its `batchTargetPos` is 4: strictly inside the
+  // bullet_list (0..12), the list_item (1..6) AND the paragraph (2..5).
+  const before = h.notifications.length
+  assert.deepEqual(dispatchThrough(h, h.view.state.tr.delete(4, 9)), { veto: true },
+    'a cross-block range step inside a list is refused')
+  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
+  assert.ok(!h.notifications.at(-1).includes('read-only'),
+    `a refusal inside a PROVEN list item must not claim it is read-only, got: ${h.notifications.at(-1)}`)
+  assert.ok(h.notifications.at(-1).includes('unsupported-input-type'),
+    `it keeps the generic message, got: ${h.notifications.at(-1)}`)
+
+  // The predicate itself, over the SAME real map: no position inside this
+  // document is read-only to the user — including every position strictly
+  // inside the containers, which is where the old rule answered yes.
+  for (let pmPos = 1; pmPos < h.view.state.doc.content.size; pmPos += 1) {
+    assert.equal(readOnlyPairAt(pairs, pmPos, isTypableTextblock), null,
+      `pm position ${pmPos} of a fully provable list document must not resolve to a read-only block`)
+  }
+}
+{
+  // Same shape one container over — a blockquote — because the defect is about
+  // CONTAINERS, not about lists, and a list-only regression would let the next
+  // container reintroduce it. Measured in the built app on the blockquote
+  // fixture too (a quote..paragraph selection + Tab said 只读).
+  // blockquote 0, paragraph 1 (content 2, '甲' at 2, ends 4), quote ends 5;
+  // paragraph '乙' at 5 (content 6).
+  const md = '> 甲\n\n乙\n'
+  const h = makeHarness(md, doc(bq(p(text('甲'))), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.equal(h.controller.getKernelStatus().readOnlyBlocks, 0)
+  const before = h.notifications.length
+  assert.deepEqual(dispatchThrough(h, h.view.state.tr.delete(3, 7)), { veto: true })
+  assert.ok(h.notifications.length > before)
+  assert.ok(!h.notifications.at(-1).includes('read-only'),
+    `a refusal inside a PROVEN blockquote must not claim it is read-only, got: ${h.notifications.at(-1)}`)
+}
+{
+  // THE OTHER DIRECTION, so the fix cannot be "never say read-only": a
+  // genuinely unprovable block INSIDE a list still reports itself, and the
+  // innermost pair — the paragraph, not the enclosing list — is the one named
+  // in the diagnostic. The unprovable block is the RED highlight paragraph
+  // Case 17 uses (kernel: one coalesced inline-html atom; PM: a 2-char marked
+  // run), here carried by a list item.
+  globalThis.__hmKernelDiagnostics = []
+  const RED = '<mark class="hm-hl-red">高亮</mark>'
+  const md = '- 甲\n- ' + RED + '\n'
+  const redP = () => p(schema.text('高亮', [schema.mark('highlight', { color: 'red' })]))
+  const h = makeHarness(md, doc(bl(li(null, p(text('甲'))), li(null, redP())), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const pairs = h.controller.kernel.map.blockPairs
+  const degraded = pairs.filter((pair) => pair.pmNode.isTextblock && !pair.charMap)
+  assert.equal(degraded.length, 1, 'exactly the highlight item degrades')
+  assert.equal(h.controller.getKernelStatus().readOnlyBlocks, 1,
+    'and it is counted — the fix must not silence a real degradation')
+  // pmPos inside the degraded paragraph resolves to IT, not to the list around it.
+  const inside = degraded[0].pmPos + 1
+  assert.equal(readOnlyPairAt(pairs, inside, isTypableTextblock)?.pmNode.type.name, 'paragraph',
+    'the innermost read-only pair is reported, never the enclosing container')
+  const before = h.notifications.length
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, inside)))
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true,
+    'Enter in the unprovable item is swallowed')
+  assert.ok(h.notifications.length > before, 'and surfaced')
+  assert.ok(h.notifications.at(-1).includes('read-only'),
+    `a genuinely unprovable list item must still say read-only, got: ${h.notifications.at(-1)}`)
+  const diag = globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'block-read-only')
+  assert.ok(diag.length >= 1, 'the refusal is diagnosable')
+  assert.equal(diag.at(-1).block, 'paragraph',
+    'the diagnostic names the block it is ABOUT — the missing evidence that let the mis-attribution hide')
 }
 
 // Case 17 (P5-2.5): a document containing ONE unprovable block attaches and
