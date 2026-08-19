@@ -102,6 +102,13 @@ const standalone = [
     script: 'scripts/test-source-transaction-sync.mjs'
   },
   {
+    // Legacy (non-kernel) path of the wedged-`updating` node-view defect
+    // ed60fe2 fixed: keystrokes reached CodeMirror and never the document.
+    name: 'Legacy mermaid commit: a diagram edit reaches the document and the file',
+    script: 'scripts/test-mermaid-legacy-commit-ui.mjs',
+    env: { CDP_PORT: '10052' }
+  },
+  {
     name: 'Transaction-first source sync: plain paragraph, quote, and list edits',
     script: 'scripts/test-transaction-source-sync-ui.mjs'
   },
