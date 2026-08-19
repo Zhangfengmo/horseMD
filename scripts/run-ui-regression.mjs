@@ -116,6 +116,17 @@ const standalone = [
     script: 'scripts/test-transaction-source-sync-ui.mjs'
   },
   {
+    // NOT a session test: it launches its own app twice (a cold reopen) and a
+    // second one for the legacy comparison, on its own port pair. It is also
+    // the FIDELITY WARRANT for scripts/test-kernel-combination-matrix.mjs —
+    // the headless matrix builds its ProseMirror documents from a replica of
+    // the editor's parse chain, and this script is what proves the replica
+    // still matches the running app.
+    name: 'Mode-switch over feature combinations: kernel and legacy rich<->source',
+    script: 'scripts/test-mode-switch-combination-ui.mjs',
+    env: { CDP_PORT: '10501' }
+  },
+  {
     name: 'Background CDP: no native focus and per-character input',
     script: 'scripts/test-background-cdp-ui.mjs'
   },
