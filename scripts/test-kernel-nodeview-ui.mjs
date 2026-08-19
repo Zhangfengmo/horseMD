@@ -263,12 +263,37 @@ const slashItems = (evaluate) => evaluate(`[
 // in editor-crepe-setup.js, h1–h6 + bullet + ordered, filtered through the
 // kernel's own `BLOCK_TYPE_MARKERS` — without updating this predicate, so
 // this assertion has been failing since that commit against the behaviour it
-// deliberately shipped. `task` and `divider` are excluded there on purpose
-// (the kernel refuses them), and so are text/image/code/table/math.
+// deliberately shipped.
+//
+// It then went stale a SECOND time, the same way: `e007a68` corrected it for
+// the block-type items, and five commits later `5ffae3a` + `484ea99` routed
+// `table`, `code` (plus every `code:<language>` variant) and `math` without
+// touching this list again. Twice is a pattern, not an accident — a hardcoded
+// mirror of a production table drifts every time that table grows, and
+// because `test:kernel-ui` is an `&&` chain with this script 4th, a stale
+// entry here ABORTS the suite before empty-fence, math-block, blocktype,
+// blockinsert, hardbreak and the whitespace tests ever run. A stale
+// expectation in this file therefore hides every later regression.
+//
+// The durable fix is to derive this from the production tables
+// (`KERNEL_BLOCK_TYPE_ITEMS` in editor-crepe-setup.js, `BLOCK_INSERT_TARGETS`
+// in lib/source-kernel/commands/block-insert.js) so the two cannot drift —
+// that refactor needs a pure shared module both sides can import, and is
+// tracked separately. Until then this list is a MIRROR: extend it in the same
+// commit that routes a new slash item.
+//
+// Anything absent is refused by the kernel on purpose: `task` and `divider`
+// are probed refusals, `text` yields an unrepresentable empty paragraph, and
+// `image` is an atom with no provable caret home.
 const KERNEL_ROUTED_SLASH_ITEMS = new Set([
-  'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered'
+  'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered',
+  'table', 'code', 'math'
 ])
-const isStructurallyBlocked = (item) => !KERNEL_ROUTED_SLASH_ITEMS.has(item.id)
+// `/js`, `/python`, … render as a dynamic `code:<language>` item that routes
+// through the same code-block insert as bare `/code`.
+const isStructurallyBlocked = (item) => !(
+  KERNEL_ROUTED_SLASH_ITEMS.has(item.id) || item.id.startsWith('code:')
+)
 
 async function click(send, point) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point })
