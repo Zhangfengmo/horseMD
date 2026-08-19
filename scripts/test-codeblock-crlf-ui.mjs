@@ -439,15 +439,22 @@ async function run() {
     // BREAK commit — that is the P3-4 churn symptom — so the window starts
     // here.
     //
-    // The reset is NOT blind: exactly ONE mismatch may have accumulated over
-    // the five characters of 'KTAIL'. Two or more would mean a plain
-    // single-char commit inside the CRLF block is itself churning, which is a
-    // real regression this stage must catch.
+    // The reset is NOT blind: ZERO mismatches may accumulate over the five
+    // characters of 'KTAIL'. Any at all would mean a plain single-char commit
+    // inside the CRLF block is itself churning, which is a real regression
+    // this stage must catch.
+    //
+    // This asserted exactly ONE until 4e43852: the heading-slug plugin
+    // re-dispatched a `setNodeMarkup` batch on every doc change, which the
+    // gateway could not classify, so a repair reconcile fired once and the
+    // plugin's restore step was then vetoed forever. Heading ids are not
+    // Markdown bytes, so that batch is now a proven pass-through and the
+    // quirk is gone — making this the stronger assertion, not a relaxed one.
     const preResetMismatches = JSON.parse(await evaluate(
       `JSON.stringify((window.__hmKernelDiagnostics || []).filter((entry) => entry.type === 'projection-mismatch'))`
     ))
-    assert.equal(preResetMismatches.length, 1,
-      `exactly one (heading-slug) projection repair may precede the break commits, got ${JSON.stringify(preResetMismatches)}`)
+    assert.equal(preResetMismatches.length, 0,
+      `no projection repair may precede the break commits, got ${JSON.stringify(preResetMismatches)}`)
     await evaluate(`(window.__hmKernelDiagnostics = []).length`)
 
     await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
