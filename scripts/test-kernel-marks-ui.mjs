@@ -88,11 +88,13 @@ const LINK_URL = 'https://x.example'
 const LINK_URL_2 = 'https://y.example'
 const AFTER_LINK = FIXTURE.replace('伍陆柒捌', `[伍陆柒捌](${LINK_URL})`)
 const AFTER_LINK_EDIT = FIXTURE.replace('伍陆柒捌', `[伍陆柒捌](${LINK_URL_2})`)
-// The /quote placeholder refusal (empty-blockquote projection guard) is
-// byte-neutral EXCEPT the "/quote" text itself, which the TYPING of the query
-// commits as ordinary plain text (only the WRAP click is refused).
+// `/quote` COMMITS since 2026-08-19 (before that it refused every time — the
+// empty-blockquote projection guard). Two byte states matter here: what the
+// TYPED query leaves in the source, and what the item's own kernel transaction
+// replaces it with (a real, empty blockquote).
 const AFTER_QUOTE_QUERY = AFTER_TYPING.replace('\n\nz\n\n', '\n\n/quote\n\n')
-const SAVED = AFTER_QUOTE_QUERY
+const AFTER_QUOTE_WRAP = AFTER_TYPING.replace('\n\nz\n\n', '\n\n>\n\n')
+const SAVED = AFTER_QUOTE_WRAP
 
 // ---- Plan 4 Task 5.5: right-click ctxmenu quote/unquote byte checkpoints ----
 // LEGACY (before kernel mode is ever enabled): a plain PM wrapIn/lift
@@ -102,16 +104,16 @@ const SAVED = AFTER_QUOTE_QUERY
 // exactly a "> " prefix on that one line (captured against the live app;
 // see task-5.5-report.md's derivation transcript).
 const LEGACY_AFTER_QUOTE = FIXTURE.replace('首段落用于占位说明。', '> 首段落用于占位说明。')
-// KERNEL (after step 9's redo x2, i.e. against AFTER_QUOTE_QUERY): a single
+// KERNEL (after step 9's redo chain, i.e. against AFTER_QUOTE_WRAP): a single
 // trailing paragraph wraps the same as test-source-kernel-quote.mjs's basic
 // case ("text\n" -> "> text\n"). The loose list (blank line between items)
 // wraps like that same file's loose-list case: the blank separator line
 // becomes a BARE '>' so the reparse stays one blockquote, not two.
-const KERNEL_PARA_QUOTED = AFTER_QUOTE_QUERY.replace('尾段落。', '> 尾段落。')
-const KERNEL_LIST_QUOTED = AFTER_QUOTE_QUERY.replace('- 列项一\n\n- 列项二', '> - 列项一\n>\n> - 列项二')
+const KERNEL_PARA_QUOTED = AFTER_QUOTE_WRAP.replace('尾段落。', '> 尾段落。')
+const KERNEL_LIST_QUOTED = AFTER_QUOTE_WRAP.replace('- 列项一\n\n- 列项二', '> - 列项一\n>\n> - 列项二')
 // Heading (minor ride-along): same shape as test-source-kernel-quote.mjs's
 // heading case ('# 头\n' -> '> # 头\n').
-const KERNEL_HEADING_QUOTED = AFTER_QUOTE_QUERY.replace('# 标题', '> # 标题')
+const KERNEL_HEADING_QUOTED = AFTER_QUOTE_WRAP.replace('# 标题', '> # 标题')
 
 async function waitFor(check, message, attempts = 80) {
   for (let index = 0; index < attempts; index += 1) {
@@ -717,15 +719,17 @@ async function run() {
     //    whose ENTIRE raw text is the typed query (shouldShow requires
     //    atEndOfBlock + text.startsWith('/') on the FULL block text — an
     //    existing populated paragraph, and any block inside a list
-    //    (isInList), can never reach this menu at all). On that one
-    //    reachable shape the wrap is a genuine architectural dead end (a
-    //    bare '>' marker with nothing else reparses to a ZERO-child mdast
-    //    blockquote, which ProseMirror's `content: "block+"` schema can
-    //    never represent) — this task's fix makes it refuse SAFELY
-    //    (fail-closed, requireMap) instead of the two real bugs found while
-    //    building this: embedding the literal query text, or silently
-    //    vanishing the paragraph. See task-5-report.md for the full probe
-    //    transcript.
+    //    (isInList), can never reach this menu at all).
+    //
+    //    THIS USED TO PIN A REFUSAL (2026-08-19). On that one reachable shape
+    //    the wrap was an architectural dead end: a bare '>' with nothing else
+    //    reparses to a ZERO-child mdast blockquote, while ProseMirror's
+    //    `content: "block+"` schema always holds the empty paragraph
+    //    `createAndFill` puts there, so the result document's map was a count
+    //    mismatch and `requireMap` refused — every time, on an item the menu
+    //    presented as enabled and ranked first. The mismatch is now synthesized
+    //    (editor-kernel-projection-map.js `syntheticEmptyQuoteParagraph`), so
+    //    the item commits a real, typable empty blockquote in ONE transaction.
     // ============================================================
     await selectRange(evaluate, send, 'z', 0, 1)
     await typeTextLikeUser(send, '/quote', { delayMs: delay })
@@ -741,8 +745,8 @@ async function run() {
     await click(send, quotePoint)
     await sleep(400)
     assert.equal(app.dialogs.length, 0, 'no dialog from the /quote refusal')
-    await assertSource(evaluate, AFTER_QUOTE_QUERY,
-      'the /quote wrap must be refused fail-closed: the typed query text commits as plain text, but no blockquote marker is added')
+    await assertSource(evaluate, AFTER_QUOTE_WRAP,
+      'the /quote item must replace the typed query bytes with a real empty blockquote, in one commit')
 
     // ============================================================
     // 8b) `/quote` inside the loose list never even opens the menu
@@ -759,11 +763,17 @@ async function run() {
     await sleep(200)
 
     // ============================================================
-    // 9) undo chain sanity — spot-check 2 discrete groups. The most recent
-    //    two kernel-history groups at this point are: the /quote query text
-    //    commit (step 8), and the far-plain 'Z' typed insert (step 5c) —
-    //    each undo must revert exactly ONE of them.
+    // 9) undo chain sanity — spot-check 3 discrete groups. The most recent
+    //    kernel-history groups at this point are: the /quote WRAP (step 8's
+    //    own single transaction), the /quote query text commit, and the
+    //    far-plain 'Z' typed insert (step 5c) — each undo must revert exactly
+    //    ONE of them.
     // ============================================================
+    await pressUndo(send) // reverts the /quote wrap
+    await sleep(250)
+    await assertSource(evaluate, AFTER_QUOTE_QUERY,
+      'undo #1 must revert exactly the /quote wrap, leaving the typed query bytes')
+
     await pressUndo(send) // reverts the /quote query text commit
     await sleep(250)
     await assertSource(evaluate, AFTER_TYPING, 'undo #1 must revert exactly the /quote query text group')
@@ -777,14 +787,16 @@ async function run() {
     await sleep(250)
     await pressRedo(send)
     await sleep(250)
-    await assertSource(evaluate, AFTER_QUOTE_QUERY, 'redo x2 must restore the pre-undo state exactly')
+    await pressRedo(send)
+    await sleep(250)
+    await assertSource(evaluate, AFTER_QUOTE_WRAP, 'redo x3 must restore the pre-undo state exactly')
 
     // ============================================================
     // 9a) KERNEL ctxmenu quote/unquote — a real, general UI entry point for
     //     the quote domain (Plan 4 Task 5.5). Runs AFTER the undo/redo
     //     assertions above (so it never disturbs that history-group
     //     scrutiny) and nets to zero bytes (wrap, assert, then unwrap,
-    //     assert back to AFTER_QUOTE_QUERY) so the save/reopen checks below
+    //     assert back to AFTER_QUOTE_WRAP) so the save/reopen checks below
     //     stay unaffected. Right-clicking the SAME (now-quoted) paragraph a
     //     second time is exactly "right-click inside the quote -> 取消引用
     //     -> unwrapped".
@@ -798,7 +810,7 @@ async function run() {
       const point2 = await pointAt(evaluate, '尾段落。', 0)
       await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
       assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu unquote')
-      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote must revert to the exact original bytes')
+      await assertSource(evaluate, AFTER_QUOTE_WRAP, 'kernel ctxmenu Unquote must revert to the exact original bytes')
     }
 
     // ============================================================
@@ -821,7 +833,7 @@ async function run() {
       const point2 = await pointAt(evaluate, '列项一', 0)
       await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
       assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu list unquote')
-      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote on the list must revert to the exact original bytes')
+      await assertSource(evaluate, AFTER_QUOTE_WRAP, 'kernel ctxmenu Unquote on the list must revert to the exact original bytes')
     }
 
     // ============================================================
@@ -837,7 +849,7 @@ async function run() {
       const point2 = await pointAt(evaluate, '标题', 0)
       await clickQuoteMenuItem(evaluate, send, point2, 'unquote')
       assert.equal(app.dialogs.length, 0, 'no dialog from the kernel ctxmenu heading unquote')
-      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'kernel ctxmenu Unquote on the heading must revert to the exact original bytes')
+      await assertSource(evaluate, AFTER_QUOTE_WRAP, 'kernel ctxmenu Unquote on the heading must revert to the exact original bytes')
     }
 
     // ============================================================
@@ -871,7 +883,7 @@ async function run() {
       const afterCode = await paragraphTexts(evaluate)
       assert.deepEqual(afterCode, beforeCode,
         'right-clicking inside a code block must never mutate the document, even when the menu is dismissed without a click')
-      await assertSource(evaluate, AFTER_QUOTE_QUERY, 'the code-block ctxmenu gating check must leave source bytes byte-identical')
+      await assertSource(evaluate, AFTER_QUOTE_WRAP, 'the code-block ctxmenu gating check must leave source bytes byte-identical')
     }
 
     // ============================================================
@@ -889,7 +901,10 @@ async function run() {
     ;({ evaluate, send } = app)
     await waitFor(async () => {
       const text = await mounted(evaluate)
-      return text && text.includes('quote') && text.includes('列项二') ? text : null
+      // The saved document's quote block is EMPTY (the '/quote' query bytes
+      // were replaced by a real blockquote), so there is no 'quote' text left
+      // to wait for — these two are the surviving landmarks.
+      return text && text.includes('尾段落。') && text.includes('列项二') ? text : null
     }, 'reopened document did not mount with the saved content')
     await toggleSourceMode(evaluate)
     const reopened = await waitFor(() => visibleSource(evaluate), 'source view did not appear after cold reopen')
