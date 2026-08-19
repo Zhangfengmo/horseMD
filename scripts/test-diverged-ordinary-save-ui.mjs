@@ -206,12 +206,22 @@ async function openApp(profile, file, appPort) {
     executable: packagedAppPath || undefined,
     entrypoint: packagedAppPath ? null : undefined
   })
-  await waitFor(
-    () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')]
-      .find((node) => node.offsetParent)?.textContent.includes('你还')`),
-    'diverged ordinary-save fixture did not mount'
-  )
-  await sleep(300)
+  // The mount wait can legitimately fail (stale build, fixture regression). If
+  // it throws, this function has not returned yet, so the caller's `finally`
+  // never sees the app — the launched Electron must be torn down HERE, or the
+  // zombie keeps holding the CDP port and every later run of this suite fails
+  // identically at launch (an un-reproducible-looking poisoned state).
+  try {
+    await waitFor(
+      () => app.evaluate(`!![...document.querySelectorAll('.ProseMirror')]
+        .find((node) => node.offsetParent)?.textContent.includes('你还')`),
+      'diverged ordinary-save fixture did not mount'
+    )
+    await sleep(300)
+  } catch (error) {
+    await stopBuiltElectron(app, { removeProfile: true }).catch(() => {})
+    throw error
+  }
   return app
 }
 
