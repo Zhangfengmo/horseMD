@@ -142,8 +142,17 @@ async function testTaskListInput() {
     // Task-list input rules are triggered while the user types: do not model
     // this as one paste transaction, or a regression in the intermediate
     // ordinary-list state stays invisible.
-    await typeTextLikeUser(app.send, '* [ ] ')
-    await typeTextLikeUser(app.send, '牛逼')
+    //
+    // The marker and its label are ONE typing stream, deliberately not two
+    // awaited calls. A label-less task is a documented rich-only transient: the
+    // app demotes it back to literal `[ ]` text at any durability boundary, and
+    // Editor.jsx's rich-dirty reconcile makes one of those fire 260 ms after the
+    // last edit (`demoteEmptyTaskItemsInView` via `flushMarkdown`). Every extra
+    // await between the closing `] ` and the first label character is another
+    // place a stalled test process can spend that budget and report an
+    // input-rule regression that never happened — measured: a 300 ms gap here
+    // fails 2/2, a 200 ms gap passes 2/2.
+    await typeTextLikeUser(app.send, '* [ ] 牛逼')
     await sleep(600)
 
     const snapshot = JSON.parse(await app.evaluate(`(() => {
