@@ -393,10 +393,38 @@ export function createKernelMode({
   // trailing chain); either way `splitPlaceholders` — this module's own
   // record of the CURRENT chain — is resynced to exactly what got vouched
   // here, so any caller that omits `pending` correctly ends the session.
-  const bindMap = (pmDoc, pending = null) => {
+  // Perf counters (perf assessment §9, 2026-08-21). Real work counts, not
+  // instrumentation guesses: `projectionMapBuilds` increments only when
+  // `buildProjectionMap` actually runs, `projectionMapReuses` only when a
+  // transaction-validated map is adopted without a rebuild. Exposed through
+  // `getPerfStats` so the headless suites can pin the duplicate-work fixes
+  // behaviorally (and so the next assessment can measure without probes).
+  const perfStats = {
+    projectionMapBuilds: 0,
+    projectionMapReuses: 0
+  }
+
+  const bindMap = (pmDoc, pending = null, reuse = null) => {
     const isChain = Array.isArray(pending)
     const list = isChain ? pending : (pending ? [pending] : [])
     splitPlaceholders = list
+    // Reuse the map the caller ALREADY built and validated for exactly this
+    // text/doc pair (perf assessment §9 #2): `applyKernelTransaction` builds
+    // `nextMap` from (result.doc.text, parsed) for its requireMap/anchor
+    // proofs, reconciles the view to `parsed`, then lands here — where the
+    // rebuild would construct the identical map a second time (~190 ms at
+    // 200 KB). Adoption is guarded by `pmDoc.eq(reuse.doc)`: the map is only
+    // served for a view doc VALUE-EQUAL to the parse it was proven against
+    // (kernel.doc.text is already `result.doc.text` by the time the caller
+    // gets here). A reconcile that failed or diverged makes `eq` false and
+    // falls through to the honest rebuild. Never combined with a placeholder
+    // voucher — `pending` implies a pairing `nextMap` was not built with.
+    if (!list.length && pmDoc && reuse?.map && reuse.doc && pmDoc.eq(reuse.doc)) {
+      kernel.map = reuse.map
+      perfStats.projectionMapReuses += 1
+      publishStatus()
+      return kernel.map
+    }
     // Preserve the CALLER's shape when forwarding to buildProjectionMap — do
     // NOT normalize a single object into a one-element `pendingPlaceholders`
     // array here. buildProjectionMap's chain-only trailing-floor self-check
@@ -417,6 +445,7 @@ export function createKernelMode({
       ? (list.length ? { pendingPlaceholders: list } : {})
       : (pending ? { pendingPlaceholder: pending } : {})
     kernel.map = pmDoc ? buildProjectionMap(kernel.doc.text, pmDoc, options) : null
+    if (pmDoc) perfStats.projectionMapBuilds += 1
     if (!kernel.map) {
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
       splitPlaceholders = []
@@ -1281,8 +1310,10 @@ export function createKernelMode({
     }
     // The map must be rebound to the reconciled doc BEFORE any further
     // caret work: rawToPmPos is only meaningful on a map built for this
-    // revision.
-    bindMap(view.state.doc)
+    // revision. When the reconcile landed the view exactly on `parsed`,
+    // the map validated above IS this revision's map — adopt it (see
+    // bindMap's reuse guard) instead of rebuilding it.
+    bindMap(view.state.doc, null, nextMap ? { map: nextMap, doc: parsed } : null)
     // MINIMAL-DIFF FALLBACK for a STRUCTURE-CHANGING edit (2026-08-20).
     // `reconcileProjection` replaces only the smallest differing range, which is
     // what preserves node-view identity everywhere else — but `tr.replace`
@@ -2789,6 +2820,9 @@ export function createKernelMode({
     isDegraded: () => degraded,
     // P6 Task 3: the observable-degradation state (see getKernelStatus).
     getKernelStatus,
+    // Perf counters (see perfStats above): a snapshot copy, never the live
+    // object — callers must not be able to write the counts.
+    getPerfStats: () => ({ ...perfStats }),
     composition,
     dispose
   }

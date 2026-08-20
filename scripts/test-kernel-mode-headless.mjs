@@ -3827,4 +3827,43 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(h.controller.kernel.map, 'the map is rebound around the rewritten heading node')
 }
 
+// Case PERF-1 (perf assessment §9 #2 — reuse the map you just built):
+// `applyKernelTransaction` builds `nextMap` from (result.doc.text, parsed) to
+// validate the transaction, reconciles the view to `parsed`, then rebinds.
+// When the reconciled view doc EQUALS the parse output (`.eq`, the ordinary
+// success path), the rebind must ADOPT the already-validated map instead of
+// rebuilding the identical one — observable through the controller's perf
+// counters, and provably the same map: it still serves the committed bytes'
+// offsets.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.equal(typeof h.controller.getPerfStats, 'function',
+    'controller exposes perf counters (map builds / reuses)')
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const before = h.controller.getPerfStats()
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true)
+  const after = h.controller.getPerfStats()
+  assert.equal(after.projectionMapReuses, before.projectionMapReuses + 1,
+    'the map proven against the committed bytes is adopted, not rebuilt')
+  // The adopted map is bound and correct: same offsets the rebuild would serve
+  // (raw 3 = start of the split's second paragraph -> PM pos 4, Case 3's own
+  // expectation).
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(4), 3)
+  assert.equal(h.view.state.selection.head, 4, 'caret restore still works through the adopted map')
+
+  // And a plain-text commit (no nextMap exists on that route) still REBUILDS:
+  // reuse must never serve a map for a doc the validation never saw.
+  const b2 = h.controller.getPerfStats()
+  const tr = h.view.state.tr.insertText('丙', 4)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  const a2 = h.controller.getPerfStats()
+  assert.equal(a2.projectionMapReuses, b2.projectionMapReuses, 'plain-text rebind does not reuse')
+  assert.ok(a2.projectionMapBuilds > b2.projectionMapBuilds, 'plain-text rebind rebuilds')
+}
+
 console.log('PASS kernel mode headless')
