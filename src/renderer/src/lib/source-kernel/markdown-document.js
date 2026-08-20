@@ -25,6 +25,13 @@ import { splitsCrlfPair } from './character-map.js'
 // Each entry is `{ from, to, ascii }`: the raw span of the written U+00A0 run
 // and the ASCII whitespace it stands for (' ' or '\t'), so the heal restores
 // what was pressed rather than guessing between "one Tab" and "two Spaces".
+//
+// `ascii: ''` IS A THIRD PROVENANCE (2026-08-20): a task SEED
+// (commands/block-insert.js's `/task` target) \u2014 a U+00A0 that stands for NO
+// keystroke at all. It may only ever be DISSOLVED (deleted under the first
+// label character, commands/task-seed.js); the whitespace heals require a
+// non-empty `ascii` and therefore can never claim it, so the empty string is
+// what keeps the two exits from ever touching each other's bytes.
 const NBSP_ONLY = /^\u00A0+$/
 
 // Remap the ledger across one transaction's edits, then re-validate it against
@@ -64,7 +71,9 @@ const acceptWhitespaceMarks = (marks, nextText) => {
   for (const mark of marks || []) {
     if (!Number.isInteger(mark?.from) || !Number.isInteger(mark?.to) || mark.from >= mark.to) continue
     if (mark.from < 0 || mark.to > nextText.length) continue
-    if (typeof mark.ascii !== 'string' || !/^[ \t]+$/.test(mark.ascii)) continue
+    // `''` is the task-seed provenance (see the ledger ADR above); anything
+    // else must be the ASCII whitespace the span stands for.
+    if (typeof mark.ascii !== 'string' || !/^[ \t]*$/.test(mark.ascii)) continue
     if (!NBSP_ONLY.test(nextText.slice(mark.from, mark.to))) continue
     out.push({ from: mark.from, to: mark.to, ascii: mark.ascii })
   }

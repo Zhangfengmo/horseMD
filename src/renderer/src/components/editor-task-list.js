@@ -196,7 +196,7 @@ export function viewHasEmptyTaskItems(view) {
   return emptyTasksInDocument(state).length > 0
 }
 
-export function createTaskListInputPlugin() {
+export function createTaskListInputPlugin({ kernelMode = false } = {}) {
   return new Plugin({
     key: taskListInputKey,
     appendTransaction(transactions, _oldState, newState) {
@@ -213,6 +213,20 @@ export function createTaskListInputPlugin() {
       if (match) {
         return createTaskListTransaction(newState, paragraphDepth, match[1].toLowerCase() === 'x')
       }
+
+      // SOURCE-KERNEL MODE NEVER DEMOTES (2026-08-20). This demotion is a
+      // LEGACY-only contract: there, an empty task really is a rich-only
+      // transient with no GFM spelling, so boundaries rewrite it to literal
+      // "[ ]" text. In kernel mode that premise is false — the kernel's
+      // `/task` writes `- [ ] ` + U+00A0, a REAL `checked: false` item whose
+      // seed U+00A0 is exactly the shape `emptyTaskMarker`'s migration clause
+      // matches — and this appendTransaction rode a projection-classified
+      // reconcile batch straight past the gateway, rewriting the just-created
+      // checkbox into literal "[ ]" while the SOURCE still held a real task
+      // (measured in the built app: bytes `- [ ] ` + U+00A0 on disk, view
+      // showing "[ ]"). Bytes are the kernel's only truth; a view-side
+      // "demotion" of a representable item is corruption, not migration.
+      if (kernelMode) return null
 
       // The transaction that creates a task carries an explicit meta marker;
       // leave it editable until the user types, deletes, or crosses a source

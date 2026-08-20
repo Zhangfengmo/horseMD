@@ -116,9 +116,12 @@ const mermaidLanguage = LanguageDescription.of({
 // The table is FILTERED through `BLOCK_TYPE_MARKERS`, the kernel's own target
 // list, rather than merely matching it by hand: a target the kernel stops
 // supporting drops out of the menu automatically instead of becoming a dead
-// entry. `task` and `divider` are absent because the kernel refuses them (see
-// lib/source-kernel/commands/block-type.js for each probed reason); they keep
-// the phase-1 "not supported yet" message.
+// entry. `divider` is absent because the kernel refuses it (see
+// lib/source-kernel/commands/block-type.js for the probed reason); it keeps
+// the phase-1 "not supported yet" message. `task` is absent HERE because it is
+// not a marker-prefix conversion at all — it routes through the block-INSERT
+// domain below (`KERNEL_INSERT_ITEMS`), whose two-axis reparse proof is what
+// the U+00A0 seed spelling needs.
 const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
   Object.entries({
     h1: 'heading1',
@@ -156,16 +159,23 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // `LANGUAGES` table.)
 //
 // Absent on purpose, each for a probed reason recorded in
-// lib/source-kernel/commands/block-insert.js: `task` (bare `- [ ] ` is not a
-// task item to remark-gfm at all), `image` (an image-block is an atom — no
-// caret home), `divider` (a thematic break is a PM leaf with no text
-// position), `text` (a fully-empty top-level paragraph has no raw
+// lib/source-kernel/commands/block-insert.js: `image` (an image-block is an
+// atom — no caret home), `divider` (a thematic break is a PM leaf with no
+// text position), `text` (a fully-empty top-level paragraph has no raw
 // representation).
 //
 // `math` joined the routed set on 2026-08-18, once block math became editable
 // — before that the item would have created a block with no caret position
 // inside it for the formula the user was about to type.
-const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code', math: 'math' })
+//
+// `task` joined on 2026-08-20. A bare `- [ ] ` is not a task item to
+// remark-gfm at all (checked === null, "[ ]" as literal text — probed), so
+// the route writes the ONE representable spelling instead: `- [ ] ` + U+00A0,
+// a real `checked: false` item with a caret home, ledger-tracked and
+// DISSOLVED under the first label character (commands/task-seed.js). Same
+// single-source-of-truth property as every other row here: this entry is
+// both the unblock and the route.
+const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code', math: 'math', task: 'task' })
 const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES.map((name) => 'code:' + name))
 
 function kernelSlashInsertRoute(id) {
@@ -390,7 +400,11 @@ export function createConfiguredCrepe({
       // block's BYTES and strips the query in ONE kernel transaction. That
       // resolver is the single source of truth for both halves here too.
       //
-      // Everything still absent (task, divider, text, image) keeps the phase-1
+      // `/task` routes through the same insert resolver since 2026-08-20
+      // (the U+00A0 seed + first-content dissolve — see the ADRs in
+      // lib/source-kernel/commands/block-insert.js and task-seed.js).
+      //
+      // Everything still absent (divider, text, image) keeps the phase-1
       // refusal message. Each is refused for a probed reason recorded in
       // lib/source-kernel/commands/block-type.js and
       // lib/source-kernel/commands/block-insert.js. `/image` in particular is
@@ -483,7 +497,13 @@ export function createConfiguredCrepe({
         onEdit: markUserEdit,
         onValueChange: onInlineCodeValueChange
       }),
-      createTaskListInputPlugin(),
+      // Kernel mode keeps the plugin's marker CONVERSIONS but disables its
+      // empty-task DEMOTION (see the ADR inside the plugin): the kernel's
+      // `/task` seed (`- [ ] ` + U+00A0) is a real, representable task, and
+      // the demotion — riding a projection-classified reconcile batch past
+      // the gateway — rewrote it into literal "[ ]" text while the source
+      // bytes still held the real item.
+      createTaskListInputPlugin({ kernelMode }),
       createInlineMathEditingPlugin({ getDeleteMode: getInlineMathDeleteMode }),
       createKatexDomPrunePlugin(),
       mathPreviewPlugin(getT),

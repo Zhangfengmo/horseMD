@@ -57,7 +57,11 @@ export const BLOCK_TYPE_MARKERS = Object.freeze({
 //   * task list (`- [ ] `) — the empty form reparses to
 //     `list > listItem > paragraph` whose paragraph carries the checkbox
 //     bytes in its own raw span, and the projection map refuses to
-//     character-map it. The block would be created read-only.
+//     character-map it. The block would be created read-only. (`/task` is
+//     served since 2026-08-20 by the block-INSERT domain instead —
+//     block-insert.js writes `- [ ] ` + a U+00A0 seed, the one spelling that
+//     IS a real task with a caret home — so this marker table still owns no
+//     task row on purpose.)
 //   * divider (`---`) — a thematic break is a PM leaf with no text position,
 //     so the committed caret has nowhere provable to land in the same
 //     transaction.

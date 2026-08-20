@@ -64,15 +64,6 @@
 // block-type route uses.
 //
 // DELIBERATELY ABSENT, each for a probed reason (see the task report):
-//   * task list (`- [ ] `) — probed directly against the kernel's processor:
-//     `- [ ] ` with NO content is not a task item to remark-gfm at all
-//     (`listItem.checked === null`, and `[ ]` comes back as ordinary
-//     paragraph TEXT). The bytes would create a bullet item literally
-//     displaying "[ ]", not a checkbox. This app's own legacy layer records
-//     the same fact (lib/markdown-preservation/lists.js: "A task marker needs
-//     content after `]`; bare `- [ ]` re-parses as ordinary list text"), and
-//     an empty task item is therefore a ProseMirror-first shape whose byte
-//     spelling the kernel cannot derive.
 //   * image — Crepe's `image-block` is an ATOM, paired here with `charMap:
 //     null` (read-only leaf). Its byte spelling `![]()` is writable, but the
 //     caret would have no home inside the created card.
@@ -80,7 +71,28 @@
 //     the caret would have to land in a DIFFERENT block than the one this
 //     command writes, which none of the anchors above can prove.
 // Each of these must keep refusing rather than guess.
+//
+// `task` JOINED THE OWNED SET on 2026-08-20, and its spelling is the ONE
+// representable form, not a convenience. Probed against the kernel's own
+// processor (slash-completion-report.md §3): NO ASCII spelling produces an
+// empty GFM task item — `- [ ] `, `- [ ]  `, `- [ ]\t`, `- [x] `, `* [ ] `
+// all come back `checked === null` with `[ ]` as ordinary paragraph TEXT.
+// The only bytes that parse to a real `checked: false` item with an
+// addressable caret position are `- [ ] ` + U+00A0 (the no-break space seed —
+// CommonMark's whitespace stripping is ASCII-only, the same fact
+// trailing-whitespace.js is built on). The seed is SESSION-TRACKED via the
+// document's whitespace provenance ledger (`whitespaceMarks`, `ascii: ''` =
+// "stands for no keystroke") and DISSOLVED by commands/task-seed.js the
+// moment the first label character lands. It cannot take the whitespace
+// HEAL's exit, because it stands for no key and both ASCII outcomes are
+// wrong (probed): content-less `- [ ]  ` demotes the whole item back to
+// `checked: null`, and `- [ ]  x` forges a label space the user never typed
+// — so dissolve-by-deletion is the only clean exit (task-seed.js's own ADR).
+// Until it happens the seed is honest bytes: a saved file holds a REAL
+// `checked: false` task that survives reload, where the legacy layer demotes
+// the transient to plain `- [ ]` text on save.
 import { parseKernelMarkdown } from '../syntax-index.js'
+import { NO_BREAK_SPACE } from './trailing-whitespace.js'
 
 // Target -> what this command may build for it. `language: true` means the
 // target accepts an (optional) info string; every other target refuses one
@@ -92,7 +104,10 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   // started pairing an mdast `math` block editably: before that, creating one
   // would have handed the user a block with no caret position inside it.
   // A `$$` delimiter pair has no info string, so `language: false`.
-  math: Object.freeze({ language: false })
+  math: Object.freeze({ language: false }),
+  // GFM task item (2026-08-20): `- [ ] ` + U+00A0 — the only representable
+  // spelling of an "empty" task; see the seed ADR in this file's header.
+  task: Object.freeze({ language: false })
 })
 
 // A fence info string this command is willing to write verbatim. Deliberately
@@ -116,6 +131,12 @@ const TABLE_COLUMNS = 3
 const TABLE_CELL = '|  '
 const TABLE_ROW = TABLE_CELL.repeat(TABLE_COLUMNS) + '|'
 const TABLE_DELIMITER = '| --- '.repeat(TABLE_COLUMNS) + '|'
+
+// The task marker up to and including its checkbox padding space. The seed
+// U+00A0 follows it as the item's ONLY content character (probed: paragraph
+// span [6,7), one width-1 `char` unit — the caret home the ASCII spellings
+// all lack).
+const TASK_MARKER = '- [ ] '
 
 // The bytes for one target plus the caret's offset INSIDE those bytes.
 function buildBlock(target, language, ending) {
@@ -159,6 +180,20 @@ function buildBlock(target, language, ending) {
       anchor: 2 + ending.length
     }
   }
+  if (target === 'task') {
+    // One line, no interior line endings, so the document's ending never
+    // appears in these bytes. The caret lands AFTER the seed (the ruled
+    // design): the seed is the block's only character-map unit, and its end
+    // offset is exactly where the first label character will be typed — which
+    // is what lets commands/task-seed.js delete the seed and insert the label
+    // as ONE edit. `seed` is the U+00A0's own span inside `bytes`, returned so
+    // the transaction can ledger it (provenance, `ascii: ''`).
+    return {
+      bytes: TASK_MARKER + NO_BREAK_SPACE,
+      anchor: TASK_MARKER.length + 1,
+      seed: { from: TASK_MARKER.length, to: TASK_MARKER.length + 1 }
+    }
+  }
   return null
 }
 
@@ -194,6 +229,30 @@ function shapeAgrees(target, node, text, language) {
     // value is what proves nothing after the delimiters was absorbed as
     // content (the caller's span check covers the other direction).
     return node.type === 'math' && node.value === ''
+  }
+  if (target === 'task') {
+    // Exactly ONE bullet item, REALLY a task (`checked === false`, never the
+    // `null` every ASCII spelling comes back with), whose paragraph's whole
+    // decoded content is the single seed U+00A0 sitting at the marker's end —
+    // which is also the byte the caret anchor and the ledger span are derived
+    // from, so it is asserted against the candidate bytes directly. A
+    // neighbouring list this insert would MERGE into fails the caller's span
+    // check (the reparsed list ends past the written bytes — probed:
+    // '- [ ]  \n- x\n' is ONE two-item list), so `/task` refuses right
+    // above an existing list rather than proving a merge it did not write.
+    if (node.type !== 'list' || node.ordered) return false
+    const items = node.children || []
+    if (items.length !== 1 || items[0]?.type !== 'listItem') return false
+    if (items[0].checked !== false) return false
+    const blocks = items[0].children || []
+    if (blocks.length !== 1 || blocks[0]?.type !== 'paragraph') return false
+    const inline = blocks[0].children || []
+    if (inline.length !== 1 || inline[0]?.type !== 'text') return false
+    if (inline[0].value !== NO_BREAK_SPACE) return false
+    const seedStart = inline[0].position?.start?.offset
+    const seedEnd = inline[0].position?.end?.offset
+    if (!Number.isInteger(seedStart) || seedEnd !== seedStart + 1) return false
+    return text.slice(seedStart, seedEnd) === NO_BREAK_SPACE
   }
   return false
 }
@@ -323,13 +382,24 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   }
 
   const anchor = start + built.anchor
+  // The task seed's ledger entry (`ascii: ''` — "this U+00A0 stands for NO
+  // keystroke; it may only ever be DISSOLVED, never healed to a space"). The
+  // span is re-asserted against the candidate bytes here, on top of
+  // `shapeAgrees`' own position check, because a ledger entry that vouches for
+  // the wrong byte would let the dissolve delete a character the user owns.
+  const seedMarks = built.seed &&
+    candidate.slice(start + built.seed.from, start + built.seed.to) === NO_BREAK_SPACE
+    ? [{ from: start + built.seed.from, to: start + built.seed.to, ascii: '' }]
+    : null
+  if (built.seed && !seedMarks) return { ok: false, code: 'unsupported-structure' }
   return {
     ok: true,
     transaction: {
       baseRevision: doc.revision,
       edits: [{ from: start, to: end, insert: bytes }],
       intent: 'insert-block',
-      selection: { anchor, head: anchor }
+      selection: { anchor, head: anchor },
+      ...(seedMarks ? { whitespaceMarks: seedMarks } : {})
     }
   }
 }

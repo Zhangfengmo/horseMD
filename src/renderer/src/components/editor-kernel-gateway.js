@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1515,6 +1515,63 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
         return { ok: false, code: routed.code }
       }
     }
+    // TASK-SEED DISSOLVE (2026-08-20). `/task` writes `- [ ] ` + U+00A0 — the
+    // only byte spelling of an "empty" task GFM can represent (every ASCII
+    // spelling parses `checked: null` with literal "[ ]" text; see
+    // commands/block-insert.js's seed ADR). The seed is a placeholder standing
+    // for NO keystroke, so when the FIRST label character lands it must not
+    // stay: `spellTaskSeedInsert` deletes the seed and inserts the character
+    // as ONE edit, reparse-proven to be a task whose label is exactly the
+    // typed text. It cannot ride the whitespace heal (a leading ASCII space
+    // in a task item is checkbox padding — GFM strips it, a dead byte), which
+    // is why dissolve-by-deletion is this shape's only clean exit.
+    //
+    // PROVENANCE: `dissolvableTaskSeed` claims ONLY a U+00A0 the ledger
+    // records with `ascii: ''` (the seed provenance `/task` itself wrote). A
+    // user-authored U+00A0 has no entry — a reopened file starts with an
+    // empty ledger — and a heal-written one carries its non-empty key, so
+    // neither is ever dissolved. The prefilter is parse-free (a ledger scan +
+    // one unit lookup); the command spends its parses only on the single
+    // keystroke that lands on a live seed.
+    //
+    // ORDER: ahead of the tail/line-start whitespace branches, because the
+    // seed's block-end position satisfies THEIR prefilters too — but their
+    // heals already refuse the seed (empty `ascii`), so the partition is
+    // enforced twice over. An unprovable dissolve falls through
+    // (`not-structural`) to the ordinary literal append: seed + typed text is
+    // honest, observable bytes — the ruled fallback, never a refusal.
+    let taskSeedDissolved = false
+    if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
+        virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
+        stepPair.charMap && stepPair.mdBlock && insertText !== '' && !/[\r\n]/.test(insertText)) {
+      const seed = dissolvableTaskSeed(
+        kernel.doc.text, stepPair.charMap, kernel.doc.whitespaceMarks, rawFrom
+      )
+      if (seed) {
+        const routed = spellTaskSeedInsert({
+          doc: kernel.doc,
+          block: stepPair.mdBlock,
+          seed,
+          offset: rawFrom,
+          insert: insertText
+        })
+        if (routed.ok) {
+          editFrom = routed.edit.from
+          editTo = routed.edit.to
+          insertText = routed.edit.insert
+          // Nothing joins the ledger; the seed's own entry dies with this
+          // edit's remap (the edit covers its span).
+          pendingMarks = routed.whitespaceMarks
+          taskSeedDissolved = true
+          // One charMap unit (the seed) is consumed by the edit, so the
+          // block's visible length moves by insert-length minus that unit —
+          // same contract as the whitespace heals' `healedUnits`.
+          respelledVisibleDelta = [...insertText].length - routed.dissolvedUnits
+        }
+        // `not-structural` is the only non-ok answer this command gives (the
+        // ruled fallback is the literal append), so there is no refusal arm.
+      }
+    }
     // Block-TRAILING whitespace (2026-08-18) — the other end of the same block,
     // and the far more common one: while composing prose the caret is at a
     // block end for essentially every inter-word space. A literal space
@@ -1554,7 +1611,8 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // exactly the insert's own trailing whitespace run, under the same reparse
     // proof; the characters before it are byte-exact as they always were.
     let tailWhitespace = false
-    if (!emptyFence && !headingWhitespace && steps.length === 1 && oldFrom === oldTo &&
+    if (!emptyFence && !headingWhitespace && !taskSeedDissolved && steps.length === 1 &&
+        oldFrom === oldTo &&
         virtualPrefix === '' && !virtualBlock && stepPair && !stepPair.virtual &&
         stepPair.charMap && insertText !== '' && !/[\r\n]/.test(insertText)) {
       const text = kernel.doc.text
@@ -1617,7 +1675,8 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     //     first byte which cannot be part of a line's structural prefix, so
     //     ordinary typing pays one comparison.
     // Only then is a parse spent.
-    if (!emptyFence && !headingWhitespace && !tailWhitespace && steps.length === 1 &&
+    if (!emptyFence && !headingWhitespace && !tailWhitespace && !taskSeedDissolved &&
+        steps.length === 1 &&
         oldFrom === oldTo && virtualPrefix === '' && !virtualBlock && stepPair &&
         !stepPair.virtual && stepPair.charMap && stepPair.mdBlock &&
         insertText !== '' && !/[\r\n]/.test(insertText)) {

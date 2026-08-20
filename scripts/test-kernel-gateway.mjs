@@ -3327,6 +3327,101 @@ console.log('PASS kernel gateway (syncListOrderPlugin relabel stays refused — 
 
 console.log('PASS kernel gateway (block-trailing whitespace: real no-break space + self-heal; code fences, hard breaks and interior typing untouched)')
 
+// --- TS: THE TASK SEED DISSOLVE (2026-08-20) ----------------------------------
+//
+// `/task` writes `- [ ] ` + U+00A0 — the only spelling of an "empty" task GFM
+// can represent (every ASCII spelling is `checked: null` with literal "[ ]"
+// text) — and ledgers the seed with `ascii: ''`. These cases drive the REAL
+// gateway (classify -> commitPlainText) and pin the three provenances apart:
+// the ledgered seed DISSOLVES under the first label character (deleted and
+// replaced in ONE edit), while the SAME byte with no ledger entry (a reopened
+// file / a user's own U+00A0) or with a whitespace-heal entry (non-empty
+// ascii) stays exactly where the user can see it.
+{
+  const NBSP = ' '
+  const li = (checked, ...c) => schema.node('list_item', { checked }, c)
+  const bl = (...c) => schema.node('bullet_list', null, c)
+  const seedDoc = () => doc(bl(li(false, p(text(NBSP)))))
+  // Type `ch` at PM position `at` over `markdown` with the given ledger.
+  const type = (markdown, pmDoc, at, ch, marks) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, 'the seed fixture must map — the caret home is the whole point')
+    const tr = state.tr.insertText(ch, at)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: { ...createMarkdownDocument(markdown), whitespaceMarks: marks } }
+    const committed = commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+    assert.equal(committed.ok, true, `commit refused: ${committed.code}`)
+    return {
+      bytes: committed.applied.doc.text,
+      marks: committed.applied.doc.whitespaceMarks,
+      edits: committed.transaction.edits,
+      observability: committed.observability
+    }
+  }
+  const md = '- [ ] ' + NBSP + '\n'
+  const seedLedger = [{ from: 6, to: 7, ascii: '' }]
+
+  // TS1: the ledgered seed dissolves — delete + insert as ONE edit, the label
+  // is exactly the typed text, no U+00A0 survives, the ledger is empty again.
+  {
+    const result = type(md, seedDoc(), 4, 'x', seedLedger)
+    assert.equal(result.bytes, '- [ ] x\n', 'the seed dissolved under the first label character')
+    assert.deepEqual(result.edits, [{ from: 6, to: 7, insert: 'x' }], 'ONE edit, delete + insert')
+    assert.deepEqual(result.marks, [], 'the seed entry died with its byte')
+    const item = parseKernelMarkdown(result.bytes).children[0].children[0]
+    assert.equal(item.checked, false, 'still a REAL task')
+    assert.equal(item.children[0].children[0].value, 'x', 'label exactly the typed text')
+    // The observability expectation matches the dissolve arithmetic: one unit
+    // consumed, one character inserted — visible length stays 1.
+    assert.equal(result.observability?.expectedVisibleLength, 1)
+  }
+
+  // TS2: the SAME byte with an EMPTY ledger (a reopened file — the awkward
+  // save's other half, or a U+00A0 the user authored) is NEVER dissolved: the
+  // character appends after it and the seed byte stays visible.
+  {
+    const result = type(md, seedDoc(), 4, 'x', [])
+    assert.equal(result.bytes, '- [ ] ' + NBSP + 'x\n',
+      'a U+00A0 with no seed provenance must never be deleted')
+    assert.equal(parseKernelMarkdown(result.bytes).children[0].children[0].checked, false)
+  }
+
+  // TS3: a whitespace-HEAL entry (non-empty ascii — that byte stands for a
+  // Space the user PRESSED) is not a seed: it takes the heal's own exit, an
+  // ordinary ASCII space restored in the same edit as the character — the
+  // label is ' x' because the user really typed Space then x. Probed: with
+  // content following, `- [ ]  x` IS a checked:false task with label ' x'
+  // (the checkbox consumes exactly one padding space; the second survives as
+  // content). The provenance decides the exit: pressed-Space heals, seed
+  // dissolves, unledgered stays.
+  {
+    const result = type(md, seedDoc(), 4, 'x', [{ from: 6, to: 7, ascii: ' ' }])
+    assert.equal(result.bytes, '- [ ]  x\n',
+      'heal provenance heals to the pressed Space — never dissolved as a seed')
+    const item = parseKernelMarkdown(result.bytes).children[0].children[0]
+    assert.equal(item.checked, false)
+    assert.equal(item.children[0].children[0].value, ' x', 'the pressed Space is label content')
+  }
+
+  // TS4: typing at the seed's START (Home / click before it) dissolves to the
+  // same bytes — both abutting positions have one exit.
+  {
+    const result = type(md, seedDoc(), 3, 'x', seedLedger)
+    assert.equal(result.bytes, '- [ ] x\n')
+    assert.deepEqual(result.marks, [])
+  }
+
+  // TS5: an IME-style multi-character commit dissolves under the whole run.
+  {
+    const result = type(md, seedDoc(), 4, '待办事项', seedLedger)
+    assert.equal(result.bytes, '- [ ] 待办事项\n')
+    assert.equal(result.observability?.expectedVisibleLength, 4)
+  }
+}
+
+console.log('PASS kernel gateway (task seed: ledgered seed dissolves under the first label character; unledgered and heal-provenance U+00A0 stay)')
+
 // --- M: THE EMPTY $$ BLOCK (2026-08-19, audit Critical 1) ---------------------
 //
 // `64f46d5` fixed "typing into an empty fenced code block destroys its closing

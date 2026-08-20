@@ -195,9 +195,10 @@ const refuses = (label, text, offset, target, language) => {
 
 // Targets this command deliberately does not own (see its own ADR).
 // (`math` moved OUT of this list on 2026-08-18, once block math became an
-// editable pair — see section 9 below for its own proof.)
+// editable pair — see section 9 below for its own proof. `task` moved out on
+// 2026-08-20: the U+00A0 seed spelling made an "empty" task representable —
+// its own suite is scripts/test-source-kernel-task-seed.mjs.)
 refuses('divider target', '/hr\n', 3, 'divider')
-refuses('task target', '/task\n', 5, 'task')
 refuses('image target', '/img\n', 4, 'image')
 refuses('paragraph target', '/text\n', 5, 'paragraph')
 refuses('nonsense target', '/x\n', 2, 'nope')
@@ -274,12 +275,15 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 //    unblocked for a target this command does not own.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'math', 'table'])
+  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'math', 'table', 'task'])
   assert.equal(BLOCK_INSERT_TARGETS.code.language, true)
   assert.equal(BLOCK_INSERT_TARGETS.table.language, false)
   // A `$$` delimiter pair has no info string, so an info string is refused
   // rather than silently dropped.
   assert.equal(BLOCK_INSERT_TARGETS.math.language, false)
+  // A task item has no info string either (2026-08-20; its own suite is
+  // scripts/test-source-kernel-task-seed.mjs).
+  assert.equal(BLOCK_INSERT_TARGETS.task.language, false)
   assert.ok(Object.isFrozen(BLOCK_INSERT_TARGETS))
 }
 

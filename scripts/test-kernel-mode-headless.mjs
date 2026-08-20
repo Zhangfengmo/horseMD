@@ -267,6 +267,13 @@ const FIXTURE_DOCS = {
     doc(tbl([[['x'], [''], ['']], [[''], [''], ['']]]), p()),
   '```javascript\n\n```\n': () => doc(cb('javascript'), p()),
   '```javascript\nx\n```\n': () => doc(cb('javascript', 'x'), p()),
+  // Case I5 (2026-08-20): the `/task` seed spelling — `- [ ] ` + U+00A0, the
+  // only representable "empty" task (checked FALSE, one addressable char) —
+  // and the document its first-content DISSOLVE commits (seed deleted, label
+  // exactly the typed text). Same trailing-`p()` convention as the fixtures
+  // above.
+  '- [ ]  \n': () => doc(bl(li(false, p(text(' ')))), p()),
+  '- [ ] x\n': () => doc(bl(li(false, p(text('x')))), p()),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -3211,7 +3218,9 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.attachAfterCreate(), true)
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
   const before = h.notifications.length
-  for (const route of [{ target: 'math' }, { target: 'task' }, { target: 'divider' },
+  // (`task` left this list on 2026-08-20 — the U+00A0 seed spelling made it a
+  // real, owned target; its positive path is Case I5 below.)
+  for (const route of [{ target: 'math' }, { target: 'divider' },
     { target: 'image' }, { target: 'code', language: 'js x' }]) {
     assert.equal(h.controller.runInsertBlockFromQuery(route, h.view), true,
       'the slash item always swallows the invocation, success or refusal')
@@ -3236,6 +3245,52 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.runInsertBlockFromQuery({ target: 'table' }, h.view), true)
   assert.equal(h.controller.kernel.doc.text, '/table\n', 'a mid-block caret writes nothing')
   assert.ok(h.notifications.length > before)
+}
+
+// Case I5 (2026-08-20): `/task` — the U+00A0 seed, end to end through the
+// controller. The insert commits the ONE representable "empty" task spelling
+// (`- [ ] ` + U+00A0, checked FALSE — every ASCII spelling is checked:null),
+// ledgers the seed, and lands the caret AFTER it; the first label keystroke
+// then DISSOLVES the seed through the ordinary plain-text gateway path (one
+// edit: delete seed + insert label), and undo unwinds dissolve and insert as
+// separate steps back to the query bytes.
+{
+  const NBSP = ' '
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + NBSP + '\n',
+    'the query bytes became the seed spelling, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(false, p(text(NBSP)))), p())),
+    'view reconciled to a REAL checked:false task item holding the seed')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [{ from: 6, to: 7, ascii: '' }],
+    'the seed is ledgered with the stands-for-no-keystroke provenance')
+  // bullet_list(0) > list_item(1) > paragraph(2) > text(3..4): after-seed = 4.
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 4, 'the caret lands AFTER the seed (the ruled design)')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(caret), 7,
+    'and that PM position maps back to the seed\'s end')
+
+  // The first label character: an ordinary plain-text commit that must
+  // DISSOLVE the seed — bytes hold exactly the typed label, no U+00A0, empty
+  // ledger — and the view must settle on the dissolved parse.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'the first label keystroke is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n',
+    'the seed dissolved under the first label character — label exactly as typed')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [],
+    'the seed\'s ledger entry died with its byte')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(false, p(text('x')))), p())),
+    'the view settled on the dissolved document')
+  assert.ok(h.controller.kernel.map, 'and it maps — the item stays editable')
+
+  // Undo: the dissolve is its own history step, the insert its own.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + NBSP + '\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/task\n', 'the original query bytes come back')
 }
 
 // Case HID: heading ids are NOT content (2026-08-17 veto-divergence report).
