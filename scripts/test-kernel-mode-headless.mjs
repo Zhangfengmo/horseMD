@@ -2057,6 +2057,66 @@ const toggleVia = (h, markType, from, to) => {
 }
 
 // ===========================================================================
+// Case 16c (2026-08-20) — THE DOCUMENT'S TRAILING EMPTY PARAGRAPH
+// ===========================================================================
+// User report: the caret sits in the empty paragraph at the very END of the
+// document, right after an ordered list, and Backspace raises
+// 「暂未支持此操作 (unsupported-input-type)」.
+//
+// That paragraph is `@milkdown/plugin-trailing`'s synthetic node — it owns no
+// markdown bytes, and a trailing blank line cannot produce a real one because
+// CommonMark discards trailing blank lines entirely. So Backspace there has
+// NOTHING to delete: the correct answer is a view-only caret move to the end of
+// the previous block, and forward Delete at that previous block's end is a
+// no-op. Both used to reach ProseMirror's own commands, whose node-bearing
+// transaction the gateway then refused.
+//
+// PM positions for doc(bullet_list(list_item(paragraph('甲'))), paragraph()):
+// bullet_list 0 (size 7), list_item 1 (size 5), paragraph 2 (size 3, content 3,
+// '甲' ends 4), trailing paragraph 7 (size 2, content 8).
+{
+  const md = '- \u7532\n'
+  const h = makeHarness(md, doc(bl(li(null, p(text('\u7532')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true, 'the fixture must attach')
+  const pairs = h.controller.kernel.map.blockPairs
+  const last = pairs[pairs.length - 1]
+  assert.equal(last.pmNode.type.name, 'paragraph')
+  assert.equal(last.virtual, true, 'sanity: the trailing paragraph pairs VIRTUAL — it owns no bytes')
+
+  // (a) BACKSPACE inside it: swallowed, zero bytes, zero toasts, and the caret
+  //     lands at the end of the previous block's content.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 8)))
+  const notifBefore = h.notifications.length
+  const revisionBefore = h.controller.kernel.doc.revision
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true,
+    'Backspace in the trailing placeholder is handled, never delegated to PM')
+  assert.equal(h.controller.kernel.doc.text, md, 'a caret move must write no bytes')
+  assert.equal(h.controller.kernel.doc.revision, revisionBefore, 'and advance no revision')
+  assert.equal(h.notifications.length, notifBefore,
+    `a zero-byte caret move must raise no toast \u2014 got ${h.notifications.slice(notifBefore).join(' | ')}`)
+  assert.equal(h.view.state.selection.head, 4,
+    'the caret lands at the END of the last list item\u2019s content')
+
+  // (b) FORWARD DELETE at that same position: nothing follows but the
+  //     placeholder, so the key is consumed silently.
+  const notifBeforeDelete = h.notifications.length
+  assert.equal(h.controller.structuralHandlers.Delete(h.view.state, h.view.dispatch, h.view), true,
+    'Delete at the end of the document is handled')
+  assert.equal(h.controller.kernel.doc.text, md, 'and writes no bytes')
+  assert.equal(h.notifications.length, notifBeforeDelete,
+    `nor raises a toast \u2014 got ${h.notifications.slice(notifBeforeDelete).join(' | ')}`)
+
+  // (c) THE NEGATIVE CONTROL: Backspace somewhere that is NOT the trailing
+  //     placeholder keeps its previous behaviour exactly. Inside the list
+  //     item's own text it is an ordinary character delete, which this family
+  //     must not claim \u2014 `structuralHandlers` answers false so ProseMirror
+  //     produces the deletion and the gateway owns its bytes.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), false,
+    'Backspace inside real content is still the text path, not this family')
+}
+
+// ===========================================================================
 // Case 16b (2026-08-20) — A REFUSAL INSIDE A CONTAINER IS NOT A READ-ONLY BLOCK
 // ===========================================================================
 // The user's report: 「Tab 和无序列表的搭配使用等还有问题,会报错「只读」」. Measured in

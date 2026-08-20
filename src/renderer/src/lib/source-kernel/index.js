@@ -40,6 +40,7 @@ export {
   healableLineStartRun
 } from './commands/line-start-whitespace.js'
 export { spellMarkerCompletingSpace, spellMarkerRunGrowth } from './commands/marker-space.js'
+export { trimTrailingBlankLines } from './commands/trailing-placeholder.js'
 export {
   proveContentDelete,
   deleteClearsBlockLine,

@@ -45,6 +45,7 @@ import {
   spellLineStartWhitespace,
   spellMarkerCompletingSpace,
   spellMarkerRunGrowth,
+  trimTrailingBlankLines,
   looksLikeBlockLineStart,
   healableLineStartRun,
   replaceVisibleText,
@@ -1791,6 +1792,98 @@ export function createKernelMode({
     return commitHeadingLeadingWhitespace(' ', state, view) !== 'skip'
   }
 
+  // THE DOCUMENT'S TRAILING EMPTY PARAGRAPH — the block a user sees as "an empty
+  // line I can't remove", and the one that raised
+  // 「暂未支持此操作 (unsupported-input-type)」 on Backspace (2026-08-20 user report,
+  // reproduced on the first attempt).
+  //
+  // It is NEVER a real block. Only two things can put it there — plugin-trailing's
+  // synthetic node, or a controller-vouched split placeholder — and a trailing
+  // blank line cannot make a third, because CommonMark discards trailing blank
+  // lines entirely (verified in the app: '...x\n\n' renders the same blocks as
+  // '...x'). See lib/source-kernel/commands/trailing-placeholder.js.
+  //
+  // So neither key has anything to delete there, and both used to reach PM's own
+  // commands, whose join/lift transaction carries node content and is refused by
+  // the gateway — a toast for a gesture whose correct answer writes no bytes at
+  // all:
+  //   * BACKSPACE in the placeholder -> move the caret to the end of the previous
+  //     block's content. The placeholder itself must NOT be removed: plugin-trailing
+  //     re-adds it on the next dispatch, so "deleting" it is not a thing the
+  //     document can express.
+  //   * DELETE at the end of the last real block -> a no-op. There is nothing
+  //     after the caret but the placeholder, and it is not content.
+  //
+  // The ONE case with real bytes is the round trip: Enter at the document end
+  // writes a blank line, and the Backspace that takes it back should take the
+  // bytes back too. `trimTrailingBlankLines` owns that, removes only the SURPLUS
+  // endings (a file ending in one newline is left alone), and proves by reparse
+  // that every block's type and span is unchanged first.
+  const trailingPlaceholderPair = () => {
+    const pairs = kernel.map?.blockPairs || []
+    const last = pairs[pairs.length - 1]
+    if (!last?.virtual || !last.pmNode) return null
+    if (!last.pmNode.isTextblock || last.pmNode.content.size !== 0) return null
+    return last
+  }
+
+  // Where the caret belongs when it leaves the placeholder: the end of the
+  // previous block's content, resolved by ProseMirror itself rather than by raw
+  // offsets, so a previous block whose content lives in a node view (a code
+  // fence, a table cell) is handled by the same rule as a paragraph.
+  const beforePlaceholderSelection = (docNode, pair) => {
+    try {
+      return TextSelection.near(docNode.resolve(pair.pmPos), -1)
+    } catch {
+      return null
+    }
+  }
+
+  const commitTrailingPlaceholderEdge = (key, state, view) => {
+    if (key !== 'Backspace' && key !== 'Delete') return 'skip'
+    if (!state?.selection?.empty || !kernel.map) return 'skip'
+    const pair = trailingPlaceholderPair()
+    if (!pair) return 'skip'
+    const docNode = state.doc
+    // The placeholder must really be the document's last node — otherwise this
+    // is some other virtual block and none of the reasoning above applies.
+    if (pair.pmPos + pair.pmNode.nodeSize !== docNode.content.size) return 'skip'
+    const back = beforePlaceholderSelection(docNode, pair)
+    const head = state.selection.head
+    const insidePlaceholder = head === pair.pmPos + 1
+    const atPreviousEnd = !!back && back.head === head
+    if (key === 'Backspace' ? !insidePlaceholder : !atPreviousEnd) return 'skip'
+    // Forward Delete at the end of the last real block: nothing follows but the
+    // placeholder, so the key is simply consumed. No bytes, no caret move, no
+    // toast — the document already ends here.
+    if (key === 'Delete') return 'handled'
+    if (!back) return 'skip'
+
+    // Backspace: reclaim the surplus blank line the user's own Enter wrote, if
+    // there is one, then land the caret. The trim is best-effort — a document
+    // whose tail cannot be proven simply keeps its bytes and still gets the
+    // caret move, which is the part the user asked for.
+    const lastPaired = [...(kernel.map.blockPairs || [])].reverse()
+      .find((entry) => Number.isInteger(entry?.mdBlock?.position?.end?.offset))
+    const contentEnd = lastPaired?.mdBlock?.position?.end?.offset
+    if (Number.isInteger(contentEnd)) {
+      const routed = trimTrailingBlankLines({ doc: kernel.doc, contentEnd })
+      if (routed.ok && applyKernelTransaction(routed.transaction, view)) return 'handled'
+    }
+    try {
+      const tr = view.state.tr.setSelection(
+        TextSelection.near(view.state.doc.resolve(Math.min(back.head, view.state.doc.content.size)), -1)
+      )
+      tr.setMeta('addToHistory', false)
+      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+      view.dispatch(tr)
+    } catch {
+      pushKernelDiagnostic({ type: 'trailing-placeholder-caret-failed' })
+      return 'skip'
+    }
+    return 'handled'
+  }
+
   const structuralHandler = (key) => (state, dispatch, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -1836,6 +1929,7 @@ export function createKernelMode({
         return true
       }
     }
+    if (commitTrailingPlaceholderEdge(key, state, view) === 'handled') return true
     const offset = kernel.map.pmPosToRaw(state.selection.head)
     if (!Number.isFinite(offset)) {
       // Fail-closed: an unprovable caret must not reach PM's structural
