@@ -317,6 +317,27 @@ for (const { label, lines, offsetIn } of positions) {
     'not-structural',
     'an unvouched U+00A0 is left exactly as the author wrote it'
   )
+  // THE COMMAND RE-CHECKS THE LEDGER ITSELF (2026-08-20 adversarial panel,
+  // Minor — same close as spellBlockTailInsert): a FORGED heal descriptor
+  // over the author's byte-valid U+00A0, with an empty ledger, must not heal
+  // it away; and an entry standing for a different key cannot be spent.
+  assert.equal(
+    spellLineStartWhitespace({
+      doc: doc(authored), block: blockAt(authored, 0), offset: 0, insert: 'x',
+      heal: { rawStart: 0, rawEnd: 1, ascii: ' ' }
+    }).code,
+    'not-structural',
+    'a heal span the ledger does not vouch for must never rewrite the byte'
+  )
+  assert.equal(
+    spellLineStartWhitespace({
+      doc: { ...doc(authored), whitespaceMarks: [{ from: 0, to: 1, ascii: '\t' }] },
+      block: blockAt(authored, 0), offset: 0, insert: 'x',
+      heal: { rawStart: 0, rawEnd: 1, ascii: ' ' }
+    }).code,
+    'not-structural',
+    'the descriptor must carry the ledger\'s own recorded ascii'
+  )
 
   // Whitespace typed IN FRONT of a recorded run is not a displacement: the run
   // is still leading, so both runs stay U+00A0 rather than one healing to ASCII.

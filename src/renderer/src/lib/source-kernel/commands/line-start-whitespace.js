@@ -229,11 +229,19 @@ export function spellLineStartWhitespace({ doc, block, offset, insert, heal = nu
   // the insert lands exactly at the run's start (i.e. displaces it) and does not
   // itself begin with whitespace: a whitespace insert in front of a leading run
   // simply produces a longer leading run, every character of which must stay
-  // U+00A0.
+  // U+00A0. And it is re-proven against the PROVENANCE LEDGER itself
+  // (2026-08-20 adversarial panel, Minor — the same close as
+  // trailing-whitespace.js's spellBlockTailInsert): a byte check cannot tell
+  // a run this kernel wrote from one the AUTHOR wrote, so the byte-writing
+  // gate demands the `doc.whitespaceMarks` entry byte-for-byte, recorded
+  // ascii included, rather than trusting the caller to have derived `heal`
+  // from `healableLineStartRun`.
   const healSpan = heal && !leadingRun && heal.rawStart === offset &&
     Number.isInteger(heal.rawEnd) && heal.rawStart < heal.rawEnd &&
     NO_BREAK_RUN_RE.test(text.slice(heal.rawStart, heal.rawEnd)) &&
-    typeof heal.ascii === 'string' && ASCII_WHITESPACE_RE.test(heal.ascii)
+    typeof heal.ascii === 'string' && ASCII_WHITESPACE_RE.test(heal.ascii) &&
+    (doc.whitespaceMarks || []).some((entry) =>
+      entry?.from === heal.rawStart && entry.to === heal.rawEnd && entry.ascii === heal.ascii)
     ? heal
     : null
   if (!leadingRun && !healSpan) return NOT_STRUCTURAL
