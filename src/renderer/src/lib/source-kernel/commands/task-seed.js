@@ -43,6 +43,29 @@ import { NO_BREAK_SPACE, blockText, blockEditIsObservable } from './trailing-whi
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
 
+// Is this list item's ENTIRE content the session-ledgered seed — i.e. a task
+// the user created this session and never labelled? The Enter router treats
+// such an item as EFFECTIVELY EMPTY (2026-08-21 task-Enter matrix): pressing
+// Enter on it takes the same lift-out exit an empty PLAIN item takes, because
+// the seed "stands for NO keystroke" — the item is conceptually empty even
+// though the parser (correctly) sees one content character. Three facts, all
+// required:
+//   * a real task item (`task` present — boolean checkbox);
+//   * its content span is EXACTLY the one U+00A0 (`[contentStart, end)` —
+//     `end` is the mdast item end, so a continuation line or any label byte
+//     makes the slice longer and the answer false);
+//   * the LEDGER vouches for that byte with the seed provenance
+//     (`ascii: ''`). A reopened file's U+00A0 (empty ledger) and a
+//     heal-written one (non-empty ascii) both answer FALSE — Enter then
+//     splits like any labelled item, and the author's byte is never deleted.
+export const isLedgeredSeedOnlyItem = (doc, text, item) => {
+  if (!item?.task || typeof text !== 'string') return false
+  if (!Number.isInteger(item.contentStart) || !Number.isInteger(item.end)) return false
+  if (text.slice(item.contentStart, item.end) !== NO_BREAK_SPACE) return false
+  return (doc?.whitespaceMarks || []).some((entry) =>
+    entry?.ascii === '' && entry.from === item.contentStart && entry.to === item.contentStart + 1)
+}
+
 // Does a ledger-vouched task seed abut the insert offset? Returns
 // `{ rawStart, rawEnd }` or null. Parse-free — this runs on the hot typing
 // path's prefilter, so it is comparisons only:

@@ -348,17 +348,22 @@ const dissolve = (doc, offset, insert) => {
     'the seeded item is NOT empty — its U+00A0 is parser-visible content')
   assert.equal(taskAt(text).label, NBSP, 'the parser itself says so')
 
-  // ROUTER: neither Backspace nor Enter may take the empty-item exit that
-  // silently deletes the marker line. Backspace is a text-path question
-  // (`not-structural` — the gateway wall below owns the byte answer); Enter
-  // routes to the ordinary task-item split, same as any non-empty task item.
+  // ROUTER: Backspace may never take the empty-item exit that silently
+  // deletes the marker line — it is a text-path question (`not-structural`;
+  // the gateway wall below owns the byte answer). Enter's contract is
+  // LEDGER-GATED since the 2026-08-21 task-Enter matrix: on an UNLEDGERED
+  // seed (this doc carries no whitespaceMarks — the reopened-file shape) the
+  // U+00A0 is the author's content, so Enter must SPLIT, never delete; the
+  // session-ledgered seed's deliberate Enter-exit is pinned in section 6.
   const doc = { text, revision: 0 }
   assert.deepEqual(routeStructuralKey('Backspace', { doc, index, offset: seedStart + 1 }),
     { ok: false, code: 'not-structural' },
     'Backspace on the seed must NOT resolve to a structural line deletion')
   const enter = routeStructuralKey('Enter', { doc, index, offset: seedStart + 1 })
   assert.notEqual(enter?.transaction?.intent, 'exit-empty-list-item',
-    'Enter on the seed must not silently delete the item either')
+    'Enter on an UNLEDGERED (author-owned) seed must not silently delete the item')
+  assert.equal(enter?.transaction?.intent, 'split-list-item',
+    'it splits like any other item with content')
 
   // CONTROL: a genuinely empty ASCII item keeps the Typora exit semantics —
   // this fix narrows `empty`, it does not disable the empty-item commands.
@@ -426,6 +431,150 @@ const dissolve = (doc, offset, insert) => {
   }
   // An edit escaping the block's own span belongs to the cross-block guards.
   assert.deepEqual(wall(seedLedger, [{ from: 2, to: 7, insert: '' }]), NO_CLAIM)
+}
+
+// ---------------------------------------------------------------------------
+// 6. ENTER CONTINUATION (2026-08-21 user report 「任务列表的回车解析目前还是
+//    坏的」). splitListItem used to write the empty side of a task split as
+//    bare `- [ ] ` — the demoted spelling (checked:null, literal "[ ]" text,
+//    caret-unmappable anchor). Now the empty side gets the SAME session-
+//    ledgered seed `/task` writes, proven by reparse, and the first label
+//    character dissolves it through the same commands. Pre-fix, every case
+//    below fails on bytes (no U+00A0, no ledger entry).
+// ---------------------------------------------------------------------------
+const routeEnter = (doc, offset) =>
+  routeStructuralKey('Enter', { doc, index: buildSyntaxIndex(doc.text), offset })
+
+{
+  // (a) End of label, LF: the NEW item is seeded, ledgered, caret after the
+  // seed — and the seed dissolves under the first label character exactly
+  // like a `/task` seed (same commands, same ledger).
+  const doc = createMarkdownDocument('- [ ] 甲乙\n')
+  const routed = routeEnter(doc, 8)
+  assert.equal(routed.ok, true, routed.code)
+  assert.equal(routed.transaction.intent, 'split-list-item')
+  const applied = applySourceTransaction(doc, routed.transaction)
+  assert.equal(applied.doc.text, '- [ ] 甲乙\n- [ ] ' + NBSP + '\n',
+    'the continuation item carries the seed, not the demoted bare spelling')
+  assert.deepEqual(applied.doc.whitespaceMarks, [{ from: 15, to: 16, ascii: '' }],
+    'the new seed is ledgered with the stands-for-no-keystroke provenance')
+  assert.deepEqual(routed.transaction.selection, { anchor: 16, head: 16 },
+    'the caret lands AFTER the seed — a character-map unit, never a dead anchor')
+  const items = parseKernelMarkdown(applied.doc.text).children[0].children
+  assert.deepEqual(items.map((i) => i.checked), [false, false],
+    'BOTH items are REAL tasks — the new one is not literal "[ ]" text')
+
+  // …and the first label character dissolves it (the same machinery).
+  const seed = dissolvableTaskSeed(applied.doc.text,
+    buildCharacterMap(applied.doc.text, items[1].children[0]), applied.doc.whitespaceMarks, 16)
+  assert.ok(seed, 'the Enter-written seed is claimable by the dissolve')
+  const dissolved = spellTaskSeedInsert({
+    doc: applied.doc, block: items[1].children[0], seed, offset: 16, insert: 'x'
+  })
+  assert.equal(dissolved.ok, true, dissolved.code)
+  const final = applySourceTransaction(applied.doc, dissolved.transaction)
+  assert.equal(final.doc.text, '- [ ] 甲乙\n- [ ] x\n')
+  assert.deepEqual(final.doc.whitespaceMarks, [])
+}
+
+{
+  // (b) A CHECKED item continues UNCHECKED (cell 4): marker `[ ]`, seed, and
+  // the original keeps its `[x]`.
+  const doc = createMarkdownDocument('- [x] 完毕\n')
+  const applied = applySourceTransaction(doc, routeEnter(doc, 8).transaction)
+  assert.equal(applied.doc.text, '- [x] 完毕\n- [ ] ' + NBSP + '\n')
+  const items = parseKernelMarkdown(applied.doc.text).children[0].children
+  assert.deepEqual(items.map((i) => i.checked), [true, false])
+}
+
+{
+  // (c) Enter at the label's START (beforeEmpty): the label moves down, the
+  // ORIGINAL item keeps its own checked state with the seed as its content,
+  // and the caret rides with the label.
+  const doc = createMarkdownDocument('- [x] 甲\n')
+  const routed = routeEnter(doc, 6)
+  const applied = applySourceTransaction(doc, routed.transaction)
+  assert.equal(applied.doc.text, '- [x] ' + NBSP + '\n- [ ] 甲\n',
+    'the original item is seeded, the label becomes the new item')
+  assert.deepEqual(applied.doc.whitespaceMarks, [{ from: 6, to: 7, ascii: '' }])
+  assert.equal(applied.doc.text.charCodeAt(routed.transaction.selection.anchor), '甲'.charCodeAt(0),
+    'the caret lands on the moved label')
+  const items = parseKernelMarkdown(applied.doc.text).children[0].children
+  assert.deepEqual(items.map((i) => i.checked), [true, false],
+    'the original keeps [x]; the pushed-down label item is a fresh [ ]')
+}
+
+{
+  // (d) Nested + quoted + ordered shapes all carry the seed with their own
+  // prefixes (cell 5).
+  const nested = createMarkdownDocument('- 父\n  - [ ] 子\n')
+  const appliedNested = applySourceTransaction(nested,
+    routeEnter(nested, '- 父\n  - [ ] 子'.length).transaction)
+  assert.equal(appliedNested.doc.text, '- 父\n  - [ ] 子\n  - [ ] ' + NBSP + '\n')
+
+  const quoted = createMarkdownDocument('> - [ ] 引\n')
+  const appliedQuoted = applySourceTransaction(quoted,
+    routeEnter(quoted, '> - [ ] 引'.length).transaction)
+  assert.equal(appliedQuoted.doc.text, '> - [ ] 引\n> - [ ] ' + NBSP + '\n')
+
+  const ordered = createMarkdownDocument('3. [ ] a\n')
+  const appliedOrdered = applySourceTransaction(ordered,
+    routeEnter(ordered, '3. [ ] a'.length).transaction)
+  assert.equal(appliedOrdered.doc.text, '3. [ ] a\n4. [ ] ' + NBSP + '\n',
+    'ordered task continuation: number + 1, unchecked, seeded')
+}
+
+{
+  // (e) CRLF (cell 5c): the document's own ending is reused, no lone LF, and
+  // the seed rides inside the line.
+  const doc = createMarkdownDocument('- [ ] 甲\r\n')
+  const applied = applySourceTransaction(doc, routeEnter(doc, 7).transaction)
+  assert.equal(applied.doc.text, '- [ ] 甲\r\n- [ ] ' + NBSP + '\r\n')
+  assert.equal(/(?<!\r)\n/.test(applied.doc.text), false, 'no lone LF was introduced')
+  // insert = '\r\n- [ ] ' + seed at offset 7 → the seed byte sits at 15.
+  assert.deepEqual(applied.doc.whitespaceMarks, [{ from: 15, to: 16, ascii: '' }])
+}
+
+{
+  // (f) Mid-label split is UNCHANGED (cell 2 — the one cell that already
+  // worked): both sides keep content, no seed, no ledger entry.
+  const doc = createMarkdownDocument('- [ ] 甲乙\n')
+  const applied = applySourceTransaction(doc, routeEnter(doc, 7).transaction)
+  assert.equal(applied.doc.text, '- [ ] 甲\n- [ ] 乙\n')
+  assert.deepEqual(applied.doc.whitespaceMarks, [], 'no seed when both sides have content')
+}
+
+{
+  // (g) Cell 3 — Enter on the SESSION-LEDGERED seed exits the list (the
+  // Typora lift-out plain lists already take): the marker line is removed,
+  // the ledger entry dies with its byte, and the query bytes come back on
+  // undo via the ordinary history path.
+  const { doc } = insertTask('/task\n', 5)
+  for (const offset of [6, 7]) { // before AND after the seed — same item
+    const routed = routeEnter(doc, offset)
+    assert.equal(routed.ok, true, routed.code)
+    assert.equal(routed.transaction.intent, 'exit-empty-list-item',
+      'the ledgered, never-labelled seed item is EFFECTIVELY empty for Enter')
+  }
+  const applied = applySourceTransaction(doc, routeEnter(doc, 7).transaction)
+  assert.equal(applied.doc.text, '\n', 'the marker line is removed — list ended')
+  assert.deepEqual(applied.doc.whitespaceMarks, [], 'the seed entry died with its line')
+
+  // The UNLEDGERED twin (reopened file) SPLITS instead — the author's U+00A0
+  // is content, so Enter continues the list with a NEW seeded item and the
+  // author's byte is never deleted.
+  const reopened = createMarkdownDocument(SEED_BYTES + '\n')
+  const routedReopened = routeEnter(reopened, 7)
+  assert.equal(routedReopened.transaction.intent, 'split-list-item')
+  const appliedReopened = applySourceTransaction(reopened, routedReopened.transaction)
+  assert.equal(appliedReopened.doc.text, SEED_BYTES + '\n- [ ] ' + NBSP + '\n')
+  assert.deepEqual(appliedReopened.doc.whitespaceMarks, [{ from: 14, to: 15, ascii: '' }],
+    'only the NEW seed is ledgered — the author\'s byte stays theirs')
+
+  // A heal-provenance U+00A0 (stands for a pressed key) is not a seed item
+  // either: split, not exit.
+  const healed = { ...createMarkdownDocument(SEED_BYTES + '\n'), whitespaceMarks: [{ from: 6, to: 7, ascii: ' ' }] }
+  assert.equal(routeEnter(healed, 7).transaction.intent, 'split-list-item')
 }
 
 console.log('ok - source kernel task seed')

@@ -491,9 +491,130 @@ async function runImeFirstLabelSegment() {
   }
 }
 
+// ===========================================================================
+// Enter-continuation segment (2026-08-21 user report 「任务列表的回车解析目前
+// 还是坏的」): Enter at a task label's end must create the NEXT task item —
+// a live checkbox with a typable caret — via the same seed machinery /task
+// uses. Pre-fix, splitListItem wrote bare `- [ ] `, which remark-gfm demotes
+// to checked:null with literal "[ ]" text: this segment fails at its first
+// items assertion with [{checked:null,label:"[ ]"}], plus the caret was
+// unmappable, so the follow-up label landed in the WRONG item (measured).
+// Enter on the fresh (ledgered, never-labelled) seed lifts OUT of the list —
+// the plain-list parity baseline — instead of stacking demoted lines.
+// ===========================================================================
+async function runEnterContinuationSegment() {
+  const segRoot = `/tmp/horsemd-kernel-task-enter-${process.pid}`
+  const segFile = join(segRoot, 'task-enter.md')
+  const SEG_FIXTURE = ['# 标题', '', '甲乙丙丁', '', '尾段落。', ''].join('\n')
+
+  await rm(segRoot, { recursive: true, force: true })
+  await mkdir(segRoot, { recursive: true })
+  await writeFile(segFile, SEG_FIXTURE)
+  let app
+  let reopened
+  try {
+    app = await launchBuiltElectron({ profileDir: join(segRoot, 'profile'), port: port + 4, appArgs: [segFile] })
+    const { evaluate, send } = app
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('甲乙丙丁') && text.includes('尾段落。') ? text : null
+    }, 'Enter segment: initial document did not mount')
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'Enter segment: kernel mode did not remount the tab')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(!attachDiagnostics.includes('attach-unmappable'),
+      `Enter segment: kernel mode degraded to legacy fallback: ${attachDiagnostics}`)
+
+    // 1) /task → first label (ASCII), the established flow.
+    await selectBlock(evaluate, send, '甲乙丙丁')
+    await runTaskItem(evaluate, send)
+    await typeTextLikeUser(send, '首项', { delayMs: delay })
+    await sleep(400)
+
+    // 2) THE REPORTED KEYSTROKE: Enter at the label's end. The new item must
+    //    be a live checkbox holding exactly the seed, with the caret inside
+    //    it — pre-fix it was literal "[ ]" text and the caret stayed behind.
+    const diagnosticsBefore = await evaluate(`(window.__hmKernelDiagnostics || []).length`)
+    await pressKey(send, { key: 'Enter', code: 'Enter' })
+    await sleep(600)
+    const itemsAfterEnter = await taskItems(evaluate)
+    console.log('  [Enter at label end] ->', JSON.stringify(itemsAfterEnter))
+    assert.deepEqual(itemsAfterEnter, [
+      { checked: false, label: '首项' },
+      { checked: false, label: NBSP }
+    ], 'Enter must create a REAL second checkbox holding the seed — pre-fix: literal "[ ]" text')
+    assert.equal(await caretInTask(evaluate), true, 'the caret must land in the new item')
+    const enterDiagnostics = await evaluate(
+      `JSON.stringify((window.__hmKernelDiagnostics || []).slice(${diagnosticsBefore}))`)
+    assert.ok(!enterDiagnostics.includes('caret-unmappable'),
+      `the split caret must map — pre-fix every task split recorded caret-unmappable: ${enterDiagnostics}`)
+
+    // 3) Real-IME label on the Enter-created second item: the seed dissolves
+    //    through commitReplace exactly as it does for a /task seed.
+    await imeType(send, 'renwu', '任务')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('任务'),
+      'composed 任务 never reached the second item')
+    const afterIme = SEG_FIXTURE.replace('甲乙丙丁', '- [ ] 首项\n- [ ] 任务')
+    const sourceAfterIme = await readSource(evaluate, 'Enter + IME label')
+    assert.equal(sourceAfterIme, afterIme,
+      `the IME label must dissolve the Enter-written seed (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+    assert.ok(!sourceAfterIme.includes(NBSP), 'no U+00A0 survives')
+
+    // 4) Cell 3 in the real app: Enter at the label end creates a seed, a
+    //    second Enter on that fresh seed LIFTS OUT of the list (plain-list
+    //    parity) — no demoted line, no literal "[ ]" text, list intact.
+    const labelRect = await waitFor(() => charRect(evaluate, '任务', 0, 2),
+      'could not locate the 任务 item to click back into')
+    await click(send, { x: labelRect.right + 1, y: labelRect.top + labelRect.height / 2 })
+    await sleep(300)
+    await pressKey(send, { key: 'Enter', code: 'Enter' })
+    await sleep(500)
+    await pressKey(send, { key: 'Enter', code: 'Enter' })
+    await sleep(500)
+    const itemsAfterExit = await taskItems(evaluate)
+    console.log('  [Enter-Enter lift-out] ->', JSON.stringify(itemsAfterExit))
+    assert.deepEqual(itemsAfterExit, [
+      { checked: false, label: '首项' },
+      { checked: false, label: '任务' }
+    ], 'the second Enter lifts the empty seed item out — nothing demoted, nothing left behind')
+    const finalExpected = SEG_FIXTURE.replace('甲乙丙丁', '- [ ] 首项\n- [ ] 任务\n')
+    const finalSource = await readSource(evaluate, 'after lift-out')
+    assert.equal(finalSource, finalExpected,
+      'the lift-out removes the marker line and keeps everything else byte-exact')
+
+    // 5) Save + cold reopen: both checkboxes survive from the bytes alone.
+    await save(evaluate)
+    assert.equal(await readFile(segFile, 'utf8'), finalExpected, 'disk bytes match exactly')
+    assert.equal(app.dialogs.length, 0,
+      `no dialog in the Enter segment: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
+    await stopBuiltElectron(app, { removeProfile: true })
+    app = null
+    reopened = await launchBuiltElectron({ profileDir: join(segRoot, 'profile-reopen'), port: port + 5, appArgs: [segFile] })
+    await waitFor(async () => {
+      const text = await mounted(reopened.evaluate)
+      return text && text.includes('首项') && text.includes('任务') ? text : null
+    }, 'Enter segment: reopened document did not mount')
+    const reopenedItems = await taskItems(reopened.evaluate)
+    console.log('  [Enter segment cold reopen] ->', JSON.stringify(reopenedItems))
+    assert.deepEqual(reopenedItems, [
+      { checked: false, label: '首项' },
+      { checked: false, label: '任务' }
+    ], 'both Enter-flow tasks survive a cold reopen as REAL checkboxes')
+    assert.equal(reopened.dialogs.length, 0, 'no dialog on reopen (Enter segment)')
+
+    console.log('PASS kernel-mode /task Enter segment: Enter continues the list with a live seeded checkbox, a real-IME label dissolves it, Enter-Enter lifts out cleanly, and both tasks survive a cold reopen')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+    await stopBuiltElectron(reopened, { removeProfile: true })
+  }
+}
+
 async function main() {
   await run()
   await runImeFirstLabelSegment()
+  await runEnterContinuationSegment()
 }
 
 main().catch((error) => {

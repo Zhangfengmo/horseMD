@@ -296,6 +296,18 @@ const FIXTURE_DOCS = {
   ['- [ ] ' + SEED_NBSP + '买菜\r\n']: () => doc(bl(li(false, p(text(SEED_NBSP + '买菜')))), p()),
   ['- [ ] x买\n']: () => doc(bl(li(false, p(text('x买')))), p()),
   ['- [ ] ' + SEED_NBSP + '买\n']: () => doc(bl(li(false, p(text(SEED_NBSP + '买')))), p()),
+  // Case I5g/I5h (2026-08-21 task-Enter matrix): Enter continuation writes a
+  // SEEDED second item; the pre-fix demoted spelling (bare `- [ ] ` → a
+  // checked:null item holding literal "[ ]" text) is registered too, per the
+  // Case 21c tripwire convention, so the pre-fix commit lands and fails on
+  // BYTES instead of a masked stub-parse throw. Enter on the fresh seed
+  // EXITS the list, leaving no blocks at all ('\n' → just the trailing
+  // placeholder).
+  ['- [ ] x\n- [ ] ' + SEED_NBSP + '\n']: () =>
+    doc(bl(li(false, p(text('x'))), li(false, p(text(SEED_NBSP)))), p()),
+  ['- [ ] x\n- [ ] \n']: () => doc(bl(li(false, p(text('x'))), li(null, p(text('[ ]')))), p()),
+  ['- [ ] x\n- [ ] y\n']: () => doc(bl(li(false, p(text('x'))), li(false, p(text('y')))), p()),
+  ['\n']: () => doc(p()),
   // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert. An
   // hr-ending document always carries the trailing placeholder (same
   // `withTrailingParagraph` convention as every fixture above); the typed
@@ -3518,6 +3530,84 @@ const toggleVia = (h, markType, from, to) => {
     'the IME dissolve on a CRLF document commits the dissolved line with its CRLF ending intact')
   assert.equal(/(?<!\r)\n/.test(h.controller.kernel.doc.text), false, 'no lone LF was introduced')
   assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [])
+}
+
+// Case I5g (2026-08-21 user report 「任务列表的回车解析目前还是坏的」): Enter
+// at the end of a task item's label, end to end through the controller's
+// structural keymap. Pre-fix, splitListItem wrote the new item as bare
+// `- [ ] ` — remark-gfm DEMOTES that to checked:null with literal "[ ]" text
+// (the seven-spelling measurement), the caret anchor had no character-map
+// unit (`caret-unmappable:split-list-item`), and the next keystroke typed
+// into the WRONG item (measured in the built app: Enter then 'x' appended to
+// the FIRST item's label). Now the empty side carries the same session-
+// ledgered U+00A0 seed `/task` writes, the caret maps to its end, and the
+// first label character dissolves it through the same commands.
+{
+  const h = makeHarness('- [ ] x\n', doc(bl(li(false, p(text('x')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // bullet_list(0) > list_item(1) > paragraph(2) > text 'x'(3..4): after = 4.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  const diagnosticsBefore = (globalThis.__hmKernelDiagnostics || []).length
+  assert.equal(
+    h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view),
+    true, 'Enter at the label end is a structural split'
+  )
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n- [ ] ' + SEED_NBSP + '\n',
+    'the continuation item carries the seed — pre-fix these bytes were the demoted bare spelling')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [{ from: 14, to: 15, ascii: '' }],
+    'the Enter-written seed is ledgered exactly like a /task seed')
+  assert.ok(h.view.state.doc.eq(
+    doc(bl(li(false, p(text('x'))), li(false, p(text(SEED_NBSP)))), p())),
+    'the view shows a REAL second checkbox, not literal "[ ]" text')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(h.view.state.selection.head), 15,
+    'the caret maps to the seed\'s end — pre-fix it was unmappable and stayed in the old item')
+  assert.ok(!(globalThis.__hmKernelDiagnostics || []).slice(diagnosticsBefore)
+    .some((entry) => entry.type === 'caret-unmappable'),
+    'no silent caret failure — pre-fix every task split recorded one')
+
+  // The first label character dissolves the Enter-written seed through the
+  // ordinary plain-text path — same machinery as a /task seed.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('y', h.view.state.selection.head))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n- [ ] y\n',
+    'the seed dissolved under the first label character')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [])
+
+  // Undo unwinds dissolve and split as separate steps.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n- [ ] ' + SEED_NBSP + '\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n')
+}
+
+// Case I5h (task-Enter matrix cell 3): Enter on the fresh, never-labelled
+// seed EXITS the list — the same Typora lift-out an empty PLAIN item takes
+// (`- 甲` + Enter + Enter is the shipped parity baseline). The check is
+// ledger-gated: Case I5e/section-5-of-the-task-seed-suite pin that a
+// reopened (unledgered) seed splits instead. Undo restores the seed line,
+// then the query bytes.
+{
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '\n')
+  assert.equal(
+    h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view),
+    true, 'Enter on the seed is handled structurally'
+  )
+  assert.equal(h.controller.kernel.doc.text, '\n',
+    'the seed item lifts out — the marker line is gone, nothing demoted')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [],
+    'the seed\'s ledger entry died with its line')
+  assert.ok(h.view.state.doc.eq(doc(p())), 'the view settled on the emptied document')
+
+  // Undo: exit and insert unwind separately back to the query bytes.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/task\n')
 }
 
 // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert, end to end

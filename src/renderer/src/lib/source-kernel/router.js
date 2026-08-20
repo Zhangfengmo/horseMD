@@ -6,6 +6,7 @@
 import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
+import { isLedgeredSeedOnlyItem } from './commands/task-seed.js'
 import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
@@ -51,7 +52,21 @@ export function routeStructuralKey(key, ctx) {
   const item = index.listItemAt(offset)
   switch (key) {
     case 'Enter':
-      if (item) return item.empty ? exitEmptyListItem(ctx) : splitListItem(ctx)
+      // A session-created `/task`/split seed the user never labelled is
+      // EFFECTIVELY empty for Enter (the U+00A0 stands for NO keystroke —
+      // task-seed.js `isLedgeredSeedOnlyItem`), so it takes the same
+      // lift-out exit a plain empty item takes (2026-08-21 task-Enter
+      // matrix cell 3). The check is LEDGER-gated: a reopened file's U+00A0
+      // is the author's byte, the item has real content, and Enter splits —
+      // never deletes — exactly as the 2026-08-20 audit pinned. Backspace is
+      // deliberately NOT routed this way: deleting one character from the
+      // seed item leaves the unrepresentable `- [ ] ` demotion, which is the
+      // empty-task wall's own documented refusal.
+      if (item) {
+        return item.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item)
+          ? exitEmptyListItem(ctx)
+          : splitListItem(ctx)
+      }
       return splitTextBlock(ctx)
     case 'Tab':
       return item ? indentListItem(ctx) : NOT_STRUCTURAL
