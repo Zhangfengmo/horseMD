@@ -722,6 +722,17 @@ export function createKernelMode({
       scheduleVerify()
       return
     }
+    // NEVER inside an active split-placeholder session (regression caught
+    // live by test-kernel-mode-ui, pinned as Case PERF-3): the placeholder is
+    // a view-only paragraph the reparse cannot contain, so a verify landing
+    // mid-session reads it as a mismatch and its repair DELETES the block
+    // under the parked caret — the next keystroke then types into whatever
+    // neighbour the caret collapses into. DROPPED, not deferred: the session
+    // opened from a structural op that reconciled the view against a fresh
+    // parse (verified-equivalent at session start), and the session-ending
+    // commit verifies synchronously (`hadPlaceholders`), so nothing is left
+    // unchecked.
+    if (splitPlaceholders.length) return
     verifyPlainTextProjection(view.state.doc)
   }
   const scheduleVerify = () => {

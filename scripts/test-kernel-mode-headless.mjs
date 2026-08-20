@@ -189,6 +189,10 @@ const FIXTURE_DOCS = {
   '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X'))),
   '- 甲\n\nab': () => doc(bl(li(null, p(text('甲')))), p(text('ab'))),
   '甲乙\n\n\n': () => doc(p(text('甲乙'))),
+  // Case PERF-3 fixtures: a pending debounced verify + a split-placeholder
+  // session on the SAME document (blank-line runs collapse in the reparse).
+  '甲丙乙\n\n\n': () => doc(p(text('甲丙乙'))),
+  '甲丙乙\n\n丁\n': () => doc(p(text('甲丙乙')), p(text('丁'))),
   '甲乙\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
   'X甲乙\n\n\n': () => doc(p(text('X甲乙'))),
   // Task 2 (plan 3) fixtures: repeated Enter inside the trailing placeholder
@@ -3916,6 +3920,43 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(flushed, h.controller.kernel.doc.text, 'flush serves the kernel bytes')
   assert.equal(h.controller.getPerfStats().verifyRuns, 2,
     'flushMarkdown forces the pending verify to run immediately')
+}
+
+// Case PERF-3 (regression, caught live by test-kernel-mode-ui): the
+// DEBOUNCED verify must never fire while a split-placeholder session is
+// active. The placeholder is a view-only construct the reparse cannot
+// contain, so a verify landing mid-session reads it as a mismatch and its
+// repair DELETES the paragraph under the parked caret — the next keystroke
+// then lands in whatever block the caret collapses into (measured: 乙段
+// typed into the neighbouring list item). The session's own edges already
+// verify synchronously (the session-ending commit's hadPlaceholders branch),
+// so the scheduled run is simply dropped, not deferred.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // A plain-text commit first, so a verify is PENDING when the session opens.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  // Enter at the block end opens the split-placeholder session.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲丙乙')), p())), 'placeholder parked under the caret')
+  // Let every pending debounce fire. The placeholder must survive.
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲丙乙')), p())),
+    'the scheduled verify must not delete an active split placeholder')
+  // p1('甲丙乙') spans 0..4, so the placeholder sits at pmPos 5, content 6;
+  // the split wrote '\n\n' at raw 3, parking the caret at raw 5.
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(6), { raw: 5, prefix: '' },
+    'the session voucher survives the debounce window')
+  // The continuation keystroke still lands at the blank-line offset.
+  const fill = dispatchThrough(h, h.view.state.tr.insertText('丁', 6))
+  await flushMicrotasks()
+  assert.equal(fill, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n丁\n',
+    'typing after the wait still fills the placeholder, never a neighbour')
 }
 
 console.log('PASS kernel mode headless')
