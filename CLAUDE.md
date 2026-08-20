@@ -461,6 +461,13 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   UI), `/task` (writes `- [ ] ` + a session-ledgered U+00A0 seed that
   dissolves under the first label character — keyboard, paste AND IME paths),
   and `/text` (doc-end, riding the trim proof + virtual placeholder).
+  Updated 2026-08-21: CRLF/lone-CR soft-wrapped prose is editable — one line
+  ending, any spelling, is ONE width-1 `linebreak` unit (raw span swallows
+  the pair + continuation prefix; PM holds a single '\n' per ending), so the
+  former per-soft-break `visibleLength` overcount that made every CRLF
+  soft-wrapped block read-only (combination-matrix family D2) is gone; code
+  maps keep their split model for the CM bridge, and `splitsCrlfPair` still
+  refuses raw writes inside a pair at the applySourceTransaction chokepoint.
   Whitespace CommonMark would strip (block ends, heading/paragraph line
   starts) is written as raw U+00A0 (Space→1, Tab→2), session-ledgered, and
   healed back to ASCII when displaced; markers complete via a proven literal
