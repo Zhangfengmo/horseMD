@@ -39,8 +39,29 @@
 //                     bytes reparse to a still-pairing document in which the
 //                     edit is observable — the `blockEditIsObservable` posture
 //                     (lib/source-kernel/commands/line-start-whitespace.js),
-//                     applied per block instead of per command.
+//                     applied per block instead of per command. Since the
+//                     2026-08-20 slash round this includes the TRAILING
+//                     VIRTUAL PAIR: the PM side is built through
+//                     `pmDocForMatrix`, which mirrors @milkdown/plugin-trailing
+//                     (an empty paragraph appended whenever the last top-level
+//                     child is not a paragraph/heading — the vendored plugin's
+//                     own condition, verbatim), so every atom/list/fence/
+//                     table/quote-ending composition also proves that typing
+//                     in the placeholder commits `insertPrefix` + text AND
+//                     that the reparse lands the text in its OWN new trailing
+//                     paragraph — a missing/wrong separator would lazily
+//                     continue the preceding block, which the observability
+//                     check alone cannot distinguish.
 //  P4 LINE ENDINGS.   Every shape above is run for LF and for CRLF.
+//
+// ELEMENT PROVENANCE (2026-08-20): four element spellings are the RESULT bytes
+// of this round's kernel slash inserts — `---`/`***` (/divider, primary +
+// frontmatter-shape fallback), `![]()` (/image), `- [ ] ` + U+00A0 (/task's
+// seed) and its dissolved form. None is restated by hand and trusted: each is
+// derived by RUNNING the production command at load time (see the
+// PRODUCTION-SPELLING BINDING section below) and asserted against the element
+// table, so a respell in lib/source-kernel/commands/* fails this suite loudly
+// and the table has to follow consciously.
 //
 // No timing assertions anywhere. The generator is deterministic and seeded, and
 // prints its composition count.
@@ -53,15 +74,22 @@ import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel
 import {
   createMarkdownDocument,
   applySourceTransaction,
-  replaceVisibleText
+  replaceVisibleText,
+  buildSyntaxIndex,
+  insertBlockFromQuery
 } from '../src/renderer/src/lib/source-kernel/index.js'
-import { parseEditorMarkdown, prepareEditorMarkdown } from './lib/kernel-parse-harness.mjs'
+// Namespace import for exports younger than this suite's own imports above:
+// on a pre-/task tree `spellTaskSeedInsert` simply does not exist, and a named
+// import would crash at module resolution — the binding below must fail on its
+// ASSERTION instead, naming what is missing.
+import * as sourceKernel from '../src/renderer/src/lib/source-kernel/index.js'
+import { parseEditorMarkdown, prepareEditorMarkdown, editorSchema } from './lib/kernel-parse-harness.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const SNAPSHOT_PATH = join(here, 'fixtures', 'kernel-combination-readonly-snapshot.json')
 const UPDATE = process.env.UPDATE_KERNEL_COMBINATION_SNAPSHOT === '1'
 
-// Deterministic, seeded sampler. Full pairwise over the element set is ~1.1k
+// Deterministic, seeded sampler. Full pairwise over the element set is ~1.6k
 // ordered pairs; the brief caps the matrix at a few hundred documents, so the
 // pairs are sampled with a fixed-seed LCG (the classic MINSTD constants) rather
 // than truncated — truncation would silently confine coverage to whatever the
@@ -79,6 +107,73 @@ function seededOrder(count, seed) {
 }
 
 const NBSP = '\u00A0'
+
+// ==========================================================================
+// PRODUCTION-SPELLING BINDING (2026-08-20 slash round)
+// ==========================================================================
+// The slash-insert result elements are DERIVED, not transcribed: each spelling
+// below is the byte run the production command itself commits, obtained by
+// running `insertBlockFromQuery` / `spellTaskSeedInsert` on a minimal query
+// document at load time. Two consequences, both deliberate:
+//   * a respelling in the commands (a different divider marker, a task seed
+//     that stops being U+00A0, an image literal with a title slot\u2026) fails THIS
+//     suite loudly at startup, so the element table can never drift from what
+//     the app actually writes;
+//   * on a tree predating a target, the command answers
+//     `unsupported-structure` and the assertion names the target \u2014 which is
+//     exactly the pre-fix failure that proves these additions non-vacuous.
+const INSERT_QUERY_DOC = '/q\n'
+function productionInsertBytes(target, baseMd = INSERT_QUERY_DOC) {
+  const result = insertBlockFromQuery({
+    doc: createMarkdownDocument(baseMd),
+    index: buildSyntaxIndex(baseMd),
+    // The query paragraph's own end offset ('/q' spans [0,2) in the default
+    // base; custom bases keep the query as the first block, same span).
+    offset: 2,
+    target,
+    language: ''
+  })
+  assert.equal(result?.ok, true,
+    `production /${target} must commit on ${JSON.stringify(baseMd)} (got ${result?.code})`)
+  return result.transaction.edits[0].insert
+}
+// /divider: primary spelling, then the frontmatter-shape fallback (query as
+// the document's FIRST block with a later `---` line \u2014 the one shape where
+// `---` would parse as a yaml fence and the command's axis (a) rejects it).
+const DIVIDER_BYTES = productionInsertBytes('divider')
+const DIVIDER_FALLBACK_BYTES = productionInsertBytes('divider', '/q\n\n\u7532\n\n---\n')
+const IMAGE_EMPTY_BYTES = productionInsertBytes('image')
+const TASK_SEED_BYTES = productionInsertBytes('task')
+// The dissolved form: the seed deleted and the first label character inserted
+// as ONE edit \u2014 commands/task-seed.js's own transaction, applied.
+function productionDissolvedDoc(label) {
+  assert.equal(typeof sourceKernel.spellTaskSeedInsert, 'function',
+    'spellTaskSeedInsert must exist (a pre-/task tree fails here by name)')
+  const seedDoc = `${TASK_SEED_BYTES}\n`
+  const index = buildSyntaxIndex(seedDoc)
+  const paragraph = index.tree.children[0]?.children?.[0]?.children?.[0]
+  const seedStart = seedDoc.indexOf(NBSP)
+  const result = sourceKernel.spellTaskSeedInsert({
+    doc: { text: seedDoc, revision: 0 },
+    block: paragraph,
+    seed: { rawStart: seedStart, rawEnd: seedStart + 1 },
+    offset: seedStart + 1,
+    insert: label
+  })
+  assert.equal(result?.ok, true,
+    `the task seed must dissolve under ${JSON.stringify(label)} (got ${result?.code})`)
+  const applied = applySourceTransaction({ text: seedDoc, revision: 0 }, result.transaction)
+  assert.equal(applied?.ok, true, 'the dissolve transaction must apply')
+  return applied.doc.text
+}
+const TASK_DISSOLVED_DOC = productionDissolvedDoc('\u7532')
+// The literals the docs/ADRs cite, pinned so a drift is legible in BOTH
+// directions (command vs table, table vs record).
+assert.equal(DIVIDER_BYTES, '---', 'the /divider primary spelling is ---')
+assert.equal(DIVIDER_FALLBACK_BYTES, '***', 'the /divider frontmatter-shape fallback is ***')
+assert.equal(IMAGE_EMPTY_BYTES, '![]()', 'the /image spelling is ![]()')
+assert.equal(TASK_SEED_BYTES, `- [ ] ${NBSP}`, 'the /task seed spelling is "- [ ] " + U+00A0')
+assert.equal(TASK_DISSOLVED_DOC, '- [ ] \u7532\n', 'the dissolved seed is the label alone \u2014 no forged space, no leftover seed')
 
 // ==========================================================================
 // FEATURE ELEMENTS
@@ -149,9 +244,31 @@ const ELEMENTS = [
   // so the pairing is sound and no byte is at risk, but every `---`-led
   // composition would otherwise silently stop exercising the construct that
   // follows it. `***` keeps the thematic-break x everything intersection real.
+  //
+  // Since 2026-08-20 these two are ALSO the /divider insert's own result
+  // shapes — `---` the primary spelling, `***` the frontmatter-shape fallback
+  // — asserted against the production command right below the table, so they
+  // are the command's bytes formally, not by coincidence.
   { id: 'thematic-break', md: '---\n' },
   { id: 'thematic-break-stars', md: '***\n' },
   { id: 'image-block', md: '![独立图片](standalone.png)\n' },
+  // --- slash-insert results (2026-08-20; spellings bound to production above) ---
+  // /image writes the empty image card: mdast paragraph > image url:'' alt:'',
+  // which Crepe's remarkImageBlock turns into the block-level image-block ATOM
+  // (read-only by construction, so it can never appear in the read-only
+  // signature — what its compositions exercise is the pairing around it and
+  // the trailing placeholder after it).
+  { id: 'image-block-empty', md: `${IMAGE_EMPTY_BYTES}\n` },
+  // /task writes the only representable empty task: `- [ ] ` + U+00A0 (every
+  // ASCII spelling parses checked:null with literal "[ ]" text). Here the seed
+  // is plain AUTHORED bytes — createMarkdownDocument starts with an empty
+  // provenance ledger, exactly like a reopened file — so the matrix proves the
+  // seed item pairs, survives a map build byte-identically, and accepts an
+  // ordinary edit; the ledger-gated dissolve is its own suite's subject
+  // (test-source-kernel-task-seed.mjs).
+  { id: 'task-seed', md: `${TASK_SEED_BYTES}\n` },
+  // …and the dissolved form the first label character leaves behind.
+  { id: 'task-dissolved', md: TASK_DISSOLVED_DOC },
   // --- front matter (document head only) ---
   { id: 'frontmatter', md: '---\ntitle: 示例\ntags: [a, b]\n---\n', leadingOnly: true }
 ]
@@ -163,6 +280,14 @@ const el = (id) => {
   return found
 }
 
+// The /divider spellings ARE the two existing thematic-break elements —
+// stated as an assertion so the correspondence is a checked fact, not a
+// comment that can rot.
+assert.equal(el('thematic-break').md, `${DIVIDER_BYTES}\n`,
+  'the thematic-break element is the /divider primary spelling')
+assert.equal(el('thematic-break-stars').md, `${DIVIDER_FALLBACK_BYTES}\n`,
+  'the thematic-break-stars element is the /divider frontmatter-shape fallback')
+
 // ==========================================================================
 // CONTAINMENT — element A holding element B, where the grammar allows it.
 // ==========================================================================
@@ -173,8 +298,12 @@ const quotePrefix = (md) => md.replace(/\n$/, '').split('\n').map((line) => (lin
 
 const CONTAINMENT = []
 // list > quote, list > fence, list > table, list > math  (3-space continuation
-// under an ordered marker and 2-space under a bullet, the canonical shapes)
-for (const inner of ['quote-plain', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'para-bold', 'para-hardbreak-spaces']) {
+// under an ordered marker and 2-space under a bullet, the canonical shapes).
+// `image-block-empty` joined 2026-08-20: an empty image card as a list item's
+// SECOND block (the `- 甲` paragraph stays first, so no schema-required
+// leading-paragraph fill is involved — that class has its own flattenMd
+// handling and its own pins).
+for (const inner of ['quote-plain', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'para-bold', 'para-hardbreak-spaces', 'image-block-empty']) {
   CONTAINMENT.push({
     id: `contain:list-bullet>${inner}`,
     md: `- 甲\n\n${indentBlock(el(inner).md, '  ')}`
@@ -184,8 +313,9 @@ for (const inner of ['quote-plain', 'fence-js', 'fence-empty', 'math-block', 'ta
     md: `1. 甲\n\n${indentBlock(el(inner).md, '   ')}`
   })
 }
-// quote > everything it can hold
-for (const inner of ['list-bullet', 'list-task', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'heading-plain', 'para-highlight', 'para-hardbreak-spaces', 'thematic-break']) {
+// quote > everything it can hold (task-seed and the empty image card joined
+// 2026-08-20 — the slash-insert results one container deep)
+for (const inner of ['list-bullet', 'list-task', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'heading-plain', 'para-highlight', 'para-hardbreak-spaces', 'thematic-break', 'task-seed', 'image-block-empty']) {
   CONTAINMENT.push({ id: `contain:quote>${inner}`, md: quotePrefix(el(inner).md) })
 }
 // nested list holding a fence / a quote
@@ -217,7 +347,12 @@ const TRIPLES = [
   // heading with a leading NBSP directly inside a quote
   { id: 'triple:quote>heading-nbsp', md: `> ## ${NBSP}前置空格标题\n` },
   // frontmatter followed immediately by a table containing a <br>
-  { id: 'triple:frontmatter>table-br', md: '---\ntitle: 示例\n---\n\n| 甲 | 乙 |\n| --- | --- |\n| 一<br>二 | 三 |\n' }
+  { id: 'triple:frontmatter>table-br', md: '---\ntitle: 示例\n---\n\n| 甲 | 乙 |\n| --- | --- |\n| 一<br>二 | 三 |\n' },
+  // a fresh task seed whose SIBLING item is checked and carries marks — the
+  // static-bytes neighbourhood of "toggle between insert and first keystroke"
+  // (the dissolve preserves `checked`; here the matrix proves the seed item
+  // and a marked, checked item pair and edit side by side in ONE list)
+  { id: 'triple:task-list>seed+marks', md: `- [ ] ${NBSP}\n- [x] **粗** 乙\n` }
 ]
 
 // ==========================================================================
@@ -282,6 +417,35 @@ function buildCompositions() {
 // ==========================================================================
 // ORACLE HELPERS
 // ==========================================================================
+
+// THE LIVE EDITOR'S TRAILING PLACEHOLDER, mirrored (2026-08-20). Crepe ships
+// `@milkdown/plugin-trailing` unconditionally, and its default `shouldAppend`
+// is exactly this: append one empty paragraph whenever the document's last
+// top-level child is anything other than a heading/paragraph (read from the
+// vendored node_modules/@milkdown/plugin-trailing/lib/index.js, not assumed).
+// The harness's ParserState parse alone never runs PM plugins, so before this
+// mirror every atom/list/fence/table/quote-ending composition was missing the
+// one PM node the real editor always has there — and with it the whole
+// "typing after a trailing atom" surface the wf-gateway round was about.
+// With the mirror, `buildProjectionMap` pairs the appended paragraph as the
+// trailing VIRTUAL pair (editable at markdown.length, carrying the separator
+// `insertPrefix`), and P3 types through it like any other editable pair —
+// plus the trailing-specific reparse assertion in the edit loop below.
+const TRAILING_EXEMPT_TYPES = new Set(['heading', 'paragraph'])
+function pmDocForMatrix(md) {
+  const parsed = parseEditorMarkdown(md)
+  const last = parsed.lastChild
+  if (!last || TRAILING_EXEMPT_TYPES.has(last.type.name)) return parsed
+  return parsed.copy(parsed.content.addToEnd(editorSchema.nodes.paragraph.create()))
+}
+
+// Is this pair the trailing virtual placeholder? All the kernel's virtual
+// pairs carry `mdBlock: null`; only the trailing one anchors at the document's
+// own end (an empty quote/list anchor always sits before its line ending).
+const isTrailingPair = (pair, markdown) =>
+  !!pair.virtual && pair.mdBlock === null &&
+  pair.charMap?.visibleLength === 0 &&
+  pair.charMap.visibleToRaw(0) === markdown.length
 
 // The signature that gets snapshotted: which pairs are read-only, described
 // structurally (index + PM node type) rather than by content, so a snapshot
@@ -383,6 +547,17 @@ const KNOWN_UNEDITABLE = new Map([])
 //                 hard-break-into-blockquote family is documented under.
 //     Posture:    fail-closed and LOUD.
 //
+// SNAPSHOT RE-BASELINE LOG — every regeneration is a conscious decision and
+// leaves a line here saying what changed and why it is acceptable:
+//   2026-08-20 (slash-round elements): +24 entries, 0 removed, 0 changed, no
+//   new family. All 24 are compositions of the NEW elements
+//   (image-block-empty / task-seed / task-dissolved) with the two elements
+//   that already carried a degraded block: 12 x D1 (the `<br>` table cell,
+//   now next to a new neighbour) and 12 x D2 (the CRLF soft-break paragraph,
+//   same). In every entry the read-only block is the OLD element's own block
+//   — verified per entry, never a block a new element contributed — so the
+//   new constructs themselves are fully editable in every composition.
+//
 // Each family carries a STATUS, and the snapshot stores the family alongside
 // every entry, because these are not all the same kind of fact:
 //   `known-degraded`      — current, fail-closed behaviour with no scheduled
@@ -441,6 +616,8 @@ const stats = {
   readOnlyTextblocks: 0,
   documentsWithReadOnlyTextblocks: 0,
   editsCommitted: 0,
+  trailingPlaceholderDocs: 0,
+  trailingEditsCommitted: 0,
   preparationRewrites: 0,
   byFamily: {}
 }
@@ -457,7 +634,7 @@ for (const document of composed.documents) {
 
   let pmDoc
   try {
-    pmDoc = parseEditorMarkdown(md)
+    pmDoc = pmDocForMatrix(md)
   } catch (error) {
     record(id, `harness parse threw: ${error.message}`)
     continue
@@ -491,7 +668,7 @@ for (const document of composed.documents) {
     continue
   }
   const signature = readOnlySignature(map)
-  const second = buildProjectionMap(md, parseEditorMarkdown(md))
+  const second = buildProjectionMap(md, pmDocForMatrix(md))
   if (!second || readOnlySignature(second).join('|') !== signature.join('|')) {
     record(id, 'a second, independent map build produced a different read-only signature')
     continue
@@ -508,6 +685,7 @@ for (const document of composed.documents) {
   // --- P3: every editable block round-trips a committed plain-text edit.
   const editable = editablePairs(map)
   stats.editableBlocks += editable.length
+  if (editable.some((pair) => isTrailingPair(pair, md))) stats.trailingPlaceholderDocs += 1
   let editFailure = null
   for (const pair of editable) {
     const { charMap } = pair
@@ -543,7 +721,7 @@ for (const document of composed.documents) {
     // require both a still-pairing document and an OBSERVABLE edit.
     let editedPm
     try {
-      editedPm = parseEditorMarkdown(editedText)
+      editedPm = pmDocForMatrix(editedText)
     } catch (error) {
       editFailure = `reparsing committed bytes threw: ${error.message}`
       break
@@ -556,6 +734,20 @@ for (const document of composed.documents) {
     if (!editedPm.textContent.includes(EDIT_MARKER)) {
       editFailure = `committed edit at pmPos ${pair.pmPos} is not observable in the reparsed document`
       break
+    }
+    // TRAILING PLACEHOLDER TOOTH (2026-08-20): for the trailing virtual pair,
+    // observability alone is too weak — with a missing/short separator prefix
+    // the marker would still be "observable", just lazily absorbed INTO the
+    // preceding list item/blockquote line. The contract is stronger: the typed
+    // text becomes its OWN new final paragraph, holding exactly the marker.
+    if (isTrailingPair(pair, md)) {
+      const lastChild = editedPm.lastChild
+      if (!lastChild || lastChild.type.name !== 'paragraph' || lastChild.textContent !== EDIT_MARKER) {
+        editFailure = 'trailing-placeholder typing did not land in its own new final paragraph ' +
+          `(last child: ${lastChild ? `${lastChild.type.name} ${JSON.stringify(lastChild.textContent)}` : 'none'})`
+        break
+      }
+      stats.trailingEditsCommitted += 1
     }
     stats.editsCommitted += 1
   }
@@ -635,9 +827,26 @@ if (UPDATE) {
 console.log(
   `paired ${stats.pairedDocuments} / unpaired ${stats.unpairedDocuments}; ` +
   `editable textblocks ${stats.editableBlocks} (edits committed ${stats.editsCommitted}); ` +
+  `trailing placeholders paired in ${stats.trailingPlaceholderDocs} documents ` +
+  `(placeholder edits committed ${stats.trailingEditsCommitted}); ` +
   `read-only textblocks ${stats.readOnlyTextblocks} across ${stats.documentsWithReadOnlyTextblocks} documents; ` +
   `preparation rewrote bytes in ${stats.preparationRewrites} documents`
 )
+// The trailing mirror must not be decorative: a matrix run in which no
+// document paired a trailing placeholder (or in which paired placeholders
+// stopped committing their typing shape) means `pmDocForMatrix` stopped
+// mirroring plugin-trailing, or the separator/anchor machinery regressed —
+// fail loudly rather than let the whole surface silently drop out of
+// coverage. Pushed into `failures` (not asserted here) so the per-document
+// reasons recorded above always print alongside.
+if (stats.trailingPlaceholderDocs === 0) {
+  failures.push('no document paired a trailing placeholder — the plugin-trailing mirror is dead')
+} else if (stats.trailingEditsCommitted < stats.trailingPlaceholderDocs) {
+  failures.push(
+    `only ${stats.trailingEditsCommitted} of ${stats.trailingPlaceholderDocs} paired trailing placeholders ` +
+    'committed the typing shape — each per-document reason is itemized in this list'
+  )
+}
 // Attribute every read-only entry to a named family, so the number above is
 // readable and an entry belonging to NO known family stands out immediately —
 // that is the one a reader must look at.
