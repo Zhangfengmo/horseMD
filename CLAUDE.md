@@ -452,15 +452,19 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   paragraph, whole-atom deletion (not a *partial* overlap, not a *marked*
   atom like a linked image — its `[`/`](url)` bytes belong to no unit), and
   slash-menu block-type/insert items (`/h1`–`/h6`, `/ul`, `/ol`, `/table`,
-  `/code`+language incl. `/mermaid`, `/math`). Deliberately still refused:
-  hard-break paragraphs (the break's raw span stops at the line ending, so
-  the next line's continuation prefix is unaddressable — typing there would
-  demote a blockquote's `> ` to prose); `/image` `/divider` `/task` `/text`
-  (no caret home in the empty node each would create); and `/quote` itself —
-  its only reachable invocation always hits "an empty blockquote reparses to
-  zero mdast children, and PM's blockquote schema requires `block+`", so it
-  is wired but can never succeed (use the right-click "引用/取消引用" menu
-  item instead, which does work in both modes). **Not close to default-on**:
+  `/code`+language incl. `/mermaid`, `/math`). Updated 2026-08-20: hard-break
+  paragraphs are typable (`hardBreakUnitEnd` folds the continuation prefix
+  into the break's unit, `6560df5`), and the ENTIRE slash menu now works in
+  kernel mode — `/quote` (empty blockquote synthesized like an empty list
+  item, `123100f`; an earlier note here claimed it "can never succeed", which
+  was disproven), `/divider`, `/image` (`![]()` + the kernel-routed upload
+  UI), `/task` (writes `- [ ] ` + a session-ledgered U+00A0 seed that
+  dissolves under the first label character — keyboard, paste AND IME paths),
+  and `/text` (doc-end, riding the trim proof + virtual placeholder).
+  Whitespace CommonMark would strip (block ends, heading/paragraph line
+  starts) is written as raw U+00A0 (Space→1, Tab→2), session-ledgered, and
+  healed back to ASCII when displaced; markers complete via a proven literal
+  space (`spellMarkerCompletingSpace`). **Not close to default-on**:
   `.superpowers/kernel-performance-assessment.md` measured ~450 ms of
   main-thread block per keystroke at 100 KB in the real app (two full-document
   reparses per commit; of five identified proof-preserving optimizations, only
