@@ -276,7 +276,8 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 //    unblocked for a target this command does not own.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'divider', 'image', 'math', 'table', 'task'])
+  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(),
+    ['code', 'divider', 'image', 'math', 'table', 'task', 'text'])
   assert.equal(BLOCK_INSERT_TARGETS.code.language, true)
   assert.equal(BLOCK_INSERT_TARGETS.table.language, false)
   // A `$$` delimiter pair has no info string, so an info string is refused
@@ -286,9 +287,11 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   // scripts/test-source-kernel-task-seed.mjs).
   assert.equal(BLOCK_INSERT_TARGETS.task.language, false)
   // A thematic break has no info string (2026-08-20, section 10 below), and
-  // neither has an empty image (section 11).
+  // neither has an empty image (section 11) nor the revert-to-text edit
+  // (section 12).
   assert.equal(BLOCK_INSERT_TARGETS.divider.language, false)
   assert.equal(BLOCK_INSERT_TARGETS.image.language, false)
+  assert.equal(BLOCK_INSERT_TARGETS.text.language, false)
   assert.ok(Object.isFrozen(BLOCK_INSERT_TARGETS))
 }
 
@@ -555,6 +558,74 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   refuses('image inside a blockquote', '> /image\n', 8, 'image')
   refuses('image with an info string', '/image\n', 6, 'image', 'x')
   refuses('image mid-block caret', '/image tail\n', 6, 'image')
+}
+
+// ---------------------------------------------------------------------------
+// 12. `/text` (2026-08-20) — revert-to-paragraph, the one target that writes
+//     NO block. The edit is a proven suffix deletion (query block + every
+//     trailing byte), the caret anchors at the new document end, and
+//     `docEndPlaceholder` tells the controller which doc-end home serves it:
+//     false -> the trailing virtual pair (requireMap proves it pre-commit),
+//     true -> a vouched placeholder (the kept bytes provably end in a blank
+//     line, so the voucher's prefix-less commit is byte-correct).
+// ---------------------------------------------------------------------------
+{
+  const revert = (text, offset, expected, expectPlaceholder, label) => {
+    const { c, r } = run(text, offset, 'text')
+    assert.equal(r.ok, true, `${label}: ${r.code}`)
+    assert.equal(r.docEndPlaceholder, expectPlaceholder, `${label}: placeholder flag`)
+    const out = apply(c.doc, r)
+    assert.equal(out, expected, label)
+    assert.deepEqual(r.transaction.selection, { anchor: expected.length, head: expected.length },
+      `${label}: the caret anchors at the new document end`)
+    return out
+  }
+  // (a) After a paragraph: the kept bytes end in the blank line that stood
+  // before the query — the voucher's home (docEndPlaceholder: true).
+  assert.deepEqual(shapeOf(revert('甲\n\n/text\n', 8, '甲\n\n', true, 'after a paragraph')), ['paragraph'])
+  // (b) After a heading: same voucher home.
+  revert('# 题\n\n/text', 10, '# 题\n\n', true, 'after a heading')
+  // (c) After a LIST: the trailing virtual pair serves the caret
+  // (docEndPlaceholder: false) — the same home /divider takes at doc end.
+  assert.deepEqual(shapeOf(revert('- 甲\n\n/text\n', 10, '- 甲\n\n', false, 'after a list')), ['list'])
+  // (d) The query is the WHOLE document: an empty document, whose single
+  // empty PM paragraph IS the trailing virtual pair.
+  revert('/text\n', 5, '', false, 'whole document')
+  // (e) A heading query strips its marker too — "/text" on `## /text` means
+  // "this block becomes plain text", and empty text is no block at all.
+  revert('## /text\n', 8, '', false, 'heading query')
+  // (f) Leading blank bytes stay (they precede the query, not follow it).
+  revert('\n\n/text', 7, '\n\n', false, 'leading blanks')
+  // (g) Surplus blank lines AFTER the query are deleted with it.
+  revert('甲\n\n/text\n\n\n', 8, '甲\n\n', true, 'surplus trailing blanks')
+  // (h) CRLF, both homes; no lone LF anywhere.
+  {
+    const out = revert('甲\r\n\r\n/text\r\n', 10, '甲\r\n\r\n', true, 'CRLF after a paragraph')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+  }
+  revert('- 甲\r\n\r\n/text\r\n', 12, '- 甲\r\n\r\n', false, 'CRLF after a list')
+
+  // (i) MID-DOCUMENT: the named refusal — the emptied paragraph would be the
+  // split-placeholder gap, so nothing is written and the code carries the
+  // message that names the remedies.
+  {
+    const { c, r } = run('/text\n\n乙\n', 5, 'text')
+    assert.equal(r.ok, false, 'mid-document /text must refuse')
+    assert.equal(r.code, 'text-needs-document-end', 'mid-document /text carries the named code')
+    assert.equal(r.transaction, undefined)
+    assert.equal(c.doc.text, '/text\n\n乙\n', 'nothing written')
+  }
+  {
+    const { r } = run('甲\n\n/text\n\n乙\n', 8, 'text')
+    assert.equal(r.ok, false)
+    assert.equal(r.code, 'text-needs-document-end')
+  }
+  // (j) The generic guards hold for this target too.
+  refuses('text inside a list item', '- /text\n', 7, 'text')
+  refuses('text inside a blockquote', '> /text\n', 7, 'text')
+  refuses('text with an info string', '/text\n', 5, 'text', 'x')
+  refuses('text mid-block caret', '/text tail\n', 5, 'text')
+  refuses('text on a setext heading', '/text\n===\n', 5, 'text')
 }
 
 console.log('ok - source kernel block-insert')

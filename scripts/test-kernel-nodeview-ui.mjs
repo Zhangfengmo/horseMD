@@ -294,12 +294,16 @@ const slashItems = (evaluate) => evaluate(`[
 // list, so the matrix assertion had been failing against deliberately-shipped
 // behaviour again. Extend this set in the SAME commit that routes an item.
 //
-// Anything absent is refused by the kernel on purpose: `text` yields an
-// unrepresentable empty paragraph. (`divider` and `image` routed on
-// 2026-08-20 — the caret-after machinery.)
+// NOTHING is structurally absent any more: `divider`, `image` and `text`
+// all routed on 2026-08-20 (the caret-after machinery + the /text suffix
+// deletion), so every id the menu renders is in this set and the matrix
+// assertion now proves no item is WRONGLY disabled. Refusals still exist,
+// but they are POSITIONAL (decided by the command at invocation — e.g.
+// /text mid-document, /divider before a list) and are exercised as such in
+// steps (a)/(b) below and in test-kernel-leaf-insert-ui.mjs.
 const KERNEL_ROUTED_SLASH_ITEMS = new Set([
   'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered',
-  'table', 'code', 'math', 'task', 'divider', 'image'
+  'table', 'code', 'math', 'task', 'divider', 'image', 'text'
 ])
 // `/js`, `/python`, … render as a dynamic `code:<language>` item that routes
 // through the same code-block insert as bare `/code`.
@@ -447,22 +451,25 @@ async function run() {
     assert.ok(items.length > 5, `slash menu opened with too few items: ${JSON.stringify(items)}`)
     assert.ok(
       items.every((item) => item.disabled === isStructurallyBlocked(item)),
-      `every structural slash item must be .disabled except 'quote' (kernel-routed) in kernel mode: ${JSON.stringify(items)}`
+      `every slash item must match the disabled matrix (nothing is structurally disabled any more): ${JSON.stringify(items)}`
     )
 
-    // (a) Enter on the highlighted (first) disabled item: menu closes,
-    // document bytes unchanged, no command ran.
+    // (a) Enter on the highlighted (first) item — `text`, which is ENABLED
+    // but positionally refused here (the '/' paragraph is mid-document, and
+    // /text only works on the last block): menu closes, the refusal toasts,
+    // and the document bytes are UNCHANGED — fail-closed at the command, not
+    // at the menu.
     let beforeEnter = await paragraphTexts(evaluate)
     await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
     await sleep(300)
     let afterEnter = await paragraphTexts(evaluate)
-    assert.deepEqual(afterEnter, beforeEnter, 'a blocked slash item ran (or otherwise changed the document) on Enter')
+    assert.deepEqual(afterEnter, beforeEnter, 'a positionally-refused slash item must change nothing on Enter')
     const menuShownAfterEnter = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
-    assert.equal(menuShownAfterEnter, 'false', 'slash menu did not close after refusing a blocked item via Enter')
+    assert.equal(menuShownAfterEnter, 'false', 'slash menu did not close after the refusal via Enter')
 
     // (b) reopen (click away, click back — no text change, shouldShow just
-    // re-evaluates the same still-'/'-starting block) and click a blocked
-    // item with the pointer instead of the keyboard.
+    // re-evaluates the same still-'/'-starting block) and take the same
+    // positionally-refused first item with the pointer instead.
     await clickTextEnd(evaluate, send, FAR_PARAGRAPH_AFTER_TYPING)
     await sleep(150)
     await clickTextEnd(evaluate, send, '/')
@@ -471,7 +478,7 @@ async function run() {
     items = await slashItems(evaluate)
     assert.ok(
       items.every((item) => item.disabled === isStructurallyBlocked(item)),
-      `reopened slash menu items must still match the disabled matrix (quote excepted): ${JSON.stringify(items)}`
+      `reopened slash menu items must still match the disabled matrix: ${JSON.stringify(items)}`
     )
 
     const firstItemPoint = await evaluate(`(() => {
@@ -484,10 +491,10 @@ async function run() {
     await click(send, firstItemPoint)
     await sleep(300)
     const afterClick = await paragraphTexts(evaluate)
-    assert.deepEqual(afterClick, beforeClick, 'a blocked slash item ran (or otherwise changed the document) on click')
+    assert.deepEqual(afterClick, beforeClick, 'a positionally-refused slash item must change nothing on click')
     const menuShownAfterClick = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
-    assert.equal(menuShownAfterClick, 'false', 'slash menu did not close after refusing a blocked item via click')
-    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the blocked slash-menu interactions')
+    assert.equal(menuShownAfterClick, 'false', 'slash menu did not close after the refusal via click')
+    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the refused slash-menu interactions')
 
     // ============================================================
     // 3) Selection toolbar APPEARS in kernel mode (Plan 4 Task 3 flip)

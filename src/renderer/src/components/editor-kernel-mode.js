@@ -2429,6 +2429,27 @@ export function createKernelMode({
       notifyBlocked(routed.code)
       return true
     }
+    // `/text` onto a paragraph/heading-ending document (2026-08-20): the
+    // command proved the bytes (a pure suffix deletion) but its caret anchor
+    // — the document end — is a position the reparse CANNOT represent (no
+    // trailing pair exists when the last block is a paragraph/heading), so
+    // `requireMap`'s anchor half would refuse a byte-correct edit. This is
+    // exactly the transient the structural intents' `requireMap: false`
+    // posture exists for (see applyKernelTransaction's own note): commit,
+    // reconcile, then give the caret its home through the SAME vouched
+    // split-placeholder session `runExitCode` uses — `materializePlaceholder`
+    // is itself fail-closed (an unprovable voucher removes the placeholder
+    // again and rebinds plain). The voucher's prefix-less commit is
+    // byte-correct because the command proved the kept bytes end in a blank
+    // line (revertToTextFromQuery's own separator assertion).
+    if (routed.docEndPlaceholder) {
+      if (!applyKernelTransaction(routed.transaction, view)) return true
+      const anchor = routed.transaction.selection?.anchor
+      if (Number.isFinite(anchor) && kernel.map && !kernel.map.rawToPmPos(anchor)) {
+        materializePlaceholder(view, view.state.doc.content.size, anchor)
+      }
+      return true
+    }
     applyKernelTransaction(routed.transaction, view, { requireMap: true })
     return true
   }

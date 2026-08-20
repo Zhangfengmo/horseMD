@@ -1,5 +1,6 @@
-// Kernel-mode LEAF slash items end-to-end UI regression (/divider and
-// /image — the caret-AFTER insert family).
+// Kernel-mode LEAF slash items end-to-end UI regression (/divider, /image
+// and /text — the caret-AFTER insert family plus the revert-to-paragraph
+// suffix deletion).
 //
 // The headless suites (scripts/test-source-kernel-blockinsert.mjs section 10 +
 // Case I6 in scripts/test-kernel-mode-headless.mjs) prove the COMMAND and the
@@ -39,7 +40,9 @@ const LINES = [
   '',
   '丙丙段落',
   '',
-  '丁丁尾段',
+  '丁丁段落',
+  '',
+  '戊戊尾段',
   ''
 ]
 const FIXTURE = LINES.join(EOL)
@@ -231,7 +234,7 @@ async function run() {
     const { evaluate, send } = app
     await waitFor(async () => {
       const text = await mounted(evaluate)
-      return text && text.includes('甲甲段落') && text.includes('丁丁尾段') ? text : null
+      return text && text.includes('甲甲段落') && text.includes('戊戊尾段') ? text : null
     }, 'initial document did not mount')
     assert.equal(app.dialogs.length, 0, 'no dialog on plain mount')
 
@@ -291,21 +294,42 @@ async function run() {
     console.log('  [/image mid-document] ->', JSON.stringify({ caret: imageCaret, card: imageCard }))
     assert.ok(imageCard?.present, 'the committed ![]() must PROJECT as the image-block card in the view')
     assert.equal(imageCard.hasImg, false, 'the empty card must show its upload UI, not a broken <img>')
-    assert.ok(imageCaret && imageCaret.tag === 'p' && imageCaret.text === '丁丁尾段' && imageCaret.caretOffset === 0,
+    assert.ok(imageCaret && imageCaret.tag === 'p' && imageCaret.text === '丁丁段落' && imageCaret.caretOffset === 0,
       `the caret must land at the START of the following paragraph, got ${JSON.stringify(imageCaret)}`)
 
     await typeTextLikeUser(send, 'Y', { delayMs: delay })
     await sleep(400)
-    const afterImage = afterMid.replace('丙丙段落', '![]()').replace('丁丁尾段', 'Y丁丁尾段')
+    const afterImage = afterMid.replace('丙丙段落', '![]()').replace('丁丁段落', 'Y丁丁段落')
     await assertSource(evaluate, afterImage,
       `/image mid-document must commit ![]() and the follow-up keystroke must land in the next paragraph (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 3) `/divider` at the DOCUMENT END: the caret lands in the trailing
+    // 3) `/text` at the DOCUMENT END, after a PARAGRAPH — the vouched
+    //    placeholder home. The query block's bytes (and its surplus line)
+    //    are deleted, the caret sits in an empty last paragraph the reparse
+    //    cannot show, and typing there commits a NEW paragraph — never a
+    //    lazy continuation of the block above.
+    // ============================================================
+    await selectBlock(evaluate, send, '戊戊尾段')
+    await runSlashItem(evaluate, send, 'text', 'text')
+
+    const textCaret = await caretBlock(evaluate)
+    console.log('  [/text doc-end] ->', JSON.stringify({ caret: textCaret }))
+    assert.ok(textCaret && textCaret.tag === 'p' && textCaret.text === '' && textCaret.isLastChild,
+      `the caret must land inside the (empty) materialized placeholder, got ${JSON.stringify(textCaret)}`)
+
+    await typeTextLikeUser(send, '新尾段', { delayMs: delay })
+    await sleep(400)
+    const afterText = afterImage.replace('戊戊尾段\n', '新尾段')
+    await assertSource(evaluate, afterText,
+      `/text at the document end must strip the query and typing must commit a fresh paragraph (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
+    // 4) `/divider` at the DOCUMENT END: the caret lands in the trailing
     //    placeholder, and typing there commits a new paragraph below the
     //    divider (the virtual-pair bytes typing there has always committed).
     // ============================================================
-    await selectBlock(evaluate, send, 'Y丁丁尾段')
+    await selectBlock(evaluate, send, '新尾段')
     await runSlashItem(evaluate, send, 'hr', 'divider')
 
     const endCaret = await caretBlock(evaluate)
@@ -315,15 +339,15 @@ async function run() {
 
     await typeTextLikeUser(send, '结尾段', { delayMs: delay })
     await sleep(400)
-    // The replaced tail block keeps its own line ending ('---\n'); typing in
-    // the trailing placeholder then appends the virtual pair's separator plus
-    // the text — no NEW trailing ending is ever invented.
-    const afterEnd = afterImage.replace('Y丁丁尾段\n', '---\n\n结尾段')
+    // '新尾段' had no trailing ending (it was typed into the placeholder), so
+    // '---' replaces it verbatim and the follow-up typing carries the full
+    // '\n\n' separator — no NEW trailing ending is ever invented.
+    const afterEnd = afterText.replace('新尾段', '---\n\n结尾段')
     await assertSource(evaluate, afterEnd,
       `/hr at the document end must commit --- and typing must land below it (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 4) `/divider` before a LIST: the NAMED refusal. The item stays enabled
+    // 5) `/divider` before a LIST: the NAMED refusal. The item stays enabled
     //    (the refusal is positional, decided by the command), zero divider
     //    bytes are written, and the toast names the workaround.
     // ============================================================
@@ -342,14 +366,31 @@ async function run() {
       'a refused /hr must leave the query bytes as plain text and write NO divider')
 
     // ============================================================
-    // 5) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
+    // 6) `/text` MID-DOCUMENT: the other NAMED refusal — the emptied block
+    //    would be the split-placeholder gap, so nothing is deleted and the
+    //    toast names the remedies.
+    // ============================================================
+    await selectBlock(evaluate, send, '标题')
+    await resetToasts(evaluate)
+    await runSlashItem(evaluate, send, 'text', 'text')
+    await sleep(300)
+    const textRefusalToasts = JSON.parse(await toasts(evaluate))
+    console.log('  [/text mid-document] ->', JSON.stringify({ toasts: textRefusalToasts }))
+    assert.ok(textRefusalToasts.some((t) => /最后一个块|last block/.test(t)),
+      `the mid-document /text refusal must raise the named-remedy toast, got ${JSON.stringify(textRefusalToasts)}`)
+    const afterTextRefusal = afterRefusal.replace('# 标题', '# /text')
+    await assertSource(evaluate, afterTextRefusal,
+      'a refused mid-document /text must leave the heading (query text and all) untouched')
+
+    // ============================================================
+    // 7) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
     //    the saved bytes must parse back to the same blocks.
     // ============================================================
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
     const disk = await readFile(file, 'utf8')
-    const expectedDisk = afterRefusal.split('\n').join(EOL)
+    const expectedDisk = afterTextRefusal.split('\n').join(EOL)
     if (disk !== expectedDisk) {
       console.error('  disk    :', JSON.stringify(disk))
       console.error('  expected:', JSON.stringify(expectedDisk))
@@ -375,11 +416,11 @@ async function run() {
     const reopenCard = await reopened.evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('.milkdown-image-block, milkdown-image-block')`)
     assert.ok(reopenCard, 'the empty image must survive the cold relaunch as the image-block card')
     const reopenText = await reopened.evaluate(`(${VISIBLE_EDITOR})?.textContent`)
-    assert.ok(reopenText.includes('结尾段') && reopenText.includes('/hr'),
-      'the typed paragraph and the refused query text must both survive the cold relaunch')
+    assert.ok(reopenText.includes('结尾段') && reopenText.includes('/hr') && reopenText.includes('/text'),
+      'the typed paragraph and both refused query texts must survive the cold relaunch')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on cold relaunch')
 
-    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider and /image commit at the document end and mid-document, the caret is immediately typable in both homes, the before-a-list shape refuses with the named remedy, and the bytes survive save + cold relaunch`)
+    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider, /image and /text commit their bytes, the caret is immediately typable in every doc-end/mid-document home, both positional refusals raise their named-remedy toasts, and the bytes survive save + cold relaunch`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

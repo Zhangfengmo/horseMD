@@ -128,6 +128,12 @@ import { NO_BREAK_SPACE } from './trailing-whitespace.js'
 // plain text line below the insertion point first.
 const NO_CARET_HOME = 'no-caret-home-after-insert'
 
+// `/text` invoked mid-document: the emptied paragraph would be the known
+// split-placeholder gap, so the command refuses with its own code and the
+// message names both remedies (delete the /query text to keep the block, or
+// use /text on the document's last block).
+const TEXT_MID_DOCUMENT = 'text-needs-document-end'
+
 // Target -> what this command may build for it. `language: true` means the
 // target accepts an (optional) info string; every other target refuses one
 // rather than silently dropping it.
@@ -150,7 +156,14 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   // Empty image card (2026-08-20): `![]()` — the second caret-AFTER target;
   // the created image-block atom carries its own upload UI, so the caret's
   // only honest homes are the divider's two. See the header.
-  image: Object.freeze({ language: false })
+  image: Object.freeze({ language: false }),
+  // Revert-to-paragraph (2026-08-20): the ONE target that writes no block at
+  // all — a fully-empty top-level paragraph has no raw representation
+  // (CommonMark: a blank line is a block separator, not a node), so "/text"
+  // means DELETE the query block and hand the caret to the document-end
+  // placeholder machinery. Doc-end only; mid-document refuses with its own
+  // code (`text-needs-document-end`). See revertToTextFromQuery below.
+  text: Object.freeze({ language: false })
 })
 
 // A fence info string this command is willing to write verbatim. Deliberately
@@ -306,6 +319,92 @@ function caretAfterInsert(candidate, candidateTree, inserted) {
     return { ok: false, code: NO_CARET_HOME }
   }
   return { ok: true, anchor }
+}
+
+// `/text` (2026-08-20) — revert the query block to a plain paragraph. There
+// is nothing to WRITE: a fully-empty top-level paragraph has no byte
+// spelling (CommonMark: a blank line is a block separator, not a node), so
+// the honest edit DELETES the query block's bytes plus every byte after it —
+// the surplus line the strip would otherwise leave — and the caret rides the
+// document-end placeholder machinery the trailing-placeholder work landed:
+//   * candidate's last block is NOT a paragraph/heading (list/table/fence/
+//     atom…, or the candidate is empty): safeParse's trailing paragraph
+//     exists by plugin-trailing's own condition, the map pairs it virtual at
+//     `candidate.length`, and the controller's `requireMap: true` proves the
+//     anchor PRE-commit — the same doc-end home /divider takes.
+//   * candidate's last block IS a paragraph/heading: no trailing pair exists,
+//     so the controller materializes a VOUCHED placeholder at the document
+//     end (`materializePlaceholder` — the split-placeholder session, itself
+//     fail-closed: an unprovable voucher removes the placeholder again). A
+//     vouched pair commits with NO separator prefix, which is byte-correct
+//     here precisely because the blank-line separator that stood before the
+//     query block STAYS in the candidate — asserted below, never assumed.
+//     Reported to the controller via `docEndPlaceholder: true`.
+// THE PROOF: the deletion is a pure suffix removal, so every remaining
+// node's span is byte-identical — the candidate's full signature must equal
+// the baseline's signature with the query block's region excluded, or the
+// command refuses. Mid-document (the query is not the last root child)
+// refuses with its own code: the emptied paragraph would be the known
+// split-placeholder gap, and the message names the remedies instead of
+// guessing.
+function revertToTextFromQuery({ doc, start, end }) {
+  const text = doc.text
+  const candidate = text.slice(0, start)
+  let baselineTree
+  let candidateTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const children = baselineTree.children || []
+  const last = children[children.length - 1] || null
+  if (!last || last.position?.start?.offset !== start) {
+    return { ok: false, code: TEXT_MID_DOCUMENT }
+  }
+  if (last.position?.end?.offset !== end) return { ok: false, code: 'unsupported-structure' }
+  // Everything between the query block's end and the document end must be
+  // whitespace — those are the only other bytes this edit deletes.
+  if (!/^[ \t\r\n]*$/.test(text.slice(end))) return { ok: false, code: 'unsupported-structure' }
+
+  // The suffix-removal proof (see above). The empty region at the candidate's
+  // end excludes nothing, so `after` is the candidate's FULL signature.
+  const before = outsideSignature(baselineTree, start, text.length, 0)
+  const after = outsideSignature(candidateTree, candidate.length, candidate.length, 0)
+  if (before === null || after === null || before !== after) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+
+  const rest = candidateTree.children || []
+  const lastKept = rest.length ? rest[rest.length - 1] : null
+  const docEndPlaceholder = !!lastKept &&
+    (lastKept.type === 'paragraph' || lastKept.type === 'heading')
+  if (docEndPlaceholder) {
+    const keptEnd = lastKept.position?.end?.offset
+    if (!Number.isInteger(keptEnd)) return { ok: false, code: 'unsupported-structure' }
+    // The voucher commits with NO separator prefix, so the kept bytes MUST
+    // already end in a blank line (the separator that stood before the query
+    // block). Proven rather than assumed: a candidate violating this refuses
+    // instead of letting the next keystroke commit a lazy continuation line
+    // of the last paragraph.
+    const sep = candidate.slice(keptEnd)
+    if (!/(?:\r\n|\n|\r)[ \t]*(?:\r\n|\n|\r)[ \t\r\n]*$/.test(sep)) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+  }
+
+  const anchor = candidate.length
+  return {
+    ok: true,
+    docEndPlaceholder,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from: start, to: text.length, insert: '' }],
+      intent: 'revert-to-text',
+      selection: { anchor, head: anchor }
+    }
+  }
 }
 
 // Does the reparsed node REALLY mean what this command claims to have written?
@@ -478,6 +577,10 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   if (node.type === 'heading' && !ATX_HEADING_RE.test(text.slice(start, end))) {
     return { ok: false, code: 'unsupported-structure' }
   }
+
+  // `/text` writes no block — its whole edit is a proven suffix deletion, so
+  // it branches before the build/spelling machinery.
+  if (target === 'text') return revertToTextFromQuery({ doc, start, end })
 
   const built = buildBlock(target, info, index.dominantEnding || '\n')
   if (!built) return { ok: false, code: 'unsupported-structure' }

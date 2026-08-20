@@ -297,6 +297,16 @@ const FIXTURE_DOCS = {
   '/image\n\n乙\n': () => doc(p(text('/image')), p(text('乙'))),
   '![]()\n\n乙\n': () => doc(ib({ src: '', alt: '', caption: '' }), p(text('乙'))),
   '![]()\n\nX乙\n': () => doc(ib({ src: '', alt: '', caption: '' }), p(text('X乙'))),
+  // Case I8 (2026-08-20): `/text` — revert-to-paragraph. The post-strip
+  // documents parse WITHOUT the emptied paragraph (a trailing blank line is
+  // no block); the controller then gives the caret its home (a vouched
+  // placeholder after a paragraph ending, the trailing pair after a list).
+  '甲\n\n/text\n': () => doc(p(text('甲')), p(text('/text'))),
+  '甲\n\n': () => doc(p(text('甲'))),
+  '甲\n\nX': () => doc(p(text('甲')), p(text('X'))),
+  '- 甲\n\n/text\n': () => doc(bl(li(null, p(text('甲')))), p(text('/text'))),
+  '- 甲\n\n': () => doc(bl(li(null, p(text('甲')))), p()),
+  '/text\n\n乙\n': () => doc(p(text('/text')), p(text('乙'))),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -3408,10 +3418,73 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(verdict, undefined)
   assert.equal(h.controller.kernel.doc.text, '![]()\n\nX乙\n')
 }
+// Case I8 (2026-08-20): `/text` — revert-to-paragraph, end to end. The edit
+// is a proven suffix deletion; the REAL assertions are the caret's home in
+// each doc-end shape and that typing there commits the right bytes.
 {
-  // (c) Mid-document before a LIST: the named refusal — nothing committed,
-  // nothing reconciled, the map untouched, and the toast carries the code
-  // whose message names the workaround.
+  // (a) After a PARAGRAPH — the vouched-placeholder home. The reparse cannot
+  // represent the emptied paragraph (a trailing blank line is no block), so
+  // the controller materializes a vouched placeholder at the document end;
+  // typing in it commits with NO separator prefix because the kept bytes
+  // provably end in the blank line that stood before the query.
+  const h = makeHarness('甲\n\n/text\n', doc(p(text('甲')), p(text('/text'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 9)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n',
+    'the query block and its surplus line are gone, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p())),
+    'view shows the remaining paragraph plus the materialized placeholder')
+  assert.equal(h.view.state.selection.head, 4, 'the caret lands INSIDE the placeholder')
+  assert.ok(h.controller.kernel.map, 'the vouched map is live')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 4))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in the placeholder is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '甲\n\nX',
+    'the keystroke commits at the voucher\'s raw anchor with no separator prefix')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(text('X')))))
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n/text\n', 'the original query bytes come back')
+}
+{
+  // (b) After a LIST — the trailing virtual pair home (requireMap proves the
+  // anchor pre-commit, the same doc-end home /divider takes).
+  const h = makeHarness('- 甲\n\n/text\n', doc(bl(li(null, p(text('甲')))), p(text('/text'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 13)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- 甲\n\n')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(null, p(text('甲')))), p())),
+    'view shows the list plus the trailing placeholder')
+  assert.equal(h.view.state.selection.head, 8, 'the caret lands in the trailing placeholder')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 8))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '- 甲\n\nX',
+    'typing commits after the kept blank line — a new paragraph, never a lazy continuation')
+}
+{
+  // (c) MID-DOCUMENT: the named refusal — nothing committed, view and map
+  // untouched, and the toast carries the code whose message names the
+  // remedies.
+  const h = makeHarness('/text\n\n乙\n', doc(p(text('/text')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  const before = h.notifications.length
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '/text\n\n乙\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('/text')), p(text('乙')))), 'view untouched')
+  assert.ok(h.controller.kernel.map, 'map untouched')
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
+  assert.ok(h.notifications.at(-1).includes('text-needs-document-end'),
+    'the refusal carries its OWN code so the message can name the remedies')
+}
+{
+  // (d) Mid-document before a LIST (divider): the named refusal — nothing
+  // committed, nothing reconciled, the map untouched, and the toast carries
+  // the code whose message names the workaround.
   const h = makeHarness('/hr\n\n- 甲\n', doc(p(text('/hr')), bl(li(null, p(text('甲')))), p()))
   assert.equal(h.controller.attachAfterCreate(), true)
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))

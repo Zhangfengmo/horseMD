@@ -158,9 +158,9 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // never a `/latex` item to unblock: `latex` is not in the menu's own
 // `LANGUAGES` table.)
 //
-// Absent on purpose, for a probed reason recorded in
-// lib/source-kernel/commands/block-insert.js: `text` (a fully-empty top-level
-// paragraph has no raw representation).
+// Nothing is absent from this table any more — every slash item the menu
+// renders now has a kernel route behind it (the last holdout, `text`, joined
+// on 2026-08-20; see below).
 //
 // `math` joined the routed set on 2026-08-18, once block math became editable
 // — before that the item would have created a block with no caret position
@@ -187,13 +187,21 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // image-block card (whose own upload UI routes the src through the
 // kernel-proven image-attrs.js), and the caret takes the divider's two
 // proven homes because the card itself is an atom.
+//
+// `text` joined last (2026-08-20): a fully-empty top-level paragraph has no
+// raw representation, so the route DELETES the query block (a proven suffix
+// removal, document end only) and the caret rides the trailing-placeholder
+// machinery — the trailing virtual pair, or a controller-vouched placeholder
+// when the remaining document ends in a paragraph/heading. Mid-document it
+// refuses with `text-needs-document-end`, whose message names the remedies.
 const KERNEL_INSERT_ITEMS = Object.freeze({
   table: 'table',
   code: 'code',
   math: 'math',
   task: 'task',
   divider: 'divider',
-  image: 'image'
+  image: 'image',
+  text: 'text'
 })
 const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES.map((name) => 'code:' + name))
 

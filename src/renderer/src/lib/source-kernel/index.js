@@ -73,5 +73,9 @@ export const KERNEL_CODES = Object.freeze({
   // A caret-after block insert (/divider, /image) whose following block
   // cannot host the caret (commands/block-insert.js `caretAfterInsert`). Has
   // its own message because the refusal has a concrete, nameable remedy.
-  NO_CARET_HOME: 'no-caret-home-after-insert'
+  NO_CARET_HOME: 'no-caret-home-after-insert',
+  // `/text` invoked mid-document (commands/block-insert.js
+  // `revertToTextFromQuery`): the emptied paragraph would be the known
+  // split-placeholder gap, so the refusal names the remedies instead.
+  TEXT_MID_DOCUMENT: 'text-needs-document-end'
 })
