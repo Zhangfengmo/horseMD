@@ -137,8 +137,11 @@ const insertTask = (text, offset) => {
 }
 
 // The exported target table is the menu's routing contract — pin the new row.
+// (The full key-set pin lives in test-source-kernel-blockinsert.mjs section 8;
+// this suite pins only its OWN row so it does not have to change every time a
+// different target joins the table.)
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'math', 'table', 'task'])
+  assert.ok(Object.hasOwn(BLOCK_INSERT_TARGETS, 'task'))
   assert.equal(BLOCK_INSERT_TARGETS.task.language, false)
 }
 

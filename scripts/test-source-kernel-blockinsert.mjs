@@ -9,6 +9,7 @@ import { createMarkdownDocument, applySourceTransaction } from '../src/renderer/
 import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { insertBlockFromQuery, BLOCK_INSERT_TARGETS } from '../src/renderer/src/lib/source-kernel/commands/block-insert.js'
 import { buildCodeMap } from '../src/renderer/src/lib/source-kernel/code-map.js'
+import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/character-map.js'
 
 console.log('--- source kernel block-insert ---')
 
@@ -197,8 +198,8 @@ const refuses = (label, text, offset, target, language) => {
 // (`math` moved OUT of this list on 2026-08-18, once block math became an
 // editable pair — see section 9 below for its own proof. `task` moved out on
 // 2026-08-20: the U+00A0 seed spelling made an "empty" task representable —
-// its own suite is scripts/test-source-kernel-task-seed.mjs.)
-refuses('divider target', '/hr\n', 3, 'divider')
+// its own suite is scripts/test-source-kernel-task-seed.mjs. `divider` moved
+// out the same day as the first caret-AFTER target — section 10 below.)
 refuses('image target', '/img\n', 4, 'image')
 refuses('paragraph target', '/text\n', 5, 'paragraph')
 refuses('nonsense target', '/x\n', 2, 'nope')
@@ -275,7 +276,7 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 //    unblocked for a target this command does not own.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'math', 'table', 'task'])
+  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'divider', 'math', 'table', 'task'])
   assert.equal(BLOCK_INSERT_TARGETS.code.language, true)
   assert.equal(BLOCK_INSERT_TARGETS.table.language, false)
   // A `$$` delimiter pair has no info string, so an info string is refused
@@ -284,6 +285,8 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   // A task item has no info string either (2026-08-20; its own suite is
   // scripts/test-source-kernel-task-seed.mjs).
   assert.equal(BLOCK_INSERT_TARGETS.task.language, false)
+  // A thematic break has no info string (2026-08-20, section 10 below).
+  assert.equal(BLOCK_INSERT_TARGETS.divider.language, false)
   assert.ok(Object.isFrozen(BLOCK_INSERT_TARGETS))
 }
 
@@ -371,6 +374,115 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     assert.equal(routed.ok, false, `${label}: a non-top-level insert must refuse`)
     assert.equal(routed.code, 'unsupported-structure')
   }
+}
+
+// ---------------------------------------------------------------------------
+// 10. `/divider` (2026-08-20) — the first caret-AFTER target. The written
+//     block has no text position, so what is SPECIFIC here is the caret
+//     derivation: document end -> `candidate.length` (the trailing virtual
+//     pair's raw anchor, byte-for-byte), following paragraph/heading -> that
+//     block's own `buildCharacterMap` content anchor, anything else -> a
+//     NAMED refusal (`no-caret-home-after-insert`), zero bytes written.
+// ---------------------------------------------------------------------------
+{
+  // (a) Document end, query is the whole document: the human spelling `---`,
+  // caret anchored at the new document end.
+  {
+    const { c, r } = run('/hr\n', 3, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '---\n')
+    assert.deepEqual(shapeOf(out), ['thematicBreak'])
+    assert.deepEqual(r.transaction.selection, { anchor: 4, head: 4 },
+      'doc-end caret anchors at candidate.length — the trailing virtual pair\'s own raw anchor')
+  }
+  // (b) Document end after real content, no trailing ending at all.
+  {
+    const { c, r } = run('甲\n\n/hr', 6, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\n\n---')
+    assert.deepEqual(shapeOf(out), ['paragraph', 'thematicBreak'])
+    assert.equal(r.transaction.selection.anchor, out.length)
+  }
+  // (c) Mid-document before a PARAGRAPH: the caret anchor IS the following
+  // paragraph's own content anchor — asserted against buildCharacterMap run
+  // on the result, not restated by hand.
+  {
+    const { c, r } = run('甲\n\n/hr\n\n乙\n', 6, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\n\n---\n\n乙\n')
+    assert.deepEqual(shapeOf(out), ['paragraph', 'thematicBreak', 'paragraph'])
+    const next = parseKernelMarkdown(out).children[2]
+    assert.equal(r.transaction.selection.anchor, buildCharacterMap(out, next).visibleToRaw(0),
+      'the mid-document caret is the following paragraph\'s content anchor')
+  }
+  // (d) Mid-document before a HEADING: same rule, and the anchor sits AFTER
+  // the ATX marker (a heading's content anchor, not its `#`).
+  {
+    const { c, r } = run('/hr\n# 后\n', 3, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '---\n# 后\n')
+    assert.deepEqual(shapeOf(out), ['thematicBreak', 'heading'])
+    const next = parseKernelMarkdown(out).children[1]
+    const anchor = buildCharacterMap(out, next).visibleToRaw(0)
+    assert.equal(r.transaction.selection.anchor, anchor)
+    assert.equal(out.slice(anchor, anchor + 1), '后', 'the anchor is the heading\'s first content character')
+  }
+  // (e) THE FRONTMATTER HAZARD, and the fallback spelling. A `---` written as
+  // the document's FIRST block with a later `---` line is ONE yaml node to
+  // remark-frontmatter (probed: '---\n\nabc\n\n---' -> yaml[0,13)) — axis (a)
+  // rejects that spelling and the command falls back to `***`, the same
+  // thematicBreak to every CommonMark parser and never a frontmatter fence.
+  {
+    const { c, r } = run('/hr\n\n甲\n\n---\n', 3, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '***\n\n甲\n\n---\n')
+    assert.deepEqual(shapeOf(out), ['thematicBreak', 'paragraph', 'thematicBreak'])
+    const next = parseKernelMarkdown(out).children[1]
+    assert.equal(r.transaction.selection.anchor, buildCharacterMap(out, next).visibleToRaw(0))
+  }
+  // (f) CRLF, both caret homes. The written bytes are one line (no interior
+  // endings), so the document's endings are simply never touched.
+  {
+    const { c, r } = run('甲\r\n\r\n/hr\r\n', 8, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\r\n\r\n---\r\n')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+    assert.equal(r.transaction.selection.anchor, out.length)
+  }
+  {
+    const { c, r } = run('甲\r\n\r\n/hr\r\n\r\n乙\r\n', 8, 'divider')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\r\n\r\n---\r\n\r\n乙\r\n')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+    const next = parseKernelMarkdown(out).children[2]
+    assert.equal(r.transaction.selection.anchor, buildCharacterMap(out, next).visibleToRaw(0))
+  }
+  // (g) NAMED refusals: the following block cannot host the caret — its own
+  // code (the message names the workaround), zero bytes, no transaction.
+  const refusesCaretHome = (label, text, offset) => {
+    const { c, r } = run(text, offset, 'divider')
+    assert.equal(r.ok, false, label + ' must refuse')
+    assert.equal(r.code, 'no-caret-home-after-insert', label + ' must carry the named code')
+    assert.equal(r.transaction, undefined, label + ' must not carry a transaction')
+    assert.equal(c.doc.text, text, label + ' must write nothing')
+  }
+  refusesCaretHome('before a list', '/hr\n\n- 甲\n', 3)
+  refusesCaretHome('before a fence', '/hr\n\n```\nx\n```\n', 3)
+  refusesCaretHome('before a table', '/hr\n\n| a |\n| - |\n', 3)
+  refusesCaretHome('before a blockquote', '/hr\n\n> 甲\n', 3)
+  // Before another divider: the `---` spelling reads as frontmatter (axis (a)
+  // rejects it), `***` passes the axes — and then the caret rule still
+  // refuses, because a thematicBreak cannot host a caret either.
+  refusesCaretHome('before another divider', '/hr\n\n---\n', 3)
+  // Before a standalone image: that "paragraph" is exactly the shape Crepe
+  // renders as a block-level image-block ATOM (charMap: null), so it is
+  // excluded from the paragraph rule rather than trusted to resolve.
+  refusesCaretHome('before a standalone image', '/hr\n\n![a](x.png)\n', 3)
+  // (h) The generic guards hold for this target too.
+  refuses('divider inside a list item', '- /hr\n', 5, 'divider')
+  refuses('divider inside a blockquote', '> /hr\n', 5, 'divider')
+  refuses('divider with an info string', '/hr\n', 3, 'divider', 'x')
+  refuses('divider mid-block caret', '/hr tail\n', 3, 'divider')
 }
 
 console.log('ok - source kernel block-insert')

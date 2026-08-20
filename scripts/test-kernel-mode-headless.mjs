@@ -166,6 +166,8 @@ const tbl = (rows) => schema.node('table', null, rows.map((cells, rowIndex) =>
 // Plan 5 Task 5 — image helpers.
 const ib = (attrs) => schema.node('image-block', attrs)
 const img = (attrs) => schema.node('image', attrs)
+// Case I6 — the thematic break leaf.
+const hr = () => schema.node('hr')
 
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
@@ -274,6 +276,17 @@ const FIXTURE_DOCS = {
   // above.
   '- [ ]  \n': () => doc(bl(li(false, p(text(' ')))), p()),
   '- [ ] x\n': () => doc(bl(li(false, p(text('x')))), p()),
+  // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert. An
+  // hr-ending document always carries the trailing placeholder (same
+  // `withTrailingParagraph` convention as every fixture above); the typed
+  // follow-up rides the virtual pair ('---\n' + '\n' separator + 'X').
+  '/hr\n': () => doc(p(text('/hr'))),
+  '---\n': () => doc(hr(), p()),
+  '---\n\nX': () => doc(hr(), p(text('X'))),
+  '/hr\n\n乙\n': () => doc(p(text('/hr')), p(text('乙'))),
+  '---\n\n乙\n': () => doc(hr(), p(text('乙'))),
+  '---\n\nX乙\n': () => doc(hr(), p(text('X乙'))),
+  '/hr\n\n- 甲\n': () => doc(p(text('/hr')), bl(li(null, p(text('甲')))), p()),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -3219,9 +3232,11 @@ const toggleVia = (h, markType, from, to) => {
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
   const before = h.notifications.length
   // (`task` left this list on 2026-08-20 — the U+00A0 seed spelling made it a
-  // real, owned target; its positive path is Case I5 below.)
-  for (const route of [{ target: 'math' }, { target: 'divider' },
-    { target: 'image' }, { target: 'code', language: 'js x' }]) {
+  // real, owned target; its positive path is Case I5 below. `divider` left
+  // the same day — the caret-after machinery gave it provable homes; its
+  // positive path is Case I6 below.)
+  for (const route of [{ target: 'math' }, { target: 'image' },
+    { target: 'code', language: 'js x' }]) {
     assert.equal(h.controller.runInsertBlockFromQuery(route, h.view), true,
       'the slash item always swallows the invocation, success or refusal')
     assert.equal(h.controller.kernel.doc.text, '/table\n', 'kernel bytes untouched')
@@ -3291,6 +3306,71 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '- [ ] ' + NBSP + '\n')
   assert.equal(h.controller.runHistory('undo'), true)
   assert.equal(h.controller.kernel.doc.text, '/task\n', 'the original query bytes come back')
+}
+
+// Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert, end to end
+// through the controller. The written block has no text position, so the
+// REAL assertions are where the caret lands and that the FOLLOW-UP KEYSTROKE
+// commits — at the document end that is the trailing placeholder's own
+// virtual-pair path (byte-identical to what typing there has always
+// committed), mid-document it is the following paragraph's content anchor.
+{
+  // (a) Document end: caret into the trailing placeholder, typing commits
+  // through the virtual pair, undo unwinds insert and keystroke separately.
+  const h = makeHarness('/hr\n', doc(p(text('/hr'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'divider' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '---\n',
+    'the query bytes became the divider, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(hr(), p())),
+    'view reconciled to an hr plus the trailing placeholder')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 2, 'the caret lands INSIDE the trailing placeholder')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing below the new divider is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '---\n\nX',
+    'the keystroke commits the virtual pair\'s own bytes — separator plus text')
+  assert.ok(h.view.state.doc.eq(doc(hr(), p(text('X')))))
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '---\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/hr\n', 'the original query bytes come back')
+}
+{
+  // (b) Mid-document before a paragraph: the caret lands at the FOLLOWING
+  // block's content start and the next keystroke types into it.
+  const h = makeHarness('/hr\n\n乙\n', doc(p(text('/hr')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'divider' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '---\n\n乙\n')
+  assert.ok(h.view.state.doc.eq(doc(hr(), p(text('乙')))))
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 2, 'the caret lands at the following paragraph\'s content start')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '---\n\nX乙\n',
+    'the keystroke types into the block the caret was proven to sit in')
+}
+{
+  // (c) Mid-document before a LIST: the named refusal — nothing committed,
+  // nothing reconciled, the map untouched, and the toast carries the code
+  // whose message names the workaround.
+  const h = makeHarness('/hr\n\n- 甲\n', doc(p(text('/hr')), bl(li(null, p(text('甲')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  const before = h.notifications.length
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'divider' }, h.view), true,
+    'the slash item swallows the invocation on refusal too')
+  assert.equal(h.controller.kernel.doc.text, '/hr\n\n- 甲\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('/hr')), bl(li(null, p(text('甲')))), p())), 'view untouched')
+  assert.ok(h.controller.kernel.map, 'the current map is untouched too')
+  assert.ok(h.notifications.length > before, 'the refusal notifies')
+  assert.ok(h.notifications.at(-1).includes('no-caret-home-after-insert'),
+    'the refusal carries its OWN code so the message can name the workaround')
 }
 
 // Case HID: heading ids are NOT content (2026-08-17 veto-divergence report).

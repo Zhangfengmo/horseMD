@@ -69,5 +69,9 @@ export const KERNEL_CODES = Object.freeze({
   // A structural edit whose BYTES are legal but whose reparse yields a
   // different document than the command intended (commands/indent.js).
   RESTRUCTURE: 'would-restructure-document',
-  EMPTY_ITEM_HEADING: 'empty-item-would-become-heading'
+  EMPTY_ITEM_HEADING: 'empty-item-would-become-heading',
+  // A caret-after block insert (/divider) whose following block cannot host
+  // the caret (commands/block-insert.js `caretAfterInsert`). Has its own
+  // message because the refusal has a concrete, nameable remedy.
+  NO_CARET_HOME: 'no-caret-home-after-insert'
 })

@@ -160,8 +160,7 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 //
 // Absent on purpose, each for a probed reason recorded in
 // lib/source-kernel/commands/block-insert.js: `image` (an image-block is an
-// atom — no caret home), `divider` (a thematic break is a PM leaf with no
-// text position), `text` (a fully-empty top-level paragraph has no raw
+// atom — no caret home), `text` (a fully-empty top-level paragraph has no raw
 // representation).
 //
 // `math` joined the routed set on 2026-08-18, once block math became editable
@@ -175,7 +174,20 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // DISSOLVED under the first label character (commands/task-seed.js). Same
 // single-source-of-truth property as every other row here: this entry is
 // both the unblock and the route.
-const KERNEL_INSERT_ITEMS = Object.freeze({ table: 'table', code: 'code', math: 'math', task: 'task' })
+//
+// `divider` joined on 2026-08-20, as the first caret-AFTER target: the
+// written block has no text position, so the command anchors the caret at
+// the document end (the trailing virtual pair `requireMap` then proves) or
+// the following paragraph/heading's own content anchor, and refuses — with a
+// message naming the workaround — when the following block is anything else.
+// See the CARET-AFTER section in commands/block-insert.js.
+const KERNEL_INSERT_ITEMS = Object.freeze({
+  table: 'table',
+  code: 'code',
+  math: 'math',
+  task: 'task',
+  divider: 'divider'
+})
 const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES.map((name) => 'code:' + name))
 
 function kernelSlashInsertRoute(id) {

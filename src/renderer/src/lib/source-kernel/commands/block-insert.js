@@ -63,14 +63,37 @@
 // controller proving the projection is the same division of labour the
 // block-type route uses.
 //
-// DELIBERATELY ABSENT, each for a probed reason (see the task report):
+// CARET-AFTER TARGETS (divider, 2026-08-20). A thematic break is a PM leaf
+// with no text position, so the caret's home is NECESSARILY outside the bytes
+// this command writes. That used to be the refusal reason; what dissolved it
+// is that both homes the caret can take are now proven by machinery that
+// already exists, with no new anchor class:
+//   * LAST root child -> the trailing virtual pair. `safeParse` mirrors
+//     `@milkdown/plugin-trailing` (an atom-ending document always gains one
+//     empty trailing paragraph), `buildProjectionMap` pairs it editable at
+//     `markdown.length`, and the controller's `requireMap: true` proves —
+//     PRE-commit — that this command's anchor (`candidate.length`) resolves
+//     through the REBUILT map. Typing there is the same virtual-pair commit
+//     the trailing placeholder has always taken (locked by
+//     test-kernel-trailing-atom-typing.mjs).
+//   * followed by a PARAGRAPH/HEADING -> that block's own content anchor,
+//     `buildCharacterMap(candidate, next).visibleToRaw(0)` — the exact
+//     primitive heading-whitespace.js / line-start-whitespace.js /
+//     link-toggle.js already anchor with. Axis (b) proves `next` is the same
+//     block it was (type + shifted span), block spans are disjoint, and the
+//     preceding block is the just-written atom (charMap: null), so
+//     `rawToPmPos(anchor)` can only resolve inside `next` — never
+//     "resolvable but wrong".
+//   * followed by anything else (list, fence, table, quote, another leaf…) —
+//     REFUSED with its own code (`no-caret-home-after-insert`) whose message
+//     names the workaround, per the standing rule against inventing an
+//     anchor-into-an-unwritten-block proof class.
+//
+// DELIBERATELY ABSENT, for a probed reason (see the task report):
 //   * image — Crepe's `image-block` is an ATOM, paired here with `charMap:
 //     null` (read-only leaf). Its byte spelling `![]()` is writable, but the
 //     caret would have no home inside the created card.
-//   * divider (`---`) — a thematic break is a PM leaf with no text position;
-//     the caret would have to land in a DIFFERENT block than the one this
-//     command writes, which none of the anchors above can prove.
-// Each of these must keep refusing rather than guess.
+// It must keep refusing rather than guess.
 //
 // `task` JOINED THE OWNED SET on 2026-08-20, and its spelling is the ONE
 // representable form, not a convenience. Probed against the kernel's own
@@ -92,7 +115,14 @@
 // `checked: false` task that survives reload, where the legacy layer demotes
 // the transient to plain `- [ ]` text on save.
 import { parseKernelMarkdown } from '../syntax-index.js'
+import { buildCharacterMap } from '../character-map.js'
 import { NO_BREAK_SPACE } from './trailing-whitespace.js'
+
+// A caret-after insert whose following block cannot host the caret. Its own
+// code (not the generic `unsupported-structure`) because the refusal has a
+// concrete remedy the message must name: insert at the document end, or put a
+// plain text line below the insertion point first.
+const NO_CARET_HOME = 'no-caret-home-after-insert'
 
 // Target -> what this command may build for it. `language: true` means the
 // target accepts an (optional) info string; every other target refuses one
@@ -107,7 +137,12 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   math: Object.freeze({ language: false }),
   // GFM task item (2026-08-20): `- [ ] ` + U+00A0 — the only representable
   // spelling of an "empty" task; see the seed ADR in this file's header.
-  task: Object.freeze({ language: false })
+  task: Object.freeze({ language: false }),
+  // Thematic break (2026-08-20): a caret-AFTER target — the written block has
+  // no text position, so the caret lands in the trailing virtual pair (doc
+  // end) or the following paragraph/heading's content anchor. See the
+  // CARET-AFTER section in this file's header.
+  divider: Object.freeze({ language: false })
 })
 
 // A fence info string this command is willing to write verbatim. Deliberately
@@ -194,7 +229,68 @@ function buildBlock(target, language, ending) {
       seed: { from: TASK_MARKER.length, to: TASK_MARKER.length + 1 }
     }
   }
+  if (target === 'divider') {
+    // TWO spellings, tried cheapest-first under the SAME two-axis proof —
+    // the candidate-list discipline image-attrs.js established. `---` is the
+    // human convention (what Typora/Mark Text write, what this repo's own
+    // fixtures use) and wins whenever it parses as a thematicBreak. The one
+    // shape where it cannot: the query is the document's FIRST block and a
+    // later `---` line exists, so remark-frontmatter reads the pair as a YAML
+    // block swallowing everything between (probed: '---\n\nabc\n\n---' is ONE
+    // `yaml[0,13)` node — axis (a) catches it, the inserted node's end is not
+    // the written bytes' end). `***` is the same thematicBreak to every
+    // CommonMark parser and can never open frontmatter, so it is the fallback
+    // spelling for exactly that shape rather than a refusal.
+    // `caretAfter`: the caret's home is OUTSIDE the written bytes — derived
+    // after the axis proofs, from the accepted candidate's own parse (see
+    // caretAfterInsert).
+    return { spellings: ['---', '***'], caretAfter: true }
+  }
   return null
+}
+
+// Where the caret lands for a `caretAfter` target, derived from the ACCEPTED
+// candidate's own parse (never searched for in the pre-insert document):
+//   * no root child after the inserted block -> the document end. The
+//     controller's `requireMap: true` then proves `candidate.length` resolves
+//     through the rebuilt map's trailing virtual pair before any byte moves.
+//   * next root child is a paragraph/heading -> its content anchor,
+//     `buildCharacterMap(candidate, next).visibleToRaw(0)` — asserted to sit
+//     inside `next`'s own span. A paragraph whose SINGLE child is an image is
+//     excluded first: that is exactly the shape Crepe's remarkImageBlock
+//     turns into a block-level `image-block` ATOM (charMap: null), so the
+//     "paragraph" has no addressable content position in the projection.
+//   * anything else -> `no-caret-home-after-insert`, whose message names the
+//     workaround (document end, or a text line below first).
+function caretAfterInsert(candidate, candidateTree, inserted) {
+  const children = candidateTree.children || []
+  const index = children.indexOf(inserted)
+  if (index < 0) return { ok: false, code: 'unsupported-structure' }
+  const next = children[index + 1] || null
+  if (!next) return { ok: true, anchor: candidate.length }
+  if (next.type !== 'paragraph' && next.type !== 'heading') {
+    return { ok: false, code: NO_CARET_HOME }
+  }
+  if (next.type === 'paragraph') {
+    const inline = next.children || []
+    if (inline.length === 1 && inline[0]?.type === 'image') {
+      return { ok: false, code: NO_CARET_HOME }
+    }
+  }
+  let map = null
+  try {
+    map = buildCharacterMap(candidate, next)
+  } catch {
+    map = null
+  }
+  const anchor = map ? map.visibleToRaw(0) : null
+  const nextStart = next.position?.start?.offset
+  const nextEnd = next.position?.end?.offset
+  if (!Number.isInteger(anchor) || !Number.isInteger(nextStart) || !Number.isInteger(nextEnd) ||
+      anchor < nextStart || anchor > nextEnd) {
+    return { ok: false, code: NO_CARET_HOME }
+  }
+  return { ok: true, anchor }
 }
 
 // Does the reparsed node REALLY mean what this command claims to have written?
@@ -229,6 +325,14 @@ function shapeAgrees(target, node, text, language) {
     // value is what proves nothing after the delimiters was absorbed as
     // content (the caller's span check covers the other direction).
     return node.type === 'math' && node.value === ''
+  }
+  if (target === 'divider') {
+    // A thematicBreak has no interior at all, so the caller's span check
+    // (`position.end.offset === insertedEnd`) carries the whole absorption
+    // proof; the type is what rejects the frontmatter reading (`yaml`) and
+    // the setext reading (`heading` — impossible here since the query block
+    // is preceded by a blank line, but proven rather than assumed).
+    return node.type === 'thematicBreak'
   }
   if (target === 'task') {
     // Exactly ONE bullet item, REALLY a task (`checked === false`, never the
@@ -343,14 +447,9 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
 
   const built = buildBlock(target, info, index.dominantEnding || '\n')
   if (!built) return { ok: false, code: 'unsupported-structure' }
-  const { bytes } = built
-  const candidate = text.slice(0, start) + bytes + text.slice(end)
-  const insertedEnd = start + bytes.length
 
-  let candidateTree
   let baselineTree
   try {
-    candidateTree = parseKernelMarkdown(candidate)
     // The BASELINE is re-parsed here rather than reusing `index.tree`: the
     // index's tree carries `injectHighlightNodes`'s split text nodes, which the
     // candidate parse (a plain `parseKernelMarkdown`) does not, so comparing
@@ -360,28 +459,51 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   } catch {
     return { ok: false, code: 'unsupported-structure' }
   }
-
-  // Axis (a): the block at the insertion point is the one we wrote, and it
-  // ends exactly where our bytes end (nothing after it was absorbed).
-  const inserted = (candidateTree.children || []).find(
-    (child) => child.position?.start?.offset === start
-  )
-  if (!inserted || inserted.position?.end?.offset !== insertedEnd) {
-    return { ok: false, code: 'unsupported-structure' }
-  }
-  if (!shapeAgrees(target, inserted, candidate, info)) {
-    return { ok: false, code: 'unsupported-structure' }
-  }
-
-  // Axis (b): nothing outside the rewritten region changed meaning.
-  const delta = bytes.length - (end - start)
   const before = outsideSignature(baselineTree, start, end, 0)
-  const after = outsideSignature(candidateTree, start, insertedEnd, delta)
-  if (before === null || after === null || before !== after) {
-    return { ok: false, code: 'unsupported-structure' }
-  }
 
-  const anchor = start + built.anchor
+  // Every spelling runs the FULL two-axis proof; the first that passes wins
+  // (single-spelling targets just have a one-entry list). A spelling that
+  // fails an axis is not an error — the next one is tried — but a target
+  // whose every spelling fails refuses exactly as before.
+  let accepted = null
+  for (const bytes of built.spellings || [built.bytes]) {
+    const candidate = text.slice(0, start) + bytes + text.slice(end)
+    const insertedEnd = start + bytes.length
+
+    let candidateTree
+    try {
+      candidateTree = parseKernelMarkdown(candidate)
+    } catch {
+      continue
+    }
+
+    // Axis (a): the block at the insertion point is the one we wrote, and it
+    // ends exactly where our bytes end (nothing after it was absorbed).
+    const inserted = (candidateTree.children || []).find(
+      (child) => child.position?.start?.offset === start
+    )
+    if (!inserted || inserted.position?.end?.offset !== insertedEnd) continue
+    if (!shapeAgrees(target, inserted, candidate, info)) continue
+
+    // Axis (b): nothing outside the rewritten region changed meaning.
+    const delta = bytes.length - (end - start)
+    const after = outsideSignature(candidateTree, start, insertedEnd, delta)
+    if (before === null || after === null || before !== after) continue
+
+    accepted = { bytes, candidate, candidateTree, inserted }
+    break
+  }
+  if (!accepted) return { ok: false, code: 'unsupported-structure' }
+  const { bytes, candidate, candidateTree, inserted } = accepted
+
+  let anchor
+  if (built.caretAfter) {
+    const caret = caretAfterInsert(candidate, candidateTree, inserted)
+    if (!caret.ok) return { ok: false, code: caret.code }
+    anchor = caret.anchor
+  } else {
+    anchor = start + built.anchor
+  }
   // The task seed's ledger entry (`ascii: ''` — "this U+00A0 stands for NO
   // keystroke; it may only ever be DISSOLVED, never healed to a space"). The
   // span is re-asserted against the candidate bytes here, on top of
