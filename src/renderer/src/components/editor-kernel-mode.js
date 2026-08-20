@@ -401,7 +401,9 @@ export function createKernelMode({
   // behaviorally (and so the next assessment can measure without probes).
   const perfStats = {
     projectionMapBuilds: 0,
-    projectionMapReuses: 0
+    projectionMapReuses: 0,
+    verifyRuns: 0,
+    verifyScheduled: 0
   }
 
   const bindMap = (pmDoc, pending = null, reuse = null) => {
@@ -625,6 +627,7 @@ export function createKernelMode({
   }
 
   const verifyPlainTextProjection = (newDoc) => {
+    perfStats.verifyRuns += 1
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
       pushKernelDiagnostic({ type: 'projection-parse-failure', revision: kernel.doc.revision })
@@ -648,6 +651,74 @@ export function createKernelMode({
       }
       bindMap(view.state.doc)
     })
+  }
+
+  // ===========================================================================
+  // Debounced verify (perf assessment §9 #5, 2026-08-21)
+  // ===========================================================================
+  // `verifyPlainTextProjection` is POST-HOC repair, not a gate: the PM
+  // transaction is already applied when it runs, no fail-closed veto consults
+  // it, and its remedy is an async reconcile. Running its full-document parse
+  // synchronously on EVERY keystroke was ~1/3 of the whole keystroke route
+  // (~113 ms headless / ~350 ms real at 200 KB), so a typing burst now pays
+  // for ONE coalesced run after it settles.
+  //
+  // What must NOT be debounced, and is not:
+  //   * the REPAIR path — when the rebind failed (kernel.map null, e.g. the
+  //     orphaned split placeholder), verify IS the recovery mechanism and the
+  //     next keystroke depends on the map it restores. `requestVerify` runs it
+  //     immediately there, exactly as before.
+  //   * a FLUSH reader — flushMarkdown / flushMarkdownSettled /
+  //     getRecoveryMarkdown force the pending run first (`flushPendingVerify`),
+  //     so a save or mode switch never reads past a silently-dropped check.
+  // What this deliberately trades (assessment §9 #5's stated cost): a
+  // projection mismatch is now undetected for up to one debounce interval
+  // instead of one microtask. Every BYTE write in that window is still gated
+  // by the gateway/command proofs against the freshly rebuilt map — a
+  // diverged view degrades pairs fail-closed — so the window delays a VIEW
+  // repair, never a byte decision.
+  //
+  // The debounced run re-reads the LIVE view doc at fire time (by then
+  // updateState has installed the transaction's doc — the `newDoc` argument
+  // the synchronous call sites used is stale by design here) and re-arms
+  // itself while an IME composition is in flight: reconciling mid-composition
+  // would fight the composition session, whose own settle path already
+  // reconciles through applyKernelTransaction.
+  const VERIFY_DEBOUNCE_MS = 200
+  let verifyTimer = null
+  const runScheduledVerify = () => {
+    verifyTimer = null
+    if (inactive()) return
+    const view = getView?.()
+    if (!view) return
+    if (view.composing || compositionSession.isActive()) {
+      scheduleVerify()
+      return
+    }
+    verifyPlainTextProjection(view.state.doc)
+  }
+  const scheduleVerify = () => {
+    if (verifyTimer) clearTimeout(verifyTimer)
+    verifyTimer = setTimeout(runScheduledVerify, VERIFY_DEBOUNCE_MS)
+    // Never keep a headless process alive for a pending verify (Node timers
+    // hold the event loop; browser timers have no unref and skip this).
+    if (typeof verifyTimer?.unref === 'function') verifyTimer.unref()
+    perfStats.verifyScheduled += 1
+  }
+  const flushPendingVerify = () => {
+    if (!verifyTimer) return
+    clearTimeout(verifyTimer)
+    runScheduledVerify()
+  }
+  const requestVerify = (newDoc) => {
+    if (!kernel.map) {
+      // Rebind failed: verify is the repair path and must run NOW, against
+      // the doc the caller is installing (the live view may not carry it yet
+      // — handleTransactions runs before updateState).
+      if (newDoc) verifyPlainTextProjection(newDoc)
+      return
+    }
+    scheduleVerify()
   }
 
   // Best-effort scan: does any ReplaceStep in this batch target a
@@ -788,9 +859,32 @@ export function createKernelMode({
         // in which case the rebind fails against the orphaned empty
         // paragraph and verifyPlainTextProjection's repair reconcile removes
         // it (the parse never contains it) and rebinds.
+        //
+        // Two commits keep the SYNCHRONOUS verify under the debounce (§9 #5),
+        // because for both the view is KNOWN to differ from the bytes and the
+        // verify's reconcile is what settles it — neither ever occurs inside
+        // an ordinary typing burst:
+        //   * `hadPlaceholders` — the session-ending commit: an orphan at the
+        //     document end is byte-legally TOLERATED by the rebind as a
+        //     trailing placeholder (kernel.map non-null), so the
+        //     immediate-repair branch of `requestVerify` alone would not
+        //     catch it, yet the cleanup is a pinned session contract
+        //     (Case 14). At most once per Enter.
+        //   * `committed.rewrote` — the gateway re-spelled the step (a
+        //     whitespace heal, the task-seed dissolve, a virtual-block
+        //     prefix, the code-fence newline expansion): the view shows the
+        //     PM slice while the bytes hold the rewrite, and until the
+        //     reconcile runs the block cannot be proven against the view —
+        //     debouncing would leave it refusing keystrokes for the whole
+        //     interval (Case I5's dissolve pin).
+        const hadPlaceholders = splitPlaceholders.length > 0
         bindMap(newState?.doc || null)
         verifyEditObservable(committed.observability)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        if ((hadPlaceholders || committed.rewrote) && newState?.doc) {
+          verifyPlainTextProjection(newState.doc)
+        } else {
+          requestVerify(newState?.doc)
+        }
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -932,7 +1026,7 @@ export function createKernelMode({
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        requestVerify(newState?.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -970,7 +1064,7 @@ export function createKernelMode({
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        requestVerify(newState?.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -2639,6 +2733,9 @@ export function createKernelMode({
     flushMarkdown: (...args) => {
       const delegate = legacy('flushMarkdown')
       if (delegate) return delegate(...args)
+      // A flush reader (save, mode switch, export) must not read past a
+      // pending debounced verify — run it now (see the debounce ADR above).
+      flushPendingVerify()
       return kernel.doc.text
     },
     // Await any in-flight IME composition before serving the flush: a save
@@ -2652,6 +2749,7 @@ export function createKernelMode({
       const delegate = legacy('flushMarkdownSettled')
       if (delegate) return delegate(...args)
       await composition.settled()
+      flushPendingVerify()
       return kernel.doc.text
     },
     replaceMarkdown: (markdown) => {
@@ -2694,6 +2792,7 @@ export function createKernelMode({
     getRecoveryMarkdown: (...args) => {
       const delegate = legacy('getRecoveryMarkdown')
       if (delegate) return delegate(...args)
+      flushPendingVerify()
       return kernel.doc.text
     },
     markdownOffsetFromSelection: (...args) => {
@@ -2773,6 +2872,10 @@ export function createKernelMode({
   const dispose = () => {
     disposed = true
     kernel.map = null
+    if (verifyTimer) {
+      clearTimeout(verifyTimer)
+      verifyTimer = null
+    }
     compositionSession.dispose()
     // Clear the host's indicator: a torn-down editor must not leave a stale
     // "some blocks are read-only" badge behind.

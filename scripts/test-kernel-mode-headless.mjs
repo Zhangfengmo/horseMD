@@ -3866,4 +3866,43 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(a2.projectionMapBuilds > b2.projectionMapBuilds, 'plain-text rebind rebuilds')
 }
 
+// Case PERF-2 (perf assessment §9 #5 — debounce the verify parse): the
+// post-hoc verify (`verifyPlainTextProjection`) is not a gate — the PM
+// transaction is already applied when it runs — so a typing burst must pay
+// for ONE coalesced verify parse after the burst settles, not one per
+// keystroke. Two invariants ride along and are pinned here:
+//   * the REPAIR path stays immediate — when the rebind failed
+//     (kernel.map null), verify is the recovery mechanism and must not be
+//     delayed (covered by the existing placeholder/task-toggle cases, which
+//     would hang unmapped if it were);
+//   * a FLUSH forces the pending verify — a save/mode-switch reader never
+//     sees a view whose scheduled verification was silently dropped.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tr = h.view.state.tr.insertText('丙', 2)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  const s1 = h.controller.getPerfStats()
+  assert.equal(typeof s1.verifyRuns, 'number', 'perf stats expose verifyRuns')
+  assert.equal(s1.verifyRuns, 0,
+    'a healthy plain-text commit schedules the verify instead of parsing synchronously')
+  await new Promise((resolve) => setTimeout(resolve, 350))
+  const s2 = h.controller.getPerfStats()
+  assert.equal(s2.verifyRuns, 1, 'the burst settles into exactly one verify run')
+
+  // Forced flush: a pending verify runs NOW when a flush reader asks for the
+  // text (mode switch / save), never left dangling behind the debounce.
+  const tr2 = h.view.state.tr.insertText('丁', 1)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined)
+  assert.equal(h.controller.getPerfStats().verifyRuns, 1, 'second commit is debounced too')
+  const flushed = h.controller.apiOverrides.flushMarkdown()
+  assert.equal(flushed, h.controller.kernel.doc.text, 'flush serves the kernel bytes')
+  assert.equal(h.controller.getPerfStats().verifyRuns, 2,
+    'flushMarkdown forces the pending verify to run immediately')
+}
+
 console.log('PASS kernel mode headless')
