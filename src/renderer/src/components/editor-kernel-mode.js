@@ -37,9 +37,11 @@ import {
   buildSyntaxIndex,
   createMarkdownDocument,
   createSourceHistory,
+  dissolvableTaskSeed,
   exitCodeBlock,
   insertHeadingLeadingWhitespace,
   spellBlockTailInsert,
+  spellTaskSeedInsert,
   literalTailIsStripped,
   healableTrailingSpace,
   spellLineStartWhitespace,
@@ -1385,27 +1387,74 @@ export function createKernelMode({
         Number.isFinite(pmFrom)) {
       const pair = kernel.map.pairAt(pmFrom)
       if (pair && !pair.virtual && pair.charMap && pair.mdBlock) {
-        const heal = healableTrailingSpace(kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks)
-        const stripped = literalTailIsStripped(kernel.doc.text, pair.mdBlock, rawFrom)
-        if ((heal && heal.rawEnd === rawFrom) || stripped) {
-          const routed = spellBlockTailInsert({
-            doc: kernel.doc,
-            block: pair.mdBlock,
-            offset: rawFrom,
-            insert,
-            heal
-          })
-          if (routed.ok) {
-            healFrom = routed.edit.from
-            healTo = routed.edit.to
-            healInsert = routed.edit.insert
-            healMarks = routed.whitespaceMarks
-          } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
-            // The trailing byte IS one CommonMark discards and no surviving
-            // spelling could be proven: refuse rather than commit it. The
-            // composition session reverts the view, so nothing diverges.
-            notifyBlocked(routed.code)
-            return false
+        // THE TASK-SEED DISSOLVE, ON THIS PATH TOO (2026-08-20 adversarial
+        // panel, Important — the same route-blindness as the 2026-08-19 heal
+        // finding this comment block sits inside). The dissolve used to be
+        // consulted only in the gateway's plain-text branch, so an
+        // IME-committed first label character — the NORMAL way a Chinese
+        // user types the label — landed AFTER the seed and permanently
+        // embedded the kernel-authored U+00A0 at the label's start
+        // (`- [ ] <U+00A0>买菜` on disk where ASCII typing yields
+        // `- [ ] 买菜`), with the surviving `ascii:''` ledger entry vouching
+        // a byte that no longer had any exit.
+        //
+        // SAME commands, not a fork: `dissolvableTaskSeed` (the parse-free,
+        // ledger-gated prefilter) + `spellTaskSeedInsert` (delete seed +
+        // insert label as ONE edit, reparse-proven checked-state and exact
+        // label) — the identical consultation the gateway's plain-text
+        // branch performs. Its only non-ok answer is `not-structural` (the
+        // ruled fallback is the literal commit — seed + composed text is
+        // honest, observable bytes), so there is no refusal arm.
+        //
+        // ORDER: ahead of the trailing-whitespace heal, mirroring the
+        // gateway's branch order — the seed's block-end position can satisfy
+        // the heal's prefilter too, though its heal already refuses the
+        // empty-`ascii` entry, so the provenance partition is enforced twice.
+        let taskSeedDissolved = false
+        if (insert !== '' && !/[\r\n]/.test(insert)) {
+          const seed = dissolvableTaskSeed(
+            kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks, rawFrom
+          )
+          if (seed) {
+            const routed = spellTaskSeedInsert({
+              doc: kernel.doc,
+              block: pair.mdBlock,
+              seed,
+              offset: rawFrom,
+              insert
+            })
+            if (routed.ok) {
+              healFrom = routed.edit.from
+              healTo = routed.edit.to
+              healInsert = routed.edit.insert
+              healMarks = routed.whitespaceMarks
+              taskSeedDissolved = true
+            }
+          }
+        }
+        if (!taskSeedDissolved) {
+          const heal = healableTrailingSpace(kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks)
+          const stripped = literalTailIsStripped(kernel.doc.text, pair.mdBlock, rawFrom)
+          if ((heal && heal.rawEnd === rawFrom) || stripped) {
+            const routed = spellBlockTailInsert({
+              doc: kernel.doc,
+              block: pair.mdBlock,
+              offset: rawFrom,
+              insert,
+              heal
+            })
+            if (routed.ok) {
+              healFrom = routed.edit.from
+              healTo = routed.edit.to
+              healInsert = routed.edit.insert
+              healMarks = routed.whitespaceMarks
+            } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+              // The trailing byte IS one CommonMark discards and no surviving
+              // spelling could be proven: refuse rather than commit it. The
+              // composition session reverts the view, so nothing diverges.
+              notifyBlocked(routed.code)
+              return false
+            }
           }
         }
       }

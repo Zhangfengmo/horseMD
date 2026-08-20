@@ -169,6 +169,12 @@ const img = (attrs) => schema.node('image', attrs)
 // Case I6 — the thematic break leaf.
 const hr = () => schema.node('hr')
 
+// The `/task` seed byte (U+00A0), spelled as an escape so no fixture can be
+// edited by accident into an ordinary space — the same convention as
+// commands/trailing-whitespace.js's NO_BREAK_SPACE. (Older fixtures embed the
+// literal character; new ones use this constant.)
+const SEED_NBSP = '\u00A0'
+
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
 const FIXTURE_DOCS = {
@@ -276,6 +282,20 @@ const FIXTURE_DOCS = {
   // above.
   '- [ ]  \n': () => doc(bl(li(false, p(text(' ')))), p()),
   '- [ ] x\n': () => doc(bl(li(false, p(text('x')))), p()),
+  // Case I5c-I5f (2026-08-20 adversarial panel): the IME route to the task-
+  // seed dissolve. Every byte string commitReplace can produce on these
+  // shapes is registered — INCLUDING the un-dissolved pre-fix spellings
+  // (seed + committed label, the same tripwire convention as Case 21c:
+  // without them stubParse would THROW on the pre-fix bytes and the kernel
+  // would roll back, masking the byte assertion behind a parse failure).
+  ['/task\r\n']: () => doc(p(text('/task'))),
+  ['- [ ] ' + SEED_NBSP + '\r\n']: () => doc(bl(li(false, p(text(SEED_NBSP)))), p()),
+  ['- [ ] 买菜\n']: () => doc(bl(li(false, p(text('买菜')))), p()),
+  ['- [ ] 买菜\r\n']: () => doc(bl(li(false, p(text('买菜')))), p()),
+  ['- [ ] ' + SEED_NBSP + '买菜\n']: () => doc(bl(li(false, p(text(SEED_NBSP + '买菜')))), p()),
+  ['- [ ] ' + SEED_NBSP + '买菜\r\n']: () => doc(bl(li(false, p(text(SEED_NBSP + '买菜')))), p()),
+  ['- [ ] x买\n']: () => doc(bl(li(false, p(text('x买')))), p()),
+  ['- [ ] ' + SEED_NBSP + '买\n']: () => doc(bl(li(false, p(text(SEED_NBSP + '买')))), p()),
   // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert. An
   // hr-ending document always carries the trailing placeholder (same
   // `withTrailingParagraph` convention as every fixture above); the typed
@@ -3387,6 +3407,117 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, seedBytes)
   assert.equal(h.controller.runHistory('undo'), true)
   assert.equal(h.controller.kernel.doc.text, '/task\n', 'exit 2: undo returns the query bytes')
+}
+
+// Case I5c (2026-08-20 adversarial panel, Important): the IME path reaches
+// the dissolve. `commitReplace` — the composition session's SOLE write path —
+// used to carry only the trailing-whitespace heal; the dissolve was consulted
+// only in the gateway's plain-text branch. So an IME-committed first label
+// character (the NORMAL way a Chinese user types the label) landed AFTER the
+// seed and permanently embedded the kernel-authored U+00A0 at the label's
+// start: file bytes `- [ ] <U+00A0>买菜` where ASCII typing yields
+// `- [ ] 买菜`. The seed could never dissolve afterwards
+// (`spellTaskSeedInsert`'s blockText===NBSP gate) and the surviving
+// `ascii:''` ledger entry kept vouching a byte with no exit. Pre-fix this
+// case fails at the byte assertion, showing the embedded U+00A0 (the
+// un-dissolved spelling is a registered fixture, so the pre-fix commit LANDS
+// instead of being masked by a stub-parse failure).
+{
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '\n')
+  const caret = h.view.state.selection.head // after the seed (pinned = 4 in I5)
+
+  // One whole MULTI-CHARACTER composition (compose 买菜, commit at onEnd) —
+  // the same drive protocol as Case 10: composition transactions mutate the
+  // stub view directly, only compositionend's diff reaches the kernel.
+  h.controller.composition.onStart()
+  assert.equal(h.controller.composition.isActive(), true)
+  h.view.updateState(h.view.state.apply(h.view.state.tr.insertText('买菜', caret)))
+  h.controller.composition.onEnd()
+  await flushMicrotasks()
+  assert.equal(h.controller.composition.isActive(), false)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] 买菜\n',
+    'the seed dissolves under the IME-committed first label — no U+00A0 before the label')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [],
+    'the seed\'s ledger entry died with its byte')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(false, p(text('买菜')))), p())),
+    'the view settled on the dissolved parse')
+  assert.ok(h.controller.kernel.map, 'and it still maps — the item stays editable')
+
+  // The ime-commit is bracketed as its own undo group (commitReplace's
+  // breakGroup fences): first undo returns the seed, second the query bytes.
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/task\n')
+}
+
+// Case I5d (negative control): an IME commit AFTER an existing label has no
+// seed to claim — the first label character already dissolved it through the
+// plain-text path and the ledger is empty — so the commit is the ordinary
+// literal append. Nothing may be deleted.
+{
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', h.view.state.selection.head))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n', 'ASCII first label dissolved (Case I5 pin)')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [], 'ledger empty — seed gone')
+
+  // bullet_list(0) > list_item(1) > paragraph(2) > text 'x'(3..4): after = 4.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  h.controller.composition.onStart()
+  h.view.updateState(h.view.state.apply(h.view.state.tr.insertText('买', 4)))
+  h.controller.composition.onEnd()
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x买\n',
+    'no seed, no dissolve: the IME commit is the literal append')
+}
+
+// Case I5e (negative control, fail-closed direction): a USER-authored U+00A0
+// — the seed bytes reopened from disk, where the session ledger is empty by
+// construction — is NEVER dissolved by an IME commit. The byte is the
+// author's; typing appends after it (same pin as the plain path's provenance
+// section in scripts/test-source-kernel-task-seed.mjs, now on the IME route).
+{
+  const h = makeHarness('- [ ] ' + SEED_NBSP + '\n', doc(bl(li(false, p(text(SEED_NBSP)))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [],
+    'a document created from bytes has no provenance')
+  // bullet_list(0) > list_item(1) > paragraph(2) > text NBSP(3..4): after = 4.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  h.controller.composition.onStart()
+  h.view.updateState(h.view.state.apply(h.view.state.tr.insertText('买', 4)))
+  h.controller.composition.onEnd()
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '买\n',
+    'a user-authored U+00A0 survives the IME commit — the kernel never rewrites a byte it did not write')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [])
+}
+
+// Case I5f (CRLF): the dissolve edit is interior to the seed's own line, so a
+// CRLF document keeps its endings byte-for-byte and gains no lone LF.
+{
+  const h = makeHarness('/task\r\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- [ ] ' + SEED_NBSP + '\r\n')
+  const caret = h.view.state.selection.head
+  h.controller.composition.onStart()
+  h.view.updateState(h.view.state.apply(h.view.state.tr.insertText('买菜', caret)))
+  h.controller.composition.onEnd()
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '- [ ] 买菜\r\n',
+    'the IME dissolve on a CRLF document commits the dissolved line with its CRLF ending intact')
+  assert.equal(/(?<!\r)\n/.test(h.controller.kernel.doc.text), false, 'no lone LF was introduced')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [])
 }
 
 // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert, end to end

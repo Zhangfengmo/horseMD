@@ -369,7 +369,134 @@ async function run() {
   }
 }
 
-run().catch((error) => {
+// ===========================================================================
+// IME first-label segment (2026-08-20 adversarial panel, Important): the main
+// run above types the label in ASCII, which reaches the dissolve through the
+// gateway's plain-text branch. A COMPOSED label — the NORMAL way a Chinese
+// user types it — reaches the kernel through the composition session's ONE
+// write path instead (editor-kernel-mode.js `commitReplace`), which used to
+// carry only the trailing-whitespace heal. Pre-fix, the committed word landed
+// AFTER the seed and permanently embedded the kernel-authored U+00A0 at the
+// label's start: disk bytes `- [ ] <U+00A0>买菜` where ASCII typing yields
+// `- [ ] 买菜`, unfixable afterwards (the seed can only dissolve while it is
+// the block's ENTIRE content). This segment fails pre-fix at the first
+// source assertion, showing that embedded U+00A0.
+//
+// `imeType` is copied verbatim from scripts/test-kernel-ime-ui.mjs:159-173
+// (itself from test-ime-source-fidelity-ui.mjs:47-69, the proven
+// real-composition driver): per-pinyin-letter rawKeyDown/keyUp INTERLEAVED
+// with Input.imeSetComposition, committed via Input.insertText — the
+// interleaving is load-bearing for composition-lifecycle coverage.
+// ===========================================================================
+let compId = 1
+async function imeType(send, pinyin, cjk) {
+  const replacementId = `comp-${compId++}`
+  for (let i = 0; i < pinyin.length; i += 1) {
+    const ch = pinyin[i]
+    const code = ch.charCodeAt(0)
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: ch, code: `Key${ch.toUpperCase()}`, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code })
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, code: `Key${ch.toUpperCase()}`, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code })
+    const text = pinyin.slice(0, i + 1)
+    await send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length, replacementId, location: 0 })
+    await sleep(delay)
+  }
+  await sleep(delay)
+  await send('Input.insertText', { text: cjk }) // commit → compositionend
+  await sleep(delay)
+}
+
+async function runImeFirstLabelSegment() {
+  const segRoot = `/tmp/horsemd-kernel-task-ime-${process.pid}`
+  const segFile = join(segRoot, 'task-ime.md')
+  const SEG_LINES = ['# 标题', '', '甲乙丙丁', '', '尾段落。', '']
+  const SEG_FIXTURE = SEG_LINES.join('\n')
+
+  await rm(segRoot, { recursive: true, force: true })
+  await mkdir(segRoot, { recursive: true })
+  await writeFile(segFile, SEG_FIXTURE)
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(segRoot, 'profile'), port: port + 2, appArgs: [segFile] })
+    const { evaluate, send } = app
+    await waitFor(async () => {
+      const text = await mounted(evaluate)
+      return text && text.includes('甲乙丙丁') && text.includes('尾段落。') ? text : null
+    }, 'IME segment: initial document did not mount')
+    assert.equal(app.dialogs.length, 0, 'no dialog on plain mount (IME segment)')
+
+    await toggleKernelMode(evaluate)
+    await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      'IME segment: kernel mode did not remount the tab')
+    await sleep(300)
+    const attachDiagnostics = await evaluate(`JSON.stringify(window.__hmKernelDiagnostics || [])`)
+    assert.ok(!attachDiagnostics.includes('attach-unmappable'),
+      `IME segment: kernel mode degraded to legacy fallback: ${attachDiagnostics}`)
+
+    // 1) `/task`, then the FIRST label via a real composition: the seed must
+    //    dissolve under the committed word exactly as it does under an ASCII
+    //    keystroke — same bytes, no U+00A0.
+    await selectBlock(evaluate, send, '甲乙丙丁')
+    await runTaskItem(evaluate, send)
+    const itemsAfterInsert = await taskItems(evaluate)
+    console.log('  [/task IME segment] ->', JSON.stringify(itemsAfterInsert))
+    assert.deepEqual(itemsAfterInsert, [{ checked: false, label: NBSP }],
+      'the checkbox must appear immediately, holding exactly the seed')
+    assert.equal(await caretInTask(evaluate), true, 'the caret must land inside the new task item')
+
+    await imeType(send, 'maicai', '买菜')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('买菜'),
+      'composed 买菜 never reached the kernel-mode editor')
+    const itemsAfterIme = await taskItems(evaluate)
+    console.log('  [IME first label] ->', JSON.stringify(itemsAfterIme))
+    assert.deepEqual(itemsAfterIme, [{ checked: false, label: '买菜' }],
+      'the composed label must REPLACE the seed on screen — no leading placeholder character')
+
+    const afterIme = SEG_FIXTURE.replace('甲乙丙丁', '- [ ] 买菜')
+    const sourceAfterIme = await readSource(evaluate, 'IME first label')
+    assert.equal(sourceAfterIme, afterIme,
+      `the IME-committed first label must DISSOLVE the seed (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+    assert.ok(!sourceAfterIme.includes(NBSP), 'no U+00A0 survives the IME dissolve')
+
+    // 2) Control: a SECOND composition after the label has no seed to claim —
+    //    it appends, deletes nothing (the ledger entry died with the dissolve).
+    const labelRect = await waitFor(() => charRect(evaluate, '买菜', 0, 2),
+      'could not locate the dissolved task paragraph to click back into')
+    await click(send, { x: labelRect.right + 1, y: labelRect.top + labelRect.height / 2 })
+    await sleep(300)
+    await imeType(send, 'jixu', '继续')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('买菜继续'),
+      'the second composed word never reached the editor')
+    const finalExpected = SEG_FIXTURE.replace('甲乙丙丁', '- [ ] 买菜继续')
+    const finalSource = await readSource(evaluate, 'IME after label')
+    assert.equal(finalSource, finalExpected,
+      'a composition after the label is a literal append — nothing dissolves twice')
+
+    // 3) Save + reparse: the file holds a REAL checked:false task whose label
+    //    is exactly the two composed words, and no U+00A0 anywhere.
+    await save(evaluate)
+    const disk = await readFile(segFile, 'utf8')
+    assert.equal(disk, finalExpected, 'disk bytes match the kernel-derived expectation exactly')
+    assert.ok(!disk.includes(NBSP), 'no U+00A0 on disk')
+    const diskItems = parseKernelMarkdown(disk).children
+      .filter((node) => node.type === 'list')
+      .map((list) => [list.children[0].checked, list.children[0].children[0].children.map((n) => n.value ?? '').join('')])
+    assert.deepEqual(diskItems, [[false, '买菜继续']],
+      'the saved bytes reparse to a real task with exactly the composed label')
+    assert.equal(app.dialogs.length, 0,
+      `no dialog may appear in the IME segment: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
+
+    console.log('PASS kernel-mode /task IME segment: a composed first label dissolves the seed byte-identically to ASCII typing, a second composition appends without claiming anything, and the saved file reparses to the exact label')
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+  }
+}
+
+async function main() {
+  await run()
+  await runImeFirstLabelSegment()
+}
+
+main().catch((error) => {
   console.error(error)
   process.exit(1)
 })
