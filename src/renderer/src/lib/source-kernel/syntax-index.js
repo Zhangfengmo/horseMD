@@ -65,6 +65,50 @@ import {
 // assumed, in scripts/test-source-kernel-index.mjs.
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkFrontmatter)
 
+// ===========================================================================
+// Parse memo (perf assessment §9 #3, 2026-08-21)
+// ===========================================================================
+// One kernel operation parses the SAME full document string several times:
+// the route handler builds an index of `kernel.doc.text`, `buildProjectionMap`
+// builds another for the identical post-edit text, and the byte-proof
+// commands parse their baseline (`doc.text`) on top — 4-6 full parses per
+// structural/mark/link/image operation, ~110 ms each at 200 KB. The parse is
+// pure and the memo key is the EXACT string (never a hash, never a revision
+// number), so a hit is proof the bytes are identical and can never serve a
+// stale tree. Small LRU: entries beyond the cap evict oldest-first; the cap
+// covers two mounted editors' current+previous texts (the cross-document
+// thrash 1e5d2db measured on the table memo cannot recur at cap 8).
+//
+// TWO SEPARATE CACHES, never shared: `buildSyntaxIndex` MUTATES the tree it
+// parses (`injectHighlightNodes` splits text nodes in place), so its memo
+// stores the whole INDEX (tree already injected, safe to reshare because no
+// consumer mutates it — audited 2026-08-21: the only tree mutation anywhere
+// in source-kernel/ or the kernel components is injectHighlightNodes
+// itself). `parseKernelMarkdown` serves raw, highlight-free trees and must
+// keep doing so — routing it through the index memo (or vice versa) would
+// leak the injection into callers that count/walk raw nodes.
+//
+// Texts above the length cap skip the memo entirely (parse and return):
+// entries pin both the string and its mdast for the cache lifetime, and the
+// kernel's own operating window is ≤ CHUNK_THRESHOLD (120 K chars), so the
+// cap is a leak guard, not a working limit.
+const PARSE_MEMO_ENTRIES = 8
+const PARSE_MEMO_MAX_TEXT = 1_500_000
+const rawParseMemo = new Map()
+const indexMemo = new Map()
+const memoGet = (memo, key) => {
+  if (!memo.has(key)) return null
+  const value = memo.get(key)
+  memo.delete(key)
+  memo.set(key, value) // refresh recency (Map preserves insertion order)
+  return value
+}
+const memoSet = (memo, key, value) => {
+  memo.delete(key)
+  memo.set(key, value)
+  while (memo.size > PARSE_MEMO_ENTRIES) memo.delete(memo.keys().next().value)
+}
+
 // The kernel's own parse, exposed for commands that must PROVE a candidate
 // rewrite reparses to the document they intend (Plan 5 Task 5's
 // `setImageAttrs` re-parses its candidate bytes and asserts the image node
@@ -75,7 +119,13 @@ const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(
 // only splits text nodes) is not applied here: it never changes a node's
 // span and the callers below read block/inline node positions only.
 export function parseKernelMarkdown(text) {
-  return processor.parse(String(text ?? ''))
+  const key = String(text ?? '')
+  if (key.length > PARSE_MEMO_MAX_TEXT) return processor.parse(key)
+  const hit = memoGet(rawParseMemo, key)
+  if (hit) return hit
+  const tree = processor.parse(key)
+  memoSet(rawParseMemo, key, tree)
+  return tree
 }
 
 export function scanLines(text) {
@@ -115,6 +165,17 @@ const MARKER_RE = /^([ \t]*)([*+-]|\d{1,9}[.)])([ \t]+|$)/
 const TASK_RE = /^\[( |x|X)\]([ \t]*)/
 
 export function buildSyntaxIndex(text) {
+  const key = String(text ?? '')
+  if (key.length <= PARSE_MEMO_MAX_TEXT) {
+    const hit = memoGet(indexMemo, key)
+    if (hit) return hit
+  }
+  const index = buildSyntaxIndexUncached(key)
+  if (key.length <= PARSE_MEMO_MAX_TEXT) memoSet(indexMemo, key, index)
+  return index
+}
+
+function buildSyntaxIndexUncached(text) {
   const lines = scanLines(text)
   const dominantEnding = lines.find((l) => l.ending)?.ending || '\n'
   const tree = processor.parse(text)
