@@ -2290,4 +2290,57 @@ const fm = (value) => schema.node('frontmatter', { value })
   }
 }
 
+// ===========================================================================
+// Case: rawToPmCaret — CARET resolution for offsets the write path refuses
+// ===========================================================================
+// `rawToPmPos` fails closed on any offset outside a charMap unit boundary —
+// correct for WRITES (a wrong success writes a wrong byte), but a committed
+// selection anchor still needs a HOME in the view after a structure-changing
+// reconcile. The measured failure (2026-08-21): typing `*` on a blank line
+// commits the byte, the reparse makes an empty bullet item (charMap: null, no
+// mdBlock — the syntheticEmptyItemParagraph pair), the repair reconcile had no
+// caret target, and the caret was thrown into the trailing placeholder — the
+// continuation text landed in the WRONG BLOCK, silently.
+//
+// The caret resolver answers the weaker, safe question "where may the caret
+// SIT for this raw offset": the write-path answer when it exists, else the
+// single caret position of the empty textblock whose marker span contains the
+// offset — an empty textblock has exactly one, so this is a derivation, not a
+// guess. It never makes an unmappable offset writable.
+{
+  // '甲\n\n*' — 甲(0) \n(1) \n(2) *(3). PM: p('甲')[0..3), bullet_list(4:
+  // list_item(5: paragraph(6..6))). Empty-item pair: pmPos 5? paragraph node
+  // begins at 5 → contentPos 6. Derived below from the pair itself, so the
+  // assertion cannot rot if node sizes shift.
+  const md = '甲\n\n*'
+  const d = doc(p(text('甲')), schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p()])
+  ]))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map, 'the bare-marker document maps (the empty item pairs read-only)')
+  const itemPair = map.blockPairs.find((pair) => !pair.charMap && pair.pmNode.type.name === 'paragraph')
+  assert.ok(itemPair, 'the empty item paragraph pairs with charMap null')
+  assert.equal(map.rawToPmPos(4), null, 'the WRITE path still refuses the marker-end offset')
+  const caret = map.rawToPmCaret(4)
+  assert.ok(caret, 'the CARET path resolves it')
+  assert.equal(caret.pos, itemPair.pmPos + 1, 'to the empty item paragraph, its only caret position')
+  // Direct passthrough: an offset the write path CAN resolve answers identically.
+  assert.deepEqual(map.rawToPmCaret(1), map.rawToPmPos(1))
+  // An offset on the blank line belongs to no block: still null (fail-closed).
+  assert.equal(map.rawToPmCaret(2), null)
+}
+{
+  // Bare heading: '甲\n\n#' — the heading pairs generically (mdBlock present,
+  // charMap null because a spacing-less ATX heading has no provable content
+  // start), so the caret resolver must serve the mdBlock span too.
+  const md = '甲\n\n#'
+  const d = doc(p(text('甲')), schema.node('heading', { level: 1 }))
+  const map = buildProjectionMap(md, d)
+  assert.ok(map)
+  const headingPair = map.blockPairs.find((pair) => pair.pmNode.type.name === 'heading')
+  assert.ok(headingPair && !headingPair.charMap)
+  assert.equal(map.rawToPmPos(4), null)
+  assert.deepEqual(map.rawToPmCaret(4), { pos: headingPair.pmPos + 1, atom: false })
+}
+
 console.log('PASS kernel projection map (front matter pairs, stays read-only)')

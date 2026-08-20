@@ -220,6 +220,108 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
   }
 }
 
+// MARKER-FOLLOWING TEXT — the second half of the bare-marker rule, and the
+// exit `spellMarkerCompletingSpace` deliberately does not own.
+//
+// A bare marker (`*`, `-`, `+`, `1.`, `#`…) is an AMBIGUOUS intermediate
+// state: the kernel is byte-first, so the single character is already valid
+// syntax (an empty list item, an empty heading) and the reconcile converts
+// the block immediately. The NEXT keystroke resolves the ambiguity:
+//   * whitespace  -> the marker was SYNTAX; the space completes it
+//                    (`spellMarkerCompletingSpace` above);
+//   * ordinary text -> the marker was CONTENT all along; `*` + `a` = the
+//                    literal paragraph `*a`, which is exactly what the bytes
+//                    `*a` already reparse to.
+// Before this command the second exit did not exist: the empty structure has
+// no provable content anchor (its charMap is null by design), so the typed
+// character either refused or — worse, measured 2026-08-21 in the built app —
+// landed in whatever block the reconcile had thrown the caret into, severing
+// the text from its marker (`*` then `a` produced `*\n\na`: a dead empty
+// list plus a separate paragraph, with no toast).
+//
+// NOTHING IS DECIDED FROM THE GRAMMAR. Same posture as the Space half: the
+// command builds the candidate bytes, REPARSES them, and requires the
+// DEMOTION to be visible in the kernel's own parse — a literal text node
+// spelling exactly `marker + typed` starting at the marker's own offset. A
+// shape that cannot be proven answers `not-structural` and the caller keeps
+// exactly its previous behavior, so this command can only ever ADD a working
+// gesture.
+//
+// `>` IS DELIBERATELY NOT CLAIMED: a bare `>` already pairs editable through
+// the projection map's empty-quote virtual anchor (`emptyQuoteContentStart`),
+// so typing after it commits through the ordinary plain-text path — claiming
+// it here would give one byte two owners. Whitespace of any kind (including
+// U+00A0, which the whitespace-provenance ledger owns) is refused for the
+// same one-owner reason.
+const nodeTypeForToken = (token) =>
+  (token[0] === '#' ? 'heading' : 'listItem')
+
+export function spellMarkerFollowingText({ doc, offset, text: typed }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
+  if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return NOT_STRUCTURAL
+  if (typeof typed !== 'string' || typed.length === 0) return NOT_STRUCTURAL
+  // Any whitespace (ASCII or Unicode — /\s/ includes U+00A0) belongs to the
+  // completion / re-speller family; a line ending could never be one edit.
+  if (/\s/.test(typed)) return NOT_STRUCTURAL
+
+  const index = buildSyntaxIndex(text)
+  const line = index.lineAt(offset)
+  if (!line || offset < line.start) return NOT_STRUCTURAL
+  const baseline = index.blockAt(offset) || index.blockAt(Math.max(0, offset - 1))
+  if (baseline && VERBATIM.has(baseline.type)) return NOT_STRUCTURAL
+
+  const match = MARKER_TOKEN.exec(text.slice(line.start, offset))
+  if (!match) return NOT_STRUCTURAL
+  const token = match[0]
+  if (token === '>' || token[0] === '[') return NOT_STRUCTURAL
+  const markerStart = offset - token.length
+  if (!looksLikeBlockLineStart(text, markerStart)) return NOT_STRUCTURAL
+
+  // The marker must CURRENTLY be a bare (empty, spacing-less) structure — that
+  // is what makes this a demotion of a committed intermediate state rather
+  // than a guess about text that merely ends in a marker character. An empty
+  // structure's own node ends exactly at the caret; content or spacing after
+  // the marker means some other path (the ordinary character path, the
+  // virtual-anchor path) already owns this position.
+  const type = nodeTypeForToken(token)
+  const bare = nodeStartingAt(index.tree, type, markerStart)
+  if (!bare || contentStartOf(bare.node) !== null) return NOT_STRUCTURAL
+  if (type === 'heading' && bare.node.depth !== token.length) return NOT_STRUCTURAL
+  if (bare.node.position?.end?.offset !== offset) return NOT_STRUCTURAL
+
+  // THE PROOF: after inserting the typed text, the structure at the marker's
+  // offset is gone and a literal TEXT node spelling exactly `token + typed`
+  // starts there instead — the parser's own statement that the marker
+  // demoted to content and the typed character is visible right after it.
+  const candidate = text.slice(0, offset) + typed + text.slice(offset)
+  const grown = buildSyntaxIndex(candidate)
+  if (nodeStartingAt(grown.tree, type, markerStart)) return NOT_STRUCTURAL
+  let demoted = null
+  const walk = (node) => {
+    if (demoted) return
+    if (node.type === 'text' && node.position?.start?.offset === markerStart) demoted = node
+    for (const child of node.children || []) walk(child)
+  }
+  walk(grown.tree)
+  if (!demoted || !String(demoted.value).startsWith(token + typed)) return NOT_STRUCTURAL
+
+  const caret = offset + typed.length
+  return {
+    ok: true,
+    marker: token,
+    edit: { from: offset, to: offset, insert: typed },
+    transaction: {
+      baseRevision: doc.revision,
+      from: offset,
+      to: offset,
+      insert: typed,
+      intent: 'marker-following-text',
+      selection: { anchor: caret, head: caret }
+    }
+  }
+}
+
 // ATX HEADING RUN GROWTH — the `##` half of the same rule, and the one shape a
 // completing Space alone cannot reach.
 //
