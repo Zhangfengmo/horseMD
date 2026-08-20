@@ -2,6 +2,7 @@
 // 整个列表（不触碰兄弟项、不重排编号）。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
+import { parseKernelMarkdown } from '../syntax-index.js'
 
 // Same idiom as syntax-index.js buildItem: QUOTE_PREFIX's leading `[ \t]*` is
 // unconditional, so it also matches pure indentation with zero '>' — only
@@ -65,6 +66,94 @@ const selectionFor = (edits, offset) => {
     }
   }
   return offset + delta
+}
+
+// THE PROOF THIS COMMAND DID NOT HAVE (2026-08-20).
+//
+// Indent/outdent used to compute their prefix edits and return them unchecked —
+// the ONLY structural command family in this kernel with no reparse behind it.
+// The bytes are individually legal, so nothing downstream noticed when they
+// reparsed into a DIFFERENT DOCUMENT. Reported by a user with before/after
+// screenshots, reproduced on the first attempt through the app's own gestures:
+//
+//   - 12312          Tab in the empty         - 12312
+//   - 123213    -->  third item          -->  - 123213
+//   -                                           -
+//
+// which is `  - ` on its own line, and CommonMark reads that as a SETEXT
+// HEADING UNDERLINE, not a nested item: an EMPTY list item cannot interrupt a
+// paragraph, so the line becomes the underline for the previous item's text.
+// The second item silently turned into an empty paragraph plus an `<h2>`
+// carrying the first item's words, rendered big and bold outside the list. The
+// user's list had two leading U+00A0 in that item (from the whitespace family),
+// which is why the report looked NBSP-specific — it is not: the identical
+// corruption happens on plain text, verified as a control.
+//
+// The invariant is what indent MEANS: it changes CONTAINER NESTING and nothing
+// else. So every LEAF block — the blocks that actually carry the user's words —
+// must survive with the same type, the same decoded text, and the same order.
+// A nested-list level appearing or disappearing does not disturb that; a
+// paragraph turning into a heading, or content moving between blocks, does.
+//
+// Stated over decoded text rather than raw bytes on purpose: the raw bytes
+// legitimately change (that is the edit), and the decoded text legitimately
+// does not.
+const LEAF_BLOCKS = new Set(['paragraph', 'heading', 'code', 'math', 'html', 'thematicBreak', 'table'])
+
+const decodedText = (node) => (
+  node.value !== undefined
+    ? String(node.value)
+    : (node.children || []).map(decodedText).join('')
+)
+
+const leafSignature = (text) => {
+  const rows = []
+  const walk = (node) => {
+    if (LEAF_BLOCKS.has(node.type)) {
+      rows.push(node.type + '\u0000' + decodedText(node))
+      return
+    }
+    for (const child of node.children || []) walk(child)
+  }
+  walk(parseKernelMarkdown(text))
+  return rows.join('\u0001')
+}
+
+// Apply the command's own edits right-to-left (they are ascending and
+// non-overlapping by construction) so earlier offsets stay valid.
+const applyEdits = (text, edits) => {
+  let out = text
+  for (const edit of [...edits].sort((a, b) => b.from - a.from)) {
+    out = out.slice(0, edit.from) + String(edit.insert ?? '') + out.slice(edit.to)
+  }
+  return out
+}
+
+// Two codes, because the two reachable causes have different remedies and the
+// user can act on both:
+//   * an EMPTY item cannot open a nested list, so its marker line is read as a
+//     setext underline and the item ABOVE becomes a heading — type something in
+//     the item first, and the same Tab works;
+//   * anything else (today: an ORDERED item, which can only interrupt a
+//     paragraph when its number is 1, so an indented `2. ` is swallowed as a
+//     lazy continuation of the previous item's paragraph) has no one-line
+//     remedy, so its message states the fact rather than inventing advice.
+const EMPTY_ITEM = { ok: false, code: 'empty-item-would-become-heading' }
+const RESTRUCTURES = { ok: false, code: 'would-restructure-document' }
+
+// Returns null when the edits are proven to change nesting ONLY, or the refusal
+// that says which way they would have gone wrong.
+const provenNestingOnly = (text, edits, item) => {
+  let before
+  let after
+  try {
+    before = leafSignature(text)
+    after = leafSignature(applyEdits(text, edits))
+  } catch {
+    return RESTRUCTURES
+  }
+  if (before === after) return null
+  return item?.empty ? EMPTY_ITEM : RESTRUCTURES
 }
 
 const multiTxn = (doc, edits, intent, offset) => {
@@ -131,6 +220,8 @@ export function indentListItem({ doc, index, offset }) {
     const at = index.lines[i].start + item.quotePrefix.length
     return { from: at, to: at, insert: pad }
   })
+  const refused = provenNestingOnly(index.text, edits, item)
+  if (refused) return refused
   return multiTxn(doc, edits, 'indent-list-item', offset)
 }
 
@@ -151,5 +242,7 @@ export function outdentListItem({ doc, index, offset }) {
     }
     edits.push({ from: at, to: at + width, insert: '' })
   }
+  const refused = provenNestingOnly(index.text, edits, item)
+  if (refused) return refused
   return multiTxn(doc, edits, 'outdent-list-item', offset)
 }

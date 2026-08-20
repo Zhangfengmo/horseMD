@@ -64,5 +64,9 @@ export const KERNEL_CODES = Object.freeze({
   UNSUPPORTED: 'unsupported-structure',
   NOT_STRUCTURAL: 'not-structural',
   PROJECTION: 'projection-mismatch',
-  INPUT_TYPE: 'unsupported-input-type'
+  INPUT_TYPE: 'unsupported-input-type',
+  // A structural edit whose BYTES are legal but whose reparse yields a
+  // different document than the command intended (commands/indent.js).
+  RESTRUCTURE: 'would-restructure-document',
+  EMPTY_ITEM_HEADING: 'empty-item-would-become-heading'
 })

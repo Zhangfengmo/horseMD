@@ -126,7 +126,12 @@ export function createKernelMode({
     const now = Date.now()
     if (now - (lastNotifyAt.get(code) || 0) < NOTIFY_COOLDOWN_MS) return
     lastNotifyAt.set(code, now)
-    notify?.(`${tOr('kernelMode.unsupported', 'Kernel mode blocked this edit')} (${code})`)
+    // A code with its OWN message says what actually happened; the generic one
+    // plus a machine code is the fallback for everything else. `tOr` answers the
+    // fallback when a key is missing, so adding a message is opt-in per code and
+    // an unknown code degrades to exactly the previous string.
+    const specific = tOr(`kernelMode.blocked.${code}`, '')
+    notify?.(specific || `${tOr('kernelMode.unsupported', 'Kernel mode blocked this edit')} (${code})`)
   }
   // Why this tab fell back to legacy, or null while the kernel is live. Read
   // by `getKernelStatus` (P6 Task 3) so the fallback is reportable instead of

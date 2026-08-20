@@ -15,8 +15,24 @@ const run = (src, offset, fn) => {
 
 // bullet 缩进：`- ` 宽 2 → 2 空格
 assert.equal(run('- 甲\n- 乙\n', 6, indentListItem), '- 甲\n  - 乙\n')
-// 有序 marker `10. ` 宽 4 → 4 空格
-assert.equal(run('10. 甲\n11. 乙\n', 8, indentListItem), '10. 甲\n    11. 乙\n')
+// 有序 marker `10. ` 宽 4 → 4 空格。REWRITTEN 2026-08-20: this used to assert the
+// BYTES `10. 甲\n    11. 乙\n` and never asked what they reparse to — they
+// reparse to ONE paragraph, `甲\n11. 乙`, because an ordered list can only
+// interrupt a paragraph when its number is 1. So the "working" ordered indent
+// was silently merging the two items, and the reparse proof added with the
+// empty-item fix refuses it. Making it WORK means renumbering the nested marker
+// to `1.`, which is its own task (named in the report); until then it fails
+// closed instead of corrupting.
+assert.equal(run('10. 甲\n11. 乙\n', 8, indentListItem).code, 'would-restructure-document')
+{
+  const merged = buildSyntaxIndex('10. 甲\n    11. 乙\n').tree
+  const paras = []
+  const dec = (n) => (n.value !== undefined ? String(n.value) : (n.children || []).map(dec).join(''))
+  const walk = (n) => { if (n.type === 'paragraph') paras.push(dec(n)); for (const c of n.children || []) walk(c) }
+  walk(merged)
+  assert.deepEqual(paras, ['甲\n11. 乙'],
+    'the refused bytes really do merge the two items into one paragraph')
+}
 // 首项无前兄弟 → 拒绝
 assert.equal(run('- 甲\n', 2, indentListItem).code, 'unsupported-structure')
 // 子树整体随动（子行同加前缀），一个事务
@@ -200,6 +216,83 @@ console.log('PASS source-kernel delete + router')
   const r = routeStructuralKey('Backspace', { doc, index, offset })
   assert.equal(r.ok, true)
   assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '- x\n\n甲\n乙\n')
+}
+
+// ===========================================================================
+// THE PROOF INDENT DID NOT HAVE (2026-08-20) — a user report with before/after
+// screenshots, reproduced on the first attempt through the app's own gestures.
+// ===========================================================================
+// Tab in an EMPTY last list item wrote `  - ` on its own line. Those bytes are
+// individually legal and there was NO reparse behind this command — the only
+// structural family in the kernel without one — so nothing noticed that
+// CommonMark reads that line as a SETEXT HEADING UNDERLINE rather than a nested
+// item: an empty list item cannot interrupt a paragraph. The previous item
+// silently became an empty paragraph plus an `<h2>` carrying its words, rendered
+// big and bold outside the list.
+//
+// The user's list had two leading U+00A0 in that item, which made the report
+// look NBSP-specific. It is not, and the control below is the load-bearing
+// half of that claim: the identical corruption happens on plain text.
+{
+  // THE REPORTED SHAPE — refused now, with a code of its own so the toast can
+  // say what actually happened.
+  const src = '- 12312\n- 123213\n- '
+  const refusal = run(src, src.length, indentListItem)
+  assert.equal(refusal.ok, false, 'indenting an empty item must not commit')
+  assert.equal(refusal.code, 'empty-item-would-become-heading',
+    'and must name the cause, so the toast can offer the remedy')
+
+  // ...and the bytes it would have written really do reparse to a heading —
+  // asserted here so the refusal is pinned to a real hazard rather than to a
+  // guess about one.
+  const wouldHaveWritten = '- 12312\n- 123213\n  - '
+  const tree = buildSyntaxIndex(wouldHaveWritten).tree
+  const types = []
+  const walk = (n) => { if (n.type !== 'root') types.push(n.type); for (const c of n.children || []) walk(c) }
+  walk(tree)
+  assert.ok(types.includes('heading'),
+    `the refused bytes must be the ones that produce a heading — got ${types.join(',')}`)
+}
+{
+  // THE NBSP CONTROL: same refusal, same reason, with the user's own U+00A0
+  // run present. The whitespace family is not implicated.
+  const NB = '\u00a0'
+  const src = '- 12312\n- ' + NB + NB + '123213\n- '
+  assert.equal(run(src, src.length, indentListItem).code, 'empty-item-would-become-heading')
+}
+{
+  // THE EMPTY ITEM IS NOT THE LAST ONE — same hazard, same refusal.
+  const src = '- 甲\n- 乙\n- \n- 丁\n'
+  assert.equal(run(src, src.indexOf('- \n- 丁') + 2, indentListItem).code, 'empty-item-would-become-heading')
+}
+
+// ===========================================================================
+// ...AND THE PROOF MUST NOT REFUSE WHAT ALWAYS WORKED. Each of these is a shape
+// the user or the suite exercises daily; if the invariant were stated over raw
+// bytes (which legitimately change) instead of decoded leaf blocks (which do
+// not), every one of them would start refusing.
+// ===========================================================================
+{
+  const NB = '\u00a0'
+  // A NON-EMPTY item indents — the escape hatch the refusal message names.
+  assert.equal(run('- 12312\n- 123213\n- x', 20, indentListItem), '- 12312\n- 123213\n  - x')
+  // The current item carries the U+00A0 run.
+  const cur = '- 甲\n- ' + NB + NB + '乙\n'
+  assert.equal(run(cur, cur.indexOf('乙'), indentListItem), '- 甲\n  - ' + NB + NB + '乙\n')
+  // The PREVIOUS sibling carries it — the report's own suspicion, which the
+  // arithmetic handles because U+00A0 is content, not indentation.
+  const sib = '- ' + NB + NB + '甲\n- 乙\n'
+  assert.equal(run(sib, sib.indexOf('乙'), indentListItem), '- ' + NB + NB + '甲\n  - 乙\n')
+  // The PREVIOUS item is empty and the current one carries the run.
+  const prevEmpty = '- 甲\n- \n- ' + NB + NB + '丙\n'
+  assert.equal(run(prevEmpty, prevEmpty.indexOf('丙'), indentListItem),
+    '- 甲\n- \n  - ' + NB + NB + '丙\n')
+  // OUTDENT beside a U+00A0 sibling, and outdent generally.
+  const out = '- 甲\n- ' + NB + '乙\n  - 丙\n'
+  assert.equal(run(out, out.indexOf('丙'), outdentListItem), '- 甲\n- ' + NB + '乙\n- 丙\n')
+  assert.equal(run('- 甲\n  - 乙\n  - 丙\n', 12, outdentListItem), '- 甲\n  - 乙\n- 丙\n')
+  // Subtree carry-along still moves as one transaction.
+  assert.equal(run('- 甲\n- 乙\n  - 丙\n', 6, indentListItem), '- 甲\n  - 乙\n    - 丙\n')
 }
 
 console.log('PASS source-kernel delete + router (list-boundary guard)')
