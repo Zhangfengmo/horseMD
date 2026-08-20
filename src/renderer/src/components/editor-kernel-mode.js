@@ -56,7 +56,7 @@ import {
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, isTypableTextblock } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
@@ -842,6 +842,34 @@ export function createKernelMode({
           notifyBlocked(routed.code)
           return { veto: true }
         }
+        applyKernelTransaction(routed.transaction, view, { requireMap: true })
+        return { veto: true }
+      }
+      case 'trailing-atom-typing': {
+        // Typing while the document's trailing leaf atom (hr / image-block)
+        // is node-selected — the state a click on/near an atom-ending
+        // document's tail leaves behind: `Selection.near` has no textblock to
+        // land in, so the placeholder plugin-trailing just appended never
+        // received the caret, and prosemirror-view's own keypress fallback
+        // then dispatches insertText over the NodeSelection, which REPLACES
+        // the atom (see extractTrailingAtomTyping in
+        // editor-kernel-gateway.js for the measured trace). Same posture as
+        // `mark-toggle`/`link-edit` above: the PM transaction is ALWAYS
+        // vetoed — it deleted the atom, bytes the user never asked for — and
+        // the kernel instead commits exactly what typing INSIDE the
+        // placeholder commits (the virtual pair's own anchor + separator
+        // prefix, resolved through the same `virtualBlockAt` channel), then
+        // reconciles the view from the committed source: atom intact, the
+        // typed text a new paragraph below it, caret after the text.
+        if (!view) return { veto: true }
+        const routed = routeTrailingAtomTyping({ kernel, map: kernel.map, transactions, oldState })
+        if (!routed.ok) {
+          notifyRefusal(routed.code, batchTargetPos(transactions, oldState))
+          return { veto: true }
+        }
+        // `requireMap: true` refuses (pre-commit, everything untouched) a
+        // commit whose RESULT document cannot rebuild a projection map or
+        // whose caret raw offset no longer resolves through it.
         applyKernelTransaction(routed.transaction, view, { requireMap: true })
         return { veto: true }
       }

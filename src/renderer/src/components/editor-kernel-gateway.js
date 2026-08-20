@@ -938,7 +938,147 @@ function extractHeadingIdSync(transactions, oldState) {
   return { headings: tr.steps.length }
 }
 
-// classifyTransactions: pure triage of a dispatch batch into one of eight
+// Typing while the document's TRAILING LEAF ATOM (hr / image-block) is
+// node-selected — the wf-gateway defect (2026-08-20), measured in the built
+// app on '甲一\n\n---' in kernel mode:
+//
+//   click the hr        selection = NodeSelection(hr); plugin-trailing's
+//                       placeholder rides the click batch, but the SELECTION
+//                       stays on the atom — `Selection.near` at/below the
+//                       document end has no textblock to land in when the
+//                       last real block is an atom (a list/fence/table always
+//                       offers one, which is the whole list/atom asymmetry)
+//   type one character  REFUSED unsupported-input-type, zero bytes
+//
+// The typed transaction is prosemirror-view's OWN keypress fallback for a
+// non-text selection (`editHandlers.keypress`, prosemirror-view input.ts:
+// `view.state.tr.insertText(text)`): ONE ReplaceStep replacing exactly the
+// atom's block-level range with a paragraph wrapping the typed text. Every
+// step of that shape resolved at doc depth, so `extractPlainTextSteps`'
+// `textblockProfile($from.parent)` (parent: the doc) correctly answered null
+// and the batch fell to `blocked`/INPUT_TYPE — the gateway was right that
+// this is not a textblock edit, and wrong to have no route for it at all:
+// the user's caret intent ("type below the divider") had a proven byte home
+// two positions away, the virtual trailing placeholder the same click just
+// created.
+//
+// So this classifier recognizes EXACTLY that shape and `routeTrailingAtomTyping`
+// (below) commits it as what it is on the byte level: typing into the
+// trailing placeholder — the SAME anchor and the SAME separator prefix the
+// virtual pair serves `commitPlainText` when the caret really is inside the
+// placeholder (the list case's long-proven bytes). No new byte-acceptance
+// class: the atom's own bytes are never touched, and the PM transaction —
+// which DELETED the atom — is always vetoed by the caller
+// (editor-kernel-mode.js's 'trailing-atom-typing' case), the reconcile
+// repainting atom + new paragraph from the committed source with the caret
+// after the typed text.
+//
+// NARROWNESS — every one of these must hold, or the batch stays `blocked`
+// exactly as before (fail-closed; none of these is a relaxation of any
+// existing guard):
+//   * ONE changed transaction, ONE ReplaceStep;
+//   * the replaced range is EXACTLY one TOP-LEVEL block ($from.depth 0), a
+//     block-level ATOM (isAtom, never a textblock, never inline) — a
+//     node-selected table/list/fence is NOT this shape (they are not atoms)
+//     and typing over one keeps refusing;
+//   * the atom is the document's LAST REAL block: the only node after it is
+//     the trailing empty paragraph, which is the doc's last child — a
+//     node-selected atom ANYWHERE else keeps refusing (mid-document typing
+//     over an atom has no placeholder to own the bytes);
+//   * the slice is one closed paragraph (openStart/openEnd 0) of PLAIN
+//     unmarked text with no line breaks (`plainSliceText` on its content —
+//     the same plainness proof the plain-text path runs on its slices).
+function extractTrailingAtomTyping(transactions, oldState) {
+  const changed = transactions.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'ReplaceStep') return null
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let node
+  let $from
+  try {
+    node = stepDoc.nodeAt(step.from)
+    $from = stepDoc.resolve(step.from)
+  } catch {
+    return null
+  }
+  if (!node || !node.isAtom || node.isTextblock || node.isInline) return null
+  if ($from.depth !== 0) return null
+  if (step.to !== step.from + node.nodeSize) return null
+  // The trailing placeholder must directly follow the atom AND be the last
+  // child. (It exists by construction in the refused state: plugin-trailing
+  // appended it on the very batch whose click selected the atom.)
+  const last = stepDoc.lastChild
+  if (!last || last === node) return null
+  if (last.type?.name !== 'paragraph' || last.content?.size !== 0) return null
+  if (step.to + last.nodeSize !== stepDoc.content.size) return null
+  const slice = step.slice
+  if (!slice || slice.openStart || slice.openEnd || slice.content?.childCount !== 1) return null
+  const paragraph = slice.content.firstChild
+  if (!paragraph || paragraph.type?.name !== 'paragraph') return null
+  const text = plainSliceText({
+    size: paragraph.content?.size ?? 0,
+    openStart: 0,
+    openEnd: 0,
+    content: paragraph.content
+  })
+  if (!text) return null
+  return { atomPos: step.from, placeholderPos: step.to, text }
+}
+
+// routeTrailingAtomTyping: turns a `trailing-atom-typing`-classified batch
+// (see `extractTrailingAtomTyping` above) into ONE kernel transaction — and,
+// like `routeLinkEdit`, deliberately does NOT apply it: the caller pushes it
+// through `applyKernelTransaction(..., { requireMap: true })`, which is what
+// proves the RESULT document still maps (and the caret raw offset still
+// resolves) before anything is committed, then reconciles the view from the
+// committed bytes. The PM transaction is ALWAYS vetoed — it deleted the atom,
+// which is exactly what must not happen.
+//
+// Re-derives the shape from the transactions rather than trusting a
+// caller-supplied classification (same contract as every commit function in
+// this file), then resolves the byte anchor through the projection map's OWN
+// virtual-pair channel: `virtualBlockAt(placeholderPos + 1)` is precisely the
+// lookup `commitPlainText` performs when the caret really is inside the
+// placeholder, so the two paths cannot commit different bytes for the same
+// placeholder. A map whose pair after the atom is not the vouched trailing
+// placeholder answers null there and this fails closed with UNMAPPED.
+//
+// Leading ASCII whitespace is refused with the SAME code and for the SAME
+// reason as `commitPlainText`'s own virtual-pair guard (see its comment): the
+// separator prefix opens a brand-new line, so the byte would land in that
+// line's leading run and CommonMark would discard it — a dead byte.
+export function routeTrailingAtomTyping({ kernel, map, transactions, oldState }) {
+  if (!kernel?.doc || !map || typeof map.virtualBlockAt !== 'function') {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  const trs = Array.isArray(transactions) ? transactions : [transactions]
+  const shape = extractTrailingAtomTyping(trs, oldState)
+  if (!shape) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  if (/^[ \t]/.test(shape.text)) return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+  const virtualBlock = map.virtualBlockAt(shape.placeholderPos + 1)
+  if (!virtualBlock || !Number.isFinite(virtualBlock.raw)) {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: kernel.doc.revision,
+      edits: [{
+        from: virtualBlock.raw,
+        to: virtualBlock.raw,
+        insert: (virtualBlock.prefix || '') + shape.text
+      }],
+      intent: 'insert-text'
+    }
+  }
+}
+
+// classifyTransactions: pure triage of a dispatch batch into one of nine
 // kinds. Order matters — it is priority, not just an enum listing:
 //   1. `sourceProjection` meta marks a transaction the caller itself built
 //      FROM a kernel/raw commit (e.g. a projection reconciler replaying the
@@ -998,6 +1138,12 @@ function extractHeadingIdSync(transactions, oldState) {
 //      is what keeps `applyHighlightInView`'s color-replace out of the toggle
 //      path, so it is not loosened; links get their own `link` -mark-keyed
 //      rule instead.
+//   8c. Typing over a node-selected TRAILING leaf atom (see
+//      `extractTrailingAtomTyping` above) — prosemirror-view's own keypress
+//      fallback for a non-text selection, and the one plain-typing shape the
+//      plain-text guard can never match (its step resolves at doc depth).
+//      Tried right before the plain-text guard so a shape that fails ITS
+//      narrowness still reaches rule 9's refusal unchanged.
 //   9. Otherwise, try the plain-text step guard; anything it can't prove is
 //      `blocked` with `INPUT_TYPE` (the single "docChanged but unsupported"
 //      code per the brief — this gateway does not attempt finer-grained
@@ -1037,6 +1183,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const linkEdit = extractLinkEdit(trs, oldState)
   if (linkEdit) return { kind: 'link-edit', ...linkEdit }
+
+  const trailingAtomTyping = extractTrailingAtomTyping(trs, oldState)
+  if (trailingAtomTyping) return { kind: 'trailing-atom-typing', ...trailingAtomTyping }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }

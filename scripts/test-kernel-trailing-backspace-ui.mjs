@@ -42,11 +42,19 @@ const root = `/tmp/horsemd-kernel-trailing-backspace-${process.pid}`
 const file = join(root, 'trailing.md')
 const port = Number(process.env.CDP_PORT || 10075)
 const EOL = process.env.KERNEL_TRAILING_CRLF ? '\r\n' : '\n'
+// KERNEL_TRAILING_ATOM=1: the hr-ending document (wf-gateway, 2026-08-20).
+// After an ATOM the click that spawns the placeholder leaves a NodeSelection
+// ON the atom (no textblock for Selection.near to land in — the list fixture
+// above always offers one), so typing used to dispatch prosemirror-view's
+// insertText-over-NodeSelection fallback, which the gateway refused with
+// unsupported-input-type: every keystroke swallowed, zero bytes. The fixed
+// route commits the placeholder's own bytes instead (atom intact, text below).
+const ATOM = !!process.env.KERNEL_TRAILING_ATOM
 
 // The reported shape: prose, then an ordered list as the document's LAST block,
 // which is exactly what makes plugin-trailing append its paragraph.
 const LINES = ['前言一', '', '1. 牛逼', '2. 213123']
-const FIXTURE = LINES.join(EOL)
+const FIXTURE = ATOM ? '甲一\n\n---' : LINES.join(EOL)
 
 const VISIBLE_EDITOR = `[...document.querySelectorAll('.ProseMirror')].find((n) => n.offsetParent)`
 
@@ -186,6 +194,84 @@ async function run() {
       window.__tbToasts = []
       window.addEventListener('hm:toast', (e) => window.__tbToasts.push(e.detail?.msg ?? String(e.detail)))
     `)
+
+    if (ATOM) {
+      // ===================================================================
+      // THE ATOM VARIANT (hr-ending document). The gesture the handoff
+      // report §1 measured as refused: click the document-ending hr — the
+      // placeholder appears on that very batch, but the SELECTION stays a
+      // NodeSelection on the hr — then type. Pre-fix: a toast per keystroke,
+      // zero bytes. Post-fix: the hr stays, the text lands below it as a new
+      // paragraph, byte-identical to typing inside the placeholder.
+      // ===================================================================
+      {
+        const blocks = JSON.parse(await evaluate(`JSON.stringify(
+          [...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName)
+        )`))
+        assert.deepEqual(blocks, ['P', 'HR'],
+          `the fixture must render prose + hr with NO placeholder yet — got ${JSON.stringify(blocks)}`)
+      }
+      await resetToasts(evaluate)
+      // Click ON the hr (its own element box — the blank area BELOW the last
+      // block takes the app's own caret-at-end path and is not this gesture).
+      {
+        const pt = JSON.parse(await evaluate(`(() => {
+          const hr = (${VISIBLE_EDITOR})?.querySelector('hr')
+          if (!hr) return null
+          hr.scrollIntoView({ block: 'center' })
+          const b = hr.getBoundingClientRect()
+          return JSON.stringify({ x: b.left + b.width / 2, y: b.top + b.height / 2 })
+        })()`))
+        assert.ok(pt, 'the hr element must exist')
+        await clickPoint(send, pt)
+      }
+      // The click spawned the placeholder AND left the hr node-selected —
+      // the exact pre-typing state of the report.
+      {
+        const state = JSON.parse(await evaluate(`JSON.stringify({
+          blocks: [...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName),
+          selectedNode: document.querySelector('.ProseMirror-selectednode')?.tagName || null
+        })`))
+        assert.deepEqual(state.blocks, ['P', 'HR', 'P'],
+          `the click must spawn the trailing placeholder — got ${JSON.stringify(state.blocks)}`)
+        assert.equal(state.selectedNode, 'HR',
+          'the click must leave the hr node-selected (the refused state)')
+      }
+      // THE KEYSTROKE. Must not refuse, must not delete the hr, must land
+      // the character in a new paragraph below it with the caret after it.
+      await typeText(send, 'X')
+      assert.equal(await toasts(evaluate), '[]',
+        `typing over the node-selected trailing hr must not refuse — got ${await toasts(evaluate)}`)
+      {
+        const state = JSON.parse(await evaluate(`JSON.stringify(
+          [...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName + ':' + n.textContent)
+        )`))
+        assert.deepEqual(state, ['P:甲一', 'HR:', 'P:X'],
+          `the hr must stay and the text must land below it — got ${JSON.stringify(state)}`)
+      }
+      {
+        const caret = JSON.parse(await caretAt(evaluate))
+        assert.equal(caret.text, 'X', `the caret must sit in the new paragraph — got ${JSON.stringify(caret)}`)
+        assert.equal(caret.offset, 1, 'and right after the typed character')
+      }
+      // Continuation typing flows through the ordinary plain-text path.
+      await typeText(send, 'Y')
+      assert.equal(await toasts(evaluate), '[]', 'the next character must not refuse either')
+      assert.equal(await readSource(evaluate, 'atom source'), '甲一\n\n---\n\nXY',
+        'the committed source: the placeholder\'s own bytes — hr intact, blank-line separator, then the text')
+      // And it all survives a real save.
+      await evaluate(`(() => {
+        const b = [...document.querySelectorAll('button')].find((n) => /保存|Save/.test(n.title || n.textContent || ''))
+        b?.click()
+      })()`)
+      const onDisk = await waitFor(async () => {
+        const text = await readFile(file, 'utf8')
+        return text.includes('XY') ? text : null
+      }, 'the atom-variant edits must reach disk')
+      assert.ok(onDisk.includes('---'), 'the divider must survive the save')
+      console.log('PASS kernel trailing atom typing (UI): clicking the document-ending hr and typing keeps the divider and commits the text below it — no refusal, bytes on disk')
+      return
+    }
 
     // =====================================================================
     // 0) THE PREMISE. The document really does grow a trailing empty
