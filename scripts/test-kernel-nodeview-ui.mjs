@@ -289,12 +289,17 @@ const slashItems = (evaluate) => evaluate(`[
 // tracked separately. Until then this list is a MIRROR: extend it in the same
 // commit that routes a new slash item.
 //
-// Anything absent is refused by the kernel on purpose: `task` and `divider`
-// are probed refusals, `text` yields an unrepresentable empty paragraph, and
-// `image` is an atom with no provable caret home.
+// It went stale a THIRD time exactly as predicted two paragraphs up:
+// `2c1fda5` routed `task` (the U+00A0 seed spelling) without touching this
+// list, so the matrix assertion had been failing against deliberately-shipped
+// behaviour again. Extend this set in the SAME commit that routes an item.
+//
+// Anything absent is refused by the kernel on purpose: `divider` is a probed
+// refusal, `text` yields an unrepresentable empty paragraph, and `image` is
+// an atom with no provable caret home.
 const KERNEL_ROUTED_SLASH_ITEMS = new Set([
   'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered',
-  'table', 'code', 'math'
+  'table', 'code', 'math', 'task'
 ])
 // `/js`, `/python`, … render as a dynamic `code:<language>` item that routes
 // through the same code-block insert as bare `/code`.
