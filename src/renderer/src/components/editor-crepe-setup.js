@@ -460,6 +460,7 @@ export function createConfiguredCrepe({
         ? [
             kernelPlugins.structuralKeymap(),
             kernelPlugins.historyKeymap(),
+            ...(typeof kernelPlugins.markerInputPlugin === 'function' ? [kernelPlugins.markerInputPlugin()] : []),
             ...(typeof kernelPlugins.marksKeymap === 'function' ? [kernelPlugins.marksKeymap()] : [])
           ]
         : []),

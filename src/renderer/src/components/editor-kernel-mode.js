@@ -22,7 +22,7 @@
 //    the initial projection map: the tab announces it and reverts to complete
 //    legacy behavior (pass everything through, intercept no keys).
 import { keymap } from '@milkdown/prose/keymap'
-import { TextSelection } from '@milkdown/prose/state'
+import { Plugin, TextSelection } from '@milkdown/prose/state'
 // Table-cell navigation (Plan 5 Task 4 review fix): the SAME two commands
 // @milkdown/preset-gfm's own `tableKeymap` binds Tab / Shift-Tab to
 // (preset-gfm/lib/index.js:415-420 + :652-667 — `goToNextTableCellCommand` IS
@@ -43,6 +43,8 @@ import {
   literalTailIsStripped,
   healableTrailingSpace,
   spellLineStartWhitespace,
+  spellMarkerCompletingSpace,
+  spellMarkerRunGrowth,
   looksLikeBlockLineStart,
   healableLineStartRun,
   replaceVisibleText,
@@ -1147,7 +1149,7 @@ export function createKernelMode({
   // Structural intents keep `requireMap: false` — their existing
   // placeholder flows legitimately pass through transient states this
   // strict guard would wrongly refuse.
-  const applyKernelTransaction = (txn, view, { record = true, requireMap = false } = {}) => {
+  const applyKernelTransaction = (txn, view, { record = true, requireMap = false, repairOnUnmapped = false } = {}) => {
     const result = applySourceTransaction(kernel.doc, txn)
     if (!result.ok) {
       notifyBlocked(result.code)
@@ -1245,6 +1247,35 @@ export function createKernelMode({
     // caret work: rawToPmPos is only meaningful on a map built for this
     // revision.
     bindMap(view.state.doc)
+    // MINIMAL-DIFF FALLBACK for a STRUCTURE-CHANGING edit (2026-08-20).
+    // `reconcileProjection` replaces only the smallest differing range, which is
+    // what preserves node-view identity everywhere else — but `tr.replace`
+    // re-fits the slice to the schema, so when the edit changes NESTING the
+    // resulting view can differ from `parsed` in a way the projection map cannot
+    // pair. Measured: typing `- ` at a bullet item's text start commits the
+    // correct bytes `- - x`, the minimal diff produced a view whose map came
+    // back null, and the tab then refused every keystroke until it was reloaded
+    // — even though OPENING those same bytes maps and edits fine.
+    //
+    // So: only when the rebind actually failed, and only for the callers that
+    // ask, replace the whole content with the parse the kernel already trusts.
+    // That is by construction the attach-time shape (`buildProjectionMap(text,
+    // parse(text))`), it costs node-view identity for this one edit, and it
+    // cannot fire on any path whose minimal diff worked.
+    if (repairOnUnmapped && !kernel.map) {
+      try {
+        const repair = view.state.tr
+        repair.replaceWith(0, view.state.doc.content.size, parsed.content)
+        repair.setMeta('sourceProjection', true)
+        repair.setMeta('addToHistory', false)
+        view.dispatch(repair)
+        bindMap(view.state.doc)
+        pushKernelDiagnostic({ type: 'projection-full-repair', intent: txn.intent })
+        if (Number.isFinite(anchor) && kernel.map) setCaretFromRaw(view, anchor)
+      } catch {
+        pushKernelDiagnostic({ type: 'projection-full-repair-failed', intent: txn.intent })
+      }
+    }
     if (target) {
       // No content diff (e.g. an undo landing on byte-identical parse
       // output): the reconcile dispatched nothing, so restore the caret
@@ -1609,6 +1640,139 @@ export function createKernelMode({
     return 'refused'
   }
 
+  // The pair whose PM node span STRICTLY contains `pmPos`, innermost first.
+  // Unlike `editablePairForRange` this does not require a charMap, because the
+  // one caller below needs to reach a pair the map REFUSED — see its own
+  // comment for why that is safe (and why it is the only way out of the shape
+  // it rescues).
+  const innermostPairAt = (pmPos) => {
+    if (!Number.isFinite(pmPos)) return null
+    let best = null
+    for (const pair of kernel.map?.blockPairs || []) {
+      const size = pair?.pmNode?.nodeSize
+      if (!Number.isFinite(size) || !Number.isFinite(pair.pmPos)) continue
+      if (pmPos <= pair.pmPos || pmPos >= pair.pmPos + size) continue
+      if (!best || pair.pmPos >= best.pmPos) best = pair
+    }
+    return best
+  }
+
+  // A Space that COMPLETES A MARKER — `- `, `1. `, `> `, `# `, `- [ ] ` — is
+  // Markdown SYNTAX, not content, and it is the one Space the kernel has to
+  // claim before ProseMirror does. Full measurement matrix and the three
+  // separate ways it used to be intercepted:
+  // lib/source-kernel/commands/marker-space.js.
+  //
+  // WHY IT MUST RUN IN THE KEYMAP, ahead of everything else. Its two siblings
+  // (`commitBlockTrailingWhitespace`, `commitLineStartWhitespace`) deliberately
+  // let a Space reach ProseMirror first and re-spell it afterwards ON THE BYTES,
+  // because the preset input rules fire on Space and swallowing the key would
+  // break them. That reasoning is correct for a CONTENT space and exactly
+  // backwards for this one: at a NON-EMPTY block the input rule does fire, and
+  // its wrapInBlockType carries node content, which the gateway then vetoes —
+  // so the rule can never succeed in kernel mode anyway, and letting it run only
+  // costs the user a refusal toast. Claiming the key here replaces a rule that
+  // cannot work with bytes that can.
+  //
+  // RESOLVING THE OFFSET, including for a block the map REFUSED. The empty-block
+  // shape is the reason: after typing `#` on a blank line the bytes are a valid
+  // EMPTY ATX HEADING with no spacing, whose content start is genuinely
+  // unprovable (`emptyAtxHeadingContentStart`), so the pair carries no charMap
+  // and `pmPosToRaw` answers null — the block is read-only, and the single byte
+  // that would make it provable is the one being refused. An EMPTY textblock has
+  // exactly ONE caret position, and its mdast block's own end offset is where
+  // content would begin, so that offset is a derivation rather than a guess. It
+  // is only ever handed to `spellMarkerCompletingSpace`, which reparses before
+  // returning, so a wrong derivation cannot write a byte.
+  const markerRawOffsetAt = (pmPos) => {
+    if (!kernel.map) return null
+    const direct = typeof kernel.map.pmPosToRawInsert === 'function'
+      ? kernel.map.pmPosToRawInsert(pmPos)
+      : kernel.map.pmPosToRaw(pmPos)
+    if (Number.isFinite(direct)) return direct
+    const pair = innermostPairAt(pmPos)
+    const node = pair?.pmNode
+    if (!pair || pair.virtual || pair.charMap || !node?.isTextblock) return null
+    if (node.content.size !== 0) return null
+    const end = pair.mdBlock?.position?.end?.offset
+    return Number.isInteger(end) ? end : null
+  }
+
+  // `requireMap` is deliberately NOT set for either marker route: these edits
+  // CHANGE THE BLOCK'S TYPE, so the projection map cannot rebind against the
+  // pre-edit ProseMirror document — the reconcile is what brings the view to the
+  // new structure, and it is the same path a typed `-` (which already
+  // restructures the block on its own) has always taken.
+  // `requireMap` is the fail-closed half, and it belongs to the COMPLETING SPACE
+  // only. That edit changes the block's TYPE, and a type change is exactly where
+  // the projection reconciler's minimal diff can leave a view the map cannot
+  // pair — writing bytes that strand the whole tab unmapped is fail-OPEN and
+  // worse than refusing. With `requireMap` the map is built from the candidate
+  // bytes BEFORE `kernel.doc` moves, and the caret's own raw offset must resolve
+  // in it. `repairOnUnmapped` then covers the narrower case where the map proved
+  // fine but the minimal diff still produced a view that disagrees.
+  //
+  // RUN GROWTH MUST NOT REQUIRE IT, and that is not a relaxation: the whole
+  // point of `#` -> `##` is that the INTERMEDIATE state is a marker-only heading
+  // with no spacing, whose content anchor is genuinely unprovable — so
+  // `rawToPmPos` cannot resolve there BY CONSTRUCTION and `requireMap` could
+  // never pass. Measured: with it set, every `## ` refused mid-gesture. That
+  // read-only intermediate is the state a bare typed `#` already produces
+  // through the ordinary character path, it writes exactly one proven byte, and
+  // the Space that follows completes it into a provable block.
+  const applyMarkerTransaction = (routed, view, { requireMap = false } = {}) =>
+    (applyKernelTransaction(routed.transaction, view, { requireMap, repairOnUnmapped: true })
+      ? 'handled'
+      : 'skip')
+
+  const commitMarkerCompletingSpace = (state, view) => {
+    if (!state?.selection?.empty) return 'skip'
+    const offset = markerRawOffsetAt(state.selection.head)
+    if (!Number.isFinite(offset)) return 'skip'
+    const routed = spellMarkerCompletingSpace({ doc: kernel.doc, offset })
+    if (!routed.ok) return 'skip'
+    // Once the marker is PROVEN, this Space is the kernel's — whether the commit
+    // then succeeds is its own business. Falling through on a refusal would hand
+    // the key to the line-start re-speller, which writes a DIFFERENT byte
+    // (U+00A0) for a position we have just proven is syntax: the user would get
+    // both a refusal toast and a stray invisible character.
+    applyMarkerTransaction(routed, view, { requireMap: true })
+    return 'handled'
+  }
+
+  // The `##` half (see marker-space.js `spellMarkerRunGrowth`). `#` is the only
+  // marker character that is already a complete block on its own, so on a blank
+  // line the FIRST `#` converts the paragraph into an empty ATX heading whose
+  // content anchor is (correctly) unprovable — and the second `#`, being an
+  // ordinary character to every other layer, was refused with the block-scoped
+  // 「只读」 message. `# ` worked and `## ` did not, and that asymmetry is what
+  // pointed at the intermediate state.
+  //
+  // It rides `handleTextInput` rather than a keymap because `#` is a CHARACTER,
+  // not a key: a keymap entry would be layout-dependent, while this prop is the
+  // same channel ProseMirror's own input rules use — and, mounted in the kernel
+  // plugin slot (editor-crepe-setup.js), it runs ahead of them.
+  const handleMarkerRunGrowth = (view, from, to, character) => {
+    // A THROW HERE EATS THE KEYSTROKE SILENTLY. ProseMirror calls this prop from
+    // inside its DOM input handler and does not guard it, so an exception both
+    // suppresses the character and produces no toast, no diagnostic and no
+    // insertion — measured during this task, when a missing import made every
+    // typed `#` vanish without a trace. Nothing in here is allowed to be the
+    // reason a user loses a character, so the whole body fails closed to "not
+    // mine", which is the same answer a refusal gives.
+    try {
+      if (inactive() || character !== '#') return false
+      if (from !== to || view.composing) return false
+      if (!kernel.map) return false
+      const offset = markerRawOffsetAt(from)
+      if (!Number.isFinite(offset)) return false
+      const routed = spellMarkerRunGrowth({ doc: kernel.doc, offset, character })
+      if (!routed.ok) return false
+      return applyMarkerTransaction(routed, view) === 'handled'
+    } catch {
+      return false
+    }
+  }
   // Space is NOT a structural key and must stay out of `structuralHandler`
   // (whose unmapped-offset branch refuses loudly — that would make ordinary
   // spaces untypable anywhere the map is incomplete). This handler answers
@@ -1621,6 +1785,9 @@ export function createKernelMode({
     if (!view) return false
     // Mid-composition the keydown belongs to the IME, not to us.
     if (view.composing) return false
+    // MARKER COMPLETION FIRST, and it is the one Space route that must run
+    // BEFORE ProseMirror sees the key — see `commitMarkerCompletingSpace`.
+    if (commitMarkerCompletingSpace(state, view) === 'handled') return true
     return commitHeadingLeadingWhitespace(' ', state, view) !== 'skip'
   }
 
@@ -2156,6 +2323,12 @@ export function createKernelMode({
     'Mod-y': historyHandlers.redo,
     'Shift-Mod-z': historyHandlers.redo
   })
+  // ATX heading marker growth (`#` -> `##`). A CHARACTER, not a key, so it
+  // rides `handleTextInput` — the same channel ProseMirror's own input rules
+  // use — and is mounted in the kernel plugin slot so it runs ahead of them.
+  const markerInputPlugin = () => new Plugin({
+    props: { handleTextInput: handleMarkerRunGrowth }
+  })
 
   // Empty-selection mark-shortcut guard (Plan 4 Task 3 ADR): PM's
   // `toggleMark` on an EMPTY selection dispatches a stored-marks-only
@@ -2383,6 +2556,8 @@ export function createKernelMode({
     handleTransactions,
     structuralKeymap,
     historyKeymap,
+    markerInputPlugin,
+    handleMarkerRunGrowth,
     // Empty-selection mark-shortcut guard (Plan 4 Task 3): registered by
     // editor-crepe-setup.js alongside the structural/history keymaps;
     // `markShortcutGuard` is exposed for the headless suite.

@@ -366,6 +366,33 @@ function flattenMd(tree, index) {
         result.push({ syntheticEmptyItemParagraph: true, item })
         return
       }
+      // A LIST ITEM WHOSE FIRST BLOCK IS NOT A PARAGRAPH (2026-08-20). Milkdown's
+      // `list_item` content expression is `paragraph block*` — the leading
+      // paragraph is REQUIRED — so ProseMirror's `createAndFill` inserts an empty
+      // one whenever the item's first child is anything else. mdast has no such
+      // node, so the PM side carried one more entry and the WHOLE map was
+      // rejected: measured against a real `buildProjectionMap`, `- - x` (a nested
+      // list written on the same line), `- # x` and `- > x` each returned null,
+      // i.e. ANY document containing one of those shapes ran entirely in legacy —
+      // silently, since the fallback toast is the only signal and it fires once
+      // at attach.
+      //
+      // It is also what made typing `- ` at a bullet item's text start
+      // unfixable: the bytes `- - x` are exactly right and the projection could
+      // not pair them, so the gesture had to be refused after the fact.
+      //
+      // Same treatment the two synthetic cases above get — a marker object that
+      // holds the zip's alignment — and the pair is NON-EDITABLE by construction:
+      // that paragraph has no bytes of its own (the item's content start is where
+      // the nested marker begins), so there is no offset a keystroke there could
+      // honestly write to. `paragraph` and block `html` are excluded because both
+      // pair with a PM `paragraph` directly (see PM_TO_MD), so no fill happens.
+      if (node.type === 'listItem') {
+        const first = (node.children || [])[0]
+        if (first && first.type !== 'paragraph' && first.type !== 'html') {
+          result.push({ syntheticLeadingItemParagraph: true, node })
+        }
+      }
       // An EMPTY BLOCKQUOTE ('>' alone on its line) is the same shape one
       // container over, and it was the reason `/quote` could never succeed:
       // mdast gives the blockquote ZERO children, ProseMirror's `blockquote` is
@@ -683,6 +710,17 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         virtual: editable,
         insertPrefix: editable ? '' : undefined
       })
+      continue
+    }
+
+    // ProseMirror's required leading paragraph for a list item whose first block
+    // is a nested list / heading / quote / fence (see flattenMd). It holds no
+    // bytes, so it pairs read-only — `virtual` is deliberately NOT set: a
+    // virtual pair claims an editable single-point anchor, and there is no
+    // offset here a keystroke could honestly write to.
+    if (md.syntheticLeadingItemParagraph) {
+      if (pmType !== 'paragraph' || pm.node.content.size !== 0) return null
+      blockPairs.push({ mdBlock: null, pmNode: pm.node, pmPos: pm.pos, charMap: null })
       continue
     }
 

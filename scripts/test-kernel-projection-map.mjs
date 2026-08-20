@@ -1343,33 +1343,88 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
   assert.equal(map.pmPosToRaw(3), 9)
 }
 
-// Case M6: list-embedded BLOCK math still rejects the WHOLE map — pinned as
-// today's behavior, not folklore. The cause is NOT math-specific: Milkdown's
-// `list_item` content is `'paragraph block*'`, so ProseMirror's parse runs
-// `createAndFill` and inserts an EMPTY filler paragraph before the block —
-// PM has 4 structural nodes (list, item, filler paragraph, code_block) where
-// mdast has 3 (list, listItem, math). The identical mismatch happens for a
-// plain ```js fence in a list item (asserted below), so Task 7 must not
-// misdiagnose this as a math-domain failure; it belongs to whatever task
-// teaches flattenMd about the filler paragraph.
-// P5-2.5 re-checked and did NOT flip this: the failure is a block-COUNT
-// mismatch (4 PM structural nodes vs 3 mdast ones), i.e. the two trees are
-// aligned differently — exactly the class that must keep rejecting the whole
-// map. Per-block degradation only covers CONTENT-level disagreements.
+// Case M6: a LIST ITEM WHOSE FIRST BLOCK IS NOT A PARAGRAPH.
+//
+// FLIPPED 2026-08-20 by the task the previous version of this case named
+// ("whatever task teaches flattenMd about the filler paragraph"). The cause was
+// never math-specific: Milkdown's `list_item` content expression is
+// `'paragraph block*'` — the leading paragraph is REQUIRED — so ProseMirror's
+// parse runs `createAndFill` and inserts an EMPTY filler paragraph whenever the
+// item's first child is anything else. PM had 4 structural nodes (list, item,
+// filler paragraph, code_block) where mdast had 3, and a block-COUNT mismatch
+// rejects the whole map.
+//
+// The consequence was much wider than the shapes below: a fenced code block in
+// a list item is an everyday thing to write, and ANY document containing one
+// ran ENTIRELY in legacy — silently, since the fallback toast fires once at
+// attach. The same held for `- - x` (a nested list written on the same line),
+// which is also what made typing `- ` at a bullet item's text start
+// unfixable: the bytes are exactly right and the projection could not pair
+// them.
+//
+// `flattenMd` now synthesizes that filler slot, exactly as it already does for
+// an empty list item and an empty blockquote. FAIL-CLOSED IS UNCHANGED WHERE IT
+// COUNTS, and that is what the assertions below spend most of their effort on:
+// the filler paragraph pairs `charMap: null` (it holds NO bytes — the item's
+// content start is where the nested marker begins — so there is no offset a
+// keystroke there could honestly write to), and it is NOT virtual, because a
+// virtual pair claims an editable single-point anchor.
 {
   const mdMath = '- $$\n  E=mc^2\n  $$\n'
   const dMath = doc(schema.node('bullet_list', null, [
     schema.node('list_item', null, [p(), cbl('LaTeX', 'E=mc^2')])
   ]))
-  assert.equal(buildProjectionMap(mdMath, dMath), null,
-    'list-embedded block math still degrades the whole map (filler-paragraph mismatch)')
+  const mapMath = buildProjectionMap(mdMath, dMath)
+  assert.ok(mapMath, 'a list item holding block math must pair, not degrade the document')
+  assert.deepEqual(mapMath.blockPairs.map((pair) => pair.pmNode.type.name),
+    ['bullet_list', 'list_item', 'paragraph', 'code_block'],
+    'the filler paragraph occupies a slot of its own')
+  const fillerMath = mapMath.blockPairs[2]
+  assert.equal(fillerMath.charMap, null, 'the filler paragraph owns no bytes, so it is never editable')
+  assert.equal(fillerMath.mdBlock, null, 'and it has no mdast counterpart to be edited through')
+  assert.notEqual(fillerMath.virtual, true, 'it must not claim a virtual insert anchor either')
+  assert.equal(mapMath.pmPosToRaw(fillerMath.pmPos + 1), null,
+    'no PM position inside the filler paragraph resolves to a raw offset')
+  assert.equal(mapMath.pairAt(fillerMath.pmPos + 1), null, 'pairAt skips it, so every write there fails closed')
+  assert.equal(mapMath.virtualBlockAt(fillerMath.pmPos + 1), null, 'and it is not a virtual insert target')
 
   const mdCode = '- ```js\n  ab\n  ```\n'
   const dCode = doc(schema.node('bullet_list', null, [
     schema.node('list_item', null, [p(), cbl('js', 'ab')])
   ]))
-  assert.equal(buildProjectionMap(mdCode, dCode), null,
-    'the SAME mismatch exists for a plain fenced code block in a list item')
+  const mapCode = buildProjectionMap(mdCode, dCode)
+  assert.ok(mapCode, 'the SAME shape with a plain fenced code block pairs too')
+  assert.deepEqual(mapCode.blockPairs.map((pair) => pair.pmNode.type.name),
+    ['bullet_list', 'list_item', 'paragraph', 'code_block'])
+  assert.equal(mapCode.blockPairs[2].charMap, null)
+
+  // A NESTED LIST WRITTEN ON THE SAME LINE — the shape the marker-completing
+  // Space produces when a user types `- ` at a bullet item's text start. The
+  // INNER item's paragraph is genuinely editable; only the filler is not.
+  const mdNested = '- - 乙一\n'
+  const dNested = doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [
+      p(),
+      schema.node('bullet_list', null, [schema.node('list_item', null, [p(text('乙一'))])])
+    ])
+  ]))
+  const mapNested = buildProjectionMap(mdNested, dNested)
+  assert.ok(mapNested, 'a same-line nested list must pair')
+  assert.deepEqual(mapNested.blockPairs.map((pair) => pair.pmNode.type.name),
+    ['bullet_list', 'list_item', 'paragraph', 'bullet_list', 'list_item', 'paragraph'])
+  const inner = mapNested.blockPairs[5]
+  assert.ok(inner.charMap, "the inner item's own paragraph stays editable")
+  assert.equal(mapNested.pmPosToRaw(inner.pmPos + 1), mdNested.indexOf('乙一'),
+    'and its content start resolves to the right byte')
+
+  // THE CONTROL: an item whose first child IS a paragraph gets no filler and no
+  // synthetic slot, so the ordinary shape is untouched.
+  const mapPlain = buildProjectionMap('- 乙一\n', doc(schema.node('bullet_list', null, [
+    schema.node('list_item', null, [p(text('乙一'))])
+  ])))
+  assert.ok(mapPlain)
+  assert.deepEqual(mapPlain.blockPairs.map((pair) => pair.pmNode.type.name),
+    ['bullet_list', 'list_item', 'paragraph'], 'no filler slot is invented where PM fills nothing')
 }
 
 // Case M7: fail-closed is preserved — a PM doc that DISAGREES with the

@@ -39,6 +39,7 @@ export {
   looksLikeBlockLineStart,
   healableLineStartRun
 } from './commands/line-start-whitespace.js'
+export { spellMarkerCompletingSpace, spellMarkerRunGrowth } from './commands/marker-space.js'
 export {
   proveContentDelete,
   deleteClearsBlockLine,
