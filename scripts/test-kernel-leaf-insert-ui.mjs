@@ -1,5 +1,5 @@
-// Kernel-mode LEAF slash items end-to-end UI regression (/divider — the
-// caret-AFTER insert family).
+// Kernel-mode LEAF slash items end-to-end UI regression (/divider and
+// /image — the caret-AFTER insert family).
 //
 // The headless suites (scripts/test-source-kernel-blockinsert.mjs section 10 +
 // Case I6 in scripts/test-kernel-mode-headless.mjs) prove the COMMAND and the
@@ -274,11 +274,38 @@ async function run() {
       `/hr mid-document must commit --- and the follow-up keystroke must land in the next paragraph (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 2) `/divider` at the DOCUMENT END: the caret lands in the trailing
+    // 2) `/image` MID-DOCUMENT, before a paragraph: the bytes are the
+    //    literal `![]()`, the view renders the image-block CARD (its own
+    //    upload UI is the src entry point), and the caret lands at the
+    //    following paragraph's start — same caret rule as the divider.
+    // ============================================================
+    await selectBlock(evaluate, send, '丙丙段落')
+    await runSlashItem(evaluate, send, 'image', 'image')
+
+    const imageCaret = await caretBlock(evaluate)
+    const imageCard = await evaluate(`(() => {
+      const card = (${VISIBLE_EDITOR})?.querySelector('.milkdown-image-block, milkdown-image-block')
+      if (!card) return null
+      return { present: true, hasImg: !!card.querySelector('img[src]:not([src=""])') }
+    })()`)
+    console.log('  [/image mid-document] ->', JSON.stringify({ caret: imageCaret, card: imageCard }))
+    assert.ok(imageCard?.present, 'the committed ![]() must PROJECT as the image-block card in the view')
+    assert.equal(imageCard.hasImg, false, 'the empty card must show its upload UI, not a broken <img>')
+    assert.ok(imageCaret && imageCaret.tag === 'p' && imageCaret.text === '丁丁尾段' && imageCaret.caretOffset === 0,
+      `the caret must land at the START of the following paragraph, got ${JSON.stringify(imageCaret)}`)
+
+    await typeTextLikeUser(send, 'Y', { delayMs: delay })
+    await sleep(400)
+    const afterImage = afterMid.replace('丙丙段落', '![]()').replace('丁丁尾段', 'Y丁丁尾段')
+    await assertSource(evaluate, afterImage,
+      `/image mid-document must commit ![]() and the follow-up keystroke must land in the next paragraph (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
+    // 3) `/divider` at the DOCUMENT END: the caret lands in the trailing
     //    placeholder, and typing there commits a new paragraph below the
     //    divider (the virtual-pair bytes typing there has always committed).
     // ============================================================
-    await selectBlock(evaluate, send, '丁丁尾段')
+    await selectBlock(evaluate, send, 'Y丁丁尾段')
     await runSlashItem(evaluate, send, 'hr', 'divider')
 
     const endCaret = await caretBlock(evaluate)
@@ -291,12 +318,12 @@ async function run() {
     // The replaced tail block keeps its own line ending ('---\n'); typing in
     // the trailing placeholder then appends the virtual pair's separator plus
     // the text — no NEW trailing ending is ever invented.
-    const afterEnd = afterMid.replace('丁丁尾段\n', '---\n\n结尾段')
+    const afterEnd = afterImage.replace('Y丁丁尾段\n', '---\n\n结尾段')
     await assertSource(evaluate, afterEnd,
       `/hr at the document end must commit --- and typing must land below it (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 3) `/divider` before a LIST: the NAMED refusal. The item stays enabled
+    // 4) `/divider` before a LIST: the NAMED refusal. The item stays enabled
     //    (the refusal is positional, decided by the command), zero divider
     //    bytes are written, and the toast names the workaround.
     // ============================================================
@@ -315,7 +342,7 @@ async function run() {
       'a refused /hr must leave the query bytes as plain text and write NO divider')
 
     // ============================================================
-    // 4) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
+    // 5) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
     //    the saved bytes must parse back to the same blocks.
     // ============================================================
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
@@ -345,12 +372,14 @@ async function run() {
     const reopenTags = await reopened.evaluate(`[...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName.toLowerCase())`)
     assert.equal(reopenTags.filter((t) => t === 'hr').length, 2,
       `both dividers must survive the cold relaunch as real <hr> blocks, got ${JSON.stringify(reopenTags)}`)
+    const reopenCard = await reopened.evaluate(`!!(${VISIBLE_EDITOR})?.querySelector('.milkdown-image-block, milkdown-image-block')`)
+    assert.ok(reopenCard, 'the empty image must survive the cold relaunch as the image-block card')
     const reopenText = await reopened.evaluate(`(${VISIBLE_EDITOR})?.textContent`)
     assert.ok(reopenText.includes('结尾段') && reopenText.includes('/hr'),
       'the typed paragraph and the refused query text must both survive the cold relaunch')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on cold relaunch')
 
-    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider commits at the document end and mid-document, the caret is immediately typable in both homes, the before-a-list shape refuses with the named remedy, and the bytes survive save + cold relaunch`)
+    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider and /image commit at the document end and mid-document, the caret is immediately typable in both homes, the before-a-list shape refuses with the named remedy, and the bytes survive save + cold relaunch`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

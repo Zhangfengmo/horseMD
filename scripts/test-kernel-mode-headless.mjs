@@ -287,6 +287,16 @@ const FIXTURE_DOCS = {
   '---\n\n乙\n': () => doc(hr(), p(text('乙'))),
   '---\n\nX乙\n': () => doc(hr(), p(text('X乙'))),
   '/hr\n\n- 甲\n': () => doc(p(text('/hr')), bl(li(null, p(text('甲')))), p()),
+  // Case I7 (2026-08-20): `/image` — the second caret-AFTER insert. `![]()`
+  // is the paragraph>image shape Crepe's remarkImageBlock renders as the
+  // block-level image-block ATOM; an image-ending document carries the
+  // trailing placeholder like every other atom ending.
+  '/image\n': () => doc(p(text('/image'))),
+  '![]()\n': () => doc(ib({ src: '', alt: '', caption: '' }), p()),
+  '![]()\n\nX': () => doc(ib({ src: '', alt: '', caption: '' }), p(text('X'))),
+  '/image\n\n乙\n': () => doc(p(text('/image')), p(text('乙'))),
+  '![]()\n\n乙\n': () => doc(ib({ src: '', alt: '', caption: '' }), p(text('乙'))),
+  '![]()\n\nX乙\n': () => doc(ib({ src: '', alt: '', caption: '' }), p(text('X乙'))),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -3232,10 +3242,10 @@ const toggleVia = (h, markType, from, to) => {
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
   const before = h.notifications.length
   // (`task` left this list on 2026-08-20 — the U+00A0 seed spelling made it a
-  // real, owned target; its positive path is Case I5 below. `divider` left
-  // the same day — the caret-after machinery gave it provable homes; its
-  // positive path is Case I6 below.)
-  for (const route of [{ target: 'math' }, { target: 'image' },
+  // real, owned target; its positive path is Case I5 below. `divider` and
+  // `image` left the same day — the caret-after machinery gave them provable
+  // homes; their positive paths are Cases I6/I7 below.)
+  for (const route of [{ target: 'math' },
     { target: 'code', language: 'js x' }]) {
     assert.equal(h.controller.runInsertBlockFromQuery(route, h.view), true,
       'the slash item always swallows the invocation, success or refusal')
@@ -3354,6 +3364,49 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(verdict, undefined)
   assert.equal(h.controller.kernel.doc.text, '---\n\nX乙\n',
     'the keystroke types into the block the caret was proven to sit in')
+}
+// Case I7 (2026-08-20): `/image` — the second caret-AFTER insert. The bytes
+// are `![]()`, the view reconciles to the image-block CARD (whose own upload
+// UI later routes the src through image-attrs.js), and the caret takes the
+// same two proven homes as the divider.
+{
+  // (a) Document end: caret into the trailing placeholder, typing commits
+  // through the virtual pair, undo unwinds insert and keystroke separately.
+  const h = makeHarness('/image\n', doc(p(text('/image'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'image' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '![]()\n',
+    'the query bytes became the empty image, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(ib({ src: '', alt: '', caption: '' }), p())),
+    'view reconciled to the image-block card plus the trailing placeholder')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 2, 'the caret lands INSIDE the trailing placeholder')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing below the new image is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '![]()\n\nX')
+  assert.ok(h.view.state.doc.eq(doc(ib({ src: '', alt: '', caption: '' }), p(text('X')))))
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '![]()\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/image\n', 'the original query bytes come back')
+}
+{
+  // (b) Mid-document before a paragraph: caret at the following block's
+  // content start, next keystroke types into it.
+  const h = makeHarness('/image\n\n乙\n', doc(p(text('/image')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'image' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '![]()\n\n乙\n')
+  assert.ok(h.view.state.doc.eq(doc(ib({ src: '', alt: '', caption: '' }), p(text('乙')))))
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 2, 'the caret lands at the following paragraph\'s content start')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '![]()\n\nX乙\n')
 }
 {
   // (c) Mid-document before a LIST: the named refusal — nothing committed,

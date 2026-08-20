@@ -158,10 +158,9 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // never a `/latex` item to unblock: `latex` is not in the menu's own
 // `LANGUAGES` table.)
 //
-// Absent on purpose, each for a probed reason recorded in
-// lib/source-kernel/commands/block-insert.js: `image` (an image-block is an
-// atom — no caret home), `text` (a fully-empty top-level paragraph has no raw
-// representation).
+// Absent on purpose, for a probed reason recorded in
+// lib/source-kernel/commands/block-insert.js: `text` (a fully-empty top-level
+// paragraph has no raw representation).
 //
 // `math` joined the routed set on 2026-08-18, once block math became editable
 // — before that the item would have created a block with no caret position
@@ -181,12 +180,20 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // the following paragraph/heading's own content anchor, and refuses — with a
 // message naming the workaround — when the following block is anything else.
 // See the CARET-AFTER section in commands/block-insert.js.
+//
+// `image` joined the same day, as the second caret-after target: `![]()` is
+// the one byte spelling every reference agrees on, it reparses to exactly
+// the paragraph>image shape Crepe's remarkImageBlock renders as the
+// image-block card (whose own upload UI routes the src through the
+// kernel-proven image-attrs.js), and the caret takes the divider's two
+// proven homes because the card itself is an atom.
 const KERNEL_INSERT_ITEMS = Object.freeze({
   table: 'table',
   code: 'code',
   math: 'math',
   task: 'task',
-  divider: 'divider'
+  divider: 'divider',
+  image: 'image'
 })
 const KERNEL_LANGUAGE_IDS = new Set(SLASH_LANGUAGE_NAMES.map((name) => 'code:' + name))
 

@@ -420,24 +420,33 @@ async function run() {
       `/math must commit a $$ block whose empty content line is immediately typable (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 3) The still-refused items stay refused and visibly disabled — a dead
-    //    item is a bug, but so is an item that looks alive and writes nothing.
-    //    `/image` is the standing example: Crepe's `image-block` is a PM ATOM
-    //    with no content expression, so a created card has no caret home. Its
-    //    src/alt/title BYTES are writable (commands/image-attrs.js); what is
-    //    missing is a UI, and inventing one is not this item's job.
+    // 3) `/image` (2026-08-20, caret-after family): the query becomes the
+    //    literal `![]()`, the view renders Crepe's real image-block CARD
+    //    (whose own upload/paste-link UI is the src entry point — it routes
+    //    through the kernel-proven image-attrs.js), and the caret lands in
+    //    the trailing placeholder so the very next keystroke commits a
+    //    paragraph below the card. (Until this date the item was pinned
+    //    DISABLED here — the atom had no proven caret home.)
     // ============================================================
     await selectBlock(evaluate, send, '尾段落。')
-    await typeTextLikeUser(send, '/image', { delayMs: delay })
-    await waitFor(() => evaluate(`document.querySelectorAll('.milkdown-slash-menu[data-show="true"] .hm-slash-item').length > 0`),
-      'slash menu did not open for the /image query', 25)
-    const imageDisabled = await evaluate(`(() => {
-      const li = document.querySelector('.milkdown-slash-menu[data-show="true"] .hm-slash-item[data-id="image"]')
-      return li ? li.classList.contains('disabled') : null
+    await runSlashItem(evaluate, send, 'image', 'image')
+
+    const imageCard = await evaluate(`(() => {
+      const card = (${VISIBLE_EDITOR})?.querySelector('.milkdown-image-block, milkdown-image-block')
+      if (!card) return null
+      return { present: true, hasImg: !!card.querySelector('img[src]:not([src=""])') }
     })()`)
-    assert.equal(imageDisabled, true, '/image must still be visibly disabled in kernel mode')
-    await pressKey(send, { key: 'Escape', code: 'Escape' })
-    await sleep(200)
+    console.log('  [/image] ->', JSON.stringify({ card: imageCard }))
+    assert.ok(imageCard?.present, 'the committed ![]() must PROJECT as the image-block card in the view')
+    assert.equal(imageCard.hasImg, false, 'the empty card must show its upload UI, not a broken <img>')
+    await typeTextLikeUser(send, '图后段', { delayMs: delay })
+    await sleep(400)
+    // The replaced tail block keeps its own line ending ('![]()\n'); typing
+    // in the trailing placeholder appends the separator plus the text and
+    // never invents a NEW trailing ending.
+    const afterImage = afterMath.replace('尾段落。\n', '![]()\n\n图后段')
+    await assertSource(evaluate, afterImage,
+      `/image must commit the literal ![]() and the follow-up keystroke must land below the card (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
     // 4) Disk bytes. The source view normalizes line endings, so this is the
@@ -453,14 +462,14 @@ async function run() {
       .replace('戊己庚辛', () => eol(CODE))
       .replace('壬癸子丑', () => eol(['```mermaid', 'graph TD', '```'].join('\n')))
       .replace('寅卯辰巳', () => eol(['$$', 'E=mc^2', '$$'].join('\n')))
-      .replace('尾段落。', () => '/image')
+      .replace('尾段落。' + EOL, () => eol('![]()\n\n图后段'))
     assert.equal(disk, expectedDisk, 'disk bytes must match the kernel-derived expectation exactly')
     if (crlf) {
       assert.equal(/(?<!\r)\n/.test(disk), false, 'a CRLF document must not gain a lone LF anywhere')
     }
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
-    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js, /mermaid and /math commit their block bytes, project, and land a typable caret in a VISIBLE editor; /image stays visibly refused`)
+    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js, /mermaid, /math and /image commit their block bytes, project, and land a typable caret`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

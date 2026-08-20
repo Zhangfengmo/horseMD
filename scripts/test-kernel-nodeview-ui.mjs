@@ -295,11 +295,11 @@ const slashItems = (evaluate) => evaluate(`[
 // behaviour again. Extend this set in the SAME commit that routes an item.
 //
 // Anything absent is refused by the kernel on purpose: `text` yields an
-// unrepresentable empty paragraph, and `image` is an atom with no provable
-// caret home. (`divider` routed on 2026-08-20 — the caret-after machinery.)
+// unrepresentable empty paragraph. (`divider` and `image` routed on
+// 2026-08-20 — the caret-after machinery.)
 const KERNEL_ROUTED_SLASH_ITEMS = new Set([
   'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered',
-  'table', 'code', 'math', 'task', 'divider'
+  'table', 'code', 'math', 'task', 'divider', 'image'
 ])
 // `/js`, `/python`, … render as a dynamic `code:<language>` item that routes
 // through the same code-block insert as bare `/code`.

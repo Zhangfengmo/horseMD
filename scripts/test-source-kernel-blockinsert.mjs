@@ -198,9 +198,9 @@ const refuses = (label, text, offset, target, language) => {
 // (`math` moved OUT of this list on 2026-08-18, once block math became an
 // editable pair — see section 9 below for its own proof. `task` moved out on
 // 2026-08-20: the U+00A0 seed spelling made an "empty" task representable —
-// its own suite is scripts/test-source-kernel-task-seed.mjs. `divider` moved
-// out the same day as the first caret-AFTER target — section 10 below.)
-refuses('image target', '/img\n', 4, 'image')
+// its own suite is scripts/test-source-kernel-task-seed.mjs. `divider` and
+// `image` moved out the same day as the caret-AFTER targets — sections 10
+// and 11 below.)
 refuses('paragraph target', '/text\n', 5, 'paragraph')
 refuses('nonsense target', '/x\n', 2, 'nope')
 refuses('missing target', '/x\n', 2, undefined)
@@ -276,7 +276,7 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 //    unblocked for a target this command does not own.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'divider', 'math', 'table', 'task'])
+  assert.deepEqual(Object.keys(BLOCK_INSERT_TARGETS).sort(), ['code', 'divider', 'image', 'math', 'table', 'task'])
   assert.equal(BLOCK_INSERT_TARGETS.code.language, true)
   assert.equal(BLOCK_INSERT_TARGETS.table.language, false)
   // A `$$` delimiter pair has no info string, so an info string is refused
@@ -285,8 +285,10 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   // A task item has no info string either (2026-08-20; its own suite is
   // scripts/test-source-kernel-task-seed.mjs).
   assert.equal(BLOCK_INSERT_TARGETS.task.language, false)
-  // A thematic break has no info string (2026-08-20, section 10 below).
+  // A thematic break has no info string (2026-08-20, section 10 below), and
+  // neither has an empty image (section 11).
   assert.equal(BLOCK_INSERT_TARGETS.divider.language, false)
+  assert.equal(BLOCK_INSERT_TARGETS.image.language, false)
   assert.ok(Object.isFrozen(BLOCK_INSERT_TARGETS))
 }
 
@@ -483,6 +485,76 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   refuses('divider inside a blockquote', '> /hr\n', 5, 'divider')
   refuses('divider with an info string', '/hr\n', 3, 'divider', 'x')
   refuses('divider mid-block caret', '/hr tail\n', 3, 'divider')
+}
+
+// ---------------------------------------------------------------------------
+// 11. `/image` (2026-08-20) — the second caret-AFTER target. `![]()` is the
+//     one byte answer every reference agrees on; what is SPECIFIC here is the
+//     shape proof (a paragraph whose single child is an EMPTY image — exactly
+//     what Crepe renders as the image-block card) and the caret rule shared
+//     with /divider.
+// ---------------------------------------------------------------------------
+{
+  const imageShape = (out, index) => {
+    const node = parseKernelMarkdown(out).children[index]
+    assert.equal(node.type, 'paragraph')
+    assert.equal(node.children.length, 1)
+    assert.equal(node.children[0].type, 'image')
+    assert.equal(node.children[0].url, '')
+    assert.equal(node.children[0].alt ?? '', '')
+    return node
+  }
+  // (a) Document end, query is the whole document.
+  {
+    const { c, r } = run('/image\n', 6, 'image')
+    const out = apply(c.doc, r)
+    assert.equal(out, '![]()\n')
+    imageShape(out, 0)
+    assert.deepEqual(r.transaction.selection, { anchor: 6, head: 6 },
+      'doc-end caret anchors at candidate.length — the trailing virtual pair\'s own raw anchor')
+  }
+  // (b) Document end after real content, no trailing ending.
+  {
+    const { c, r } = run('甲\n\n/image', 9, 'image')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\n\n![]()')
+    imageShape(out, 1)
+    assert.equal(r.transaction.selection.anchor, out.length)
+  }
+  // (c) Mid-document before a PARAGRAPH: the following block's own content
+  // anchor, asserted against buildCharacterMap on the result.
+  {
+    const { c, r } = run('甲\n\n/image\n\n乙\n', 9, 'image')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\n\n![]()\n\n乙\n')
+    imageShape(out, 1)
+    const next = parseKernelMarkdown(out).children[2]
+    assert.equal(r.transaction.selection.anchor, buildCharacterMap(out, next).visibleToRaw(0))
+  }
+  // (d) CRLF, both caret homes; the written bytes are one line.
+  {
+    const { c, r } = run('甲\r\n\r\n/image\r\n', 11, 'image')
+    const out = apply(c.doc, r)
+    assert.equal(out, '甲\r\n\r\n![]()\r\n')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+    assert.equal(r.transaction.selection.anchor, out.length)
+  }
+  // (e) The shared caret-home refusals hold for this target too.
+  const refusesCaretHome = (label, text, offset) => {
+    const { c, r } = run(text, offset, 'image')
+    assert.equal(r.ok, false, label + ' must refuse')
+    assert.equal(r.code, 'no-caret-home-after-insert', label + ' must carry the named code')
+    assert.equal(c.doc.text, text, label + ' must write nothing')
+  }
+  refusesCaretHome('before a list', '/image\n\n- 甲\n', 6)
+  refusesCaretHome('before a fence', '/image\n\n```\nx\n```\n', 6)
+  refusesCaretHome('before a standalone image', '/image\n\n![a](x.png)\n', 6)
+  refusesCaretHome('before a divider', '/image\n\n---\n', 6)
+  // (f) The generic guards hold too.
+  refuses('image inside a list item', '- /image\n', 8, 'image')
+  refuses('image inside a blockquote', '> /image\n', 8, 'image')
+  refuses('image with an info string', '/image\n', 6, 'image', 'x')
+  refuses('image mid-block caret', '/image tail\n', 6, 'image')
 }
 
 console.log('ok - source kernel block-insert')

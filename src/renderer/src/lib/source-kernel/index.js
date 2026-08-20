@@ -70,8 +70,8 @@ export const KERNEL_CODES = Object.freeze({
   // different document than the command intended (commands/indent.js).
   RESTRUCTURE: 'would-restructure-document',
   EMPTY_ITEM_HEADING: 'empty-item-would-become-heading',
-  // A caret-after block insert (/divider) whose following block cannot host
-  // the caret (commands/block-insert.js `caretAfterInsert`). Has its own
-  // message because the refusal has a concrete, nameable remedy.
+  // A caret-after block insert (/divider, /image) whose following block
+  // cannot host the caret (commands/block-insert.js `caretAfterInsert`). Has
+  // its own message because the refusal has a concrete, nameable remedy.
   NO_CARET_HOME: 'no-caret-home-after-insert'
 })

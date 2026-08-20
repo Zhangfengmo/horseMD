@@ -89,11 +89,15 @@
 //     names the workaround, per the standing rule against inventing an
 //     anchor-into-an-unwritten-block proof class.
 //
-// DELIBERATELY ABSENT, for a probed reason (see the task report):
-//   * image — Crepe's `image-block` is an ATOM, paired here with `charMap:
-//     null` (read-only leaf). Its byte spelling `![]()` is writable, but the
-//     caret would have no home inside the created card.
-// It must keep refusing rather than guess.
+// `image` joined the caret-after set the same day. `![]()` is the ONE byte
+// answer every reference agrees on (muya writes the identical literal, and
+// CommonMark has no grammar ambiguity here — unlike the task-item case):
+// mdast `paragraph > image url:'' alt:''`, which is EXACTLY the shape
+// Crepe's remarkImageBlock converts to its block-level `image-block` card,
+// whose own upload/paste-link UI then routes the src through the
+// kernel-proven image-attrs.js. The card is an ATOM (charMap: null), so the
+// caret takes the same two proven homes as divider — never a position
+// "inside" the card.
 //
 // `task` JOINED THE OWNED SET on 2026-08-20, and its spelling is the ONE
 // representable form, not a convenience. Probed against the kernel's own
@@ -142,7 +146,11 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   // no text position, so the caret lands in the trailing virtual pair (doc
   // end) or the following paragraph/heading's content anchor. See the
   // CARET-AFTER section in this file's header.
-  divider: Object.freeze({ language: false })
+  divider: Object.freeze({ language: false }),
+  // Empty image card (2026-08-20): `![]()` — the second caret-AFTER target;
+  // the created image-block atom carries its own upload UI, so the caret's
+  // only honest homes are the divider's two. See the header.
+  image: Object.freeze({ language: false })
 })
 
 // A fence info string this command is willing to write verbatim. Deliberately
@@ -246,6 +254,13 @@ function buildBlock(target, language, ending) {
     // caretAfterInsert).
     return { spellings: ['---', '***'], caretAfter: true }
   }
+  if (target === 'image') {
+    // ONE spelling — every reference agrees on it (muya writes this literal;
+    // CommonMark parses it without ambiguity; image-attrs.js's segmenter
+    // owns the same `![...](...)` grammar for later src edits). One line, no
+    // interior endings, so the document's endings are never touched.
+    return { spellings: ['![]()'], caretAfter: true }
+  }
   return null
 }
 
@@ -333,6 +348,25 @@ function shapeAgrees(target, node, text, language) {
     // the setext reading (`heading` — impossible here since the query block
     // is preceded by a blank line, but proven rather than assumed).
     return node.type === 'thematicBreak'
+  }
+  if (target === 'image') {
+    // Exactly the shape remarkImageBlock converts to the image-block card: a
+    // paragraph whose SINGLE inline child is an `image`, empty url/alt, no
+    // title, spanning the whole written bytes (probed: `![]()` ->
+    // paragraph[0,5) > image url:'' alt:'' title:null). Any inline content
+    // beside the image means bytes this command never wrote.
+    if (node.type !== 'paragraph') return false
+    const inline = node.children || []
+    if (inline.length !== 1 || inline[0]?.type !== 'image') return false
+    const img = inline[0]
+    if (img.url !== '' || (img.alt ?? '') !== '' || img.title != null) return false
+    const imgStart = img.position?.start?.offset
+    const imgEnd = img.position?.end?.offset
+    if (!Number.isInteger(imgStart) || !Number.isInteger(imgEnd)) return false
+    // The image IS the paragraph, byte for byte.
+    return imgStart === node.position?.start?.offset &&
+      imgEnd === node.position?.end?.offset &&
+      text.slice(imgStart, imgEnd) === '![]()'
   }
   if (target === 'task') {
     // Exactly ONE bullet item, REALLY a task (`checked === false`, never the
