@@ -247,6 +247,37 @@ const dissolve = (doc, offset, insert) => {
   assert.equal(dissolvableTaskSeed('- [ ] x\n', charMap, [{ from: 6, to: 7, ascii: '' }], 7), null)
 }
 
+// THE BYTE-WRITING COMMAND RE-CHECKS THE LEDGER ITSELF (2026-08-20
+// adversarial panel, Minor). `spellTaskSeedInsert` used to re-prove a
+// caller-supplied seed descriptor against the BYTES only, trusting that the
+// caller had screened provenance through `dissolvableTaskSeed` — so a forged
+// descriptor could spend a U+00A0 the ledger never vouched for (a
+// user-authored byte, or a heal-written one standing for a real keystroke)
+// as if it were a seed. The command is the last gate before bytes are
+// written, so it now requires the `ascii:''` entry in `doc.whitespaceMarks`
+// itself — the same "a document with no ledger claims NOTHING" posture as
+// `healableTrailingSpace`.
+{
+  const text = SEED_BYTES + '\n'
+  const { paragraph } = taskAt(text)
+  const forged = { rawStart: 6, rawEnd: 7 }
+  // A user-authored U+00A0: reopened file, ledger empty by construction.
+  assert.deepEqual(
+    spellTaskSeedInsert({
+      doc: createMarkdownDocument(text), block: paragraph, seed: forged, offset: 7, insert: 'x'
+    }),
+    { ok: false, code: 'not-structural' },
+    'a seed descriptor the ledger does not vouch for must never dissolve')
+  // A heal-written U+00A0: that byte stands for a pressed key, not a seed.
+  assert.deepEqual(
+    spellTaskSeedInsert({
+      doc: { ...createMarkdownDocument(text), whitespaceMarks: [{ from: 6, to: 7, ascii: ' ' }] },
+      block: paragraph, seed: forged, offset: 7, insert: 'x'
+    }),
+    { ok: false, code: 'not-structural' },
+    'heal provenance is not seed provenance — the empty string is the partition')
+}
+
 // The ledger itself: `ascii: ''` is accepted by the document chokepoint, junk
 // is not, and the remap drops the entry the moment any edit touches its span.
 {

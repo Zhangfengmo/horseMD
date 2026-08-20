@@ -307,6 +307,45 @@ const visible = (text, type, start) => {
     'a caller-supplied heal span must be re-proven against the bytes')
 }
 
+// …and against the PROVENANCE LEDGER (2026-08-20 adversarial panel, Minor).
+// The byte check alone cannot tell a run this kernel wrote from one the
+// AUTHOR wrote: a forged heal descriptor over a byte-valid U+00A0 run with
+// an empty ledger used to heal it away — the kernel rewriting a character it
+// never wrote, the exact failure the ledger exists to prevent. The command
+// now requires `doc.whitespaceMarks` to vouch for the span byte-for-byte,
+// recorded ascii included, rather than trusting the caller to have derived
+// `heal` from `healableTrailingSpace`.
+{
+  const text = 'a' + NBSP + '\n'
+  const block = blockAt(text, 'paragraph', 0)
+  // A user-authored U+00A0 (reopened file — empty ledger): never healed; the
+  // command falls through and the caller appends after the author's byte.
+  assert.deepEqual(
+    spellBlockTailInsert({
+      doc: doc(text), block, offset: 2, insert: 'y',
+      heal: { rawStart: 1, rawEnd: 2, ascii: ' ' }
+    }),
+    { ok: false, code: 'not-structural' },
+    'a heal span the ledger does not vouch for must never rewrite the byte')
+  // The recorded ascii must match too: an entry standing for a Tab cannot be
+  // spent as a Space heal (the descriptor would restore a key never pressed).
+  assert.deepEqual(
+    spellBlockTailInsert({
+      doc: doc(text, [{ from: 1, to: 2, ascii: '\t' }]), block, offset: 2, insert: 'y',
+      heal: { rawStart: 1, rawEnd: 2, ascii: ' ' }
+    }),
+    { ok: false, code: 'not-structural' },
+    'the descriptor must carry the ledger\'s own recorded ascii')
+  // Control: the same descriptor WITH its ledger entry heals exactly as
+  // before — nothing about the vouched path changes.
+  const vouched = spellBlockTailInsert({
+    doc: doc(text, [{ from: 1, to: 2, ascii: ' ' }]), block, offset: 2, insert: 'y',
+    heal: { rawStart: 1, rawEnd: 2, ascii: ' ' }
+  })
+  assert.equal(vouched.ok, true, 'the ledger-vouched heal is untouched')
+  assert.deepEqual(vouched.edit, { from: 1, to: 2, insert: ' y' })
+}
+
 // ---------------------------------------------------------------------------
 // 9) Input hygiene: only ONE code point, never a line break, never a
 //    stale/foreign block node.

@@ -90,6 +90,20 @@ export function spellTaskSeedInsert({ doc, block, seed, offset, insert }) {
   if (!seed || !Number.isInteger(seed.rawStart) || seed.rawEnd !== seed.rawStart + 1) return NOT_STRUCTURAL
   if (offset !== seed.rawStart && offset !== seed.rawEnd) return NOT_STRUCTURAL
   if (text.slice(seed.rawStart, seed.rawEnd) !== NO_BREAK_SPACE) return NOT_STRUCTURAL
+  // THE LEDGER IS RE-CHECKED HERE, not only in `dissolvableTaskSeed`
+  // (2026-08-20 adversarial panel, Minor). This function is the byte-WRITING
+  // gate, and until this check it re-proved a caller-supplied descriptor
+  // against the bytes alone — so a forged `seed` could spend a U+00A0 the
+  // ledger never vouched for (the author's own byte, or a heal-written one
+  // standing for a real keystroke) as if it were a seed. Both callers screen
+  // through `dissolvableTaskSeed` first, but a provenance decision must not
+  // depend on every future caller remembering to: the command demands the
+  // `ascii: ''` entry from `doc.whitespaceMarks` itself — the same "a
+  // document with no ledger claims NOTHING" posture as
+  // `healableTrailingSpace`, enforced where the bytes are written.
+  const vouched = (doc.whitespaceMarks || []).some((entry) =>
+    entry?.ascii === '' && entry.from === seed.rawStart && entry.to === seed.rawEnd)
+  if (!vouched) return NOT_STRUCTURAL
   if (block?.type !== 'paragraph') return NOT_STRUCTURAL
   const blockStart = block.position?.start?.offset
   const blockEnd = block.position?.end?.offset

@@ -154,7 +154,15 @@ function productionDissolvedDoc(label) {
   const paragraph = index.tree.children[0]?.children?.[0]?.children?.[0]
   const seedStart = seedDoc.indexOf(NBSP)
   const result = sourceKernel.spellTaskSeedInsert({
-    doc: { text: seedDoc, revision: 0 },
+    // The ledger entry rides along exactly as production always has it (the
+    // `/task` insert wrote it): since the 2026-08-20 Minor-finding fix the
+    // command re-checks provenance ITSELF and a ledger-less doc dissolves
+    // nothing — which is the point, not an inconvenience.
+    doc: {
+      text: seedDoc,
+      revision: 0,
+      whitespaceMarks: [{ from: seedStart, to: seedStart + 1, ascii: '' }]
+    },
     block: paragraph,
     seed: { rawStart: seedStart, rawEnd: seedStart + 1 },
     offset: seedStart + 1,

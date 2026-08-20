@@ -439,11 +439,20 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   const needsSpelling = !!written && literalTailIsStripped(text, block, offset)
   // The caller's heal span is re-proven against the bytes AND against its own
   // recorded spelling — a span that is not a pure U+00A0 run, or that claims to
-  // stand for something other than ASCII whitespace, is not healed.
+  // stand for something other than ASCII whitespace, is not healed — AND
+  // against the PROVENANCE LEDGER itself (2026-08-20 adversarial panel,
+  // Minor): the byte check cannot tell a run this kernel wrote from one the
+  // AUTHOR wrote, so a forged descriptor over a byte-valid U+00A0 run used to
+  // heal away a character the kernel never wrote. The command is the
+  // byte-writing gate, so it demands the entry from `doc.whitespaceMarks`
+  // byte-for-byte, recorded ascii included, rather than trusting the caller
+  // to have derived `heal` from `healableTrailingSpace`.
   const healSpan = heal && heal.rawEnd === offset &&
     Number.isInteger(heal.rawStart) && heal.rawStart < heal.rawEnd &&
     NO_BREAK_RUN_RE.test(text.slice(heal.rawStart, heal.rawEnd)) &&
-    typeof heal.ascii === 'string' && ASCII_WHITESPACE_RE.test(heal.ascii)
+    typeof heal.ascii === 'string' && ASCII_WHITESPACE_RE.test(heal.ascii) &&
+    (doc.whitespaceMarks || []).some((entry) =>
+      entry?.from === heal.rawStart && entry.to === heal.rawEnd && entry.ascii === heal.ascii)
     ? heal
     : null
   if (!needsSpelling && !healSpan) return NOT_STRUCTURAL
