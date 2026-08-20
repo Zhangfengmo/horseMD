@@ -464,13 +464,22 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   Whitespace CommonMark would strip (block ends, heading/paragraph line
   starts) is written as raw U+00A0 (Space→1, Tab→2), session-ledgered, and
   healed back to ASCII when displaced; markers complete via a proven literal
-  space (`spellMarkerCompletingSpace`). **Not close to default-on**:
-  `.superpowers/kernel-performance-assessment.md` measured ~450 ms of
-  main-thread block per keystroke at 100 KB in the real app (two full-document
-  reparses per commit; of five identified proof-preserving optimizations, only
-  the cheapest has landed), and kernel mode cannot attach at all above
-  `CHUNK_THRESHOLD` (120 000 chars — the refusal is now a named, honest
-  message instead of a silent one, but the document still can't be edited in
+  space (`spellMarkerCompletingSpace`). **Perf: the five proof-preserving
+  optimizations from `.superpowers/kernel-performance-assessment.md` §9 all
+  landed 2026-08-21** (skip markdownUpdated `5d35a87`; map reuse, parse memo,
+  lazy charMaps + deferred status scan, debounced verify — see the
+  assessment's addendum for the A/B). Measured on the same 100 KB corpus/
+  machine: per-keystroke synchronous main-thread block ~257 → ~130 ms (−49%),
+  a 12-key burst's total block 2.56 → 1.20 s, peak single task 261 → 139 ms;
+  the debounced verify (+status scan, ~106 ms) runs 200 ms AFTER the burst,
+  off the input path — synchronous again the moment bytes and view are known
+  to differ (gateway `rewrote`: heals/seed-dissolve/prefix), when a
+  split-placeholder session ends (and NEVER mid-session — Case PERF-3), or
+  when the rebind failed (verify IS the repair). **Still not default-on
+  material**: 130 ms ≫ the 16 ms frame goal (only §9 #6's incremental map —
+  the one that trades away a proof — closes that, deliberately not done), and
+  kernel mode still cannot attach above `CHUNK_THRESHOLD` (120 000 chars —
+  the refusal is a named, honest message, but the document can't be edited in
   kernel mode).
 - **List Backspace** (`editor-list-backspace.js`): Backspace on an EMPTY list
   item lifts it out of the list (Typora behavior). The CommonMark preset's

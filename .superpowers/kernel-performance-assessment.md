@@ -201,6 +201,30 @@ Ordered by (value ÷ risk). "Safe" = does not change what is proven before bytes
 
 **What the safe set alone buys** (1 + 2 + 3 + 4 + 5, no proof weakened), estimated at 200 KB headless: keystroke ~318 ms → ~95 ms synchronous (one parse for `bindMap` with lazy charMaps) with the verify parse moved off the burst; structural Enter ~593 ms → ~230 ms; link edit ~820 ms → ~340 ms; attach ~200 ms → ~115 ms. In real-app terms that is roughly 450 ms → ~150 ms per keystroke at 100 KB. Still ~10× the frame budget: **only #6 (incremental map) closes that gap**, and it is the one that trades away a proof.
 
+## 9b. Addendum (2026-08-21): the safe set landed
+
+Optimizations **#1–#5 are all in** (branch `perf/kernel-large-doc`): #1 in
+`5d35a87`; #2 map reuse (`bindMap`'s `pmDoc.eq(parsed)` adoption guard,
+pinned by headless Case PERF-1); #3 exact-string parse memo (LRU 8 in
+`syntax-index.js`, index/raw caches deliberately separate because
+`injectHighlightNodes` mutates its tree); #4 lazy per-block charMaps (proofs
+run at first access; `pairForContentPos`/`rawToPmPos` pre-filter via
+content.size / mdast span; the read-only status count moved to a 150 ms
+trailing debounce); #5 debounced verify (200 ms; synchronous for gateway-
+rewritten commits (`rewrote`), placeholder-session ends, and the
+map-repair path; NEVER fired mid-session — Case PERF-3 pins the regression
+test-kernel-mode-ui caught live). #6 (incremental map) remains deliberately
+not done; #7 unnecessary after #4's pre-filters; #8 unchanged (honest
+refusal above `CHUNK_THRESHOLD`).
+
+**A/B, same machine / method / 100 KB corpus (§1.3), built app, kernel
+mode:** isolated keystroke synchronous block ~257–264 ms → **~130 ms**
+(−49 %), with ~106 ms of deferred verify+status work landing 200 ms later,
+off the input path; 12-key burst (70 ms cadence): total long-task time
+2 562 ms → 1 197 ms (−53 %), peak single task 261 → 139 ms. The §9
+estimate ("450 → ~150 ms real at 100 KB") held. The 16 ms frame goal still
+requires #6, which trades away a proof.
+
 ## 10. Caveats
 
 * The headless `parse` is a proxy (§1.2) and underestimates the real Milkdown parse by ≈3× (measured in §4). All *ratios between kernel phases* are unaffected; absolute headless totals should be multiplied by ~3.5–4.5 for real-app expectations.
