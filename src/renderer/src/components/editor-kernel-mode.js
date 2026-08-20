@@ -541,14 +541,41 @@ export function createKernelMode({
   // Emit only on a real CHANGE. `bindMap` runs on every accepted commit, and
   // pushing an identical status into React on each keystroke would be pure
   // re-render churn for a value that changes a handful of times per session.
+  //
+  // DEFERRED since lazy charMaps (§9 #4): the read-only COUNT is the one
+  // consumer that reads every pair's charMap, i.e. it would force the whole
+  // document's materialization on every rebind and single-handedly defeat
+  // the laziness. The publish therefore runs on a short trailing debounce —
+  // during a typing burst the timer keeps re-arming and the scan never runs;
+  // at rest it runs once, against the final map. `getKernelStatus` itself
+  // stays synchronous for direct callers (StatusBar menu open), and DISPOSE
+  // publishes immediately — a torn-down editor must not leave a stale badge
+  // behind while a timer spins.
   let lastStatusKey = null
-  const publishStatus = () => {
+  let statusTimer = null
+  const STATUS_DEBOUNCE_MS = 150
+  const publishStatusNow = () => {
+    if (statusTimer) {
+      clearTimeout(statusTimer)
+      statusTimer = null
+    }
     if (typeof onStatusChange !== 'function') return
     const status = getKernelStatus()
     const key = `${status.state}:${status.readOnlyBlocks}:${status.blocks}:${status.reason || ''}`
     if (key === lastStatusKey) return
     lastStatusKey = key
     onStatusChange(status)
+  }
+  const publishStatus = () => {
+    if (typeof onStatusChange !== 'function') return
+    if (disposed) {
+      publishStatusNow()
+      return
+    }
+    if (statusTimer) clearTimeout(statusTimer)
+    statusTimer = setTimeout(publishStatusNow, STATUS_DEBOUNCE_MS)
+    // Never keep a headless process alive for a pending badge update.
+    if (typeof statusTimer?.unref === 'function') statusTimer.unref()
   }
 
   const refreshProjectionMap = () => {
@@ -1655,13 +1682,19 @@ export function createKernelMode({
   // `pmPosToRaw` relies on). Virtual pairs are excluded — a placeholder
   // has no real bytes to mark or tab into; refusing is the fail-closed
   // choice.
-  const editablePairForRange = (from, to) =>
-    (kernel.map?.blockPairs || []).find((candidate) => {
-      if (!candidate.charMap || candidate.virtual) return false
-      const contentPos = candidate.pmPos + 1
-      const end = contentPos + candidate.charMap.visibleLength
-      return from >= contentPos && to <= end
-    }) || null
+  // Resolved through the map's own `pairAt` (rather than a hand-rolled scan
+  // over blockPairs reading every candidate's charMap) since lazy charMaps
+  // (§9 #4): pairAt range-checks deferred pairs without materializing them,
+  // so this builds only the block the range lands in. Equivalent by
+  // construction — content ranges of distinct pairs are disjoint, so the
+  // pair containing `from` is the only one that could contain [from, to].
+  const editablePairForRange = (from, to) => {
+    const pair = kernel.map?.pairAt?.(from)
+    if (!pair || pair.virtual || !pair.charMap) return null
+    const contentPos = pair.pmPos + 1
+    if (from < contentPos || to > contentPos + pair.charMap.visibleLength) return null
+    return pair
+  }
 
   // Whitespace at a block's END — the other position CommonMark strips (see
   // lib/source-kernel/commands/trailing-whitespace.js). Measured before this

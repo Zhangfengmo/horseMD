@@ -3055,17 +3055,30 @@ const toggleVia = (h, markType, from, to) => {
 {
   // onStatusChange fires on real transitions and is de-duplicated, so a
   // keystroke that leaves the status unchanged costs no host re-render.
+  //
+  // TIMING (changed with \u00a79 #4, 2026-08-21): the status COUNT is the one
+  // consumer that walks every pair's charMap, which under lazy charMaps
+  // would force the whole document's materialization on every rebind \u2014 so
+  // the publish is now DEFERRED to a short idle debounce instead of running
+  // synchronously inside bindMap/attach. `getKernelStatus` itself stays
+  // synchronous for direct callers. Dispose still publishes 'off'
+  // immediately: a torn-down editor must not leave a stale badge while a
+  // timer spins.
   const md = '\u7532\u4e59\n'
   const seen = []
   const h = makeHarness(md, doc(p(text('\u7532\u4e59'))), { onStatusChange: (s) => seen.push(s.state) })
   assert.deepEqual(seen, [], 'nothing is published before attach')
   assert.equal(h.controller.attachAfterCreate(), true)
-  assert.deepEqual(seen, ['normal'])
+  assert.deepEqual(seen, [], 'attach schedules the publish off the hot path (lazy charMaps)')
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  assert.deepEqual(seen, ['normal'], 'the deferred publish lands after the debounce')
   h.controller.refreshProjectionMap()
   h.controller.refreshProjectionMap()
+  await new Promise((resolve) => setTimeout(resolve, 250))
   assert.deepEqual(seen, ['normal'], 'an unchanged status is not re-published')
   h.controller.dispose()
-  assert.deepEqual(seen, ['normal', 'off'], 'teardown clears the host indicator')
+  assert.deepEqual(seen, ['normal', 'off'],
+    'teardown clears the host indicator immediately, no timer wait')
 }
 
 // ===========================================================================
