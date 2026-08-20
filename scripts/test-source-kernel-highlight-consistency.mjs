@@ -118,7 +118,10 @@ const MARK_CONTAINERS = new Set(['emphasis', 'strong', 'delete', 'link', 'highli
 function pmContentSize(node) {
   let size = 0
   for (const child of node.children || []) {
-    if (child.type === 'text') size += child.value.length
+    // ProseMirror holds ONE character per line ending regardless of the
+    // source spelling (CRLF widening, 2026-08-21) — the simulator must
+    // count text values like PM does, not like the raw bytes.
+    if (child.type === 'text') size += child.value.replace(/\r\n?/g, '\n').length
     else if (child.type === 'inlineCode') size += child.value.length
     else if (ATOM_INLINE.has(child.type)) size += 1
     else if (MARK_CONTAINERS.has(child.type)) size += pmContentSize(child)

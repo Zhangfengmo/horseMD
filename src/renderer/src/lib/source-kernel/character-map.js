@@ -149,12 +149,31 @@ export function textUnits(text, node) {
     const cp = value.codePointAt(v)
     const ch = String.fromCodePoint(cp)
 
-    if (ch === '\n') {
+    if (ch === '\n' || ch === '\r') {
+      // ONE line ending — whatever its spelling — is ONE width-1 `linebreak`
+      // unit (CRLF widening, 2026-08-21). remark keeps a soft break's bytes
+      // verbatim in the value ('\n', '\r\n', or lone '\r'), but ProseMirror
+      // holds exactly ONE character for it, so counting the '\r' of a CRLF
+      // pair as its own `char` unit made `visibleLength` exceed
+      // `content.size` by one per soft break and every CRLF soft-wrapped
+      // block degraded to read-only (the everyday shape: a list item
+      // wrapping onto a continuation line). The unit spans the whole ending
+      // plus the continuation prefix; `ending` records the VALUE spelling so
+      // highlight-syntax.js's `offsetTables` can advance its value index by
+      // the true number of value chars (width is always the DECODED width, 1).
+      const pair = ch === '\r' && value[v + 1] === '\n'
+      const ending = pair ? '\r\n' : ch
+      // The raw bytes must spell the ending exactly as the value does — a
+      // divergence (e.g. a value ending in a lone '\r' while the raw
+      // continues '\r\n') would silently claim the block-final ending's
+      // bytes, so it fails closed instead.
+      if (!text.startsWith(ending, r)) return null
+      if (ch === '\r' && !pair && text[r + 1] === '\n') return null
       const next = consumeSoftBreak(text, r)
       if (next === null || next > end) return null
-      units.push({ rawStart: r, rawEnd: next, width: 1, kind: 'linebreak' })
+      units.push({ rawStart: r, rawEnd: next, width: 1, kind: 'linebreak', ending })
       r = next
-      v += 1
+      v += ending.length
       continue
     }
 
@@ -485,11 +504,14 @@ export function buildCharacterMap(text, blockNode) {
 // silently becomes three lines. Every command that resolves a raw offset from
 // a character map must refuse it.
 //
-// It exists as a real boundary because the maps deliberately model a CRLF as
-// TWO units. In a PROSE block a CRLF soft break leaves the '\r' in the mdast
-// text value, so `textUnits` emits a width-1 `char` unit for it and then the
-// `linebreak` unit for the '\n' (plus any continuation prefix); in a CODE
-// block `buildCodeMap` splits the pair the same way for its own reasons.
+// Since the CRLF widening (2026-08-21) only a CODE map still exposes that
+// boundary: `buildCodeMap` deliberately models a '\r\n' as TWO units (the
+// '\r' its own `char` unit — CodeMirror's own Text model needs the per-byte
+// addressing, see editor-codeblock-crlf.js). A PROSE map now emits ONE
+// width-1 `linebreak` unit for the whole ending (any spelling, plus its
+// continuation prefix), so no visible boundary resolves inside the pair at
+// all and this predicate is simply unreachable there — the byte-level
+// superset below still refuses raw-arithmetic writes in every block kind.
 //
 // This lives here — in the module that owns the unit model — so the gateway's
 // plain-text path (editor-kernel-gateway.js `commitPlainText`) and the pure

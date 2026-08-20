@@ -1648,27 +1648,24 @@ const linkEdit = (text, blockOffset, args) => {
   )
 }
 
-// CRLF BISECTION (review finding, 2026-08-17). A CRLF soft break leaves the
-// '\r' in the mdast text value, so the map models it as a `char` unit plus the
-// `linebreak` unit for the '\n' — and the offset between them is a real,
-// ProseMirror-addressable position. Writing there is byte-legal and even
-// survives the reparse proof (remark keeps the literal '\r', so the decoded
-// text is unchanged), but it splits ONE line ending into a lone CR and a
-// separate LF: 2 lines silently become 3. Refuse, exactly as the gateway's
-// plain-text path does.
+// CRLF (widening, 2026-08-21 — supersedes the 2026-08-17 bisection cases).
+// The map now models a '\r\n' pair as ONE width-1 `linebreak` unit, so the
+// old intra-pair boundary is no longer any visible offset at all — the three
+// former refusal cases are unreachable by construction (no visible index
+// resolves between the '\r' and the '\n'; `splitsCrlfPair` still refuses any
+// raw-arithmetic write there at the applySourceTransaction chokepoint). The
+// visible text of 'one\r\ntwo three' is 'one\ntwo three' (13 chars), exactly
+// what ProseMirror holds.
 {
   const crlf = 'one\r\ntwo three\r\n'
-  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 0, visTo: 4, op: 'wrap', href: 'u' }),
-    { ok: false, code: 'unmapped-selection' }, 'a range ENDING between \\r and \\n refuses')
-  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 4, visTo: 8, op: 'wrap', href: 'u' }),
-    { ok: false, code: 'unmapped-selection' }, 'a range STARTING there refuses too')
-  assert.deepEqual(linkEdit(crlf, 0, { visFrom: 4, visTo: 4, op: 'insert', href: 'u', insertedText: 'u' }),
-    { ok: false, code: 'unmapped-selection' }, 'and so does an insert point there')
-  // Everything that does NOT bisect the pair still works, including a label
-  // that spans the whole soft break.
   assert.equal(linkEdit(crlf, 0, { visFrom: 0, visTo: 3, op: 'wrap', href: 'u' }).text, '[one](u)\r\ntwo three\r\n')
-  assert.equal(linkEdit(crlf, 0, { visFrom: 5, visTo: 8, op: 'wrap', href: 'u' }).text, 'one\r\n[two](u) three\r\n')
-  assert.equal(linkEdit(crlf, 0, { visFrom: 0, visTo: 8, op: 'wrap', href: 'u' }).text, '[one\r\ntwo](u) three\r\n')
+  assert.equal(linkEdit(crlf, 0, { visFrom: 4, visTo: 7, op: 'wrap', href: 'u' }).text, 'one\r\n[two](u) three\r\n')
+  // A label that spans the soft break keeps the raw CRLF bytes verbatim.
+  assert.equal(linkEdit(crlf, 0, { visFrom: 0, visTo: 7, op: 'wrap', href: 'u' }).text, '[one\r\ntwo](u) three\r\n')
+  // An insert at the continuation line's visible start lands AFTER the whole
+  // linebreak unit — never inside the pair.
+  assert.equal(linkEdit(crlf, 0, { visFrom: 4, visTo: 4, op: 'insert', href: 'u', insertedText: 'q' }).text,
+    'one\r\n[q](u)two three\r\n')
 }
 
 console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, proven byte-for-byte)')
@@ -1836,16 +1833,22 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
   assert.equal(/\r(?!\n)/.test(ok.doc.text), false, 'no lone \\r')
   assert.equal(/(?<!\r)\n/.test(ok.doc.text), false, 'no bare \\n')
 
-  // (c) replaceVisibleText — previously unguarded, and the path a kernel-mode
-  // Tab insert takes.
+  // (c) replaceVisibleText — under the widened model (2026-08-21) the
+  // intra-pair boundary is NOT a visible offset at all: vis 4 is the start
+  // of 'two'. The former refusals are unreachable by construction (the
+  // byte-level chokepoint in (b) still refuses raw-arithmetic writes there);
+  // these are ordinary edits now, and each must keep the file uniformly CRLF.
   const block = index.blockAt(0)
   const map = buildCharacterMap(crlf, block.node)
-  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 4, visTo: 4, insert: 'X' }),
-    { ok: false, code: 'unmapped-selection' }, 'an insert point between \\r and \\n refuses')
-  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 0, visTo: 4, insert: 'X' }),
-    { ok: false, code: 'unmapped-selection' }, 'a range ENDING there refuses')
-  assert.deepEqual(replaceVisibleText({ doc, map, visFrom: 4, visTo: 8, insert: 'X' }),
-    { ok: false, code: 'unmapped-selection' }, 'a range STARTING there refuses')
+  const insertAt4 = replaceVisibleText({ doc, map, visFrom: 4, visTo: 4, insert: 'X' })
+  assert.equal(insertAt4.ok, true, insertAt4.code)
+  assert.equal(applySourceTransaction(doc, insertAt4.transaction).doc.text, 'one\r\nXtwo three\r\n')
+  const acrossBreak = replaceVisibleText({ doc, map, visFrom: 0, visTo: 4, insert: 'X' })
+  assert.equal(acrossBreak.ok, true, acrossBreak.code)
+  assert.equal(applySourceTransaction(doc, acrossBreak.transaction).doc.text, 'Xtwo three\r\n')
+  const fromBreak = replaceVisibleText({ doc, map, visFrom: 4, visTo: 8, insert: 'X' })
+  assert.equal(fromBreak.ok, true, fromBreak.code)
+  assert.equal(applySourceTransaction(doc, fromBreak.transaction).doc.text, 'one\r\nXthree\r\n')
   const kept = replaceVisibleText({ doc, map, visFrom: 0, visTo: 3, insert: 'ONE' })
   assert.equal(kept.ok, true, kept.code)
   assert.equal(applySourceTransaction(doc, kept.transaction).doc.text, 'ONE\r\ntwo three\r\n')

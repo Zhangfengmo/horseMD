@@ -5,10 +5,6 @@
       "status": "known-degraded",
       "summary": "table cell containing <br> -> cell read-only"
     },
-    "D2": {
-      "status": "fix-scheduled",
-      "summary": "CRLF + soft line break in prose -> paragraph read-only (the `\\r` unit-model widening; scheduled as its own task)"
-    },
     "D3": {
       "status": "known-degraded",
       "summary": "paragraph whose soft-break continuation line starts with \"> \" -> paragraph read-only"
@@ -664,14 +660,6 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-nested+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "5:paragraph"
-      ]
-    },
     "adj:thematic-break+table-br#crlf": {
       "families": [
         "D1"
@@ -680,30 +668,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-plain+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "3:paragraph"
-      ]
-    },
-    "adj:fence-mermaid+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:table-br+quote-multiline#crlf": {
       "families": [
-        "D1",
-        "D2"
+        "D1"
       ],
       "readOnly": [
-        "2:paragraph(cell)",
-        "5:paragraph"
+        "2:paragraph(cell)"
       ]
     },
     "adj:para-inline-math+table-br#crlf": {
@@ -714,14 +684,6 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:list-nested+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "9:paragraph"
-      ]
-    },
     "adj:table-br+list-nested#crlf": {
       "families": [
         "D1"
@@ -730,76 +692,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:list-task+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "5:paragraph"
-      ]
-    },
-    "adj:quote-multiline+list-mixed#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:list-bullet+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "6:paragraph"
-      ]
-    },
     "adj:table-br+para-inline-math#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+math-block#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-highlight+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+fence-mermaid#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-multiline+fence-empty#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+task-seed#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:quote-nested+table-br#crlf": {
@@ -818,28 +716,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:fence-mermaid+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:table-br+heading-plain#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:quote-multiline+para-hardbreak-backslash#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:list-mixed+table-br#crlf": {
@@ -858,62 +740,6 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:image-block+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+list-task#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-inline-html#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+list-bullet#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-highlight+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-softbreak+heading-setext#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
     "adj:table-br+thematic-break-stars#crlf": {
       "families": [
         "D1"
@@ -924,11 +750,9 @@
     },
     "adj:quote-multiline+table-br#crlf": {
       "families": [
-        "D1",
-        "D2"
+        "D1"
       ],
       "readOnly": [
-        "1:paragraph",
         "4:paragraph(cell)"
       ]
     },
@@ -940,44 +764,12 @@
         "5:paragraph(cell)"
       ]
     },
-    "adj:para-inline-math+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+heading-marks#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:table-br+table-marks#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+table-marks#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:thematic-break-stars+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:table-br+para-hardbreak-spaces#crlf": {
@@ -996,62 +788,6 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+heading-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:image-block-empty+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+heading-marks#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:math-block+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+thematic-break#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+heading-setext#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-nested+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "4:paragraph"
-      ]
-    },
     "adj:table-br+fence-empty#crlf": {
       "families": [
         "D1"
@@ -1060,52 +796,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+para-inline-math#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+thematic-break-stars#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:list-mixed+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "9:paragraph"
-      ]
-    },
-    "adj:thematic-break+list-bullet#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:para-inline-image+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:heading-plain+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:para-strike+table-br#crlf": {
@@ -1141,17 +837,9 @@
         "4:paragraph(cell)"
       ]
     },
-    "adj:quote-plain+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:thematic-break+quote-multiline#crlf": {
       "families": [
-        "D2"
+        "D3"
       ],
       "readOnly": [
         "1:paragraph"
@@ -1173,29 +861,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph",
-        "3:paragraph"
-      ]
-    },
     "adj:image-block-empty+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:quote-multiline+quote-bare#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:table-br+quote-nested#crlf": {
@@ -1206,22 +877,6 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:fence-empty+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-inline-html+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:heading-nbsp+table-br#crlf": {
       "families": [
         "D1"
@@ -1230,68 +885,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+para-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-link#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-inline-html#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-hardbreak-backslash+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+fence-latex#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
     "adj:para-highlight+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:quote-bare+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+quote-nested#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:list-bullet+table-br#crlf": {
@@ -1318,84 +917,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:fence-js+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:heading-nbsp+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+fence-js#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+image-block#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+image-block-empty#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:list-ordered+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "6:paragraph"
-      ]
-    },
     "adj:table-br+math-block#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:para-inline-image+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+heading-nbsp#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+quote-nested#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
       ]
     },
     "adj:quote-plain+table-br#crlf": {
@@ -1406,87 +933,12 @@
         "4:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+para-highlight#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:para-softbreak+table-br#crlf": {
       "families": [
-        "D1",
-        "D2"
+        "D1"
       ],
       "readOnly": [
-        "0:paragraph",
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+heading-nbsp#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-multiline+image-block-empty#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-inline-html+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:frontmatter+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-inline-math#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:heading-setext+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:task-dissolved+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "4:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph",
-        "2:paragraph"
       ]
     },
     "adj:table-br+fence-mermaid#crlf": {
@@ -1497,68 +949,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:task-seed+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "4:paragraph"
-      ]
-    },
-    "adj:fence-empty+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:frontmatter+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+thematic-break#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:fence-latex+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-link#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:fence-js+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:quote-multiline+fence-latex#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:table-br+list-ordered#crlf": {
@@ -1571,20 +967,10 @@
     },
     "adj:table-br+para-softbreak#crlf": {
       "families": [
-        "D1",
-        "D2"
+        "D1"
       ],
       "readOnly": [
-        "2:paragraph(cell)",
-        "4:paragraph"
-      ]
-    },
-    "adj:thematic-break+list-nested#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
+        "2:paragraph(cell)"
       ]
     },
     "adj:heading-setext+table-br#crlf": {
@@ -1603,100 +989,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+para-inline-code#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+quote-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-inline-image+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:thematic-break-stars+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:table-br+list-mixed#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:heading-marks+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-strike+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:fence-latex+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:math-block+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:list-mixed+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "8:paragraph"
-      ]
-    },
-    "adj:para-softbreak+task-dissolved#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-inline-image#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
       ]
     },
     "adj:table-br+para-italic#crlf": {
@@ -1707,14 +1005,6 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+para-italic#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
     "adj:table-br+heading-setext#crlf": {
       "families": [
         "D1"
@@ -1723,28 +1013,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+quote-bare#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
     "adj:table-br+task-dissolved#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:thematic-break+list-mixed#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:table-br+para-hardbreak-backslash#crlf": {
@@ -1763,62 +1037,6 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+para-hardbreak-spaces#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+list-nested#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-strike#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+image-block#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:thematic-break+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-italic+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-inline-math+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:table-br+heading-nbsp#crlf": {
       "families": [
         "D1"
@@ -1835,124 +1053,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:thematic-break+list-task#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+fence-mermaid#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:list-nested+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "11:paragraph(cell)"
-      ]
-    },
-    "adj:image-block+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-bold#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:fence-js+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-hardbreak-backslash#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-inline-image#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+fence-js#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+list-mixed#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-inline-code+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-hardbreak-spaces+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-plain+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+table-marks#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-hardbreak-spaces+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:thematic-break-stars+table-br#crlf": {
@@ -1963,44 +1069,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+para-highlight#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-italic#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:heading-plain+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:heading-marks+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:table-marks+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "5:paragraph"
       ]
     },
     "adj:para-hardbreak-spaces+table-br#crlf": {
@@ -2011,52 +1085,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+list-nested#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
     "adj:image-block+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+heading-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:task-dissolved+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "3:paragraph"
-      ]
-    },
-    "adj:list-nested+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "10:paragraph"
-      ]
-    },
-    "adj:list-task+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "6:paragraph"
       ]
     },
     "adj:table-br+para-highlight#crlf": {
@@ -2075,36 +1109,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:para-italic+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:table-br+heading-marks#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:image-block-empty+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+list-ordered#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:task-seed+table-br#crlf": {
@@ -2123,30 +1133,6 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:para-link+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+list-task#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-link+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
     "adj:table-br+quote-bare#crlf": {
       "families": [
         "D1"
@@ -2155,28 +1141,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:list-ordered+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "5:paragraph"
-      ]
-    },
     "adj:table-marks+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "6:paragraph(cell)"
-      ]
-    },
-    "adj:heading-plain+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
       ]
     },
     "adj:table-br+para-bold#crlf": {
@@ -2195,60 +1165,12 @@
         "3:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+fence-empty#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-strike+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:task-seed+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "3:paragraph"
-      ]
-    },
-    "adj:para-softbreak+para-inline-code#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:table-marks+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "4:paragraph"
-      ]
-    },
     "adj:para-bold+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:quote-multiline+task-dissolved#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
       ]
     },
     "adj:table-br+fence-latex#crlf": {
@@ -2267,14 +1189,6 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:quote-multiline+thematic-break-stars#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:table-br+thematic-break#crlf": {
       "families": [
         "D1"
@@ -2291,84 +1205,12 @@
         "7:paragraph(cell)"
       ]
     },
-    "adj:para-softbreak+para-strike#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-bold+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-inline-code+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:table-br+fence-js#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "2:paragraph(cell)"
-      ]
-    },
-    "adj:heading-nbsp+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:thematic-break+list-ordered#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:quote-multiline+math-block#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-plain+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+list-bullet#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+task-seed#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
       ]
     },
     "adj:frontmatter+table-br#crlf": {
@@ -2385,15 +1227,6 @@
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph",
-        "1:paragraph"
       ]
     },
     "adj:table-br+image-block#crlf": {
@@ -2430,7 +1263,7 @@
     },
     "adj:thematic-break+quote-nested#crlf": {
       "families": [
-        "D2"
+        "D3"
       ],
       "readOnly": [
         "1:paragraph"
@@ -2460,93 +1293,12 @@
         "2:paragraph(cell)"
       ]
     },
-    "adj:para-hardbreak-backslash+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "2:paragraph"
-      ]
-    },
-    "adj:para-softbreak+list-ordered#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:para-softbreak+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph",
-        "2:paragraph"
-      ]
-    },
-    "adj:quote-multiline+para-bold#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:heading-setext+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
-    "adj:para-softbreak+quote-plain#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
-      ]
-    },
-    "adj:quote-bare+quote-multiline#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "3:paragraph"
-      ]
-    },
-    "adj:list-bullet+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "5:paragraph"
-      ]
-    },
-    "adj:para-bold+para-softbreak#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "1:paragraph"
-      ]
-    },
     "adj:heading-marks+table-br#crlf": {
       "families": [
         "D1"
       ],
       "readOnly": [
         "3:paragraph(cell)"
-      ]
-    },
-    "adj:para-softbreak+para-hardbreak-spaces#crlf": {
-      "families": [
-        "D2"
-      ],
-      "readOnly": [
-        "0:paragraph"
       ]
     },
     "triple:frontmatter>table-br#crlf": {

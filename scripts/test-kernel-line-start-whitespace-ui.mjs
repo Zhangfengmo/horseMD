@@ -346,23 +346,14 @@ async function run() {
     await evaluate('window.__lineStartToasts = []')
     await clickAtTextNode(evaluate, send, 'soft二', 0)
     await pressChar(send, { key: ' ', code: 'Space', text: ' ' })
-    // A SOFT break in a CRLF document is a PRE-EXISTING kernel limitation that
-    // has nothing to do with whitespace: the paragraph's character map counts
-    // both '\r' and '\n' as units while ProseMirror holds one '\n', so the
-    // block zip cannot pair them and the whole paragraph degrades to read-only.
-    // EVERY edit in it refuses, loudly and with the block-scoped message — which
-    // is the fail-closed outcome, so this asserts it rather than pretending the
-    // shape is writable. (The `\` and two-space hard breaks, step 3, DO map in
-    // CRLF and are proven there.)
-    const softIsReadOnly = EOL === '\r\n'
-    const SOFT = softIsReadOnly ? '' : NBSP
-    if (softIsReadOnly) {
-      const fired = JSON.parse(await toasts(evaluate))
-      assert.ok(fired.length === 1 && /只读|read-only/.test(fired[0]),
-        `a CRLF soft-break paragraph must refuse LOUDLY as read-only — got ${JSON.stringify(fired)}`)
-      assert.equal(await readSource(evaluate, 'crlf soft break refusal'), seen({ para: NB2 }),
-        'a refused edit must write no bytes at all')
-    } else {
+    // A SOFT break maps under BOTH line endings since the CRLF widening
+    // (2026-08-21, character-map.js): the whole '\r\n' pair is one
+    // `linebreak` unit, so the paragraph's visible count matches
+    // ProseMirror's and the block pairs. The former CRLF branch asserted a
+    // loud read-only refusal here — that limitation is fixed, so the CRLF
+    // run now proves the same NBSP re-spelling the LF run always did.
+    const SOFT = NBSP
+    {
       assert.equal(
         await readSource(evaluate, 'space at a soft-break continuation line'),
         seen({ para: NB2, soft: NBSP }),
@@ -437,8 +428,8 @@ async function run() {
     //    command tries the literal FIRST on every call, so nothing that already
     //    worked may change.
     // =====================================================================
-    // Driven inside the BLOCKQUOTE, the one multi-shape block that maps under
-    // both line endings (the soft-break paragraph is read-only in CRLF).
+    // Driven inside the BLOCKQUOTE (a multi-shape block that maps under both
+    // line endings — as does the soft-break paragraph, since the widening).
     await clickAtTextNode(evaluate, send, '引用段落。', 2)
     await pressChar(send, { key: ' ', code: 'Space', text: ' ' })
     {
