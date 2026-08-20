@@ -3328,6 +3328,67 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '/task\n', 'the original query bytes come back')
 }
 
+// Case I5b (2026-08-20 adversarial audit, Critical): BACKSPACE ON THE FRESH
+// SEED refuses LOUDLY — the documented empty-task wall, end to end through
+// the controller. Pre-fix, syntax-index.js classified the seeded item EMPTY
+// (String.trim() strips U+00A0), so `structuralHandlers.Backspace` routed to
+// exitEmptyListItem and SILENTLY deleted the whole `- [ ]  ` line: zero
+// toasts, a `caret-unmappable` diagnostic, and item-less bytes on save —
+// while guide/ai-handoff §5.2g documented the keystroke as refused. This case
+// fails pre-fix at the `handled === false` pin (the handler answered true and
+// the bytes were gone).
+{
+  const NBSP = ' '
+  const h = makeHarness('/task\n', doc(p(text('/task'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  const seedBytes = '- [ ] ' + NBSP + '\n'
+  assert.equal(h.controller.kernel.doc.text, seedBytes)
+  const seedLedger = [{ from: 6, to: 7, ascii: '' }]
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, seedLedger)
+  const caret = h.view.state.selection.head // after the seed (pinned = 4 in I5)
+
+  // 1) The STRUCTURAL route must not own this keystroke any more: the seed
+  //    item is not empty (its U+00A0 is parser-visible content), so Backspace
+  //    is a text-path question and the handler passes it through.
+  const diagnosticsBefore = (globalThis.__hmKernelDiagnostics || []).length
+  const handled = h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, false,
+    'Backspace on the seed is NOT a structural exit — pre-fix this applied exit-empty-list-item')
+  assert.equal(h.controller.kernel.doc.text, seedBytes, 'no byte moved')
+  assert.ok(!(globalThis.__hmKernelDiagnostics || []).slice(diagnosticsBefore)
+    .some((entry) => entry.type === 'caret-unmappable'),
+    'and no silent caret failure was recorded')
+
+  // 2) The text path (PM's own character deletion) hits the WALL: vetoed,
+  //    bytes and ledger untouched, the view still shows the checkbox, and the
+  //    refusal is LOUD (a toast naming the code fires — never silence).
+  const notificationsBefore = h.notifications.length
+  const verdict = dispatchThrough(h, h.view.state.tr.delete(caret - 1, caret))
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, 'the seed deletion is vetoed, view untouched')
+  assert.equal(h.controller.kernel.doc.text, seedBytes, 'bytes untouched')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, seedLedger, 'ledger untouched')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(false, p(text(NBSP)))), p())),
+    'the checkbox item is still on screen')
+  assert.ok(h.notifications.length > notificationsBefore, 'the refusal NOTIFIES — never silent')
+  assert.ok(h.notifications.slice(notificationsBefore)
+    .some((message) => /empty-task-unrepresentable/.test(message)),
+    'with the empty-task wall\'s own code, so the toast names the exits')
+
+  // 3) Both documented exits stay real: typing the label still dissolves the
+  //    seed, and undo still unwinds to the query bytes.
+  const typed = dispatchThrough(h, h.view.state.tr.insertText('x', h.view.state.selection.head))
+  await flushMicrotasks()
+  assert.equal(typed, undefined, 'the first label keystroke is not vetoed')
+  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n', 'exit 1: the label dissolves the seed')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, seedBytes)
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '/task\n', 'exit 2: undo returns the query bytes')
+}
+
 // Case I6 (2026-08-20): `/divider` — the first caret-AFTER insert, end to end
 // through the controller. The written block has no text position, so the
 // REAL assertions are where the caret lands and that the FOLLOW-UP KEYSTROKE

@@ -243,6 +243,50 @@ async function run() {
     assert.equal(await caretInTask(evaluate), true,
       'the caret must land inside the new task item — a task you cannot label is worse than a blocked item')
 
+    // ============================================================
+    // 1b) THE AUDIT'S KEYSTROKE (2026-08-20, Critical): Backspace on the
+    //     fresh seed must REFUSE LOUDLY. Pre-fix, syntax-index classified the
+    //     seeded item EMPTY (String.trim() strips U+00A0), the structural
+    //     route ran exit-empty-list-item, and this exact keystroke silently
+    //     deleted the checkbox — zero toasts, a caret-unmappable diagnostic,
+    //     and item-less bytes on the next save — while the guide documented
+    //     it as refused.
+    // ============================================================
+    await evaluate(`(() => {
+      window.__ieToasts = []
+      if (!window.__ieToastHook) {
+        window.__ieToastHook = true
+        window.addEventListener('hm:toast', (e) => window.__ieToasts.push(e.detail?.msg ?? String(e.detail)))
+      }
+      return 1
+    })()`)
+    const diagnosticsBefore = await evaluate(`(window.__hmKernelDiagnostics || []).length`)
+    {
+      const bs = { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }
+      // A REAL keyDown (not rawKeyDown): the fixed path lets the keymap pass
+      // the key through, so the deletion must come from Chromium's own
+      // editing command for the gateway wall to be the thing that stops it.
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...bs })
+      await sleep(20)
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...bs })
+    }
+    await sleep(600)
+    const itemsAfterBackspace = await taskItems(evaluate)
+    console.log('  [backspace on seed] ->', JSON.stringify(itemsAfterBackspace))
+    assert.deepEqual(itemsAfterBackspace, [{ checked: false, label: NBSP }],
+      'the checkbox must survive the refused Backspace — pre-fix it vanished on this keystroke')
+    const backspaceToasts = JSON.parse(await evaluate(`JSON.stringify(window.__ieToasts || [])`))
+    assert.ok(backspaceToasts.length >= 1,
+      `the refusal must be LOUD — pre-fix this keystroke was silent (got ${JSON.stringify(backspaceToasts)})`)
+    assert.ok(backspaceToasts.some((message) => /任务项|task item/i.test(message)),
+      `the toast must name the empty-task wall and its exits — got ${JSON.stringify(backspaceToasts)}`)
+    const backspaceDiagnostics = await evaluate(
+      `JSON.stringify((window.__hmKernelDiagnostics || []).slice(${diagnosticsBefore}))`)
+    assert.ok(!backspaceDiagnostics.includes('caret-unmappable'),
+      `no silent caret failure may be recorded — got ${backspaceDiagnostics}`)
+
+    // The documented exit stays real: typing the label still dissolves the
+    // seed (the flow below is the pre-existing main-path assertion).
     await typeTextLikeUser(send, '待办事项', { delayMs: delay })
     await sleep(500)
     const afterFirst = FIXTURE.replace('甲乙丙丁', '- [ ] 待办事项')

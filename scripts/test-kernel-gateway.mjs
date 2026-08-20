@@ -3418,9 +3418,44 @@ console.log('PASS kernel gateway (block-trailing whitespace: real no-break space
     assert.equal(result.bytes, '- [ ] 待办事项\n')
     assert.equal(result.observability?.expectedVisibleLength, 4)
   }
+
+  // TS6 (2026-08-20 adversarial audit, Critical): BACKSPACE ON THE FRESH SEED.
+  // Deleting the ledgered seed would commit `- [ ] `, which reparses to
+  // `checked: null` with LITERAL "[ ]" text — the checkbox vanishes and three
+  // characters nobody typed appear. The documented contract (guide 被拒绝的
+  // 操作, ai-handoff §5.2g) is a REFUSAL with named exits (undo / type the
+  // label); until this fix no wall existed on any path and the delete
+  // silently destroyed the item. Same delete against the OTHER two
+  // provenances keeps its pre-existing literal behaviour — the wall claims
+  // exactly the byte the kernel wrote, never a byte the user authored.
+  const del = (markdown, pmDoc, from, to, marks) => {
+    const state = EditorState.create({ schema, doc: pmDoc })
+    const map = buildProjectionMap(markdown, state.doc)
+    assert.ok(map, 'the seed fixture must map')
+    const tr = state.tr.delete(from, to)
+    assert.equal(classifyTransactions([tr], state).kind, 'plain-text')
+    const kernel = { doc: { ...createMarkdownDocument(markdown), whitespaceMarks: marks } }
+    return commitPlainText({ kernel, map, transactions: [tr], oldState: state })
+  }
+  {
+    const committed = del(md, seedDoc(), 3, 4, seedLedger)
+    assert.equal(committed.ok, false,
+      'deleting the ledgered seed must REFUSE — the documented empty-task wall')
+    assert.equal(committed.code, 'empty-task-unrepresentable',
+      'and the refusal carries its own code so the toast can name the exits')
+  }
+  // The unledgered byte (reopened file / user-authored U+00A0) and the
+  // heal-provenance byte are NOT claimed: the literal delete commits, exactly
+  // as before this wall existed.
+  for (const marks of [[], [{ from: 6, to: 7, ascii: ' ' }]]) {
+    const committed = del(md, seedDoc(), 3, 4, marks)
+    assert.equal(committed.ok, true,
+      `a non-seed U+00A0 delete keeps its pre-existing behaviour (marks ${JSON.stringify(marks)})`)
+    assert.equal(committed.applied.doc.text, '- [ ] \n')
+  }
 }
 
-console.log('PASS kernel gateway (task seed: ledgered seed dissolves under the first label character; unledgered and heal-provenance U+00A0 stay)')
+console.log('PASS kernel gateway (task seed: ledgered seed dissolves under the first label character; unledgered and heal-provenance U+00A0 stay; deleting the seed refuses — the empty-task wall)')
 
 // --- M: THE EMPTY $$ BLOCK (2026-08-19, audit Critical 1) ---------------------
 //

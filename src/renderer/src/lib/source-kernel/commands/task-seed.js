@@ -163,6 +163,126 @@ export function spellTaskSeedInsert({ doc, block, seed, offset, insert }) {
   }
 }
 
+// THE SEED-DELETE WALL (2026-08-20 adversarial audit, Critical). Backspace on
+// a fresh `/task` seed is DOCUMENTED as refused ("empty task unrepresentable"
+// — guide 被拒绝的操作, ai-handoff §5.2g), and until this command the wall did
+// not exist on any path: the structural route misclassified the seed item as
+// empty (syntax-index.js `empty`, fixed alongside this) and silently deleted
+// the whole line, and the plain-text delete path would otherwise commit the
+// literal removal — `- [ ] ` — which remark-gfm reads as `checked: null` with
+// LITERAL "[ ]" text: the checkbox disappears and three characters nobody
+// typed appear. Both outcomes are the guard-not-reached corruption shape.
+//
+// WHAT IS CLAIMED, and only this: a delete (or whitespace-only replace) that
+// removes the LEDGER-VOUCHED seed and leaves the task paragraph with no
+// parser-visible content must refuse, because no byte spelling of an empty
+// task exists (probed: `- [ ] `, `- [ ]  `, `- [ ]\t` all demote). The
+// refusal's exits are real and named by its message: undo (the insert is its
+// own history step, and history transactions do not pass through this wall),
+// or typing the label (an insert with content is not this shape).
+//
+// WHAT IS NOT CLAIMED: a user-authored U+00A0 (no ledger entry) or a
+// heal-written one (non-empty `ascii`) — deleting those is ordinary editing;
+// and a delete that leaves other content standing (`- [ ] ` + seed + 'x'
+// minus the seed is still a task). Emptying a REAL task's label (no seed
+// involved) keeps its pre-existing behaviour — this wall states exactly the
+// documented seed contract, nothing broader.
+//
+// Answers, same three-way contract as proveBatchDelete:
+//   NOT_STRUCTURAL       — not the shape; the caller keeps its behaviour.
+//   { ok: false, code }  — the shape, and the candidate reparse PROVES the
+//                          item stops being a task: the caller MUST refuse.
+//   { ok: true }         — the shape, but the candidate provably keeps a task
+//                          with the same checked state (unreachable with
+//                          today's grammar; stated so the wall dissolves by
+//                          itself if GFM ever gains an empty-task spelling).
+export const EMPTY_TASK_CODE = 'empty-task-unrepresentable'
+
+export function taskSeedDeleteRefusal({ doc, block, marks, edits }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Array.isArray(edits) || !edits.length) return NOT_STRUCTURAL
+  if (block?.type !== 'paragraph') return NOT_STRUCTURAL
+  const blockStart = block.position?.start?.offset
+  const blockEnd = block.position?.end?.offset
+  if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return NOT_STRUCTURAL
+  let removes = false
+  for (const edit of edits) {
+    if (!Number.isInteger(edit?.from) || !Number.isInteger(edit?.to) || edit.from > edit.to) {
+      return NOT_STRUCTURAL
+    }
+    // Anything escaping the block's own span belongs to the cross-block
+    // guards, not to this wall.
+    if (edit.from < blockStart || edit.to > blockEnd) return NOT_STRUCTURAL
+    const insert = edit.insert ?? ''
+    if (typeof insert !== 'string') return NOT_STRUCTURAL
+    // An insert carrying any parser-visible content (anything but ASCII
+    // space/tab — U+00A0 IS content to remark) keeps the item a task.
+    if (/[^ \t]/.test(insert)) return NOT_STRUCTURAL
+    if (edit.to > edit.from) removes = true
+  }
+  if (!removes) return NOT_STRUCTURAL
+  const removed = (index) => edits.some((edit) => index >= edit.from && index < edit.to)
+  // The seed: a ledger entry with the stands-for-no-keystroke provenance
+  // (`ascii: ''`), still reading as exactly one U+00A0 inside THIS block, and
+  // fully consumed by the removal — the same three facts dissolvableTaskSeed
+  // checks, asked of a delete instead of an insert.
+  const seed = (marks || []).find((entry) =>
+    entry?.ascii === '' &&
+    Number.isInteger(entry.from) && Number.isInteger(entry.to) &&
+    entry.to === entry.from + 1 &&
+    entry.from >= blockStart && entry.to <= blockEnd &&
+    text.slice(entry.from, entry.to) === NO_BREAK_SPACE &&
+    removed(entry.from))
+  if (!seed) return NOT_STRUCTURAL
+  // Surviving content: any block byte outside the removed ranges that is not
+  // ASCII space/tab keeps the item a task, and the literal delete is honest.
+  for (let index = blockStart; index < blockEnd; index += 1) {
+    if (removed(index)) continue
+    const ch = text[index]
+    if (ch !== ' ' && ch !== '\t') return NOT_STRUCTURAL
+  }
+  // THE PROOF — the parse decides, never the prose above. Baseline: this
+  // paragraph really is a task item's own paragraph (boolean `checked`).
+  let baselineTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+  } catch {
+    return { ok: false, code: EMPTY_TASK_CODE }
+  }
+  const baseline = findTaskParagraph(baselineTree, 'paragraph', blockStart, blockEnd)
+  if (!baseline || typeof baseline.item.checked !== 'boolean') return NOT_STRUCTURAL
+  const itemStart = baseline.item.position?.start?.offset
+  // Candidate: compose the edits (ascending, non-overlapping — the caller's
+  // coordinate space) and require the item to still be a task with the SAME
+  // checked state. Today it never is — `- [ ] ` demotes — so this refuses.
+  let candidate = ''
+  let cursor = 0
+  for (const edit of [...edits].sort((a, b) => a.from - b.from)) {
+    candidate += text.slice(cursor, edit.from) + (edit.insert ?? '')
+    cursor = edit.to
+  }
+  candidate += text.slice(cursor)
+  let candidateTree
+  try {
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: EMPTY_TASK_CODE }
+  }
+  let survives = false
+  const walk = (node) => {
+    if (survives) return
+    if (node?.type === 'listItem' &&
+        node.position?.start?.offset === itemStart &&
+        node.checked === baseline.item.checked) {
+      survives = true
+      return
+    }
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(candidateTree)
+  return survives ? { ok: true } : { ok: false, code: EMPTY_TASK_CODE }
+}
+
 // The paragraph at [start, end) whose PARENT is a list item, found in one
 // walk so the pair is proven rather than looked up twice.
 function findTaskParagraph(tree, type, start, end) {

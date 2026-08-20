@@ -202,7 +202,19 @@ export function buildSyntaxIndex(text) {
       listStart: offsetOf(list?.position?.start),
       listEnd: offsetOf(list?.position?.end),
       depth,
-      empty: singleLine && markerLineTail.trim() === ''
+      // CommonMark blankness is ASCII-only ("a line containing only spaces
+      // or tabs"), and `empty` must answer what THE PARSER this index is
+      // built from answers — never what JavaScript's Unicode whitespace
+      // table answers. `String.trim()` strips U+00A0 (the `/task` seed and
+      // every whitespace-heal byte), U+3000, \f, … — every one of which
+      // remark reads as REAL content (the item gets a paragraph child). The
+      // trim() spelling therefore contradicted this index's own `tree`: the
+      // seeded task item (`- [ ] ` + U+00A0, checked:false, one addressable
+      // character) classified as EMPTY, so the router sent Backspace/Enter
+      // to exitEmptyListItem, which silently deleted a line the parser
+      // proves has content (2026-08-20 adversarial audit, Critical — the
+      // documented refusal was never reached).
+      empty: singleLine && !/[^ \t]/.test(markerLineTail)
     }
   }
 

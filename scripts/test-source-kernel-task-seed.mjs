@@ -12,9 +12,10 @@ import assert from 'node:assert/strict'
 import { createMarkdownDocument, applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
 import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { insertBlockFromQuery, BLOCK_INSERT_TARGETS } from '../src/renderer/src/lib/source-kernel/commands/block-insert.js'
-import { dissolvableTaskSeed, spellTaskSeedInsert } from '../src/renderer/src/lib/source-kernel/commands/task-seed.js'
+import { dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, EMPTY_TASK_CODE } from '../src/renderer/src/lib/source-kernel/commands/task-seed.js'
 import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/character-map.js'
 import { NO_BREAK_SPACE } from '../src/renderer/src/lib/source-kernel/commands/trailing-whitespace.js'
+import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 
 console.log('--- source kernel task seed ---')
 
@@ -289,6 +290,111 @@ const dissolve = (doc, offset, insert) => {
   assert.ok(task.charMap, 'still character-mappable — still editable')
   // The seed survived as the user's byte: no dissolve is claimable.
   assert.equal(dissolvableTaskSeed(reopened.text, task.charMap, reopened.whitespaceMarks, 7), null)
+}
+
+// ---------------------------------------------------------------------------
+// 5. BACKSPACE ON THE FRESH SEED (2026-08-20 adversarial audit, Critical).
+//    The documented contract (guide 被拒绝的操作, ai-handoff §5.2g) is a
+//    refusal — "empty task unrepresentable" — but the wall was never reached:
+//    syntax-index.js computed `empty` with String.trim(), which strips
+//    U+00A0, so the seeded item classified EMPTY and the router sent
+//    Backspace to exitEmptyListItem, silently deleting the whole `- [ ]  `
+//    line (zero toasts, caret-unmappable, item-less bytes on save). Pre-fix
+//    this section fails at its FIRST assertion (`empty` is true), then at
+//    the router pin (`Backspace` answers ok/exit-empty-list-item), then at
+//    the wall (the function does not exist).
+// ---------------------------------------------------------------------------
+{
+  const text = '甲段\n\n' + SEED_BYTES + '\n\n末段\n'
+  const index = buildSyntaxIndex(text)
+  const seedStart = text.indexOf(NBSP)
+  const item = index.listItemAt(seedStart + 1)
+
+  // ROOT CAUSE: `empty` must agree with the parser this index is built from.
+  // The seed item HAS content (a paragraph whose text is the U+00A0), so it
+  // is not empty — String.trim()'s Unicode whitespace table said otherwise.
+  assert.equal(item.empty, false,
+    'the seeded item is NOT empty — its U+00A0 is parser-visible content')
+  assert.equal(taskAt(text).label, NBSP, 'the parser itself says so')
+
+  // ROUTER: neither Backspace nor Enter may take the empty-item exit that
+  // silently deletes the marker line. Backspace is a text-path question
+  // (`not-structural` — the gateway wall below owns the byte answer); Enter
+  // routes to the ordinary task-item split, same as any non-empty task item.
+  const doc = { text, revision: 0 }
+  assert.deepEqual(routeStructuralKey('Backspace', { doc, index, offset: seedStart + 1 }),
+    { ok: false, code: 'not-structural' },
+    'Backspace on the seed must NOT resolve to a structural line deletion')
+  const enter = routeStructuralKey('Enter', { doc, index, offset: seedStart + 1 })
+  assert.notEqual(enter?.transaction?.intent, 'exit-empty-list-item',
+    'Enter on the seed must not silently delete the item either')
+
+  // CONTROL: a genuinely empty ASCII item keeps the Typora exit semantics —
+  // this fix narrows `empty`, it does not disable the empty-item commands.
+  const asciiIndex = buildSyntaxIndex('- 甲\n- \n')
+  assert.equal(asciiIndex.listItemAt(6).empty, true)
+  assert.equal(
+    routeStructuralKey('Backspace', { doc: { text: '- 甲\n- \n', revision: 0 }, index: asciiIndex, offset: 6 })
+      .transaction?.intent,
+    'exit-empty-list-item',
+    'Backspace in a real empty item still lifts out of the list'
+  )
+}
+
+// THE WALL (`taskSeedDeleteRefusal`): a delete consuming the ledgered seed
+// with nothing left in the paragraph refuses with its own code; every other
+// provenance and every content-preserving shape is left unclaimed.
+{
+  const text = SEED_BYTES + '\n'
+  const doc = createMarkdownDocument(text)
+  const block = taskAt(text).paragraph
+  const seedLedger = [{ from: 6, to: 7, ascii: '' }]
+  const wall = (marks, edits, docOverride) =>
+    taskSeedDeleteRefusal({ doc: docOverride || doc, block, marks, edits })
+
+  // The audit's exact keystroke: one Backspace on the fresh seed.
+  assert.deepEqual(wall(seedLedger, [{ from: 6, to: 7, insert: '' }]),
+    { ok: false, code: EMPTY_TASK_CODE },
+    'deleting the ledgered seed refuses — the documented empty-task wall')
+  assert.equal(EMPTY_TASK_CODE, 'empty-task-unrepresentable',
+    'the code is the i18n key suffix — the toast names the exits')
+  // Replacing the seed with ASCII whitespace is the same demotion in
+  // disguise (`- [ ]  ` with a trailing ASCII space is checked:null too).
+  assert.deepEqual(wall(seedLedger, [{ from: 6, to: 7, insert: ' ' }]),
+    { ok: false, code: EMPTY_TASK_CODE })
+
+  // NOT CLAIMED — each of these keeps its pre-existing behaviour:
+  const NO_CLAIM = { ok: false, code: 'not-structural' }
+  // a user-authored U+00A0 (reopened file — empty ledger),
+  assert.deepEqual(wall([], [{ from: 6, to: 7, insert: '' }]), NO_CLAIM)
+  // a heal-written one (stands for a pressed Space),
+  assert.deepEqual(wall([{ from: 6, to: 7, ascii: ' ' }], [{ from: 6, to: 7, insert: '' }]), NO_CLAIM)
+  // a replace that types real content over the seed (the dissolve's bytes),
+  assert.deepEqual(wall(seedLedger, [{ from: 6, to: 7, insert: 'x' }]), NO_CLAIM)
+  // and a delete of the seed that leaves other label content standing —
+  // `- [ ] x` is still a task, the literal delete is honest.
+  {
+    const withLabel = SEED_BYTES + 'x\n'
+    const labelDoc = createMarkdownDocument(withLabel)
+    const labelBlock = taskAt(withLabel).paragraph
+    assert.deepEqual(
+      taskSeedDeleteRefusal({
+        doc: labelDoc, block: labelBlock, marks: seedLedger,
+        edits: [{ from: 6, to: 7, insert: '' }]
+      }),
+      NO_CLAIM
+    )
+    // …while deleting seed AND label together empties the item: refused.
+    assert.deepEqual(
+      taskSeedDeleteRefusal({
+        doc: labelDoc, block: labelBlock, marks: seedLedger,
+        edits: [{ from: 6, to: 8, insert: '' }]
+      }),
+      { ok: false, code: EMPTY_TASK_CODE }
+    )
+  }
+  // An edit escaping the block's own span belongs to the cross-block guards.
+  assert.deepEqual(wall(seedLedger, [{ from: 2, to: 7, insert: '' }]), NO_CLAIM)
 }
 
 console.log('ok - source kernel task seed')

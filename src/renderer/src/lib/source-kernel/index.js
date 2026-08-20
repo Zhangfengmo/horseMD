@@ -39,7 +39,7 @@ export {
   looksLikeBlockLineStart,
   healableLineStartRun
 } from './commands/line-start-whitespace.js'
-export { dissolvableTaskSeed, spellTaskSeedInsert } from './commands/task-seed.js'
+export { dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal } from './commands/task-seed.js'
 export { spellMarkerCompletingSpace, spellMarkerRunGrowth } from './commands/marker-space.js'
 export { trimTrailingBlankLines } from './commands/trailing-placeholder.js'
 export {
@@ -77,5 +77,10 @@ export const KERNEL_CODES = Object.freeze({
   // `/text` invoked mid-document (commands/block-insert.js
   // `revertToTextFromQuery`): the emptied paragraph would be the known
   // split-placeholder gap, so the refusal names the remedies instead.
-  TEXT_MID_DOCUMENT: 'text-needs-document-end'
+  TEXT_MID_DOCUMENT: 'text-needs-document-end',
+  // A delete that removes the ledger-vouched `/task` seed and leaves the
+  // task paragraph contentless (commands/task-seed.js
+  // `taskSeedDeleteRefusal`): no byte spelling of an empty task exists, so
+  // the refusal names its two real exits (undo / type the label).
+  EMPTY_TASK: 'empty-task-unrepresentable'
 })

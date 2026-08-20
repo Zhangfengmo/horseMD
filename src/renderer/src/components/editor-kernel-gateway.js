@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -1909,6 +1909,24 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
     // comparisons.
     if (steps.length === 1 && oldFrom < oldTo && virtualPrefix === '' && !virtualBlock &&
         stepPair && !stepPair.virtual && stepPair.charMap && stepPair.mdBlock) {
+      // THE SEED-DELETE WALL (2026-08-20 audit Critical — see
+      // commands/task-seed.js `taskSeedDeleteRefusal` for the full ADR): a
+      // delete consuming the ledger-vouched `/task` seed with nothing left
+      // in the paragraph would commit `- [ ] `, which reparses to
+      // `checked: null` with LITERAL "[ ]" text — the checkbox vanishes and
+      // content nobody typed appears. The documented behaviour (guide,
+      // ai-handoff §5.2g) is a refusal with named exits (undo / type the
+      // label), so refuse here, before a byte moves. Checked FIRST in this
+      // region: it is the most specific delete claim.
+      const seedRefusal = taskSeedDeleteRefusal({
+        doc: kernel.doc,
+        marks: kernel.doc.whitespaceMarks,
+        block: stepPair.mdBlock,
+        edits: [{ from: editFrom, to: editTo, insert: insertText }]
+      })
+      if (!seedRefusal.ok && seedRefusal.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        return { ok: false, code: seedRefusal.code }
+      }
       if (deleteClearsBlockLine({
         text: kernel.doc.text,
         charMap: stepPair.charMap,
@@ -2037,6 +2055,20 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd) ||
           group.some((entry) => entry.from < blockStart || entry.to > blockEnd)) {
         return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+      }
+      // The seed-delete wall runs for BATCHES too (same rule as the two
+      // single-step delete guards: a proof gated on `steps.length === 1`
+      // stops running on the multi-step write path, which is the audit's
+      // named corruption shape). Same three-way contract as proveBatchDelete
+      // directly below.
+      const seedRefusal = taskSeedDeleteRefusal({
+        doc: kernel.doc,
+        marks: kernel.doc.whitespaceMarks,
+        block: pair.mdBlock,
+        edits: group
+      })
+      if (!seedRefusal.ok && seedRefusal.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        return { ok: false, code: seedRefusal.code }
       }
       const proven = proveBatchDelete({
         doc: kernel.doc,
