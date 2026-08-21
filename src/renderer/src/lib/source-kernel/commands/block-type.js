@@ -29,6 +29,15 @@
 // deliberately NOT built here: nothing in kernel mode can reach it today, and
 // an unreachable write path is a proof nobody runs. When a toolbar/shortcut
 // entry point exists, it belongs in this module next to this one.
+// 2026-08-22: the first such entry point exists — Backspace/Delete at a
+// heading's content start (Milkdown's DowngradeHeading gesture) — and its
+// converter lives below as `demoteHeadingAtCaret`, exactly where this note
+// reserved the spot.
+
+import { parseKernelMarkdown } from '../syntax-index.js'
+import { buildCharacterMap } from '../character-map.js'
+import { outsideSignature } from './list-merge.js'
+import { insertBlockFromQuery } from './block-insert.js'
 
 // Target -> the exact marker bytes written at the block's start.
 //
@@ -114,6 +123,181 @@ const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/
 // multi-line syntax or is not reachable from `shouldShow` at all, and is
 // refused.
 const SOURCE_TYPES = new Set(['paragraph', 'heading'])
+
+// ---------------------------------------------------------------------------
+// demoteHeadingAtCaret — the Backspace/Delete-at-heading-content-start gesture
+// (Milkdown's DowngradeHeading binds BOTH keys there), as byte edits.
+//
+// WHAT IS WRITTEN, per shape:
+//   * H_n (n≥2) -> H_{n-1}: delete ONE `#` at the start of the marker run.
+//     The result is still an ATX heading (an EMPTY one included — `## ` -> `# `
+//     stays representable), so this is a plain in-line byte edit.
+//   * H1 with content -> paragraph: delete the whole ATX opening (indentation,
+//     `#` run, spacing). The remaining bytes must REPARSE as exactly the same
+//     inline content in a paragraph — `# 1. 甲` would become a LIST, `# # 甲`
+//     a heading again, `# 甲` directly above `乙` would merge into one
+//     paragraph; every such shape REFUSES (named `heading-demote-unsupported`)
+//     rather than silently restructuring or inventing escape bytes the user
+//     never typed.
+//   * EMPTY H1 -> empty paragraph: a fully-empty top-level paragraph has no
+//     byte spelling at all (this module's own marker-table note), so the
+//     command DELEGATES to the /text machinery — `insertBlockFromQuery`'s
+//     `text` target deletes the block's bytes and the caret rides the
+//     doc-end/split placeholder session. Its guards pass here BY CONSTRUCTION:
+//     an empty heading's content start IS its block end. The delegation's
+//     result (transaction + docEndPlaceholder/midPlaceholder flags, or its
+//     own named refusal) is passed through verbatim.
+//
+// TOP-LEVEL ONLY, same posture as setBlockTypeFromQuery above: a heading
+// nested in a blockquote/list answers `not-structural` here, falls through to
+// ProseMirror's own demote transaction, and keeps the gateway's named refusal
+// (editor-kernel-gateway.js `extractHeadingDemotion` stays as the net for
+// exactly those shapes).
+//
+// THE PROOF (non-delegated shapes), same two axes as insertBlockFromQuery:
+//   (a) the block at the heading's start is exactly the demoted form — same
+//       span shifted by the deletion, heading depth n-1 / paragraph, and an
+//       inline signature (type+value walk) identical to the original's;
+//   (b) nothing outside the heading's span changed meaning (`outsideSignature`
+//       from list-merge.js, offsets shifted by the deletion);
+//   (c) the demoted block stays exactly as addressable as the heading was —
+//       both character maps build, same visibleLength, every unit shifted by
+//       exactly the removed byte count.
+const NOT_STRUCTURAL = Object.freeze({ ok: false, code: 'not-structural' })
+const DEMOTE_UNSUPPORTED = Object.freeze({ ok: false, code: 'heading-demote-unsupported' })
+
+// The full ATX opening, captured in parts: ≤3 spaces of indentation, the `#`
+// run, the REQUIRED spacing run (a bare `#` has no content position at all —
+// it is read-only in the projection — so `[ \t]+` is load-bearing, exactly as
+// in heading-whitespace.js's ATX_OPENING_RE).
+const ATX_DEMOTE_RE = /^( {0,3})(#{1,6})([ \t]+)/
+
+// Type+value walk of a node's children — the "same inline content" half of
+// axis (a). Positions are deliberately not part of it (everything after the
+// deletion shifts by construction); values pin text/inlineCode characters.
+const inlineSignature = (node) => {
+  const out = []
+  const walk = (n) => {
+    out.push(`${n?.type}${typeof n?.value === 'string' ? ':' + n.value : ''}`)
+    for (const child of n?.children || []) walk(child)
+  }
+  for (const child of node?.children || []) walk(child)
+  return out.join('|')
+}
+
+// Identical to heading-whitespace.js's (duplicated with a note, the same way
+// block-insert.js duplicates this module's `topLevelNodeAt`): every unit keeps
+// its kind and width and moves by exactly `shift` bytes.
+const unitsShiftBy = (before, after, shift) => {
+  if (after.length !== before.length) return false
+  for (let i = 0; i < before.length; i += 1) {
+    const a = before[i]
+    const b = after[i]
+    if (!a || !b) return false
+    if (a.kind !== b.kind || a.width !== b.width) return false
+    if (b.rawStart !== a.rawStart + shift || b.rawEnd !== a.rawEnd + shift) return false
+  }
+  return true
+}
+
+export function demoteHeadingAtCaret({ doc, index, offset }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
+  if (!Number.isInteger(offset) || offset < 1 || offset > text.length) return NOT_STRUCTURAL
+
+  // Resolve: the TOP-LEVEL ATX heading whose first content position is the
+  // caret. Walking root children (not a flattened index) is what proves
+  // top-level, exactly as topLevelNodeAt above.
+  let heading = null
+  let opening = null
+  for (const node of index.tree?.children || []) {
+    if (node?.type !== 'heading') continue
+    const start = node.position?.start?.offset
+    const end = node.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue
+    const match = text.slice(start, end).match(ATX_DEMOTE_RE)
+    if (!match || start + match[0].length !== offset) continue
+    heading = node
+    opening = match
+    break
+  }
+  if (!heading) return NOT_STRUCTURAL
+
+  const start = heading.position.start.offset
+  const end = heading.position.end.offset
+  const level = opening[2].length
+  // The bytes and mdast cannot disagree on an ATX heading's level; a mismatch
+  // means the shape is not what this command understands — refuse, don't guess.
+  if (Number.isInteger(heading.depth) && heading.depth !== level) return DEMOTE_UNSUPPORTED
+
+  // EMPTY H1 (content start IS the block end): the /text delegation.
+  if (level === 1 && offset === end) {
+    return insertBlockFromQuery({ doc, index, offset, target: 'text' })
+  }
+
+  const removedFrom = level >= 2 ? start + opening[1].length : start
+  const removedTo = level >= 2 ? removedFrom + 1 : offset
+  const removed = removedTo - removedFrom
+  const candidate = text.slice(0, removedFrom) + text.slice(removedTo)
+  const delta = -removed
+
+  // Fresh parses on both sides (index.tree carries injectHighlightNodes'
+  // split text nodes — same reasoning as insertBlockFromQuery's baseline).
+  let baselineTree = null
+  let candidateTree = null
+  try {
+    baselineTree = parseKernelMarkdown(text)
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return DEMOTE_UNSUPPORTED
+  }
+  const baseHeading = (baselineTree.children || []).find(
+    (node) => node?.type === 'heading' &&
+      node.position?.start?.offset === start && node.position?.end?.offset === end
+  )
+  if (!baseHeading) return DEMOTE_UNSUPPORTED
+
+  // Axis (b): nothing outside the heading's own span changed meaning.
+  const before = outsideSignature(baselineTree, start, end, 0)
+  const after = outsideSignature(candidateTree, start, end - removed, delta)
+  if (before === null || after === null || before !== after) return DEMOTE_UNSUPPORTED
+
+  // Axis (a): the block at the heading's start is exactly the demoted form.
+  const result = (candidateTree.children || []).find(
+    (node) => node?.position?.start?.offset === start
+  )
+  if (!result || result.position?.end?.offset !== end - removed) return DEMOTE_UNSUPPORTED
+  if (level >= 2) {
+    if (result.type !== 'heading' || result.depth !== level - 1) return DEMOTE_UNSUPPORTED
+  } else if (result.type !== 'paragraph') {
+    return DEMOTE_UNSUPPORTED
+  }
+  if (inlineSignature(result) !== inlineSignature(baseHeading)) return DEMOTE_UNSUPPORTED
+
+  // Axis (c): addressability preserved unit for unit.
+  let beforeMap = null
+  let afterMap = null
+  try {
+    beforeMap = buildCharacterMap(text, baseHeading)
+    afterMap = buildCharacterMap(candidate, result)
+  } catch {
+    return DEMOTE_UNSUPPORTED
+  }
+  if (!beforeMap || !afterMap) return DEMOTE_UNSUPPORTED
+  if (afterMap.visibleLength !== beforeMap.visibleLength) return DEMOTE_UNSUPPORTED
+  if (!unitsShiftBy(beforeMap.units, afterMap.units, delta)) return DEMOTE_UNSUPPORTED
+
+  const anchor = offset - removed
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from: removedFrom, to: removedTo, insert: '' }],
+      intent: 'demote-heading',
+      selection: { anchor, head: anchor }
+    }
+  }
+}
 
 export function setBlockTypeFromQuery({ doc, index, offset, target }) {
   const marker = BLOCK_TYPE_MARKERS[target]

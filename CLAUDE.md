@@ -475,6 +475,16 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   soft-wrapped block read-only (combination-matrix family D2) is gone; code
   maps keep their split model for the CM bridge, and `splitsCrlfPair` still
   refuses raw writes inside a pair at the applySourceTransaction chokepoint.
+  Updated 2026-08-22: Backspace/Delete at a top-level ATX heading's content
+  start DEMOTES it as a byte edit (`demoteHeadingAtCaret` in block-type.js:
+  H_n loses one `#`; a content-bearing H1 loses its opening with a reparse
+  proof; an EMPTY H1 delegates to the /text placeholder machinery — the
+  user-reported "empty H1 can't be deleted" case). The gateway's named
+  refusal stays as the net for nested/unprovable shapes. Root-cause fix
+  alongside: `trailingPlaceholderPair()` now requires `mdBlock: null`, so an
+  empty heading's virtual pair is no longer mistaken for the trailing
+  placeholder (that mistake silently ate the Backspace). See ai-handoff
+  §5.2d; locked by `test:kernel-heading-demote-ui` (LF+CRLF) + blocktype §9.
   Whitespace CommonMark would strip (block ends, heading/paragraph line
   starts) is written as raw U+00A0 (Space→1, Tab→2), session-ledgered, and
   healed back to ASCII when displaced; markers complete via a proven literal

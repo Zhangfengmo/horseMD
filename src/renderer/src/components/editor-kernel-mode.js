@@ -55,6 +55,8 @@ import {
   routeStructuralKey,
   toggleBlockquote,
   setBlockTypeFromQuery,
+  demoteHeadingAtCaret,
+  looksLikeAtxContentStart,
   insertBlockFromQuery,
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
@@ -2322,6 +2324,14 @@ export function createKernelMode({
     const pairs = kernel.map?.blockPairs || []
     const last = pairs[pairs.length - 1]
     if (!last?.virtual || !last.pmNode) return null
+    // `virtual` alone is NOT the discriminator: an EMPTY ATX heading's pair is
+    // virtual too (an anchor-only pair over REAL `# ` bytes — see the
+    // projection map's empty-heading derivation), and Backspace inside one
+    // must reach the demote route, not this caret hop. Both true placeholders
+    // (plugin-trailing's synthetic node, the controller-vouched split
+    // placeholder) carry `mdBlock: null` — no bytes is exactly what makes
+    // "nothing to delete here" true.
+    if (last.mdBlock) return null
     if (!last.pmNode.isTextblock || last.pmNode.content.size !== 0) return null
     return last
   }
@@ -2467,10 +2477,16 @@ export function createKernelMode({
       return true
     }
     if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) {
-      // Backspace/Delete: let PM produce the plain text-deletion transaction;
+      // Backspace/Delete: FIRST the heading-demote gesture (top-level ATX
+      // content start — see commitHeadingDemote; a heading's content start is
+      // never `block.start`, so the router always answers not-structural
+      // there), THEN let PM produce the plain text-deletion transaction;
       // handleTransactions' plain-text classification owns it (a cross-block
       // deletion classifies as blocked -> veto, still fail-closed).
-      if (key === 'Backspace' || key === 'Delete') return false
+      if (key === 'Backspace' || key === 'Delete') {
+        if (commitHeadingDemote(offset, state, view) !== 'skip') return true
+        return false
+      }
       // Tab: literal tab through the kernel (source-first) — UNLESS the caret
       // sits at an ATX heading's first content position, where a literal tab
       // is a dead byte (see `commitHeadingLeadingWhitespace`).
@@ -2895,6 +2911,17 @@ export function createKernelMode({
       notifyBlocked(routed.code)
       return true
     }
+    return applyRoutedBlockResult(routed, view)
+  }
+
+  // The tail of runInsertBlockFromQuery, shared verbatim with
+  // commitHeadingDemote below: a routed block command's result is either a
+  // plain transaction (requireMap posture — the block-type-conversion family's
+  // standard) or a /text-machinery result whose docEnd/mid placeholder flags
+  // need the vouched split-placeholder session. The demote of an EMPTY H1
+  // delegates to that same machinery (block-type.js), so both entry points
+  // must apply its flags identically.
+  const applyRoutedBlockResult = (routed, view) => {
     // `/text` onto a paragraph/heading-ending document (2026-08-20): the
     // command proved the bytes (a pure suffix deletion) but its caret anchor
     // — the document end — is a position the reparse CANNOT represent (no
@@ -2952,6 +2979,37 @@ export function createKernelMode({
     }
     applyKernelTransaction(routed.transaction, view, { requireMap: true })
     return true
+  }
+
+  // Backspace/Delete at a TOP-LEVEL ATX heading's content start is the
+  // demote gesture (Milkdown's DowngradeHeading binds BOTH keys there; the
+  // gateway's extractHeadingDemotion documents the transaction it would
+  // produce). Routed to the kernel's own byte command instead of being let
+  // through to PM: H_n loses one `#`, a content-bearing H1 loses its whole
+  // opening, an EMPTY H1 rides the /text placeholder machinery — and every
+  // unprovable shape keeps a named refusal. 'skip' = not that position at
+  // all; the caller falls through exactly as before (plain deletion via PM,
+  // or — for the still-unrouted nested-heading shapes — PM's demote
+  // transaction and the gateway's named refusal, unchanged).
+  // `looksLikeAtxContentStart` is the same cheap byte prefilter the
+  // plain-text gateway uses — this sits on the hot Backspace path, and the
+  // full command (two parses) must not run on ordinary mid-text deletions.
+  const commitHeadingDemote = (offset, state, view) => {
+    if (!state.selection.empty) return 'skip'
+    const text = kernel.doc?.text
+    if (typeof text !== 'string' || !looksLikeAtxContentStart(text, offset)) return 'skip'
+    const routed = demoteHeadingAtCaret({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset
+    })
+    if (!routed.ok) {
+      if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) return 'skip'
+      notifyBlocked(routed.code)
+      return 'handled'
+    }
+    applyRoutedBlockResult(routed, view)
+    return 'handled'
   }
 
   const structuralHandlers = Object.fromEntries(
