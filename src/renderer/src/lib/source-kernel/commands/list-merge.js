@@ -50,6 +50,26 @@
 // the neighbours fails the span assertion AND shows up as a node missing from
 // the candidate's outside signature — caught twice, deliberately.
 //
+// THE ITEM ACCOUNT IS THE ONLY THING THAT LOOKS AT THE NEIGHBOURS AT ALL, and
+// that is why it is stated even though it is hard to make fire. Measured
+// (mutation check, 2026-08-21): deleting the count comparison and both item
+// loops leaves every test in this repo green, because `/task`'s bytes are one
+// line with no interior line ending and the shapes that restructure a
+// neighbour also break `taskItemAgrees` or the span assertion. A 140-shape
+// sweep of neighbour geometries (nested lists, loose items, quoted and fenced
+// item content, indented lists on either side, bare markers, LF and CRLF)
+// found no case where the account is the ONLY guard that fires.
+//
+// It stays, for a reason that is about the PROOF and not about coverage:
+// `outsideSignature` skips every node overlapping the region, so it says
+// nothing whatsoever about the neighbour lists — and identical BYTES do not
+// imply an identical parse when the context changed, which is the entire
+// premise of a merge. Without the account this function would claim "the
+// neighbours' items are all present, in order, unchanged" while checking none
+// of it. That is the `__atomGuards` posture recorded in
+// editor-kernel-gateway.js: a guard written for the general case, kept
+// because "it can't happen yet" is how a guard rots into a comment.
+//
 // WHAT IS DELIBERATELY NOT COMPARED, AND WHY (the one real judgement call)
 // -----------------------------------------------------------------------
 // The MERGED list's own `spread`. Two tight lists joined across a blank line

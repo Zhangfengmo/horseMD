@@ -86,5 +86,18 @@ export const KERNEL_CODES = Object.freeze({
   // task paragraph contentless (commands/task-seed.js
   // `taskSeedDeleteRefusal`): no byte spelling of an empty task exists, so
   // the refusal names its two real exits (undo / type the label).
-  EMPTY_TASK: 'empty-task-unrepresentable'
+  EMPTY_TASK: 'empty-task-unrepresentable',
+  // Delete OR Backspace at a heading's first content character. Diagnosed
+  // 2026-08-21 by dumping the transaction (editor-kernel-gateway.js
+  // `describeUnclassified`): this key is not a deletion at all —
+  // @milkdown/preset-commonmark binds `DowngradeHeading` to BOTH keys at
+  // `parentOffset === 0`, so ProseMirror produces a structural
+  // `ReplaceAroundStep` that turns H2 into H1 or H1 into a paragraph, and no
+  // character is ever removed. The kernel has no byte command for that
+  // marker rewrite yet, so it refuses — but with its own message, because the
+  // generic "not supported yet" describes the wrong gesture entirely and
+  // hides two real remedies. Was the anonymous half of `INPUT_TYPE`; the
+  // 2026-08-19 write-path pass deferred it as "needs the app instrumented to
+  // dump tr.steps".
+  HEADING_DEMOTE: 'heading-demote-unsupported'
 })

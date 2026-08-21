@@ -4212,3 +4212,102 @@ console.log('PASS kernel gateway (the heal is scoped to the U+00A0 this session 
 }
 
 console.log('PASS kernel gateway (line-start whitespace: paragraph/continuation/hard-break/list/quote line starts commit real no-break spaces; interior typing, code fences and task items keep their literal bytes; a virtual placeholder refuses loudly)')
+
+// --- HD: `DowngradeHeading` gets its own refusal name (2026-08-21) ---------
+// Delete AND Backspace at a heading's first content character are bound by
+// @milkdown/preset-commonmark to `DowngradeHeading`, which is a BLOCK-TYPE
+// change, not a deletion: `setBlockType(paragraph)` for an H1 and
+// `setNodeMarkup(level - 1)` otherwise. Measured on the built app 2026-08-21
+// (both keys, H1 and H2, in kernel mode): one structural `ReplaceAroundStep`
+// over the heading's whole span, zero characters removed, and — before this
+// change — the anonymous `unsupported-input-type` toast.
+//
+// The refusal itself is unchanged. What is pinned here is that it is NAMED,
+// that the shape carries a description for whoever debugs the next one, and
+// that the name is not handed to block-type changes the command did not make.
+{
+  const h = (level, s) => schema.node('heading', { level, id: '' }, s ? text(s) : [])
+  // `setBlockType` / `setNodeMarkup` are re-derived here the way ProseMirror
+  // builds them, so the fixture IS the shape the live command produces rather
+  // than a hand-drawn approximation of it.
+  const demote = (state, headingPos, replacement) =>
+    state.tr.setNodeMarkup(headingPos, replacement.type, replacement.attrs)
+
+  // H2 -> H1 (`setNodeMarkup`), caret at the heading's content start.
+  {
+    const state = EditorState.create({ doc: doc(p(text('前段')), h(2, '标题'), p(text('后段'))) })
+    const headingPos = 4
+    assert.equal(state.doc.nodeAt(headingPos)?.type.name, 'heading', 'fixture: the heading is at 4')
+    const at = TextSelection.create(state.doc, headingPos + 1)
+    const withCaret = state.apply(state.tr.setSelection(at))
+    const tr = demote(withCaret, headingPos, { type: schema.nodes.heading, attrs: { level: 1, id: '' } })
+    assert.equal(tr.steps[0]?.constructor?.name, 'ReplaceAroundStep',
+      'premise: setNodeMarkup really is a structural ReplaceAroundStep')
+    const classified = classifyTransactions([tr], withCaret)
+    assert.equal(classified.kind, 'blocked', 'the refusal is unchanged')
+    assert.equal(classified.blockedCode, KERNEL_CODES.HEADING_DEMOTE,
+      'but it now carries the heading-demote name, not the anonymous input-type one')
+    assert.ok(/ReplaceAroundStep/.test(classified.blockedShape || ''),
+      `the shape travels with it — got ${classified.blockedShape}`)
+    assert.ok(/heading/.test(classified.blockedShape || ''))
+  }
+
+  // H1 -> paragraph (`setBlockType`'s own shape), same position.
+  {
+    const state = EditorState.create({ doc: doc(h(1, '标题'), p(text('后段'))) })
+    const at = TextSelection.create(state.doc, 1)
+    const withCaret = state.apply(state.tr.setSelection(at))
+    const tr = demote(withCaret, 0, { type: schema.nodes.paragraph, attrs: null })
+    const classified = classifyTransactions([tr], withCaret)
+    assert.equal(classified.blockedCode, KERNEL_CODES.HEADING_DEMOTE, 'H1 demotes to a paragraph')
+  }
+
+  // NEGATIVES — the name must not be borrowed.
+  {
+    // (a) The caret is NOT at the content start: the same structural step from
+    //     anywhere else is a block-type conversion the command did not make.
+    const state = EditorState.create({ doc: doc(h(2, '标题'), p(text('后段'))) })
+    const inside = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 2)))
+    const tr = demote(inside, 0, { type: schema.nodes.heading, attrs: { level: 1, id: '' } })
+    assert.equal(classifyTransactions([tr], inside).blockedCode, KERNEL_CODES.INPUT_TYPE,
+      'a mid-heading caret keeps the generic code')
+  }
+  {
+    // (b) PROMOTION (H1 -> H2) is not this gesture; only a demotion by exactly
+    //     one level, or H1 -> paragraph, is.
+    const state = EditorState.create({ doc: doc(h(1, '标题'), p(text('后段'))) })
+    const at = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 1)))
+    const tr = demote(at, 0, { type: schema.nodes.heading, attrs: { level: 2, id: '' } })
+    assert.equal(classifyTransactions([tr], at).blockedCode, KERNEL_CODES.INPUT_TYPE,
+      'a promotion keeps the generic code')
+  }
+  {
+    // (c) An H2 turning straight into a PARAGRAPH skips the level ladder — not
+    //     what `downgradeHeadingCommand` does, so not what this name describes.
+    const state = EditorState.create({ doc: doc(h(2, '标题'), p(text('后段'))) })
+    const at = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 1)))
+    const tr = demote(at, 0, { type: schema.nodes.paragraph, attrs: null })
+    assert.equal(classifyTransactions([tr], at).blockedCode, KERNEL_CODES.INPUT_TYPE,
+      'H2 straight to paragraph keeps the generic code')
+  }
+  {
+    // (d) An ordinary unclassifiable batch still gets the generic code — AND a
+    //     shape description, which is the half that outlives this one refusal.
+    const state = EditorState.create({ doc: doc(p(text('甲'))) })
+    const tr = state.tr.setNodeMarkup(0, schema.nodes.heading, { level: 1, id: '' })
+    const classified = classifyTransactions([tr], state)
+    assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+    assert.ok((classified.blockedShape || '').length > 0,
+      'every unclassified refusal describes its own transaction')
+  }
+  {
+    // (e) A classifiable batch is untouched: no shape, no rename, still
+    //     plain-text. The naming call runs only after every extractor failed.
+    const state = EditorState.create({ doc: doc(p(text('甲'))) })
+    const classified = classifyTransactions([state.tr.insertText('乙', 2)], state)
+    assert.equal(classified.kind, 'plain-text')
+    assert.equal(classified.blockedShape, undefined)
+  }
+}
+
+console.log('PASS kernel gateway (heading demote: Delete/Backspace at a heading content start is named, not anonymous; promotions, mid-block carets and level skips keep the generic code, and every unclassified refusal now describes its transaction)')

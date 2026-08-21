@@ -466,6 +466,70 @@ async function run() {
     )
 
     // =====================================================================
+    // 5b) Delete AND Backspace at a heading's CONTENT START: the named
+    //     refusal (2026-08-21). Neither key deletes anything there —
+    //     @milkdown/preset-commonmark binds `DowngradeHeading` to both at
+    //     `parentOffset === 0`, so ProseMirror emits a structural
+    //     ReplaceAroundStep that the kernel cannot write bytes for. Until
+    //     2026-08-21 the user got the anonymous "not supported yet" toast on
+    //     a gesture they read as "delete the character in front of me"; the
+    //     toast now names the gesture and its exits, and the diagnostic
+    //     records the transaction shape so the NEXT one needs no instrumented
+    //     build. Both keys are asserted because the 2026-08-19 diagnosis
+    //     recorded Backspace as working here — measured 2026-08-21, it is not.
+    // =====================================================================
+    {
+      const before = await readSource(evaluate, 'before the heading-demote probe')
+      await evaluate(`(() => {
+        window.__hmHeadingToasts = []
+        window.addEventListener('hm:toast', (e) => window.__hmHeadingToasts.push(e.detail?.msg ?? String(e.detail)))
+        return 1
+      })()`)
+      // The TOAST is rate-limited per code (1.5s), so it is asserted once per
+      // key with the window waited out — otherwise the second key would
+      // "pass" on a toast the first one raised.
+      for (const key of ['Delete', 'Backspace']) {
+        await evaluate('window.__hmHeadingToasts = []; window.__hmKernelDiagnostics = []')
+        await sleep(1700)
+        await clickAt(evaluate, send, NBSP + NBSP + NB2 + '标题甲', 0)
+        await pressKey(send, { key, code: key })
+        await sleep(450)
+        assert.equal(await readSource(evaluate, `after ${key} at the heading start`), before,
+          `${key} at a heading's content start must write NOTHING`)
+        const raised = JSON.parse(await evaluate('JSON.stringify(window.__hmHeadingToasts || [])'))
+        assert.ok(raised.some((t) => /标题降级|demote heading/.test(t)),
+          `${key} must raise the NAMED heading-demote toast, got ${JSON.stringify(raised)}`)
+        assert.ok(raised.every((t) => !/暂未支持|Not supported yet/.test(t)),
+          `${key} must no longer fall back to the anonymous toast, got ${JSON.stringify(raised)}`)
+        // The diagnostic has no cooldown, so it carries both the code and the
+        // transaction shape for EVERY refusal — the record that made this
+        // diagnosis possible at all.
+        const diag = JSON.parse(await evaluate('JSON.stringify(window.__hmKernelDiagnostics || [])'))
+        const entry = diag.find((item) => item.type === 'unclassified-transaction')
+        assert.ok(entry, `${key} must record an unclassified-transaction diagnostic, got ${JSON.stringify(diag)}`)
+        assert.equal(entry.code, 'heading-demote-unsupported',
+          `${key} must be refused under the NAMED code`)
+        assert.ok(/ReplaceAroundStep/.test(entry.shape) && /structure/.test(entry.shape),
+          `${key} must record the transaction shape it could not classify, got ${JSON.stringify(entry)}`)
+      }
+      // The CONTROL: one character to the right, Backspace deletes normally —
+      // which is exactly the remedy the toast names, proven rather than
+      // advertised.
+      await clickAt(evaluate, send, NBSP + NBSP + NB2 + '标题甲', 1)
+      await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+      await sleep(450)
+      const afterRemedy = await readSource(evaluate, 'the named remedy')
+      assert.equal(afterRemedy, before.replace('# ' + NBSP + NBSP + NB2, '# ' + NBSP + NB2),
+        'the remedy the toast names must really remove that one character')
+      // Put it back so step 6's expectations are unchanged — one Space at the
+      // content start is exactly the one no-break space step 2 pinned.
+      await pressKey(send, { key: ' ', code: 'Space' })
+      await sleep(450)
+      assert.equal(await readSource(evaluate, 'restored'), before,
+        'the probe must leave the document exactly as it found it')
+    }
+
+    // =====================================================================
     // 6) Save, and prove the bytes reached the FILE.
     // =====================================================================
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'document never became dirty')

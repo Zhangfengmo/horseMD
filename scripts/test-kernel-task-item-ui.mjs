@@ -336,9 +336,53 @@ async function run() {
       `the seed must dissolve even after a save + focus round-trip (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
     assert.ok(!finalSource.includes(NBSP), 'no U+00A0 anywhere in the final source')
 
+    // ============================================================
+    // 3b) THE ADJACENT-LIST POSITION (2026-08-21). `/task` in the paragraph
+    //     directly BELOW an existing list used to refuse
+    //     `unsupported-structure`: a blank line makes a CommonMark list
+    //     LOOSE, it does not end it, so the written item is absorbed and the
+    //     structure-identical axes could not tell that from bytes meaning
+    //     something else. `provePredictedListMerge` now predicts the merge
+    //     and verifies it item by item, so the item joins the list above —
+    //     which is what the user asked for.
+    //
+    //     Merging UPWARD is the shape axis (a) could never reach: after the
+    //     write, NO root child starts at the insertion offset at all.
+    // ============================================================
+    await selectBlock(evaluate, send, '尾段落。')
+    await runTaskItem(evaluate, send)
+    await sleep(300)
+    const mergedItems = await taskItems(evaluate)
+    console.log('  [/task below a list] ->', JSON.stringify(mergedItems))
+    assert.deepEqual(mergedItems, [
+      { checked: false, label: '待办事项' },
+      { checked: false, label: '补充' },
+      { checked: false, label: NBSP }
+    ], 'the merged item is a real checkbox and the neighbour keeps its label')
+    assert.equal(await caretInTask(evaluate), true,
+      'the caret must land inside the merged item, not beside the list')
+    // The DOM proof that this really merged: the new checkbox and the one
+    // above it share ONE list element. Two adjacent lists would satisfy every
+    // byte assertion below and still be the wrong document.
+    assert.equal(await evaluate(`(() => {
+      const items = [...(${VISIBLE_EDITOR})?.querySelectorAll('.milkdown-list-item-block') || []]
+      const last = items[items.length - 1]
+      const prev = items[items.length - 2]
+      if (!last || !prev) return 'missing items'
+      const listOf = (n) => n.closest('ul, ol')
+      return listOf(last) && listOf(last) === listOf(prev) ? 'same-list' : 'different-lists'
+    })()`), 'same-list', 'the new item must join the list above, not start a second one')
+    await typeTextLikeUser(send, '合并项', { delayMs: delay })
+    await sleep(500)
+    const mergedExpected = finalExpected.replace('尾段落。', '- [ ] 合并项')
+    const mergedSource = await readSource(evaluate, 'merged label')
+    assert.equal(mergedSource, mergedExpected,
+      `the merged item's label must dissolve the seed like any other (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+    assert.ok(!mergedSource.includes(NBSP), 'no U+00A0 survives the merged item\'s label')
+
     await save(evaluate)
     const finalDisk = await readFile(file, 'utf8')
-    assert.equal(finalDisk, finalExpected, 'final disk bytes match the kernel-derived expectation exactly')
+    assert.equal(finalDisk, mergedExpected, 'final disk bytes match the kernel-derived expectation exactly')
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
 
@@ -351,18 +395,19 @@ async function run() {
     reopened = await launchBuiltElectron({ profileDir: join(root, 'profile-reopen'), port: port + 1, appArgs: [file] })
     await waitFor(async () => {
       const text = await mounted(reopened.evaluate)
-      return text && text.includes('待办事项') && text.includes('补充') ? text : null
+      return text && text.includes('待办事项') && text.includes('合并项') ? text : null
     }, 'reopened document did not mount')
     const reopenedItems = await taskItems(reopened.evaluate)
     console.log('  [cold reopen] ->', JSON.stringify(reopenedItems))
     assert.deepEqual(reopenedItems, [
       { checked: false, label: '待办事项' },
-      { checked: false, label: '补充' }
-    ], 'both tasks survive a cold reopen as REAL checkboxes with exact labels')
-    assert.equal(await readFile(file, 'utf8'), finalExpected, 'reopen must not rewrite the file')
+      { checked: false, label: '补充' },
+      { checked: false, label: '合并项' }
+    ], 'all three tasks survive a cold reopen as REAL checkboxes with exact labels')
+    assert.equal(await readFile(file, 'utf8'), mergedExpected, 'reopen must not rewrite the file')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on reopen')
 
-    console.log('PASS kernel-mode /task UI regression: the slash item creates a real checkbox with a typable caret, the seed dissolves under the label (immediately AND after an awkward-instant save), and both tasks survive a cold reopen')
+    console.log('PASS kernel-mode /task UI regression: the slash item creates a real checkbox with a typable caret, the seed dissolves under the label (immediately AND after an awkward-instant save), an item written next to an existing list JOINS it through the predicted-merge proof, and all three tasks survive a cold reopen')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await stopBuiltElectron(reopened, { removeProfile: true })

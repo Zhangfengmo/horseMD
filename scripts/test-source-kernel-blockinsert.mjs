@@ -859,12 +859,18 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   assert.equal(prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n\n', 5, 10, SEED.length), null,
     'a candidate of the wrong LENGTH is not a merge')
 
-  // THE ITEM ACCOUNT, on shapes the parser really produces (found by sweeping
-  // neighbour shapes, not invented): an INDENTED list below the query becomes
-  // a NESTED list inside the item we just wrote instead of a sibling of it.
-  // The bytes are an honest splice and the merged list's span is exactly the
-  // union — only the item COUNT betrays that the document was restructured,
-  // which is precisely what this half of the proof is for.
+  // A RESTRUCTURING THE PARSER REALLY PRODUCES (found by sweeping neighbour
+  // shapes, not invented): an INDENTED list below the query becomes a NESTED
+  // list inside the item we just wrote instead of a sibling of it. The bytes
+  // are an honest splice and the merged span is exactly the union, so this is
+  // the shape that proves the proof looks INSIDE the merge at all.
+  //
+  // Honest note on which guard fires: measured by mutation, the item account
+  // is not the only one here — our item having grown a child list also fails
+  // `taskItemAgrees`. The account's own justification is in list-merge.js's
+  // ADR (it is the only statement made about the NEIGHBOURS, which
+  // `outsideSignature` skips entirely); the premise below asserts its content
+  // — the count really is wrong — directly on real bytes.
   {
     const baseline = '- a\n\n/task\n\n  - b\n'
     const start = baseline.indexOf('/task')

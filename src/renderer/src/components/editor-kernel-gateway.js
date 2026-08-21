@@ -1188,9 +1188,149 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   if (trailingAtomTyping) return { kind: 'trailing-atom-typing', ...trailingAtomTyping }
 
   const steps = extractPlainTextSteps(trs, oldState)
-  if (!steps || !steps.length) return { kind: 'blocked', blockedCode: KERNEL_CODES.INPUT_TYPE }
+  if (!steps || !steps.length) {
+    // The refusal is unchanged; only its NAME improves when the shape is one
+    // we have since identified. Asked here, after every extractor has passed,
+    // so it can never steal a batch something else would have classified.
+    return {
+      kind: 'blocked',
+      blockedCode: extractHeadingDemotion(trs, oldState)
+        ? KERNEL_CODES.HEADING_DEMOTE
+        : KERNEL_CODES.INPUT_TYPE,
+      blockedShape: describeUnclassified(trs, oldState)
+    }
+  }
 
   return { kind: 'plain-text', steps }
+}
+
+// @milkdown/preset-commonmark's `DowngradeHeading`, whose keymap binds BOTH
+// `Delete` and `Backspace` (node_modules/@milkdown/preset-commonmark/lib/
+// index.js — `shortcuts: ['Delete', 'Backspace']`) and which fires only with
+// an empty selection at a heading's `parentOffset === 0`. It calls
+// `setBlockType(paragraph)` for an H1 and `setNodeMarkup(level - 1)`
+// otherwise, so ProseMirror emits ONE structural `ReplaceAroundStep` over the
+// heading's whole span and NO character is deleted.
+//
+// WHY THIS IS RECOGNIZED AT ALL, given the answer is still a refusal. The
+// 2026-08-19 write-path pass measured this position as refused, could not say
+// what the transaction was, and recorded the wrong cause ("extractPlainTextSteps
+// rejects the transaction Chromium produces… not a cheap fix" — Chromium
+// produces nothing here). A generic toast on a gesture the user reads as
+// "delete the character in front of me" is the defect; naming the gesture and
+// its two exits is the fix that fits until the marker rewrite has a byte
+// command of its own.
+//
+// It is a NAMING function, never a gate: the caller has already decided to
+// refuse, and no byte, view or map depends on the answer.
+function extractHeadingDemotion(trs, oldState) {
+  const changed = trs.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'ReplaceAroundStep') return null
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to)) return null
+  const doc = tr.docs?.[0] || oldState?.doc
+  if (!doc) return null
+  let heading
+  try {
+    heading = doc.resolve(step.from).nodeAfter
+  } catch {
+    return null
+  }
+  if (heading?.type?.name !== 'heading') return null
+  // The step must span exactly that heading — a wider range is some other
+  // structural edit that happens to start there.
+  if (step.to !== step.from + heading.nodeSize) return null
+  const slice = step.slice
+  if (!slice || slice.openStart !== 0 || slice.openEnd !== 0) return null
+  if (slice.content?.childCount !== 1) return null
+  const replacement = slice.content.child(0)
+  const level = heading.attrs?.level
+  if (!Number.isInteger(level)) return null
+  if (replacement.type?.name === 'paragraph') {
+    if (level !== 1) return null
+  } else if (replacement.type?.name === 'heading') {
+    if (replacement.attrs?.level !== level - 1) return null
+  } else {
+    return null
+  }
+  // …and the caret really was where that command requires it. Without this a
+  // block-type conversion issued from anywhere else would borrow the message.
+  const selection = oldState?.selection
+  if (!selection || !selection.empty) return null
+  const $from = selection.$from
+  if (!$from || $from.depth < 1 || $from.parentOffset !== 0) return null
+  try {
+    if ($from.before() !== step.from) return null
+  } catch {
+    return null
+  }
+  return { level, becomes: replacement.type.name }
+}
+
+// WHY A SHAPE STRING RIDES THE REFUSAL (2026-08-21)
+// -------------------------------------------------
+// `INPUT_TYPE` is the one refusal that says nothing about WHY. Every other
+// code names a fact ("this would restructure the document", "an empty task
+// has no spelling"); this one means "no extractor recognized the transaction",
+// and the transaction is exactly the thing the user cannot see. The cost of
+// that was measured: the 2026-08-19 write-path pass found forward-Delete at a
+// heading's content start refused here, could not say what PM had produced,
+// and closed the item as "identifying the step shape needs the app
+// instrumented to dump tr.steps" — a diagnosis deferred for want of six lines
+// of description that the refusal could have carried all along.
+//
+// So the shape travels with the refusal, into `window.__hmKernelDiagnostics`
+// where every kernel UI probe already reads. It is a DESCRIPTION, never an
+// input to a decision — nothing downstream branches on it, and it is built
+// only on the refusal path, so the hot typing path is untouched.
+function describeUnclassified(trs, oldState) {
+  try {
+    const parts = []
+    let before = oldState?.doc || null
+    for (const tr of trs) {
+      if (!tr || !tr.docChanged) continue
+      const steps = Array.isArray(tr.steps) ? tr.steps : []
+      if (!steps.length) {
+        parts.push('tr(no-steps)')
+        continue
+      }
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index]
+        const name = step?.constructor?.name || 'unknown'
+        const from = step?.from
+        const to = step?.to
+        const doc = tr.docs?.[index] || before
+        let where = ''
+        try {
+          if (doc && Number.isFinite(from)) {
+            const $from = doc.resolve(from)
+            const $to = Number.isFinite(to) ? doc.resolve(to) : $from
+            where = `@${$from.parent?.type?.name || '?'}` +
+              `:d${$from.depth}` +
+              (($from.sameParent && $from.sameParent($to)) ? '' : '/cross-parent') +
+              `:off${$from.parentOffset}`
+          }
+        } catch {
+          where = '@unresolvable'
+        }
+        const slice = step?.slice
+        const open = slice ? `open${slice.openStart}/${slice.openEnd}` : 'no-slice'
+        const sliceShape = slice?.content
+          ? [...Array(slice.content.childCount).keys()]
+            .map((i) => slice.content.child(i).type?.name).join('+') || 'empty'
+          : 'empty'
+        parts.push(`${name}[${from},${to}]${where} ${open} <${sliceShape}>` +
+          (step?.structure ? ' structure' : ''))
+      }
+      before = tr.doc || before
+    }
+    return parts.join(' | ') || 'no-changed-transaction'
+  } catch {
+    return 'undescribable'
+  }
 }
 
 // `bisectsLineEnding` (used by `commitPlainText`'s guard below — see its call

@@ -34,8 +34,25 @@ const unsupported = { ok: false, code: 'unsupported-structure' }
 // `offset` is any raw offset the caller believes sits inside the code block
 // (fence lines included) — re-derived via `index.blockAt`, same convention as
 // changeCodeLanguage. mdast `math` (`$$` blocks) is NOT `code` and is refused
-// here: its delimiters are not GFM fences and Crepe's preview-only rendering
-// keeps it outside this command's contract.
+// here.
+//
+// THE REASON, CORRECTED 2026-08-21 (named-refusal sweep). This comment used
+// to give two: that `$$` delimiters are not GFM fences, and that "Crepe's
+// preview-only rendering keeps it outside this command's contract". The
+// SECOND one has been false since 2026-08-18 — block math became editable
+// through the projection map that day, and `empty-code-insert.js` says so in
+// its own header — so half of this refusal's stated justification described
+// a world that no longer existed. It is deleted rather than softened; the
+// `/quote` precedent (refused for a whole plan cycle after its blocker was
+// gone, `123100f`) is what a stale justification costs.
+//
+// What actually still blocks it: every branch below is written on GFM fence
+// grammar — `FENCE_MARKER_RE` / `CLOSE_FENCE_RE` match backtick or tilde runs
+// and the closed-fence proof compares the two runs' character and length. A
+// `$$` pair has neither an info string nor a run length, so exiting one needs
+// its own delimiter proof, not a widened type test. That is a real piece of
+// work, not a missing insight, and it is recorded as such in
+// `named-refusals-report.md` rather than implied by a wrong sentence here.
 export function exitCodeBlock({ doc, index, offset }) {
   const rawOffset = Number(offset)
   const block = Number.isFinite(rawOffset) ? index?.blockAt?.(rawOffset) : null
