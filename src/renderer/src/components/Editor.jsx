@@ -2129,7 +2129,22 @@ export default function Editor({
             isDestroyed: () => destroyed,
             getEditable: () => !readOnlyRef.current,
             onLoadingChange,
-            onStructureChange
+            onStructureChange,
+            // Kernel mode: the chunked view is repaired to the WHOLE-document
+            // parse before attach (editor-kernel-mode.js
+            // `repairChunkedProjection`). It runs here — after the last chunk,
+            // still inside the loader's read-only window — because that is the
+            // only point at which the document is complete and no user edit
+            // can be lost. Attach itself stays in `finishInitial` below, so a
+            // chunked document reaches it having already been made equal to
+            // its own whole-document parse.
+            onChunksApplied: kernelController
+              ? () => kernelController.repairChunkedProjection({
+                // Same yield the chunk loop uses: setTimeout fires even when
+                // the window is occluded, requestIdleCallback does not.
+                yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0))
+              })
+              : null
           }).then(() => {
             if (rest.length) appending = false
             // Source preservation needs the serializer snapshot of the complete

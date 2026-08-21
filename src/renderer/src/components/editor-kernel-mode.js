@@ -61,7 +61,7 @@ import {
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
-import { diffReplaceRange, reconcileProjection } from './editor-kernel-reconciler.js'
+import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 
 // Bounded diagnostics ring buffer (<=100 entries). Shared by this module and
@@ -174,16 +174,48 @@ export function createKernelMode({
   //    block sequence while the PM doc keeps the old one. The map would flip
   //    between mappable and unmappable as the user types. That is an
   //    assumption about edit locality wearing a proof's clothes.
-  // So the plan's own fallback (c) is taken: attach is still ATTEMPTED (a
-  // large document whose two parses DO agree keeps working — that agreement is
-  // still checked block by block, not assumed), and when it fails on a
-  // chunk-loaded document the refusal names its cause instead of hiding.
+  // THAT ADR STANDS — the kernel still never learns what a chunk is.
+  //
+  // WHAT CHANGED (2026-08-21, option (b)): the chunked PM document is
+  // REPAIRED to its whole-document parse ONCE, at the end of the load, before
+  // attach is attempted. `repairChunkedProjection` below reparses
+  // `kernel.doc.text` with the editor's own parser — the same `safeParse` the
+  // hot path uses, so there is no second parse entry point — diffs the live
+  // document against it with `diffReplaceRegions`
+  // (editor-kernel-reconciler.js) and replaces only the regions that
+  // genuinely disagree. The split lists rejoin, the view becomes the
+  // whole-document parse, and the attach that follows runs the ORDINARY full
+  // pairing against it. Nothing about the ongoing edit path is weakened: the
+  // repair consults no chunk boundary, makes no locality assumption, and is
+  // over before the first keystroke.
+  //
+  // Attach is still ATTEMPTED and still decided by the map, never by the
+  // flag; what the repair changes is which document the map is asked about.
+  // Both remaining chunk-load refusals keep their own named message: a
+  // document whose whole-document reparse itself fails
+  // (`kernelMode.chunkRepairFailed`), and one that is still unmappable after
+  // a successful repair (`kernelMode.unmappableChunked`).
+  //
+  // `chunkRepair` records what the repair actually did, so the refusal below
+  // describes the measured situation rather than the document's length:
+  //   null                       — never attempted (not a chunked load)
+  //   { ok: true,  regions, … }  — the view IS the whole-document parse
+  //   { ok: false, failure, … }  — 'reparse' | 'diverged' | 'reconcile'
+  let chunkRepair = null
   const notifyUnmappable = () => {
+    if (chunkRepair && chunkRepair.ok === false) {
+      degradeReason = 'chunk-repair'
+      notify?.(tOr(
+        'kernelMode.chunkRepairFailed',
+        'This document had to be loaded in pieces and could not be reassembled for the source kernel; legacy editing stays active'
+      ))
+      return
+    }
     degradeReason = chunkedLoad ? 'chunked' : 'unmappable'
     notify?.(chunkedLoad
       ? tOr(
         'kernelMode.unmappableChunked',
-        'This document is too large to load in one piece, so the source kernel cannot pair it with the editor; legacy editing stays active'
+        'This document was loaded in pieces and reassembled, but the source kernel still could not pair it with the editor; legacy editing stays active'
       )
       : tOr(
         'kernelMode.unmappable',
@@ -585,6 +617,73 @@ export function createKernelMode({
     return bindMap(view.state.doc)
   }
 
+  // THE CHUNK-LOAD REPAIR (2026-08-21). Called by Editor.jsx once
+  // `appendChunks` has appended the LAST chunk and BEFORE it restores
+  // editability — i.e. inside the window the loader already holds the editor
+  // read-only, so there is no user edit for the repair to lose and no race to
+  // arbitrate. Attach then follows in `finishInitial`, in the same turn order
+  // as an unchunked document.
+  //
+  // Two yields (`yieldTurn`) break the work into three tasks — reparse,
+  // diff+dispatch, done — so a 400 KB document blocks the main thread for one
+  // parse at a time instead of one parse plus one map build back to back. The
+  // loader already yields between chunks for the same reason.
+  //
+  // FAIL-CLOSED, like everything else here: any step that cannot be completed
+  // records its reason in `chunkRepair` and leaves the view untouched (or, for
+  // a reconcile that threw, exactly as PM left it). The attach that follows
+  // then refuses with the matching named message. A repair is never
+  // half-believed: the post-reconcile `eq` check below is the proof that the
+  // live document IS the whole-document parse, and without it the attach
+  // would be pairing against a document nobody verified.
+  const repairChunkedProjection = async ({ yieldTurn } = {}) => {
+    if (disposed || attached || degraded) return false
+    if (!getView?.()) return false
+    const pause = typeof yieldTurn === 'function' ? yieldTurn : () => Promise.resolve()
+    const fail = (failure) => {
+      chunkRepair = { ok: false, failure, regions: 0 }
+      pushKernelDiagnostic({ type: 'chunk-repair-failed', reason: failure })
+      return false
+    }
+
+    const parsed = safeParse(kernel.doc.text)
+    if (!parsed) return fail('reparse')
+    await pause()
+    if (disposed) return false
+    const view = getView?.()
+    if (!view) return false
+
+    let regions = []
+    try {
+      regions = diffReplaceRegions(view.state.doc, parsed)
+    } catch {
+      return fail('reconcile')
+    }
+    if (regions.length) {
+      try {
+        reconcileProjectionRegions({ view, newDoc: parsed, regions, mapMeta: { chunkRepair: true } })
+      } catch {
+        return fail('reconcile')
+      }
+    }
+    await pause()
+    if (disposed) return false
+    const repaired = getView?.()?.state?.doc
+    if (!repaired || !repaired.eq(parsed)) return fail('diverged')
+
+    chunkRepair = { ok: true, failure: null, regions: regions.length }
+    pushKernelDiagnostic({
+      type: 'chunk-repair',
+      regions: regions.length,
+      // Structural metadata only — how much of the document the repair had to
+      // rewrite, never any of its content. This is the number the node-view
+      // identity budget is expressed in.
+      touched: regions.reduce((total, region) => total + (region.to - region.from), 0),
+      size: repaired.content.size
+    })
+    return true
+  }
+
   const attachAfterCreate = () => {
     if (disposed) return false
     const view = getView?.()
@@ -902,6 +1001,18 @@ export function createKernelMode({
         // (permanent for this revision, and the primary way a user meets a
         // degraded block — by typing in it); anywhere else it stays the
         // generic "not supported yet". See `notifyRefusal`.
+        // `INPUT_TYPE` refusals additionally record the transaction SHAPE the
+        // gateway could not classify (editor-kernel-gateway.js
+        // `describeUnclassified`). The toast is for the user; this line is for
+        // whoever has to find out which PM step Chromium produced — a question
+        // that cost the 2026-08-19 write-path pass an entire deferred item.
+        if (classified.blockedShape) {
+          pushKernelDiagnostic({
+            type: 'unclassified-transaction',
+            code: classified.blockedCode,
+            shape: classified.blockedShape
+          })
+        }
         notifyRefusal(classified.blockedCode, batchTargetPos(transactions, oldState))
         return { veto: true }
       case 'trailing-append':
@@ -3117,6 +3228,10 @@ export function createKernelMode({
     attachLegacyApi,
     refreshProjectionMap,
     attachAfterCreate,
+    // The chunked-load repair (see repairChunkedProjection): Editor.jsx awaits
+    // it at the end of `appendChunks`, before attach.
+    repairChunkedProjection,
+    getChunkRepair: () => (chunkRepair ? { ...chunkRepair } : null),
     isDegraded: () => degraded,
     // P6 Task 3: the observable-degradation state (see getKernelStatus).
     getKernelStatus,

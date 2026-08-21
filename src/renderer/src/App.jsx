@@ -626,6 +626,16 @@ export default function App() {
     const id = activeIdRef.current
     const tab = tabsRef.current.find((item) => item.id === id)
     if (!id || !isKernelEligibleTab(tab)) return
+    // A chunk-loading tab has only PART of its document in the editor, and
+    // the settle below serializes whatever is there — which would commit the
+    // truncated prefix as the tab's content and then remount onto it. The
+    // toggle waits for the load instead of racing it (measured 2026-08-21:
+    // toggling mid-load on a 200 KB file used to drop everything after the
+    // first chunk).
+    if (richLoadingIds.has(id)) {
+      fireToast(tRef.current('kernelMode.toggleDuringLoad'))
+      return
+    }
     const md = await getSettledMarkdownForTab(id)
     if (typeof md !== 'string') {
       fireToast(tRef.current('kernelMode.toggleFailed'), { sticky: true })
@@ -652,7 +662,7 @@ export default function App() {
     tabsRef.current = bump(tabsRef.current)
     setTabs((prev) => bump(prev))
     fireToast(tRef.current(turningOn ? 'kernelMode.toggleOn' : 'kernelMode.toggleOff'))
-  }, [activeIdRef, getSettledMarkdownForTab, isKernelEligibleTab, kernelModeIds, setTabs, tabsRef, tRef])
+  }, [activeIdRef, getSettledMarkdownForTab, isKernelEligibleTab, kernelModeIds, richLoadingIds, setTabs, tabsRef, tRef])
 
   // Source/rich view state and anchor restoration live in useSourceModeSwitch.
 

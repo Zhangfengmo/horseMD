@@ -58,8 +58,27 @@ export function splitMarkdown(md, target) {
 //   getEditable       — () => bool; keeps an external reading lock after loading
 //   onLoadingChange   — (bool) optional; outline shows a skeleton while streaming
 //   onStructureChange — () optional; host refreshes outline/scrollspy after load
-export async function appendChunks({ rest, view, parseMarkdown, isDestroyed, getEditable, onLoadingChange, onStructureChange }) {
-  if (!rest || !rest.length) return
+//   onChunksApplied   — optional async hook run after the LAST chunk lands and
+//                       BEFORE editability is restored. That window is the
+//                       only place a whole-document repair can run without
+//                       racing a user edit — the source kernel's chunk repair
+//                       (editor-kernel-mode.js `repairChunkedProjection`) is
+//                       its one caller. It is awaited inside the same
+//                       read-only span and its failure is contained here: a
+//                       throwing hook must not leave the editor read-only or
+//                       reject this promise (the caller's `.then` is what
+//                       finishes the load).
+export async function appendChunks({ rest, view, parseMarkdown, isDestroyed, getEditable, onLoadingChange, onStructureChange, onChunksApplied }) {
+  if (!rest || !rest.length) {
+    // Zero remaining chunks still means a chunked document (chunks[0] was the
+    // whole first chunk) — the hook owns the "the document is complete" edge,
+    // so it must fire here too or a document that happened to split into one
+    // chunk would silently skip the repair.
+    if (onChunksApplied && !isDestroyed?.()) {
+      try { await onChunksApplied() } catch { /* hook failures are the hook's to report */ }
+    }
+    return
+  }
   onLoadingChange?.(true) // outline shows a skeleton while the doc streams in
   const setEditable = (on) => {
     try { view.setProps({ editable: () => on }) } catch { /* view tearing down */ }
@@ -75,11 +94,22 @@ export async function appendChunks({ rest, view, parseMarkdown, isDestroyed, get
       // preparation and remark transform before returning a ProseMirror doc.
       try { parsed = parseMarkdown(chunkText) } catch { /* skip unparseable chunk */ }
       if (parsed && parsed.content && parsed.content.size > 0 && !isDestroyed()) {
-        view.dispatch(view.state.tr.insert(view.state.doc.content.size, parsed.content))
+        // `addToHistory: false`: appending a chunk is the LOAD, not an edit.
+        // Without it the first Ctrl-Z on a freshly opened huge document undid
+        // a 40 KB append — deleting most of the file from the view and, with
+        // it, any chance of the source kernel's chunk repair surviving undo.
+        const tr = view.state.tr.insert(view.state.doc.content.size, parsed.content)
+        tr.setMeta('addToHistory', false)
+        view.dispatch(tr)
       }
       // Yield to the event loop so paint/input happen between chunks (setTimeout
       // fires even when occluded; rAF/idle don't).
       await new Promise((r) => setTimeout(r, 0))
+    }
+    // The document is complete and the editor is still read-only — the one
+    // window a whole-document repair can own (see the parameter docs).
+    if (onChunksApplied && !isDestroyed()) {
+      try { await onChunksApplied() } catch { /* hook failures are the hook's to report */ }
     }
   } finally {
     setEditable(getEditable ? getEditable() : true)

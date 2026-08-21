@@ -100,6 +100,12 @@ export function readOnlyPairAt(blockPairs, pmPos, isTypable) {
   return best
 }
 
+const LEGACY_DETAIL_KEYS = {
+  chunked: 'kernelMode.unmappableChunked',
+  'chunk-repair': 'kernelMode.chunkRepairFailed',
+  unmappable: 'kernelMode.unmappable'
+}
+
 export function describeKernelStatus(status) {
   const state = status?.state
   if (state === 'legacy') {
@@ -108,10 +114,11 @@ export function describeKernelStatus(status) {
       indicator: true,
       labelKey: 'kernelStatus.legacy',
       // Reuses the exact message the fallback toast already showed, so the
-      // hover detail and the toast cannot drift apart.
-      detailKey: status?.reason === 'chunked'
-        ? 'kernelMode.unmappableChunked'
-        : 'kernelMode.unmappable',
+      // hover detail and the toast cannot drift apart. The three chunk-load
+      // reasons are distinct situations and each keeps its own string:
+      // 'chunk-repair' means the whole-document reassembly itself failed,
+      // 'chunked' means it succeeded and the pairing still refused.
+      detailKey: LEGACY_DETAIL_KEYS[status?.reason] || 'kernelMode.unmappable',
       count: 0
     }
   }

@@ -61,6 +61,157 @@ export function diffReplaceRange(oldDoc, newDoc) {
   return { from: start, to: endA, insertFrom: start, insertTo: endB }
 }
 
+// ===========================================================================
+// MULTI-REGION DIFF (the chunk-load repair, 2026-08-21)
+// ===========================================================================
+// `diffReplaceRange` above answers ONE range, because that is exactly right
+// for the hot path: a keystroke changes one place, so the first and the last
+// disagreement bracket that one place and nothing else.
+//
+// The chunked-load repair is the opposite shape. `appendChunks`
+// (editor-chunked-parse.js) parses each ~40 KB chunk SEPARATELY, so a
+// document that gets cut at N boundaries can disagree with its
+// whole-document parse at up to N SCATTERED places. `findDiffStart` /
+// `findDiffEnd` then bracket the FIRST and the LAST of them and the single
+// range swallows everything in between: measured on a 646 KB concatenation
+// of this repo's own docs/, the one-range answer is **90.8 % of the
+// document** (13 genuinely-differing regions, first at pos 53 848, last at
+// 602 570). Replacing 90 % of a 646 KB document means remounting ~90 % of
+// its node views — every CodeMirror, every image, every Mermaid diagram —
+// which is precisely the freeze the chunked loader exists to avoid.
+//
+// So the repair walks the two documents' TOP-LEVEL children and resyncs
+// after each disagreement, emitting one region per disagreement. Same
+// corpus: 13 regions, **7.8 %** touched. On the synthetic chunk-trap corpus
+// (a loose list straddling every chunk boundary — the canonical shape) it is
+// 2 regions and **0.14 %** at 400 KB.
+//
+// The resync is an expanding-radius search: for a total displacement `d`,
+// every split of `d` into (skip `da` old nodes, skip `db` new ones) is tried
+// in turn, and the first split whose nodes line up again wins — so the
+// smallest number of nodes that can explain the disagreement is the number
+// replaced. A single match is not enough to resync on (a document is full of
+// repeated paragraphs); the NEXT pair must line up too. Nothing is assumed
+// about WHERE the disagreements are: chunk boundaries are never consulted,
+// which is what keeps this a proof about two documents rather than a bet on
+// the loader's arithmetic (see the rejected-mirroring ADR in
+// editor-kernel-mode.js).
+function findResync(a, b, i, j, lookahead) {
+  for (let d = 1; d <= lookahead; d += 1) {
+    for (let da = 0; da <= d; da += 1) {
+      const db = d - da
+      const ia = i + da
+      const jb = j + db
+      if (ia > a.length || jb > b.length) continue
+      // Both sides exhausted together: the tail itself is the region.
+      if (ia === a.length && jb === b.length) return { da, db }
+      if (ia >= a.length || jb >= b.length) continue
+      if (!a[ia].eq(b[jb])) continue
+      // Confirm with the NEXT pair so a single repeated paragraph cannot
+      // fake a resync. Running off either end counts as confirmation.
+      const nextA = ia + 1
+      const nextB = jb + 1
+      if (nextA >= a.length || nextB >= b.length || a[nextA].eq(b[nextB])) return { da, db }
+    }
+  }
+  return null
+}
+
+// One disagreement, expressed as a replace range: `from`/`to` in OLD-document
+// coordinates, `insertFrom`/`insertTo` in NEW-document coordinates. When a
+// region is exactly one old node against one new node of IDENTICAL markup
+// (same type, attrs and marks — so the difference is purely interior), the
+// range is narrowed one level with `diffReplaceRange`, which is why a
+// 2 535-wide bullet list that gained one item costs ~7 positions and not
+// 2 535. Differing markup is NOT narrowed: attrs live on the node, and
+// replacing only its content would leave the old attrs in place.
+function regionFor(a, b, i, j, da, db, posA, posB, sizeA, sizeB) {
+  if (da === 1 && db === 1 && !a[i].isLeaf && a[i].sameMarkup(b[j])) {
+    const inner = diffReplaceRange(a[i], b[j])
+    if (inner) {
+      return {
+        from: posA + 1 + inner.from,
+        to: posA + 1 + inner.to,
+        insertFrom: posB + 1 + inner.insertFrom,
+        insertTo: posB + 1 + inner.insertTo,
+        nodesFrom: da,
+        nodesTo: db
+      }
+    }
+  }
+  return {
+    from: posA,
+    to: posA + sizeA,
+    insertFrom: posB,
+    insertTo: posB + sizeB,
+    nodesFrom: da,
+    nodesTo: db
+  }
+}
+
+// Disjoint, ascending replace regions turning `oldDoc` into `newDoc`.
+// Returns `[]` when the two documents are already equal — a genuine no-op the
+// caller can treat as "nothing to repair".
+export function diffReplaceRegions(oldDoc, newDoc, { lookahead = 400 } = {}) {
+  if (!oldDoc || !newDoc) return []
+  const a = []
+  oldDoc.forEach((node) => a.push(node))
+  const b = []
+  newDoc.forEach((node) => b.push(node))
+  const regions = []
+  let i = 0
+  let j = 0
+  let posA = 0
+  let posB = 0
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i].eq(b[j])) {
+      posA += a[i].nodeSize
+      posB += b[j].nodeSize
+      i += 1
+      j += 1
+      continue
+    }
+    // No resync inside the window: replace everything that is left. Coarse,
+    // but still CORRECT — and it is the branch that must never be silently
+    // mistaken for a minimal one, so callers get `nodesFrom`/`nodesTo` and
+    // can budget on them.
+    const sync = findResync(a, b, i, j, lookahead) || { da: a.length - i, db: b.length - j }
+    let sizeA = 0
+    for (let k = 0; k < sync.da; k += 1) sizeA += a[i + k].nodeSize
+    let sizeB = 0
+    for (let k = 0; k < sync.db; k += 1) sizeB += b[j + k].nodeSize
+    regions.push(regionFor(a, b, i, j, sync.da, sync.db, posA, posB, sizeA, sizeB))
+    posA += sizeA
+    posB += sizeB
+    i += sync.da
+    j += sync.db
+  }
+  return regions
+}
+
+// Apply `diffReplaceRegions`' answer to a live view in ONE transaction.
+//
+// Regions are applied BACK TO FRONT: every region's coordinates were computed
+// against the original document, and a replace at a higher position cannot
+// move a lower one, so no position mapping is needed (and none is done — a
+// mapped position would be a second, unproven derivation of the same range).
+//
+// Same two metas as `reconcileProjection`: `sourceProjection` so the gateway
+// never reads the repair as a user edit, and `addToHistory: false` so undo
+// after attach cannot step backwards into the load.
+export function reconcileProjectionRegions({ view, newDoc, regions, mapMeta = null }) {
+  if (!regions || !regions.length) return 0
+  const tr = view.state.tr
+  for (let k = regions.length - 1; k >= 0; k -= 1) {
+    const region = regions[k]
+    tr.replace(region.from, region.to, newDoc.slice(region.insertFrom, region.insertTo))
+  }
+  tr.setMeta('sourceProjection', mapMeta || true)
+  tr.setMeta('addToHistory', false)
+  view.dispatch(tr)
+  return regions.length
+}
+
 // reconcileProjection: applies the minimal-diff replace to a live view.
 // `view` only needs `.state` (a real EditorState, so `.tr`/`.doc` work) and
 // a `.dispatch(tr)` method — it is never required to be a real
