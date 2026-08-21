@@ -646,13 +646,23 @@ export function createKernelMode({
       return false
     }
 
+    // Wall-clock cost of the repair, excluding the yields — the one-time
+    // price this whole design is judged on, recorded where it actually
+    // happens instead of being inferred from a long-task trace that also
+    // contains the chunk parses. Structural metadata; no content.
+    let spent = 0
+    const clock = () => (globalThis.performance?.now?.() ?? Date.now())
+    let mark = clock()
+
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) return fail('reparse')
+    spent += clock() - mark
     await pause()
     if (disposed) return false
     const view = getView?.()
     if (!view) return false
 
+    mark = clock()
     let regions = []
     try {
       regions = diffReplaceRegions(view.state.doc, parsed)
@@ -666,12 +676,13 @@ export function createKernelMode({
         return fail('reconcile')
       }
     }
+    spent += clock() - mark
     await pause()
     if (disposed) return false
     const repaired = getView?.()?.state?.doc
     if (!repaired || !repaired.eq(parsed)) return fail('diverged')
 
-    chunkRepair = { ok: true, failure: null, regions: regions.length }
+    chunkRepair = { ok: true, failure: null, regions: regions.length, ms: Math.round(spent) }
     pushKernelDiagnostic({
       type: 'chunk-repair',
       regions: regions.length,
@@ -679,7 +690,8 @@ export function createKernelMode({
       // rewrite, never any of its content. This is the number the node-view
       // identity budget is expressed in.
       touched: regions.reduce((total, region) => total + (region.to - region.from), 0),
-      size: repaired.content.size
+      size: repaired.content.size,
+      ms: Math.round(spent)
     })
     return true
   }
@@ -687,6 +699,7 @@ export function createKernelMode({
   const attachAfterCreate = () => {
     if (disposed) return false
     const view = getView?.()
+    const startedAt = globalThis.performance?.now?.() ?? Date.now()
     const map = view ? buildProjectionMap(kernel.doc.text, view.state.doc) : null
     if (!map) {
       degraded = true
@@ -710,6 +723,18 @@ export function createKernelMode({
     }
     kernel.map = map
     attached = true
+    // The successful attach of a CHUNK-LOADED document is the only success
+    // this function reports, and it reports it for one reason: the one-time
+    // cost of the above-threshold path is a product claim, and a claim needs
+    // a measurement taken where the work happens. Emitted only for chunked
+    // loads, so no ordinary document gains a diagnostic it never had.
+    if (chunkedLoad) {
+      pushKernelDiagnostic({
+        type: 'chunk-attach',
+        ms: Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt),
+        blocks: map.blockPairs?.length ?? 0
+      })
+    }
     publishStatus()
     return true
   }

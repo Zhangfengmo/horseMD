@@ -636,7 +636,19 @@ export default function App() {
       fireToast(tRef.current('kernelMode.toggleDuringLoad'))
       return
     }
-    const md = await getSettledMarkdownForTab(id)
+    // A CLEAN tab has nothing to settle: `tab.content` is exactly the bytes
+    // the file was opened (or last saved) with, and no rich edit has been
+    // made that a serializer round trip could recover. Taking that shortcut
+    // is not an optimization — `getSettledMarkdownForTab` runs the verified
+    // flush, and a CHUNK-LOADED document fails it by construction (the
+    // chunked ProseMirror document is not what its own bytes reparse to), so
+    // for every document over CHUNK_THRESHOLD the toggle refused with
+    // `kernelMode.toggleFailed` and the kernel could not be reached at all.
+    // A dirty tab still goes through the flush: there the settled bytes are
+    // the only truthful answer, and a refusal there is a real one.
+    const md = isTabDirty(tab)
+      ? await getSettledMarkdownForTab(id)
+      : (tab.content ?? '')
     if (typeof md !== 'string') {
       fireToast(tRef.current('kernelMode.toggleFailed'), { sticky: true })
       return
@@ -648,10 +660,10 @@ export default function App() {
       else next.delete(id)
       return next
     })
-    // getSettledMarkdownForTab already committed `md` into tab.content via
-    // commitRichSnapshotToTab (unconditionally, on both a clean and a dirty
-    // tab). Setting `content: md` again here is a defensive no-op that keeps
-    // this remount self-contained even if that contract ever changes; the
+    // On the dirty path getSettledMarkdownForTab already committed `md` into
+    // tab.content via commitRichSnapshotToTab; on the clean path `md` IS
+    // tab.content. Setting it again here keeps this remount self-contained
+    // either way and is a no-op in both; the
     // reloadNonce bump is what actually forces EditorArea to remount the
     // editor (rich Crepe host AND any mounted source textarea share this key),
     // so the kernel — or, turning it off, the legacy pipeline — attaches to

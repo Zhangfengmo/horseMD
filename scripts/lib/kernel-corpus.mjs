@@ -47,6 +47,11 @@ function words(rnd, count, cjkRatio = 0.5) {
 }
 
 function paragraph(rnd, n) {
+  // Roughly one prose paragraph in six carries NO inline decoration at all.
+  // Real documents are full of them, and a corpus without them has no
+  // paragraph whose raw bytes ARE its rendered text — which is exactly the
+  // shape a UI test needs to click into and splice a byte expectation for.
+  if (rnd() < 0.18) return words(rnd, 10 + Math.floor(rnd() * 14))
   const pieces = [words(rnd, 6 + Math.floor(rnd() * 10))]
   const decorations = [
     () => `**${words(rnd, 2)}**`,
