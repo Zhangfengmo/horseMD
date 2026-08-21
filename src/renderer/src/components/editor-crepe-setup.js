@@ -189,11 +189,14 @@ const KERNEL_BLOCK_TYPE_ITEMS = Object.freeze(Object.fromEntries(
 // proven homes because the card itself is an atom.
 //
 // `text` joined last (2026-08-20): a fully-empty top-level paragraph has no
-// raw representation, so the route DELETES the query block (a proven suffix
-// removal, document end only) and the caret rides the trailing-placeholder
-// machinery — the trailing virtual pair, or a controller-vouched placeholder
-// when the remaining document ends in a paragraph/heading. Mid-document it
-// refuses with `text-needs-document-end`, whose message names the remedies.
+// raw representation, so the route DELETES the query block and the caret
+// rides the split-placeholder machinery — the trailing virtual pair, or a
+// controller-vouched placeholder. At the document end that is a proven suffix
+// removal; MID-DOCUMENT (2026-08-21) it is the minimal deletion of the block's
+// own bytes, leaving exactly the blank-line gap structural Enter already
+// produces there, proven twice over (nothing around it merges, and a character
+// typed at the anchor becomes a real paragraph). The only refusal left is
+// positional: `text-neighbors-would-merge`.
 const KERNEL_INSERT_ITEMS = Object.freeze({
   table: 'table',
   code: 'code',

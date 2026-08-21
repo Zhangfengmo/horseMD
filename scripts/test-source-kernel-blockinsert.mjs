@@ -562,18 +562,25 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 
 // ---------------------------------------------------------------------------
 // 12. `/text` (2026-08-20) — revert-to-paragraph, the one target that writes
-//     NO block. The edit is a proven suffix deletion (query block + every
-//     trailing byte), the caret anchors at the new document end, and
-//     `docEndPlaceholder` tells the controller which doc-end home serves it:
-//     false -> the trailing virtual pair (requireMap proves it pre-commit),
-//     true -> a vouched placeholder (the kept bytes provably end in a blank
-//     line, so the voucher's prefix-less commit is byte-correct).
+//     NO block. The edit is a proven deletion and the caret rides the
+//     split-placeholder machinery; WHICH home serves it depends on where the
+//     query block stands:
+//     * document end, remaining doc ends in a list/table/fence/atom (or is
+//       empty) -> the trailing virtual pair (requireMap proves it pre-commit),
+//       `docEndPlaceholder: false`;
+//     * document end, remaining doc ends in a paragraph/heading -> a vouched
+//       placeholder at the document end (the kept bytes provably end in a
+//       blank line, so the voucher's prefix-less commit is byte-correct),
+//       `docEndPlaceholder: true`;
+//     * MID-DOCUMENT (2026-08-21) -> a vouched placeholder in the blank-line
+//       gap the deletion leaves, `midPlaceholder: true`. See section 12b.
 // ---------------------------------------------------------------------------
 {
   const revert = (text, offset, expected, expectPlaceholder, label) => {
     const { c, r } = run(text, offset, 'text')
     assert.equal(r.ok, true, `${label}: ${r.code}`)
     assert.equal(r.docEndPlaceholder, expectPlaceholder, `${label}: placeholder flag`)
+    assert.equal(r.midPlaceholder, undefined, `${label}: doc-end is not the mid-document route`)
     const out = apply(c.doc, r)
     assert.equal(out, expected, label)
     assert.deepEqual(r.transaction.selection, { anchor: expected.length, head: expected.length },
@@ -605,27 +612,152 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   }
   revert('- 甲\r\n\r\n/text\r\n', 12, '- 甲\r\n\r\n', false, 'CRLF after a list')
 
-  // (i) MID-DOCUMENT: the named refusal — the emptied paragraph would be the
-  // split-placeholder gap, so nothing is written and the code carries the
-  // message that names the remedies.
-  {
-    const { c, r } = run('/text\n\n乙\n', 5, 'text')
-    assert.equal(r.ok, false, 'mid-document /text must refuse')
-    assert.equal(r.code, 'text-needs-document-end', 'mid-document /text carries the named code')
-    assert.equal(r.transaction, undefined)
-    assert.equal(c.doc.text, '/text\n\n乙\n', 'nothing written')
-  }
-  {
-    const { r } = run('甲\n\n/text\n\n乙\n', 8, 'text')
-    assert.equal(r.ok, false)
-    assert.equal(r.code, 'text-needs-document-end')
-  }
-  // (j) The generic guards hold for this target too.
+  // (i) The generic guards hold for this target too.
   refuses('text inside a list item', '- /text\n', 7, 'text')
   refuses('text inside a blockquote', '> /text\n', 7, 'text')
   refuses('text with an info string', '/text\n', 5, 'text', 'x')
   refuses('text mid-block caret', '/text tail\n', 5, 'text')
   refuses('text on a setext heading', '/text\n===\n', 5, 'text')
+}
+
+// ---------------------------------------------------------------------------
+// 12b. `/text` MID-DOCUMENT (2026-08-21) — the shape that used to refuse with
+//      `text-needs-document-end`. The edit is the MINIMAL deletion of the
+//      query block's own bytes, leaving byte-for-byte the same blank-line gap
+//      structural Enter already produces mid-document, and the caret anchors
+//      at the deleted block's own start.
+//
+//      Two proofs, tested for load-bearingness in BOTH directions below:
+//      the deletion proof (nothing around it may change meaning — the list
+//      merge is its case) and the convergence proof (a character typed at the
+//      anchor must become its own paragraph there — the paragraph-then-heading
+//      lazy-continuation shape is its case, and that one passes the deletion
+//      proof, so neither check subsumes the other).
+// ---------------------------------------------------------------------------
+{
+  // Every expectation is DERIVED: the bytes are the input minus the query
+  // block's own span, and the convergence property is re-measured on the
+  // committed bytes rather than restated.
+  const revertMid = (text, offset, expected, label) => {
+    const { c, r } = run(text, offset, 'text')
+    assert.equal(r.ok, true, `${label}: ${r.code}`)
+    assert.equal(r.midPlaceholder, true, `${label}: takes the mid-document route`)
+    assert.equal(r.docEndPlaceholder, undefined, `${label}: not the doc-end route`)
+    assert.equal(r.transaction.edits.length, 1, `${label}: exactly ONE edit (atomic)`)
+    const { from, to, insert } = r.transaction.edits[0]
+    assert.equal(insert, '', `${label}: /text writes no bytes`)
+    assert.equal(text.slice(0, from) + text.slice(to), expected,
+      `${label}: the expectation IS the input minus the query block's span`)
+    const out = apply(c.doc, r)
+    assert.equal(out, expected, label)
+    assert.deepEqual(r.transaction.selection, { anchor: from, head: from },
+      `${label}: the caret anchors at the deleted block's own start`)
+
+    // The convergence property, restated on the COMMITTED bytes: a character
+    // typed at the anchor becomes its own root-level paragraph exactly there,
+    // and the rest of the document is untouched.
+    const typed = out.slice(0, from) + 'Z' + out.slice(from)
+    const tree = parseKernelMarkdown(typed)
+    const landed = tree.children.find((child) => child.position.start.offset === from)
+    assert.ok(landed, `${label}: a typed character must start a block at the anchor`)
+    assert.equal(landed.type, 'paragraph', `${label}: and that block is a paragraph`)
+    assert.equal(landed.position.end.offset, from + 1,
+      `${label}: spanning exactly the typed character (nothing absorbed)`)
+    const withoutTyped = shapeOf(typed)
+    withoutTyped.splice(tree.children.indexOf(landed), 1)
+    assert.deepEqual(withoutTyped, shapeOf(out),
+      `${label}: typing adds a paragraph and changes nothing else`)
+    return out
+  }
+
+  // (a) Between two paragraphs — the generic case the user reported.
+  assert.deepEqual(
+    shapeOf(revertMid('甲\n\n/text\n\n乙\n', 8, '甲\n\n\n\n乙\n', 'between two paragraphs')),
+    ['paragraph', 'paragraph'])
+  // The bytes are EXACTLY what Enter at the end of `甲` writes in `甲\n\n乙\n`
+  // — the same gap, the same session, stated as an equality rather than a
+  // claim in a comment.
+  assert.equal('甲' + '\n\n' + '\n\n乙\n', '甲\n\n\n\n乙\n')
+
+  // (b) After a heading.
+  revertMid('# 题\n\n/text\n\n乙\n', 10, '# 题\n\n\n\n乙\n', 'after a heading')
+  // (c) The query block IS a heading — "/text" means "this block becomes
+  // plain text", and empty text is no block at all, so its marker goes too.
+  revertMid('甲\n\n## /text\n\n乙\n', 11, '甲\n\n\n\n乙\n', 'a heading query block')
+  // (d) Between a list and a paragraph.
+  assert.deepEqual(
+    shapeOf(revertMid('- 甲\n\n/text\n\n乙\n', 10, '- 甲\n\n\n\n乙\n', 'after a list')),
+    ['list', 'paragraph'])
+  // (e) The FIRST block of the document.
+  revertMid('/text\n\n乙\n', 5, '\n\n乙\n', 'first block')
+  // (f) Around a fence.
+  revertMid('甲\n\n/text\n\n```js\nx\n```\n', 8, '甲\n\n\n\n```js\nx\n```\n', 'before a fence')
+  revertMid('```js\nx\n```\n\n/text\n\n乙\n', 18, '```js\nx\n```\n\n\n\n乙\n', 'after a fence')
+  // (g) Around a table.
+  revertMid('甲\n\n/text\n\n| a | b |\n| - | - |\n', 8, '甲\n\n\n\n| a | b |\n| - | - |\n',
+    'before a table')
+  revertMid('| a | b |\n| - | - |\n\n/text\n\n乙\n', 26, '| a | b |\n| - | - |\n\n\n\n乙\n',
+    'after a table')
+  // (h) Around a thematic break.
+  revertMid('甲\n\n/text\n\n---\n\n乙\n', 8, '甲\n\n\n\n---\n\n乙\n', 'before a divider')
+  revertMid('---\n\n/text\n\n乙\n', 10, '---\n\n\n\n乙\n', 'after a divider')
+  // (i) Around block math.
+  revertMid('甲\n\n/text\n\n$$\nx\n$$\n', 8, '甲\n\n\n\n$$\nx\n$$\n', 'before block math')
+  revertMid('$$\nx\n$$\n\n/text\n\n乙\n', 14, '$$\nx\n$$\n\n\n\n乙\n', 'after block math')
+  // (j) CRLF: the deletion never touches a line ending, so no lone LF can
+  // appear — and the anchor still lands in the gap.
+  {
+    const out = revertMid('甲\r\n\r\n/text\r\n\r\n乙\r\n', 10, '甲\r\n\r\n\r\n\r\n乙\r\n', 'CRLF mid-document')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+  }
+
+  // (k) THE DELETION PROOF IS LOAD-BEARING: two lists with the query block
+  // between them close over the gap into ONE loose list (CommonMark 0.28
+  // dropped the two-blank-lines rule), which is a restructuring of the user's
+  // document — refused, nothing written. Note the CONVERGENCE proof would
+  // pass here (`- a\n\nx\n\n- b\n` is list/paragraph/list), so this case is
+  // exactly what the deletion proof exists for.
+  {
+    const merged = parseKernelMarkdown('- a\n\n\n\n- b\n')
+    assert.deepEqual(merged.children.map((node) => node.type), ['list'],
+      'the premise: the two lists really do merge when the gap block goes')
+    const { c, r } = run('- a\n\n/text\n\n- b\n', 10, 'text')
+    assert.equal(r.ok, false, 'a merging deletion must refuse')
+    assert.equal(r.code, 'text-neighbors-would-merge', 'and carry the named code')
+    assert.equal(r.transaction, undefined)
+    assert.equal(c.doc.text, '- a\n\n/text\n\n- b\n', 'nothing written')
+  }
+  {
+    const { r } = run('1. a\n\n/text\n\n2. b\n', 11, 'text')
+    assert.equal(r.ok, false, 'ordered lists merge the same way')
+    assert.equal(r.code, 'text-neighbors-would-merge')
+  }
+
+  // (l) THE CONVERGENCE PROOF IS LOAD-BEARING: an ATX heading may interrupt a
+  // paragraph, so `甲\n# /text` deletes cleanly (the deletion proof passes —
+  // asserted here, not assumed) yet leaves the anchor one line ending below
+  // `甲`, where a typed character becomes a LAZY CONTINUATION of it instead
+  // of a new paragraph. Refused.
+  {
+    const text = '甲\n# /text\n\n乙\n'
+    assert.deepEqual(parseKernelMarkdown(text).children.map((node) => node.type),
+      ['paragraph', 'heading', 'paragraph'], 'the premise: the heading interrupts the paragraph')
+    assert.deepEqual(parseKernelMarkdown('甲\n\n\n乙\n').children.map((node) => node.type),
+      ['paragraph', 'paragraph'], 'the premise: the DELETION alone is structurally clean')
+    assert.deepEqual(parseKernelMarkdown('甲\nZ\n\n乙\n').children.map((node) => node.type),
+      ['paragraph', 'paragraph'], 'the premise: but a typed character joins the paragraph above')
+    const { c, r } = run(text, 9, 'text')
+    assert.equal(r.ok, false, 'an anchor that cannot host a paragraph must refuse')
+    assert.equal(r.code, 'text-neighbors-would-merge')
+    assert.equal(c.doc.text, text, 'nothing written')
+  }
+
+  // (m) The generic container guards hold mid-document too: a block nested in
+  // a blockquote or a list item is never a ROOT child, so the command refuses
+  // before either proof runs — the same guard every other slash-insert target
+  // takes (`unsupported-structure`).
+  refuses('text mid-document inside a blockquote', '甲\n\n> /text\n\n乙\n', 10, 'text')
+  refuses('text mid-document inside a list item', '甲\n\n- /text\n\n乙\n', 10, 'text')
 }
 
 console.log('ok - source kernel block-insert')

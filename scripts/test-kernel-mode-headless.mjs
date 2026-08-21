@@ -362,6 +362,18 @@ const FIXTURE_DOCS = {
   '- 甲\n\n/text\n': () => doc(bl(li(null, p(text('甲')))), p(text('/text'))),
   '- 甲\n\n': () => doc(bl(li(null, p(text('甲')))), p()),
   '/text\n\n乙\n': () => doc(p(text('/text')), p(text('乙'))),
+  // Case I8b (2026-08-21): `/text` MID-DOCUMENT. The deletion leaves a
+  // blank-line RUN that CommonMark collapses, so the post-strip parses hold
+  // no node for it at all — the placeholder is view-only until the follow-up
+  // keystroke makes it real.
+  '甲\n\n/text\n\n乙\n': () => doc(p(text('甲')), p(text('/text')), p(text('乙'))),
+  '甲\n\n\n\n乙\n': () => doc(p(text('甲')), p(text('乙'))),
+  '甲\n\nX\n\n乙\n': () => doc(p(text('甲')), p(text('X')), p(text('乙'))),
+  '\n\n乙\n': () => doc(p(text('乙'))),
+  'X\n\n乙\n': () => doc(p(text('X')), p(text('乙'))),
+  'X甲\n\n\n\n乙\n': () => doc(p(text('X甲')), p(text('乙'))),
+  '- a\n\n/text\n\n- b\n': () =>
+    doc(bl(li(null, p(text('a')))), p(text('/text')), bl(li(null, p(text('b')))), p()),
   // P5-2.5 fixtures (Case 17): a document with ONE unprovable block. It used
   // to be `==高亮==` — P5-3 taught the kernel that shape (it is editable now,
   // see Case M4), so the pin moved to the RED highlight, which is exactly the
@@ -3793,21 +3805,100 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '- 甲\n\nX',
     'typing commits after the kept blank line — a new paragraph, never a lazy continuation')
 }
+// Case I8b (2026-08-21): `/text` MID-DOCUMENT — the shape Case I8 (c) used to
+// pin as a refusal (`text-needs-document-end`). It now takes the SAME vouched
+// split-placeholder session, one position further in: the deletion leaves the
+// blank-line gap Enter already produces there, the placeholder is materialized
+// at the deleted block's own top-level index, and the follow-up keystroke —
+// the real assertion — commits at the voucher's raw anchor.
 {
-  // (c) MID-DOCUMENT: the named refusal — nothing committed, view and map
-  // untouched, and the toast carries the code whose message names the
-  // remedies.
+  // (a) Between two paragraphs: the user-reported shape.
+  const h = makeHarness('甲\n\n/text\n\n乙\n',
+    doc(p(text('甲')), p(text('/text')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 9)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n\n\n乙\n',
+    'only the query block\'s own bytes go — the separators around it stay')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(), p(text('乙')))),
+    'the placeholder sits exactly where the query block stood, not at the end')
+  assert.equal(h.view.state.selection.head, 4, 'the caret lands INSIDE the placeholder')
+  assert.ok(h.controller.kernel.map, 'the vouched map is live')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 4))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing in the placeholder is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '甲\n\nX\n\n乙\n',
+    'the keystroke commits at the voucher\'s raw anchor — a real paragraph between the two')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲')), p(text('X')), p(text('乙')))))
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n\n\n乙\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n/text\n\n乙\n', 'the original query bytes come back')
+}
+{
+  // (b) The FIRST block of the document — no preceding block at all, so the
+  // placeholder's home is top-level index 0.
   const h = makeHarness('/text\n\n乙\n', doc(p(text('/text')), p(text('乙'))))
   assert.equal(h.controller.attachAfterCreate(), true)
   h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 6)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '\n\n乙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(), p(text('乙')))))
+  assert.equal(h.view.state.selection.head, 1)
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 1))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, 'X\n\n乙\n',
+    'typing in the first-block placeholder commits at raw 0')
+}
+{
+  // (c) The refusal that REPLACED the positional one: two lists would close
+  // over the gap into one, so nothing is committed, the view and map are
+  // untouched, and the toast carries the code whose message names the remedy.
+  const h = makeHarness('- a\n\n/text\n\n- b\n',
+    doc(bl(li(null, p(text('a')))), p(text('/text')), bl(li(null, p(text('b')))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 13)))
   const before = h.notifications.length
   assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
-  assert.equal(h.controller.kernel.doc.text, '/text\n\n乙\n', 'kernel bytes untouched')
-  assert.ok(h.view.state.doc.eq(doc(p(text('/text')), p(text('乙')))), 'view untouched')
+  assert.equal(h.controller.kernel.doc.text, '- a\n\n/text\n\n- b\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(
+    doc(bl(li(null, p(text('a')))), p(text('/text')), bl(li(null, p(text('b')))), p())),
+  'view untouched')
   assert.ok(h.controller.kernel.map, 'map untouched')
   assert.ok(h.notifications.length > before, 'the refusal notifies')
-  assert.ok(h.notifications.at(-1).includes('text-needs-document-end'),
-    'the refusal carries its OWN code so the message can name the remedies')
+  assert.ok(h.notifications.at(-1).includes('text-neighbors-would-merge'),
+    'the refusal carries its OWN code so the message can name the remedy')
+}
+// Case I8c (2026-08-21): SESSION PARITY. `/text`'s mid-document placeholder is
+// not a second placeholder species — it is the same vouched session Enter's
+// degenerate split opens, so every escape from it must behave identically.
+// The two halves below are Case 13's `virtualBlockAt` probe and Case 14's
+// "type elsewhere" probe, re-run verbatim against a /text-created placeholder.
+{
+  const h = makeHarness('甲\n\n/text\n\n乙\n',
+    doc(p(text('甲')), p(text('/text')), p(text('乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 9)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'text' }, h.view), true)
+  // Same shape Case 13 asserts for Enter's placeholder: a virtual pair whose
+  // insert carries NO separator prefix (the separators are already bytes).
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(4), { raw: 3, prefix: '' })
+  // Save DURING the session writes the collapsed bytes — the placeholder is a
+  // view fact, never a byte one, exactly as after Enter (`甲乙\n\n\n`).
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n\n\n乙\n')
+  assert.ok(stubParse(h.controller.kernel.doc.text).eq(doc(p(text('甲')), p(text('乙')))),
+    'a file saved mid-session reopens WITHOUT the placeholder — nothing is faked')
+  // Case 14's escape: a commit ELSEWHERE ends the session, the orphan is
+  // reconciled away, and the map recovers instead of staying null.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 1))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, 'X甲\n\n\n\n乙\n', 'the elsewhere edit committed normally')
+  assert.ok(h.view.state.doc.eq(doc(p(text('X甲')), p(text('乙')))),
+    'the orphaned placeholder was reconciled away')
+  assert.ok(h.controller.kernel.map, 'map recovered after the orphan cleanup')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(1), 0)
 }
 {
   // (d) Mid-document before a LIST (divider): the named refusal — nothing

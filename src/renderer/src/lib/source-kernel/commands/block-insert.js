@@ -128,11 +128,19 @@ import { NO_BREAK_SPACE } from './trailing-whitespace.js'
 // plain text line below the insertion point first.
 const NO_CARET_HOME = 'no-caret-home-after-insert'
 
-// `/text` invoked mid-document: the emptied paragraph would be the known
-// split-placeholder gap, so the command refuses with its own code and the
-// message names both remedies (delete the /query text to keep the block, or
-// use /text on the document's last block).
-const TEXT_MID_DOCUMENT = 'text-needs-document-end'
+// `/text` whose block cannot be emptied WHERE IT STANDS: deleting it would
+// change the blocks around it (two lists closing over the gap into one), or a
+// character typed in the gap it leaves would join a neighbour instead of
+// becoming its own paragraph. Both are the same fact to the user — "the empty
+// line here has no source bytes that mean an empty line" — so they share one
+// code whose message names the remedy.
+const TEXT_NEIGHBORS_MERGE = 'text-neighbors-would-merge'
+
+// The character the mid-document proof TYPES into the gap to show the caret's
+// home converges (see revertMidDocument). An ordinary letter on purpose: it
+// carries no CommonMark meaning of its own, so what the proof measures is the
+// POSITION, never the character.
+const PROBE_CHAR = 'x'
 
 // Target -> what this command may build for it. `language: true` means the
 // target accepts an (optional) info string; every other target refuses one
@@ -160,9 +168,10 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   // Revert-to-paragraph (2026-08-20): the ONE target that writes no block at
   // all — a fully-empty top-level paragraph has no raw representation
   // (CommonMark: a blank line is a block separator, not a node), so "/text"
-  // means DELETE the query block and hand the caret to the document-end
-  // placeholder machinery. Doc-end only; mid-document refuses with its own
-  // code (`text-needs-document-end`). See revertToTextFromQuery below.
+  // means DELETE the query block and hand the caret to the split-placeholder
+  // machinery. Works ANYWHERE since 2026-08-21 (mid-document included); the
+  // only refusals left are positional and proven, not a stopgap. See
+  // revertToTextFromQuery below.
   text: Object.freeze({ language: false })
 })
 
@@ -324,9 +333,34 @@ function caretAfterInsert(candidate, candidateTree, inserted) {
 // `/text` (2026-08-20) — revert the query block to a plain paragraph. There
 // is nothing to WRITE: a fully-empty top-level paragraph has no byte
 // spelling (CommonMark: a blank line is a block separator, not a node), so
-// the honest edit DELETES the query block's bytes plus every byte after it —
-// the surplus line the strip would otherwise leave — and the caret rides the
-// document-end placeholder machinery the trailing-placeholder work landed:
+// the honest edit DELETES the query block's bytes and the caret rides the
+// SPLIT-PLACEHOLDER machinery — a view-only empty paragraph the controller
+// vouches for at a pmPos, which converges to real bytes the moment content
+// lands in it. Two positions, two homes, one dispatcher:
+//   * the query is the document's LAST root child -> revertAtDocEnd;
+//   * anything else -> revertMidDocument (2026-08-21).
+function revertToTextFromQuery({ doc, start, end }) {
+  const text = doc.text
+  let baselineTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const children = baselineTree.children || []
+  const queryIndex = children.findIndex((child) => child.position?.start?.offset === start)
+  if (queryIndex < 0) return { ok: false, code: 'unsupported-structure' }
+  if (children[queryIndex].position?.end?.offset !== end) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  return queryIndex === children.length - 1
+    ? revertAtDocEnd({ doc, text, baselineTree, start, end })
+    : revertMidDocument({ doc, text, baselineTree, start, end })
+}
+
+// `/text` on the document's LAST block. The edit deletes the query block plus
+// every byte after it — the surplus line the strip would otherwise leave —
+// and the caret takes one of the two doc-end homes:
 //   * candidate's last block is NOT a paragraph/heading (list/table/fence/
 //     atom…, or the candidate is empty): safeParse's trailing paragraph
 //     exists by plugin-trailing's own condition, the map pairs it virtual at
@@ -343,27 +377,15 @@ function caretAfterInsert(candidate, candidateTree, inserted) {
 // THE PROOF: the deletion is a pure suffix removal, so every remaining
 // node's span is byte-identical — the candidate's full signature must equal
 // the baseline's signature with the query block's region excluded, or the
-// command refuses. Mid-document (the query is not the last root child)
-// refuses with its own code: the emptied paragraph would be the known
-// split-placeholder gap, and the message names the remedies instead of
-// guessing.
-function revertToTextFromQuery({ doc, start, end }) {
-  const text = doc.text
+// command refuses.
+function revertAtDocEnd({ doc, text, baselineTree, start, end }) {
   const candidate = text.slice(0, start)
-  let baselineTree
   let candidateTree
   try {
-    baselineTree = parseKernelMarkdown(text)
     candidateTree = parseKernelMarkdown(candidate)
   } catch {
     return { ok: false, code: 'unsupported-structure' }
   }
-  const children = baselineTree.children || []
-  const last = children[children.length - 1] || null
-  if (!last || last.position?.start?.offset !== start) {
-    return { ok: false, code: TEXT_MID_DOCUMENT }
-  }
-  if (last.position?.end?.offset !== end) return { ok: false, code: 'unsupported-structure' }
   // Everything between the query block's end and the document end must be
   // whitespace — those are the only other bytes this edit deletes.
   if (!/^[ \t\r\n]*$/.test(text.slice(end))) return { ok: false, code: 'unsupported-structure' }
@@ -403,6 +425,106 @@ function revertToTextFromQuery({ doc, start, end }) {
       edits: [{ from: start, to: text.length, insert: '' }],
       intent: 'revert-to-text',
       selection: { anchor, head: anchor }
+    }
+  }
+}
+
+// `/text` MID-DOCUMENT (2026-08-21) — the shape the 2026-08-20 pass refused
+// with `text-needs-document-end`. What dissolved the refusal is that the gap
+// it leaves is not a new problem class at all: it is EXACTLY the blank-line
+// gap structural Enter has produced mid-document since Task 11.5, served by
+// the same controller-vouched split-placeholder session (a single-object
+// `pendingPlaceholder`, deliberately exempt from the trailing floor — see
+// buildProjectionMap). The bytes are even identical: Enter at the end of `甲`
+// in `甲\n\n乙\n` writes `甲\n\n` + `\n\n乙\n`, and deleting the query block
+// from `甲\n\n/text\n\n乙\n` leaves the very same `甲\n\n\n\n乙\n`.
+//
+// The edit is therefore the MINIMAL one — delete exactly the query block's
+// own bytes, `{ from: start, to: end, insert: '' }` — leaving the separators
+// that stood on either side of it untouched. Two proofs, both pure reparses,
+// because a deletion mid-document CAN change what surrounds it in ways a
+// suffix deletion never can:
+//
+//   (1) THE DELETION PROOF. Everything outside the removed region must still
+//       mean the same thing, offsets shifted by the deletion delta —
+//       `outsideSignature`, axis (b) of this file's standing discipline. The
+//       shape this catches is the list merge: `- a` / `/text` / `- b` closes
+//       over the gap into ONE loose two-item list (CommonMark 0.28 dropped
+//       the two-blank-lines rule), so the baseline's two `list` nodes collapse
+//       into one that STRADDLES the region and is skipped — the signatures
+//       cannot match, and the command refuses instead of silently restructuring
+//       the user's document.
+//
+//   (2) THE CONVERGENCE PROOF. A placeholder is only honest if the first
+//       character typed in it becomes a real paragraph AT THAT OFFSET. That is
+//       not implied by (1): `甲\n# /text\n\n乙` deletes cleanly (a heading may
+//       interrupt a paragraph, so its removal leaves `甲\n\n\n乙`) yet the
+//       anchor sits one line ending away from `甲`, where a typed character
+//       would become a LAZY CONTINUATION of it. So the proof TYPES: a probe
+//       character is inserted at the anchor and the result must reparse to a
+//       root-level `paragraph` holding exactly that probe, spanning exactly
+//       the probe's bytes, with everything else unchanged. It is a proof by
+//       construction rather than a separator regex, which is why it also
+//       ACCEPTS the shapes a regex would wrongly refuse (a heading, list or
+//       fence directly below the gap with no blank line — all of which
+//       legally interrupt a paragraph).
+//
+// The anchor is `start` itself: after the deletion that offset sits strictly
+// inside the blank run (the next block can only have moved to `start + 1` or
+// later — top-level siblings are always separated by at least one line
+// ending), so `rawToPmPos` fails closed there exactly as it does for Enter's
+// gap, and the vouched virtual pair is the only thing that can serve it.
+function revertMidDocument({ doc, text, baselineTree, start, end }) {
+  const candidate = text.slice(0, start) + text.slice(end)
+  const delta = -(end - start)
+  let candidateTree
+  try {
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const before = outsideSignature(baselineTree, start, end, 0)
+  // The removed region collapses to a POINT in the candidate, so only a node
+  // straddling it is excluded there — which is precisely how a merge shows up.
+  const after = outsideSignature(candidateTree, start, start, delta)
+  if (before === null || after === null || before !== after) {
+    return { ok: false, code: TEXT_NEIGHBORS_MERGE }
+  }
+
+  // (2) The convergence proof.
+  const probe = candidate.slice(0, start) + PROBE_CHAR + candidate.slice(start)
+  let probeTree
+  try {
+    probeTree = parseKernelMarkdown(probe)
+  } catch {
+    return { ok: false, code: TEXT_NEIGHBORS_MERGE }
+  }
+  const typed = (probeTree.children || []).find(
+    (child) => child.position?.start?.offset === start
+  )
+  if (!typed || typed.type !== 'paragraph' ||
+      typed.position?.end?.offset !== start + PROBE_CHAR.length) {
+    return { ok: false, code: TEXT_NEIGHBORS_MERGE }
+  }
+  const inline = typed.children || []
+  if (inline.length !== 1 || inline[0]?.type !== 'text' || inline[0].value !== PROBE_CHAR) {
+    return { ok: false, code: TEXT_NEIGHBORS_MERGE }
+  }
+  const probeSignature = outsideSignature(
+    probeTree, start, start + PROBE_CHAR.length, delta + PROBE_CHAR.length
+  )
+  if (probeSignature === null || probeSignature !== before) {
+    return { ok: false, code: TEXT_NEIGHBORS_MERGE }
+  }
+
+  return {
+    ok: true,
+    midPlaceholder: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from: start, to: end, insert: '' }],
+      intent: 'revert-to-text',
+      selection: { anchor: start, head: start }
     }
   }
 }

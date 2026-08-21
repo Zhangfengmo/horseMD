@@ -299,8 +299,10 @@ const slashItems = (evaluate) => evaluate(`[
 // deletion), so every id the menu renders is in this set and the matrix
 // assertion now proves no item is WRONGLY disabled. Refusals still exist,
 // but they are POSITIONAL (decided by the command at invocation — e.g.
-// /text mid-document, /divider before a list) and are exercised as such in
-// steps (a)/(b) below and in test-kernel-leaf-insert-ui.mjs.
+// /divider before a list, /text where the neighbours would merge) and are
+// exercised as such in test-kernel-leaf-insert-ui.mjs; steps (a)/(b) below
+// take the first item at a position where it SUCCEEDS (mid-document /text,
+// 2026-08-21) and undo it again.
 const KERNEL_ROUTED_SLASH_ITEMS = new Set([
   'quote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'bullet', 'ordered',
   'table', 'code', 'math', 'task', 'divider', 'image', 'text'
@@ -454,22 +456,36 @@ async function run() {
       `every slash item must match the disabled matrix (nothing is structurally disabled any more): ${JSON.stringify(items)}`
     )
 
-    // (a) Enter on the highlighted (first) item — `text`, which is ENABLED
-    // but positionally refused here (the '/' paragraph is mid-document, and
-    // /text only works on the last block): menu closes, the refusal toasts,
-    // and the document bytes are UNCHANGED — fail-closed at the command, not
-    // at the menu.
+    // (a) Enter on the highlighted (first) item — `text`. Until 2026-08-21
+    // this position REFUSED it (`text-needs-document-end`: the '/' paragraph
+    // is mid-document) and these two checks pinned "a positionally-refused
+    // item changes nothing". Mid-document `/text` now LANDS through the
+    // vouched split-placeholder session, so they pin the success instead: the
+    // '/' paragraph's bytes go, an EMPTY placeholder paragraph takes its place
+    // (the view-only home for a blank line the reparse cannot show), the menu
+    // closes, and no dialog appears. Undo then restores the '/' paragraph
+    // exactly — which is what keeps every later section, and this file's SAVED
+    // byte expectation, unchanged.
+    const emptyParagraphs = (list) => list.filter((entry) => entry === '').length
     let beforeEnter = await paragraphTexts(evaluate)
     await pressKey(send, { key: 'Enter', code: 'Enter', delayMs: delay + 30 })
-    await sleep(300)
+    await sleep(400)
     let afterEnter = await paragraphTexts(evaluate)
-    assert.deepEqual(afterEnter, beforeEnter, 'a positionally-refused slash item must change nothing on Enter')
+    assert.ok(!afterEnter.includes('/'), 'mid-document /text must empty the query block')
+    assert.equal(afterEnter.length, beforeEnter.length,
+      'the placeholder replaces the query paragraph one-for-one')
+    assert.equal(emptyParagraphs(afterEnter), emptyParagraphs(beforeEnter) + 1,
+      'and it is an EMPTY paragraph the caret can sit in')
     const menuShownAfterEnter = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
-    assert.equal(menuShownAfterEnter, 'false', 'slash menu did not close after the refusal via Enter')
+    assert.equal(menuShownAfterEnter, 'false', 'slash menu did not close after the Enter invocation')
+    await pressUndo(send)
+    await sleep(400)
+    assert.deepEqual(await paragraphTexts(evaluate), beforeEnter,
+      'undo must restore the query paragraph exactly')
 
     // (b) reopen (click away, click back — no text change, shouldShow just
-    // re-evaluates the same still-'/'-starting block) and take the same
-    // positionally-refused first item with the pointer instead.
+    // re-evaluates the same still-'/'-starting block) and take the same first
+    // item with the pointer instead.
     await clickTextEnd(evaluate, send, FAR_PARAGRAPH_AFTER_TYPING)
     await sleep(150)
     await clickTextEnd(evaluate, send, '/')
@@ -489,12 +505,17 @@ async function run() {
     assert.ok(firstItemPoint, 'first slash item is not hit-testable')
     const beforeClick = await paragraphTexts(evaluate)
     await click(send, firstItemPoint)
-    await sleep(300)
+    await sleep(400)
     const afterClick = await paragraphTexts(evaluate)
-    assert.deepEqual(afterClick, beforeClick, 'a positionally-refused slash item must change nothing on click')
+    assert.ok(!afterClick.includes('/'), 'the pointer path must reach the same command')
+    assert.equal(emptyParagraphs(afterClick), emptyParagraphs(beforeClick) + 1)
     const menuShownAfterClick = await evaluate(`document.querySelector('.milkdown-slash-menu')?.getAttribute('data-show')`)
-    assert.equal(menuShownAfterClick, 'false', 'slash menu did not close after the refusal via click')
-    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the refused slash-menu interactions')
+    assert.equal(menuShownAfterClick, 'false', 'slash menu did not close after the click invocation')
+    await pressUndo(send)
+    await sleep(400)
+    assert.deepEqual(await paragraphTexts(evaluate), beforeClick,
+      'undo must restore the query paragraph after the pointer path too')
+    assert.equal(app.dialogs.length, 0, 'no dialog appeared from the slash-menu interactions')
 
     // ============================================================
     // 3) Selection toolbar APPEARS in kernel mode (Plan 4 Task 3 flip)

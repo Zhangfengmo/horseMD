@@ -42,6 +42,18 @@ const LINES = [
   '',
   '丁丁段落',
   '',
+  // The list / paragraph / list sandwich `/text`'s merge refusal needs: with
+  // the middle paragraph gone the two lists close over the gap into ONE loose
+  // list (CommonMark 0.28 dropped the two-blank-lines rule), which is a
+  // restructuring of the document the command must refuse.
+  '- 列甲',
+  '',
+  '中间段落',
+  '',
+  '- 列乙',
+  '',
+  '己己段落',
+  '',
   '戊戊尾段',
   ''
 ]
@@ -366,24 +378,53 @@ async function run() {
       'a refused /hr must leave the query bytes as plain text and write NO divider')
 
     // ============================================================
-    // 6) `/text` MID-DOCUMENT: the other NAMED refusal — the emptied block
-    //    would be the split-placeholder gap, so nothing is deleted and the
-    //    toast names the remedies.
+    // 6) `/text` MID-DOCUMENT (2026-08-21) — on the document's FIRST block,
+    //    a HEADING, with a divider below it. Until this pass the position
+    //    itself was the refusal (`text-needs-document-end`); it now takes the
+    //    same vouched split-placeholder session the doc-end case does, one
+    //    position further in: the heading's bytes go, an empty placeholder
+    //    stands where it was, and typing there commits a plain paragraph —
+    //    which is exactly what "正文" means.
     // ============================================================
     await selectBlock(evaluate, send, '标题')
     await resetToasts(evaluate)
     await runSlashItem(evaluate, send, 'text', 'text')
-    await sleep(300)
-    const textRefusalToasts = JSON.parse(await toasts(evaluate))
-    console.log('  [/text mid-document] ->', JSON.stringify({ toasts: textRefusalToasts }))
-    assert.ok(textRefusalToasts.some((t) => /最后一个块|last block/.test(t)),
-      `the mid-document /text refusal must raise the named-remedy toast, got ${JSON.stringify(textRefusalToasts)}`)
-    const afterTextRefusal = afterRefusal.replace('# 标题', '# /text')
-    await assertSource(evaluate, afterTextRefusal,
-      'a refused mid-document /text must leave the heading (query text and all) untouched')
+
+    const midTextCaret = await caretBlock(evaluate)
+    console.log('  [/text mid-document] ->', JSON.stringify({ caret: midTextCaret }))
+    assert.ok(midTextCaret && midTextCaret.tag === 'p' && midTextCaret.text === '',
+      `the caret must land inside the (empty) materialized placeholder, got ${JSON.stringify(midTextCaret)}`)
+    assert.equal((await blockTags(evaluate))[0], 'p',
+      'the placeholder must stand where the heading did — the document\'s FIRST block')
+    const midTextToasts = JSON.parse(await toasts(evaluate))
+    assert.deepEqual(midTextToasts, [],
+      `a landed mid-document /text must not toast at all, got ${JSON.stringify(midTextToasts)}`)
+
+    await typeTextLikeUser(send, '新首段', { delayMs: delay })
+    await sleep(400)
+    const afterTextMid = afterRefusal.replace('# 标题', '新首段')
+    await assertSource(evaluate, afterTextMid,
+      `mid-document /text must delete only the query block's own bytes and typing must commit a plain paragraph there (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
-    // 7) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
+    // 7) `/text` between two LISTS: the refusal that replaced the positional
+    //    one. Removing the middle paragraph would merge the lists, so nothing
+    //    is deleted and the toast names the remedy.
+    // ============================================================
+    await selectBlock(evaluate, send, '中间段落')
+    await resetToasts(evaluate)
+    await runSlashItem(evaluate, send, 'text', 'text')
+    await sleep(300)
+    const textRefusalToasts = JSON.parse(await toasts(evaluate))
+    console.log('  [/text between lists] ->', JSON.stringify({ toasts: textRefusalToasts }))
+    assert.ok(textRefusalToasts.some((t) => /相邻的块合并|merge the blocks around it/.test(t)),
+      `the merging /text refusal must raise the named-remedy toast, got ${JSON.stringify(textRefusalToasts)}`)
+    const afterTextRefusal = afterTextMid.replace('中间段落', '/text')
+    await assertSource(evaluate, afterTextRefusal,
+      'a refused /text must leave the query bytes as plain text and delete nothing')
+
+    // ============================================================
+    // 8) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH:
     //    the saved bytes must parse back to the same blocks.
     // ============================================================
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save button missing')
@@ -417,10 +458,10 @@ async function run() {
     assert.ok(reopenCard, 'the empty image must survive the cold relaunch as the image-block card')
     const reopenText = await reopened.evaluate(`(${VISIBLE_EDITOR})?.textContent`)
     assert.ok(reopenText.includes('结尾段') && reopenText.includes('/hr') && reopenText.includes('/text'),
-      'the typed paragraph and both refused query texts must survive the cold relaunch')
+      'the typed paragraphs and both refused query texts must survive the cold relaunch')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on cold relaunch')
 
-    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider, /image and /text commit their bytes, the caret is immediately typable in every doc-end/mid-document home, both positional refusals raise their named-remedy toasts, and the bytes survive save + cold relaunch`)
+    console.log(`PASS kernel-mode leaf-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /divider, /image and /text commit their bytes, the caret is immediately typable in every doc-end/mid-document home (including mid-document /text), both positional refusals raise their named-remedy toasts, and the bytes survive save + cold relaunch`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

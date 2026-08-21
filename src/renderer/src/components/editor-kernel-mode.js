@@ -1255,6 +1255,21 @@ export function createKernelMode({
     }
   }
 
+  // Which TOP-LEVEL child of the document holds `pos`? Used by the
+  // mid-document `/text` route to name the placeholder's home by index
+  // (see runInsertBlockFromQuery). A position that is not inside any child
+  // (depth 0 — between two top-level nodes) answers null rather than the
+  // index PM would round it to: the caller needs "the block this caret is
+  // IN", and a rounded answer would silently place the placeholder next door.
+  const topLevelIndexAt = (docNode, pos) => {
+    try {
+      const $pos = docNode.resolve(Math.max(0, Math.min(pos, docNode.content.size)))
+      return $pos.depth === 0 ? null : $pos.index(0)
+    } catch {
+      return null
+    }
+  }
+
   // The degenerate-splitTextBlock caller (see the session note above): the
   // placeholder goes right after the textblock the split originated in
   // (resolved from the transaction's own `from` on the CURRENT map).
@@ -2762,6 +2777,40 @@ export function createKernelMode({
       const anchor = routed.transaction.selection?.anchor
       if (Number.isFinite(anchor) && kernel.map && !kernel.map.rawToPmPos(anchor)) {
         materializePlaceholder(view, view.state.doc.content.size, anchor)
+      }
+      return true
+    }
+    // `/text` MID-DOCUMENT (2026-08-21): the same vouched session, one
+    // position further in. The command proved the bytes (the deletion changes
+    // nothing around it) AND that a character typed at the anchor becomes a
+    // real paragraph there; what is left is the placeholder's PM home, and
+    // the only honest way to name it is the query block's own TOP-LEVEL INDEX,
+    // read from the live view BEFORE the commit. Deriving it afterwards would
+    // mean pairing mdast root children with PM top-level children by hand;
+    // taking it from the PM side up front assumes nothing at all — children
+    // [0, index) are byte-identical across the edit, so summing their
+    // nodeSizes lands exactly where the deleted block stood.
+    //
+    // Both post-commit facts are re-checked rather than trusted: the reconcile
+    // must have removed EXACTLY one top-level child, and the anchor must still
+    // be unmappable (a resolvable anchor means the reconcile already gave the
+    // caret a real home and a placeholder would be a second, competing one).
+    // `materializePlaceholder` is itself fail-closed — an unprovable voucher
+    // removes the node again and rebinds plain — so the worst case is the
+    // proven byte edit with the caret wherever the reconcile left it, never a
+    // half-tracked node.
+    if (routed.midPlaceholder) {
+      const childIndex = topLevelIndexAt(view.state.doc, view.state.selection.head)
+      const childrenBefore = view.state.doc.childCount
+      if (!applyKernelTransaction(routed.transaction, view)) return true
+      const anchor = routed.transaction.selection?.anchor
+      const docNode = view.state.doc
+      if (Number.isInteger(childIndex) && Number.isFinite(anchor) &&
+          docNode.childCount === childrenBefore - 1 && childIndex <= docNode.childCount &&
+          kernel.map && !kernel.map.rawToPmPos(anchor)) {
+        let insertPos = 0
+        for (let i = 0; i < childIndex; i += 1) insertPos += docNode.child(i).nodeSize
+        materializePlaceholder(view, insertPos, anchor)
       }
       return true
     }

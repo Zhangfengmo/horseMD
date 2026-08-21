@@ -74,10 +74,14 @@ export const KERNEL_CODES = Object.freeze({
   // cannot host the caret (commands/block-insert.js `caretAfterInsert`). Has
   // its own message because the refusal has a concrete, nameable remedy.
   NO_CARET_HOME: 'no-caret-home-after-insert',
-  // `/text` invoked mid-document (commands/block-insert.js
-  // `revertToTextFromQuery`): the emptied paragraph would be the known
-  // split-placeholder gap, so the refusal names the remedies instead.
-  TEXT_MID_DOCUMENT: 'text-needs-document-end',
+  // `/text` on a block that cannot be emptied where it stands
+  // (commands/block-insert.js `revertMidDocument`): removing it would let the
+  // blocks around it merge, or a character typed in the gap it leaves would
+  // join a neighbour instead of starting its own paragraph. Its own code
+  // because the remedy is concrete and nameable. (This REPLACED
+  // `text-needs-document-end`, the 2026-08-20 stopgap that refused every
+  // mid-document `/text`; mid-document works since 2026-08-21.)
+  TEXT_NEIGHBORS_MERGE: 'text-neighbors-would-merge',
   // A delete that removes the ledger-vouched `/task` seed and leaves the
   // task paragraph contentless (commands/task-seed.js
   // `taskSeedDeleteRefusal`): no byte spelling of an empty task exists, so

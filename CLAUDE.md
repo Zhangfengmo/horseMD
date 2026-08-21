@@ -460,7 +460,14 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   was disproven), `/divider`, `/image` (`![]()` + the kernel-routed upload
   UI), `/task` (writes `- [ ] ` + a session-ledgered U+00A0 seed that
   dissolves under the first label character — keyboard, paste AND IME paths),
-  and `/text` (doc-end, riding the trim proof + virtual placeholder).
+  and `/text` (deletes the query block's bytes and rides a placeholder —
+  doc-end via the trim proof + virtual pair, and since 2026-08-21
+  MID-DOCUMENT too: the minimal deletion leaves byte-for-byte the gap
+  structural Enter already writes there, so the same vouched
+  split-placeholder session serves it. Two reparse proofs gate it — nothing
+  around the deletion may change meaning, and a probe character typed at the
+  anchor must become its own paragraph — and the one refusal left is the
+  named `text-neighbors-would-merge`).
   Updated 2026-08-21: CRLF/lone-CR soft-wrapped prose is editable — one line
   ending, any spelling, is ONE width-1 `linebreak` unit (raw span swallows
   the pair + continuation prefix; PM holds a single '\n' per ending), so the
