@@ -20,7 +20,18 @@ import { toggleMark } from '@milkdown/prose/commands'
 import { createKernelMode } from '../src/renderer/src/components/editor-kernel-mode.js'
 import { readOnlyPairAt } from '../src/renderer/src/lib/kernel-status.js'
 import { isTypableTextblock } from '../src/renderer/src/components/editor-kernel-gateway.js'
-import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import {
+  buildSyntaxIndex,
+  getKernelParseStats,
+  setKernelMemoTestFreeze
+} from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import { getCharacterMapStats } from '../src/renderer/src/lib/source-kernel/character-map.js'
+
+// Memo-contract enforcement (integration review Condition 1): this suite
+// drives the full command surface, so it runs with every memo entry frozen —
+// a consumer that mutates a served tree/index THROWS here instead of
+// poisoning later hits. Costs nothing on these tiny documents.
+setKernelMemoTestFreeze(true)
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
 import { splitMarkdown, CHUNK_SIZE, CHUNK_THRESHOLD } from '../src/renderer/src/components/editor-chunked-parse.js'
@@ -481,10 +492,20 @@ const FIXTURE_DOCS = {
       text('甲'),
       schema.text('https://q.example', [schema.mark('link', { href: 'https://q.example' })]),
       text('乙')
-    ))
+    )),
   // (A GFM autolink literal — the same `link` MARK in ProseMirror over a
   // `link` mdast node with NO syntax bytes — already has its fixture above,
   // registered for Case M4c; Case M5 below reuses it.)
+  // Integration-review Condition 2/3 fixtures (2026-08-21): the mid-block
+  // split shape for the structural-subsumption pin, and the PERF-4 guard's
+  // own document states (unique strings — the parse memo is keyed by exact
+  // string, so fresh spellings make the parse-count deltas deterministic
+  // regardless of what earlier cases left in the LRU).
+  '守丙\n\n亥\n': () => doc(p(text('守丙')), p(text('亥'))),
+  '守甲\n\n守乙\n': () => doc(p(text('守甲')), p(text('守乙'))),
+  '守甲丙\n\n守乙\n': () => doc(p(text('守甲丙')), p(text('守乙'))),
+  '守甲丙丁\n\n守乙\n': () => doc(p(text('守甲丙丁')), p(text('守乙'))),
+  '守甲丙丁戊\n\n守乙\n': () => doc(p(text('守甲丙丁戊')), p(text('守乙')))
 }
 const stubParse = (markdown) => {
   const build = FIXTURE_DOCS[markdown]
@@ -4010,6 +4031,134 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(fill, undefined)
   assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n丁\n',
     'typing after the wait still fills the placeholder, never a neighbour')
+}
+
+// Case PERF-2b (integration review Condition 2 — pin the FULL forced-run
+// list, item by item, as the plan demanded). PERF-2 pins `flushMarkdown`;
+// the debounce ADR names two more flush readers that must force the pending
+// verify before serving bytes, and one route that subsumes it:
+//   * `flushMarkdownSettled` — the save path's async reader;
+//   * `getRecoveryMarkdown` — the recovery/export reader;
+//   * a STRUCTURAL op — `applyKernelTransaction` is parse-first (it
+//     reconciles the view against a fresh parse of the committed bytes,
+//     strictly subsuming the pending check), and the debounced run re-reads
+//     LIVE state at fire time, so a verify armed before the op fires as a
+//     no-op diff, never a stale-doc repair.
+// (The plan's "blur" item is reasoned away, not pinned: blur reads no bytes,
+// the timer fires regardless of focus, and every byte reader above forces
+// the flush first — nothing can reach disk past a dropped check.)
+{
+  // flushMarkdownSettled forces the pending verify.
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.getPerfStats().verifyRuns, 0, 'verify pending, not run')
+  const settled = await h.controller.apiOverrides.flushMarkdownSettled()
+  assert.equal(settled, h.controller.kernel.doc.text, 'settled flush serves the kernel bytes')
+  assert.equal(h.controller.getPerfStats().verifyRuns, 1,
+    'flushMarkdownSettled forces the pending verify to run immediately')
+}
+{
+  // getRecoveryMarkdown forces the pending verify.
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.getPerfStats().verifyRuns, 0, 'verify pending, not run')
+  const recovered = h.controller.apiOverrides.getRecoveryMarkdown()
+  assert.equal(recovered, h.controller.kernel.doc.text, 'recovery serves the kernel bytes')
+  assert.equal(h.controller.getPerfStats().verifyRuns, 1,
+    'getRecoveryMarkdown forces the pending verify to run immediately')
+}
+{
+  // Structural-op subsumption: a verify armed by a plain commit, then a
+  // mid-block Enter (no placeholder session — both halves carry bytes).
+  // The op's own parse-first reconcile already proved view == parse; the
+  // still-armed debounced verify must then be a no-op against LIVE state,
+  // never a repair driven by the pre-split doc it was scheduled under.
+  // Unique spellings ('守…亥') so the structural parse-count delta below is
+  // deterministic — no earlier case can have left these strings in the LRU.
+  const h = makeHarness('守亥\n', doc(p(text('守亥'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  assert.equal(h.controller.kernel.doc.text, '守丙亥\n')
+  assert.equal(h.controller.getPerfStats().verifyRuns, 0, 'verify pending when the op runs')
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3)))
+  const sp0 = getKernelParseStats().parseCalls
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  const structuralParses = getKernelParseStats().parseCalls - sp0
+  // One real remark parse: the transaction-validated map's own index build
+  // (the committed bytes are a fresh string). The OLD text's index is a memo
+  // hit and the adopted map (PERF-1) spares the rebuild — a regression that
+  // re-adds either shows up as a second parse here.
+  assert.ok(structuralParses <= 1,
+    `a structural Enter runs at most 1 kernel parse (got ${structuralParses})`)
+  assert.equal(h.controller.kernel.doc.text, '守丙\n\n亥\n', 'the split committed')
+  const split = doc(p(text('守丙')), p(text('亥')))
+  assert.ok(h.view.state.doc.eq(split), 'view reconciled against the parse of the committed bytes')
+  const mismatchesBefore = globalThis.__hmKernelDiagnostics
+    .filter((entry) => entry.type === 'projection-mismatch').length
+  // Fire whatever is still pending NOW (deterministic — no sleep): the run
+  // must read the live post-split doc and find nothing to repair.
+  h.controller.apiOverrides.flushMarkdown()
+  await flushMicrotasks()
+  assert.ok(h.view.state.doc.eq(split), 'the forced run repaired nothing')
+  assert.equal(h.controller.kernel.doc.text, '守丙\n\n亥\n', 'and moved no bytes')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics
+      .filter((entry) => entry.type === 'projection-mismatch').length,
+    mismatchesBefore,
+    'no mismatch was reported — the debounced verify reads live state, never a stale diff'
+  )
+}
+
+// Case PERF-4 (integration review Condition 3 — deterministic call-count
+// upper bounds, replacing sleep-based observation where feasible). The two
+// costs the perf branch moved off the hot path are REAL remark parses
+// (`getKernelParseStats().parseCalls`) and per-block charMap constructions
+// (`getCharacterMapStats().buildCalls`); this case pins an upper bound for
+// both, per attach and per keystroke, on fresh document strings (memo keys
+// never seen before in this process, so the deltas cannot depend on LRU
+// history). A future change that quietly re-adds a full-document parse or an
+// eager whole-map charMap pass fails HERE, without any timer.
+{
+  const h = makeHarness('守甲\n\n守乙\n', doc(p(text('守甲')), p(text('守乙'))))
+  const p0 = getKernelParseStats().parseCalls
+  const c0 = getCharacterMapStats().buildCalls
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const attachParses = getKernelParseStats().parseCalls - p0
+  const attachCharMaps = getCharacterMapStats().buildCalls - c0
+  // Attach: ONE kernel parse (the projection map's index) and ZERO charMap
+  // constructions — every non-empty textblock defers behind its getter (#4).
+  // An eager whole-map charMap pass regressing would show up here first.
+  assert.ok(attachParses <= 1, `attach runs at most 1 kernel parse (got ${attachParses})`)
+  assert.equal(attachCharMaps, 0,
+    'attach builds no charMap at all — the per-block maps are lazy')
+
+  // Three keystrokes at the end of the first paragraph ('守甲' ends at PM
+  // pos 3, then 4, then 5 as it grows). Per keystroke: at most ONE kernel
+  // parse (the post-commit rebind's index — the verify parse is debounced
+  // off the hot path, PERF-2) and at most TWO charMap constructions (the
+  // touched block's proof on the current map + the edit-observability read
+  // on the freshly bound map; every other block stays unmaterialized).
+  const chars = [['丙', 4], ['丁', 5], ['戊', 6]]
+  for (const [ch, pos] of chars) {
+    const kp = getKernelParseStats().parseCalls
+    const kc = getCharacterMapStats().buildCalls
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText(ch, pos - 1))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, `keystroke ${ch} allowed`)
+    const dp = getKernelParseStats().parseCalls - kp
+    const dc = getCharacterMapStats().buildCalls - kc
+    assert.ok(dp <= 1, `keystroke ${ch}: at most 1 kernel parse (got ${dp})`)
+    assert.ok(dc <= 2, `keystroke ${ch}: at most 2 charMap builds (got ${dc})`)
+  }
+  assert.equal(h.controller.kernel.doc.text, '守甲丙丁戊\n\n守乙\n', 'the keystrokes landed')
 }
 
 console.log('PASS kernel mode headless')

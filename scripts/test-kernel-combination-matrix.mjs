@@ -83,7 +83,13 @@ import {
 // import would crash at module resolution — the binding below must fail on its
 // ASSERTION instead, naming what is missing.
 import * as sourceKernel from '../src/renderer/src/lib/source-kernel/index.js'
+import { setKernelMemoTestFreeze } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { parseEditorMarkdown, prepareEditorMarkdown, editorSchema } from './lib/kernel-parse-harness.mjs'
+
+// Memo-contract enforcement (integration review Condition 1): the matrix is
+// the widest shape sweep in the repo, so it runs with every memo entry
+// frozen — any consumer mutation of a served tree/index throws here.
+setKernelMemoTestFreeze(true)
 
 const here = dirname(fileURLToPath(import.meta.url))
 const SNAPSHOT_PATH = join(here, 'fixtures', 'kernel-combination-readonly-snapshot.json')

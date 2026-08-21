@@ -404,7 +404,17 @@ function collectUnits(text, node, gaps = null) {
 // non-range, single-position use (as `editor-kernel-gateway.js` does for a
 // real multi-character selection's `from`, itself not going through this
 // module's `rawRangeForVisibleRange`) use `rawStartForVisible` directly.
+// Call-count instrumentation (integration review Condition 3, 2026-08-21):
+// counts every real per-block map construction so the perf guard can pin a
+// deterministic upper bound per keystroke/attach — the lazy-charMap
+// optimization's whole point (#4). Read-only; no decision consults it.
+let buildCalls = 0
+export function getCharacterMapStats() {
+  return { buildCalls }
+}
+
 export function buildCharacterMap(text, blockNode) {
+  buildCalls += 1
   const gaps = { starts: new Map(), ends: new Map() }
   const units = collectUnits(text, blockNode, gaps)
   if (!units) return null

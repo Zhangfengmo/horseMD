@@ -109,6 +109,40 @@ const memoSet = (memo, key, value) => {
   while (memo.size > PARSE_MEMO_ENTRIES) memo.delete(memo.keys().next().value)
 }
 
+// ---------------------------------------------------------------------------
+// Memo-contract enforcement, test mode (integration review Condition 1).
+// ---------------------------------------------------------------------------
+// Both memos serve SHARED objects, so a consumer that mutated a returned
+// tree would poison every later hit for the same bytes. The contract is
+// "consumers must not mutate" (the sole sanctioned mutator is
+// injectHighlightNodes, which runs inside buildSyntaxIndexUncached BEFORE
+// the entry is stored — re-audited at the 2026-08-21 perf merge). Production
+// keeps the shared-object design: freezing every stored parse costs time on
+// the exact hot path the memo exists to cool. The kernel test suites flip
+// this flag instead, deep-freezing every entry at store time, so any future
+// consumer mutation THROWS in CI (ESM strict mode) rather than silently
+// serving a poisoned tree. Locked by the canary in
+// scripts/test-source-kernel-index.mjs.
+let memoTestFreeze = false
+export function setKernelMemoTestFreeze(enabled) {
+  memoTestFreeze = Boolean(enabled)
+}
+const deepFreeze = (value) => {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const key of Object.keys(value)) deepFreeze(value[key])
+  return value
+}
+
+// Call-count instrumentation (integration review Condition 3): every REAL
+// remark parse this module runs, so the perf guard can pin a deterministic
+// upper bound per keystroke/attach — the memo's whole point, test-locked.
+// Read-only; no decision anywhere consults it.
+let parseCalls = 0
+export function getKernelParseStats() {
+  return { parseCalls }
+}
+
 // The kernel's own parse, exposed for commands that must PROVE a candidate
 // rewrite reparses to the document they intend (Plan 5 Task 5's
 // `setImageAttrs` re-parses its candidate bytes and asserts the image node
@@ -120,10 +154,15 @@ const memoSet = (memo, key, value) => {
 // span and the callers below read block/inline node positions only.
 export function parseKernelMarkdown(text) {
   const key = String(text ?? '')
-  if (key.length > PARSE_MEMO_MAX_TEXT) return processor.parse(key)
+  if (key.length > PARSE_MEMO_MAX_TEXT) {
+    parseCalls += 1
+    return processor.parse(key)
+  }
   const hit = memoGet(rawParseMemo, key)
   if (hit) return hit
+  parseCalls += 1
   const tree = processor.parse(key)
+  if (memoTestFreeze) deepFreeze(tree)
   memoSet(rawParseMemo, key, tree)
   return tree
 }
@@ -171,13 +210,19 @@ export function buildSyntaxIndex(text) {
     if (hit) return hit
   }
   const index = buildSyntaxIndexUncached(key)
-  if (key.length <= PARSE_MEMO_MAX_TEXT) memoSet(indexMemo, key, index)
+  if (key.length <= PARSE_MEMO_MAX_TEXT) {
+    // Freeze BEFORE the entry becomes shared; injectHighlightNodes (the one
+    // sanctioned mutator) has already run, inside buildSyntaxIndexUncached.
+    if (memoTestFreeze) deepFreeze(index)
+    memoSet(indexMemo, key, index)
+  }
   return index
 }
 
 function buildSyntaxIndexUncached(text) {
   const lines = scanLines(text)
   const dominantEnding = lines.find((l) => l.ending)?.ending || '\n'
+  parseCalls += 1
   const tree = processor.parse(text)
 
   const offsetOf = (point) => point?.offset

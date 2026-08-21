@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
-import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import {
+  buildSyntaxIndex,
+  parseKernelMarkdown,
+  setKernelMemoTestFreeze
+} from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 
 // 行扫描：LF / CRLF / lone-CR / 末尾换行
 {
@@ -454,3 +458,61 @@ console.log('PASS source-kernel syntax index (front matter)')
     'the oldest entry is evicted once the cap is exceeded')
 }
 console.log('PASS source-kernel syntax index (parse memo)')
+
+// ===========================================================================
+// Memo mutation canary (integration review Condition 1; the plan's binding
+// constraint: 每个新缓存都要有一个"消费者 mutate 后第二次取用仍正确"的测试).
+// Both memos serve SHARED objects, so the code's contract is "consumers must
+// not mutate" — the sole sanctioned mutator, injectHighlightNodes, runs
+// before the entry is stored. Test mode enforces the contract: every entry
+// is deep-frozen at store time, so a consumer mutation THROWS (strict mode)
+// with the entry untouched, and the refetch serves the pristine object. A
+// future consumer that starts mutating a served tree fails CI here (and in
+// every suite that flips the flag) instead of silently poisoning every
+// later hit for the same bytes.
+// ===========================================================================
+{
+  setKernelMemoTestFreeze(true)
+  try {
+    // Fresh strings, never parsed above: their entries are stored AFTER the
+    // flag flipped, so both memos hold frozen entries for them.
+    const t = '看守甲\n\n乙==丙==丁\n'
+
+    // (a) The raw parse memo.
+    const raw = parseKernelMarkdown(t)
+    const rawSnapshot = JSON.stringify(raw)
+    assert.throws(() => { raw.children.push({ type: 'poison' }) }, TypeError,
+      'appending to a served tree throws')
+    assert.throws(() => { raw.children[0].type = 'poison' }, TypeError,
+      'rewriting a served node field throws')
+    assert.throws(() => { raw.children[0].children[0].value = '毒' }, TypeError,
+      'a DEEP text-value mutation throws too (the freeze is not shallow)')
+    const rawAgain = parseKernelMarkdown(t)
+    assert.equal(rawAgain, raw, 'the refetch is still the memo hit')
+    assert.equal(JSON.stringify(rawAgain), rawSnapshot,
+      'and serves the pristine tree — the attempted mutation left no trace')
+
+    // (b) The index memo: tree, lines and the index surface itself.
+    const idx = buildSyntaxIndex(t)
+    const idxSnapshot = JSON.stringify(idx.tree)
+    assert.throws(() => { idx.tree.children.splice(0, 1) }, TypeError,
+      'mutating the index tree throws')
+    assert.throws(() => { idx.lines[0].text = '毒' }, TypeError,
+      'mutating a scanned line record throws')
+    assert.throws(() => { idx.blockAt = null }, TypeError,
+      'replacing an index resolver throws (the index object is frozen)')
+    const idxAgain = buildSyntaxIndex(t)
+    assert.equal(idxAgain, idx, 'the index refetch is still the memo hit')
+    assert.equal(JSON.stringify(idxAgain.tree), idxSnapshot,
+      'and its tree is pristine')
+  } finally {
+    setKernelMemoTestFreeze(false)
+  }
+
+  // Control: with the flag off (production posture) entries stay unfrozen —
+  // the enforcement is test-mode-only by design, the hot path pays nothing.
+  const free = parseKernelMarkdown('无冻结对照组\n')
+  assert.ok(!Object.isFrozen(free),
+    'flag off: a newly stored entry is not frozen (production path unchanged)')
+}
+console.log('PASS source-kernel syntax index (memo mutation canary)')
