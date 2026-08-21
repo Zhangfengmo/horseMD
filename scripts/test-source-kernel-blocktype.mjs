@@ -148,10 +148,12 @@ refuses('paragraph target', '/text\n', 5, 'paragraph')
 refuses('nonsense target', '/x\n', 2, 'nope')
 refuses('missing target', '/x\n', 2, undefined)
 
-// Nested contexts: NOT a root child, so `topLevelNodeAt` never finds it.
-refuses('paragraph inside a blockquote', '> /h2\n', 5, 'heading2')
+// Nested contexts that stay refused: list items (and anything list-flavoured
+// on the ancestor chain) own marker/indent semantics this command has not
+// proven — only a PURE blockquote chain is accepted (section 9 below).
 refuses('paragraph inside a list item', '- /h2\n', 5, 'heading2')
-refuses('paragraph inside a nested quote', '> > /h2\n', 7, 'heading2')
+refuses('paragraph inside a quote inside a list item', '- > /h2\n', 7, 'heading2')
+refuses('paragraph inside a list inside a quote', '> - /h2\n', 7, 'heading2')
 
 // Block types whose span is not "marker + one line of content".
 refuses('code block', '```\n/h2\n```\n', 8, 'heading2')
@@ -343,6 +345,67 @@ demoteSkips('space-less bare marker (a valid empty heading, but read-only)', '#\
   const replay = applySourceTransaction(applied, first.transaction)
   assert.equal(replay.ok, false, 'replaying a spent demote must be refused')
   assert.equal(replay.code, 'stale-revision')
+}
+
+// ---------------------------------------------------------------------------
+// 10. QUOTE-NESTED conversions (2026-08-22): a query paragraph/heading whose
+//    ancestor chain is PURE blockquotes converts in place — the marker lands
+//    at the quoted line's own content start, so it spells exactly what it
+//    spells at top level. Unlike the top-level path (whose safety is
+//    positional), the nested path is REPARSE-PROVEN: the candidate must show
+//    the target structure at the query's own start, inside a quote chain of
+//    the same depth, with everything outside the replaced span surviving
+//    byte-identical (outside-signature, the block-insert idiom).
+// ---------------------------------------------------------------------------
+{
+  const convert = (text, offset, target, expected, anchor, label) => {
+    const { c, r } = run(text, offset, target)
+    assert.equal(r.ok, true, `${label}: ${r.code}`)
+    assert.equal(r.transaction.edits.length, 1, `${label}: exactly ONE edit (atomic)`)
+    assert.deepEqual(r.transaction.selection, { anchor, head: anchor }, `${label}: caret`)
+    const out = apply(c.doc, r)
+    assert.equal(out, expected, label)
+    return parseKernelMarkdown(out)
+  }
+  // (a) paragraph in a quote -> H2 inside the SAME quote.
+  {
+    const tree = convert('> /h2\n', 5, 'heading2', '> ## \n', 5, 'quote /h2')
+    assert.equal(tree.children[0].type, 'blockquote', 'quote /h2: quote survives')
+    assert.equal(tree.children[0].children[0].type, 'heading')
+    assert.equal(tree.children[0].children[0].depth, 2)
+  }
+  // (b) bullet and ordered lists inside a quote.
+  {
+    const tree = convert('> /ul\n', 5, 'bullet', '> - \n', 4, 'quote /ul')
+    const list = tree.children[0].children[0]
+    assert.equal(list.type, 'list', 'quote /ul: a real list')
+    assert.equal(!!list.ordered, false)
+    assert.equal(list.children.length, 1)
+  }
+  {
+    const tree = convert('> /ol\n', 5, 'ordered', '> 1. \n', 5, 'quote /ol')
+    assert.equal(tree.children[0].children[0].ordered, true, 'quote /ol: ordered')
+  }
+  // (c) a NESTED quote chain converts too — depth is preserved, not guessed.
+  {
+    const tree = convert('> > /h3\n', 7, 'heading3', '> > ### \n', 8, 'nested quote /h3')
+    assert.equal(tree.children[0].children[0].children[0].depth, 3)
+  }
+  // (d) a heading query inside a quote: the old marker is REPLACED (the
+  //     B4 rule, restated under a quote prefix).
+  convert('> # /h2\n', 7, 'heading2', '> ## \n', 5, 'quote heading query')
+  // (e) the query is the quote's SECOND paragraph: the sibling above
+  //     survives byte-identical.
+  {
+    const tree = convert('> 甲\n>\n> /h2\n', 11, 'heading2', '> 甲\n>\n> ## \n', 11, 'quote second para')
+    assert.deepEqual(tree.children[0].children.map((n) => n.type), ['paragraph', 'heading'])
+  }
+  // (f) a following top-level block is untouched.
+  convert('> /h2\n\n乙\n', 5, 'heading2', '> ## \n\n乙\n', 5, 'quote with following para')
+  // (g) CRLF: no lone LF introduced.
+  {
+    convert('> /h2\r\n', 5, 'heading2', '> ## \r\n', 5, 'CRLF quote /h2')
+  }
 }
 
 console.log('ok - source kernel block-type')

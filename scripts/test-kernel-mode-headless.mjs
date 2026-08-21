@@ -285,6 +285,15 @@ const FIXTURE_DOCS = {
   '- x\n': () => doc(bl(li(null, p(text('x')))), p()),
   '1. \n': () => doc(ol(li(null, p())), p()),
   '# /h2\n': () => doc(hd(1, text('/h2'))),
+  // Case B6/B7 (2026-08-22): block-type conversion INSIDE a blockquote — the
+  // quote survives, the converted block lives inside it, and the empty
+  // heading/item is typable there exactly like at top level.
+  '> /h2\n': () => doc(bq(p(text('/h2')))),
+  '> ## \n': () => doc(bq(hd(2))),
+  '> ## T\n': () => doc(bq(hd(2, text('T')))),
+  '> /ul\n': () => doc(bq(p(text('/ul')))),
+  '> - \n': () => doc(bq(bl(li(null, p())))),
+  '> - x\n': () => doc(bq(bl(li(null, p(text('x')))))),
   // Block-INSERT domain (Cases I1-I4): the slash query blocks and every
   // document `runInsertBlockFromQuery` can produce from them. Same
   // `withTrailingParagraph` convention as above — a document ending in a TABLE
@@ -3205,6 +3214,49 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.runBlockTypeFromQuery('heading2', h.view), true)
   assert.equal(h.controller.kernel.doc.text, '## \n', 'the old marker was replaced, not appended to')
   assert.ok(h.view.state.doc.eq(doc(hd(2))))
+}
+
+// Case B6 (2026-08-22): paragraph "/h2" INSIDE A BLOCKQUOTE -> an H2 inside
+// the SAME quote. The command's quote-chain walk accepts the nested query,
+// its reparse proof pins the structure, and `requireMap: true` proves the
+// converted document still pairs (an empty quoted heading with a resolvable
+// content anchor) BEFORE anything commits. The follow-up keystroke is the
+// point, as always: a heading the kernel creates but cannot type into would
+// be worse than a refused menu item.
+{
+  const h = makeHarness('> /h2\n', doc(bq(p(text('/h2'))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5)))
+  assert.equal(h.controller.runBlockTypeFromQuery('heading2', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> ## \n', 'the quoted query became a quoted marker, one commit')
+  assert.ok(h.view.state.doc.eq(doc(bq(hd(2)), p())), 'view reconciled to an empty H2 inside the quote')
+  assert.equal(h.view.state.selection.head, 2, 'caret sits inside the quoted heading, after the marker')
+
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('T', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the quoted heading is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '> ## T\n', 'the title lands after the quoted marker')
+  assert.ok(h.view.state.doc.eq(doc(bq(hd(2, text('T'))), p())))
+
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '> ## \n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '> /h2\n', 'the original quoted query comes back')
+}
+
+// Case B7: "/ul" inside a blockquote -> a bullet list inside the quote whose
+// empty item is typable (`syntheticEmptyItemParagraph`, under a quote).
+{
+  const h = makeHarness('> /ul\n', doc(bq(p(text('/ul'))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5)))
+  assert.equal(h.controller.runBlockTypeFromQuery('bullet', h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> - \n')
+  assert.ok(h.view.state.doc.eq(doc(bq(bl(li(null, p()))), p())), 'view: one-item bullet list inside the quote')
+
+  assert.equal(dispatchThrough(h, h.view.state.tr.insertText('x', 4)), undefined)
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '> - x\n', 'typing into the quoted item lands after its marker')
 }
 
 // Case B5: an unsupported target refuses fail-closed — nothing committed,

@@ -36,6 +36,8 @@ const FIXTURE = [
   '',
   '壬癸子丑',
   '',
+  '> 引用甲',
+  '',
   '尾段落。',
   ''
 ].join('\n')
@@ -325,6 +327,34 @@ async function run() {
     await assertSource(evaluate,
       FIXTURE.replace('甲乙丙丁', '#### ').replace('戊己庚辛', '- 条目').replace('壬癸子丑', '1. '),
       '/ol in an empty paragraph must commit the `1. ` marker bytes')
+
+    // ============================================================
+    // 4.5) `/h2` INSIDE A BLOCKQUOTE (2026-08-22, the "引用内嵌套" report):
+    //      the quoted paragraph converts in place — the quote survives, the
+    //      heading lives inside it, and the created quoted heading is
+    //      immediately typable.
+    // ============================================================
+    await selectBlock(evaluate, send, '引用甲')
+    await runSlashItem(evaluate, send, 'h2', 'h2')
+    const quoteExpect = FIXTURE.replace('甲乙丙丁', '#### ').replace('戊己庚辛', '- 条目')
+      .replace('壬癸子丑', '1. ').replace('> 引用甲', '> ## ')
+    const quoteProbe = await probeDivergence(evaluate, '/h2 inside a quote')
+    console.log('  [divergence probe] /h2 inside a QUOTE ->', JSON.stringify({
+      source: quoteProbe.source === quoteExpect ? '(expected `> ## `)' : quoteProbe.source,
+      blockTags: quoteProbe.tags
+    }))
+    assert.equal(quoteProbe.source, quoteExpect,
+      `/h2 inside a blockquote must commit \`> ## \` (diagnostics: ${quoteProbe.diagnostics})`)
+    const quoteShape = await evaluate(`(() => {
+      const quotes = [...((${VISIBLE_EDITOR})?.querySelectorAll('blockquote') || [])]
+      return quotes.map((q) => [...q.children].map((n) => n.tagName.toLowerCase()))
+    })()`)
+    assert.deepEqual(quoteShape, [['h2']],
+      `the quote must survive with an H2 inside it, got ${JSON.stringify(quoteShape)}`)
+    await typeTextLikeUser(send, '引用标题', { delayMs: delay })
+    await sleep(300)
+    await assertSource(evaluate, quoteExpect.replace('> ## ', '> ## 引用标题'),
+      'typing into the quoted heading must land after its marker')
 
     // ============================================================
     // 5) THE REPORTED SHAPE: a genuinely EMPTY paragraph, created the way a

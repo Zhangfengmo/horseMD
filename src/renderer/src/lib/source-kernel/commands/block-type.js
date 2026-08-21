@@ -81,20 +81,22 @@ export const BLOCK_TYPE_MARKERS = Object.freeze({
 
 // Same exclusive-end + one-step-back recovery idiom as quote-toggle.js's
 // `topLevelNodeAt` (which itself mirrors enter.js's `resolveBlock`), applied
-// to the ROOT's own children. Walking `index.tree.children` rather than the
-// flattened block index is what proves the target is TOP-LEVEL: a paragraph
-// nested in a blockquote (reachable — `shouldShow` excludes list items but
-// NOT blockquotes) is not a root child, so it is never found here and the
-// command refuses instead of writing a marker whose meaning inside a quote
-// this function has not proven.
+// per nesting level. The walk starts at the ROOT's children and descends
+// through BLOCKQUOTES ONLY (2026-08-22; it used to stop at the root, which is
+// what made every slash conversion inside a quote refuse): a paragraph whose
+// ancestor chain is pure blockquotes starts at its own quoted line's content
+// position, so a marker written there spells exactly what it spells at top
+// level — and unlike the top-level path, the nested path is additionally
+// REPARSE-PROVEN below (`provenQuoteConversion`). Any other container on the
+// chain (a list item — marker/indent semantics this command has not proven)
+// stops the walk and the command refuses, exactly as before.
 function within(node, offset) {
   const start = node?.position?.start?.offset
   const end = node?.position?.end?.offset
   return Number.isInteger(start) && Number.isInteger(end) && offset >= start && offset < end
 }
 
-function topLevelNodeAt(index, offset) {
-  const children = index.tree?.children || []
+function levelNodeAt(children, offset) {
   const direct = children.find((node) => within(node, offset))
   if (direct) return direct
   if (offset > 0) {
@@ -102,6 +104,23 @@ function topLevelNodeAt(index, offset) {
     if (before && offset === before.position.end.offset) return before
   }
   return null
+}
+
+// The deepest node at `offset` reachable through blockquotes alone, plus how
+// many quotes were crossed. `quoteDepth: 0` is exactly the old top-level hit.
+function quoteChainNodeAt(tree, offset) {
+  let children = tree?.children || []
+  let quoteDepth = 0
+  for (;;) {
+    const hit = levelNodeAt(children, offset)
+    if (!hit) return null
+    if (hit.type === 'blockquote') {
+      quoteDepth += 1
+      children = hit.children || []
+      continue
+    }
+    return { node: hit, quoteDepth }
+  }
 }
 
 // An ATX heading's raw span STARTS at its `#` run (up to 3 leading spaces of
@@ -304,8 +323,11 @@ export function setBlockTypeFromQuery({ doc, index, offset, target }) {
   if (!marker) return { ok: false, code: 'unsupported-structure' }
   if (!Number.isInteger(offset) || offset < 1) return { ok: false, code: 'unsupported-structure' }
 
-  const node = topLevelNodeAt(index, offset)
-  if (!node || !SOURCE_TYPES.has(node.type)) return { ok: false, code: 'unsupported-structure' }
+  const found = quoteChainNodeAt(index.tree, offset)
+  if (!found || !SOURCE_TYPES.has(found.node.type)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const { node, quoteDepth } = found
 
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset
@@ -322,6 +344,17 @@ export function setBlockTypeFromQuery({ doc, index, offset, target }) {
   if (node.type === 'heading' && !ATX_HEADING_RE.test(raw)) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  if (quoteDepth > 0) {
+    // A quoted block's raw span could in principle carry continuation lines
+    // (`> a\n> b` is ONE paragraph). `shouldShow` already excludes that shape
+    // (the whole visible text is the single-line query), but the nested path
+    // proves rather than assumes: a span with a line ending would swallow
+    // lines beyond the query, so it refuses.
+    if (/[\r\n]/.test(raw)) return { ok: false, code: 'unsupported-structure' }
+    if (!provenQuoteConversion({ text: doc.text, start, end, marker, target, quoteDepth })) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+  }
 
   const anchor = start + marker.length
   return {
@@ -333,4 +366,81 @@ export function setBlockTypeFromQuery({ doc, index, offset, target }) {
       selection: { anchor, head: anchor }
     }
   }
+}
+
+// The nested path's own two-axis proof (the block-insert idiom, applied to a
+// conversion): the candidate bytes must (a) parse to the TARGET structure at
+// the query's own start, inside a blockquote chain of the SAME depth, still
+// empty of content — and (b) leave every node outside the replaced span
+// byte-identical, offsets after it shifted by exactly the edit's delta. The
+// top-level path deliberately keeps its purely positional safety (long locked
+// by the suites); this proof exists because a quote prefix is CONTEXT, and
+// context is exactly what a positional argument cannot see.
+function provenQuoteConversion({ text, start, end, marker, target, quoteDepth }) {
+  const candidate = text.slice(0, start) + marker + text.slice(end)
+  let baselineTree
+  let candidateTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  // Axis (a): the structure the marker claims, at the same place, same depth.
+  const found = quoteChainNodeAt(candidateTree, start)
+  if (!found || found.quoteDepth !== quoteDepth) return false
+  const node = found.node
+  if (node.position?.start?.offset !== start) return false
+  if (target === 'bullet' || target === 'ordered') {
+    if (node.type !== 'list') return false
+    if (!!node.ordered !== (target === 'ordered')) return false
+    const items = node.children || []
+    if (items.length !== 1) return false
+    const item = items[0]
+    if (item.position?.start?.offset !== start) return false
+    if (item.checked === true || item.checked === false) return false
+    if ((item.children || []).length !== 0) return false
+  } else {
+    if (node.type !== 'heading') return false
+    if (node.depth !== Number(target.slice('heading'.length))) return false
+    if ((node.children || []).length !== 0) return false
+  }
+  // Axis (b): nothing outside the replaced span changed meaning. The quote
+  // ancestors overlap the region on both sides and are skipped symmetrically;
+  // every sibling — inside the quote or after it — must survive.
+  const delta = marker.length - (end - start)
+  const before = outsideSignatureThroughContainers(baselineTree, start, end, 0)
+  const after = outsideSignatureThroughContainers(candidateTree, start, start + marker.length, delta)
+  return before !== null && after !== null && before === after
+}
+
+// Byte-identity signature of every node OUTSIDE [regionStart, regionEnd),
+// offsets after the region normalized back by `delta`. The block-insert
+// idiom with ONE deliberate difference: a node that overlaps the region is
+// skipped but its CHILDREN are still walked — here the region sits INSIDE
+// blockquote ancestors, and pruning their whole subtree would leave the
+// quote's own sibling paragraphs unsigned (i.e. unprotected). block-insert's
+// regions are top-level, so it never meets this case.
+function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta) {
+  const parts = []
+  let ok = true
+  const walk = (node) => {
+    if (!ok) return
+    const start = node.position?.start?.offset
+    const end = node.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+      ok = false
+      return
+    }
+    if (start < regionEnd && end > regionStart) {
+      for (const child of node.children || []) walk(child)
+      return
+    }
+    const from = start <= regionStart ? start : start - delta
+    const to = end <= regionStart ? end : end - delta
+    parts.push(`${node.type}:${from}:${to}`)
+    for (const child of node.children || []) walk(child)
+  }
+  for (const child of tree.children || []) walk(child)
+  return ok ? parts.join('\n') : null
 }

@@ -452,7 +452,10 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   paragraph, whole-atom deletion (not a *partial* overlap, not a *marked*
   atom like a linked image — its `[`/`](url)` bytes belong to no unit), and
   slash-menu block-type/insert items (`/h1`–`/h6`, `/ul`, `/ol`, `/table`,
-  `/code`+language incl. `/mermaid`, `/math`). Updated 2026-08-20: hard-break
+  `/code`+language incl. `/mermaid`, `/math`; since 2026-08-22 the block-TYPE
+  conversions also work on a paragraph/heading nested in pure blockquote
+  chains — reparse-proven, list-ancestor and block-INSERT-in-quote shapes
+  still refuse fail-closed). Updated 2026-08-20: hard-break
   paragraphs are typable (`hardBreakUnitEnd` folds the continuation prefix
   into the break's unit, `6560df5`), and the ENTIRE slash menu now works in
   kernel mode — `/quote` (empty blockquote synthesized like an empty list

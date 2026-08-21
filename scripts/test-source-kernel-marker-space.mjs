@@ -63,6 +63,13 @@ const ACCEPTED = [
   // marker are ordinary line prefix, not a reason to refuse.
   ['indented bullet', '  -甲一', '  -', '  - 甲一', '-'],
   ['bullet inside a quote', '> -甲一', '> -', '> - 甲一', '-'],
+  // The 2026-08-22 "引用内嵌套" report named headings and lists specifically —
+  // one pin per family under a quote prefix, plus a two-deep chain.
+  ['h1 inside a quote', '> #甲一', '> #', '> # 甲一', '#'],
+  ['h3 inside a quote', '> ###甲一', '> ###', '> ### 甲一', '###'],
+  ['ordered inside a quote', '> 1.甲一', '> 1.', '> 1. 甲一', '1.'],
+  ['second bullet in a quote', '> - 甲\n> -乙', '\n> -', '> - 甲\n> - 乙', '-'],
+  ['h2 inside a nested quote', '> > ##甲', '> > ##', '> > ## 甲', '##'],
   // A CONTINUATION LINE of a paragraph: the marker splits the paragraph, which
   // is exactly what Markdown means by it.
   ['second line of a paragraph', '甲一\n-乙一', '\n-', '甲一\n- 乙一', '-'],
@@ -185,4 +192,4 @@ for (const [label, text, needle, character] of [
   assert.equal(routed.code, 'not-structural')
 }
 
-console.log('PASS source kernel marker-completing space: every marker family completes at an empty block, at a paragraph start and inside a list item; LF and CRLF; padding, verbatim blocks and non-markers keep their previous behaviour')
+console.log('PASS source kernel marker-completing space: every marker family completes at an empty block, at a paragraph start, inside a list item and under (nested) quote prefixes; LF and CRLF; padding, verbatim blocks and non-markers keep their previous behaviour')
