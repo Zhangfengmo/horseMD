@@ -393,10 +393,40 @@ export function createKernelMode({
   // trailing chain); either way `splitPlaceholders` — this module's own
   // record of the CURRENT chain — is resynced to exactly what got vouched
   // here, so any caller that omits `pending` correctly ends the session.
-  const bindMap = (pmDoc, pending = null) => {
+  // Perf counters (perf assessment §9, 2026-08-21). Real work counts, not
+  // instrumentation guesses: `projectionMapBuilds` increments only when
+  // `buildProjectionMap` actually runs, `projectionMapReuses` only when a
+  // transaction-validated map is adopted without a rebuild. Exposed through
+  // `getPerfStats` so the headless suites can pin the duplicate-work fixes
+  // behaviorally (and so the next assessment can measure without probes).
+  const perfStats = {
+    projectionMapBuilds: 0,
+    projectionMapReuses: 0,
+    verifyRuns: 0,
+    verifyScheduled: 0
+  }
+
+  const bindMap = (pmDoc, pending = null, reuse = null) => {
     const isChain = Array.isArray(pending)
     const list = isChain ? pending : (pending ? [pending] : [])
     splitPlaceholders = list
+    // Reuse the map the caller ALREADY built and validated for exactly this
+    // text/doc pair (perf assessment §9 #2): `applyKernelTransaction` builds
+    // `nextMap` from (result.doc.text, parsed) for its requireMap/anchor
+    // proofs, reconciles the view to `parsed`, then lands here — where the
+    // rebuild would construct the identical map a second time (~190 ms at
+    // 200 KB). Adoption is guarded by `pmDoc.eq(reuse.doc)`: the map is only
+    // served for a view doc VALUE-EQUAL to the parse it was proven against
+    // (kernel.doc.text is already `result.doc.text` by the time the caller
+    // gets here). A reconcile that failed or diverged makes `eq` false and
+    // falls through to the honest rebuild. Never combined with a placeholder
+    // voucher — `pending` implies a pairing `nextMap` was not built with.
+    if (!list.length && pmDoc && reuse?.map && reuse.doc && pmDoc.eq(reuse.doc)) {
+      kernel.map = reuse.map
+      perfStats.projectionMapReuses += 1
+      publishStatus()
+      return kernel.map
+    }
     // Preserve the CALLER's shape when forwarding to buildProjectionMap — do
     // NOT normalize a single object into a one-element `pendingPlaceholders`
     // array here. buildProjectionMap's chain-only trailing-floor self-check
@@ -417,6 +447,7 @@ export function createKernelMode({
       ? (list.length ? { pendingPlaceholders: list } : {})
       : (pending ? { pendingPlaceholder: pending } : {})
     kernel.map = pmDoc ? buildProjectionMap(kernel.doc.text, pmDoc, options) : null
+    if (pmDoc) perfStats.projectionMapBuilds += 1
     if (!kernel.map) {
       pushKernelDiagnostic({ type: 'map-refresh-failed', revision: kernel.doc.revision })
       splitPlaceholders = []
@@ -510,14 +541,41 @@ export function createKernelMode({
   // Emit only on a real CHANGE. `bindMap` runs on every accepted commit, and
   // pushing an identical status into React on each keystroke would be pure
   // re-render churn for a value that changes a handful of times per session.
+  //
+  // DEFERRED since lazy charMaps (§9 #4): the read-only COUNT is the one
+  // consumer that reads every pair's charMap, i.e. it would force the whole
+  // document's materialization on every rebind and single-handedly defeat
+  // the laziness. The publish therefore runs on a short trailing debounce —
+  // during a typing burst the timer keeps re-arming and the scan never runs;
+  // at rest it runs once, against the final map. `getKernelStatus` itself
+  // stays synchronous for direct callers (StatusBar menu open), and DISPOSE
+  // publishes immediately — a torn-down editor must not leave a stale badge
+  // behind while a timer spins.
   let lastStatusKey = null
-  const publishStatus = () => {
+  let statusTimer = null
+  const STATUS_DEBOUNCE_MS = 150
+  const publishStatusNow = () => {
+    if (statusTimer) {
+      clearTimeout(statusTimer)
+      statusTimer = null
+    }
     if (typeof onStatusChange !== 'function') return
     const status = getKernelStatus()
     const key = `${status.state}:${status.readOnlyBlocks}:${status.blocks}:${status.reason || ''}`
     if (key === lastStatusKey) return
     lastStatusKey = key
     onStatusChange(status)
+  }
+  const publishStatus = () => {
+    if (typeof onStatusChange !== 'function') return
+    if (disposed) {
+      publishStatusNow()
+      return
+    }
+    if (statusTimer) clearTimeout(statusTimer)
+    statusTimer = setTimeout(publishStatusNow, STATUS_DEBOUNCE_MS)
+    // Never keep a headless process alive for a pending badge update.
+    if (typeof statusTimer?.unref === 'function') statusTimer.unref()
   }
 
   const refreshProjectionMap = () => {
@@ -596,6 +654,7 @@ export function createKernelMode({
   }
 
   const verifyPlainTextProjection = (newDoc) => {
+    perfStats.verifyRuns += 1
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
       pushKernelDiagnostic({ type: 'projection-parse-failure', revision: kernel.doc.revision })
@@ -619,6 +678,85 @@ export function createKernelMode({
       }
       bindMap(view.state.doc)
     })
+  }
+
+  // ===========================================================================
+  // Debounced verify (perf assessment §9 #5, 2026-08-21)
+  // ===========================================================================
+  // `verifyPlainTextProjection` is POST-HOC repair, not a gate: the PM
+  // transaction is already applied when it runs, no fail-closed veto consults
+  // it, and its remedy is an async reconcile. Running its full-document parse
+  // synchronously on EVERY keystroke was ~1/3 of the whole keystroke route
+  // (~113 ms headless / ~350 ms real at 200 KB), so a typing burst now pays
+  // for ONE coalesced run after it settles.
+  //
+  // What must NOT be debounced, and is not:
+  //   * the REPAIR path — when the rebind failed (kernel.map null, e.g. the
+  //     orphaned split placeholder), verify IS the recovery mechanism and the
+  //     next keystroke depends on the map it restores. `requestVerify` runs it
+  //     immediately there, exactly as before.
+  //   * a FLUSH reader — flushMarkdown / flushMarkdownSettled /
+  //     getRecoveryMarkdown force the pending run first (`flushPendingVerify`),
+  //     so a save or mode switch never reads past a silently-dropped check.
+  // What this deliberately trades (assessment §9 #5's stated cost): a
+  // projection mismatch is now undetected for up to one debounce interval
+  // instead of one microtask. Every BYTE write in that window is still gated
+  // by the gateway/command proofs against the freshly rebuilt map — a
+  // diverged view degrades pairs fail-closed — so the window delays a VIEW
+  // repair, never a byte decision.
+  //
+  // The debounced run re-reads the LIVE view doc at fire time (by then
+  // updateState has installed the transaction's doc — the `newDoc` argument
+  // the synchronous call sites used is stale by design here) and re-arms
+  // itself while an IME composition is in flight: reconciling mid-composition
+  // would fight the composition session, whose own settle path already
+  // reconciles through applyKernelTransaction.
+  const VERIFY_DEBOUNCE_MS = 200
+  let verifyTimer = null
+  const runScheduledVerify = () => {
+    verifyTimer = null
+    if (inactive()) return
+    const view = getView?.()
+    if (!view) return
+    if (view.composing || compositionSession.isActive()) {
+      scheduleVerify()
+      return
+    }
+    // NEVER inside an active split-placeholder session (regression caught
+    // live by test-kernel-mode-ui, pinned as Case PERF-3): the placeholder is
+    // a view-only paragraph the reparse cannot contain, so a verify landing
+    // mid-session reads it as a mismatch and its repair DELETES the block
+    // under the parked caret — the next keystroke then types into whatever
+    // neighbour the caret collapses into. DROPPED, not deferred: the session
+    // opened from a structural op that reconciled the view against a fresh
+    // parse (verified-equivalent at session start), and the session-ending
+    // commit verifies synchronously (`hadPlaceholders`), so nothing is left
+    // unchecked.
+    if (splitPlaceholders.length) return
+    verifyPlainTextProjection(view.state.doc)
+  }
+  const scheduleVerify = () => {
+    if (verifyTimer) clearTimeout(verifyTimer)
+    verifyTimer = setTimeout(runScheduledVerify, VERIFY_DEBOUNCE_MS)
+    // Never keep a headless process alive for a pending verify (Node timers
+    // hold the event loop; browser timers have no unref and skip this).
+    if (typeof verifyTimer?.unref === 'function') verifyTimer.unref()
+    perfStats.verifyScheduled += 1
+  }
+  const flushPendingVerify = () => {
+    if (!verifyTimer) return
+    clearTimeout(verifyTimer)
+    runScheduledVerify()
+  }
+  const requestVerify = (newDoc) => {
+    if (!kernel.map) {
+      // Rebind failed: verify is the repair path and must run NOW, against
+      // the doc the caller is installing (the live view may not carry it yet
+      // — handleTransactions runs before updateState).
+      if (newDoc) verifyPlainTextProjection(newDoc)
+      return
+    }
+    scheduleVerify()
   }
 
   // Best-effort scan: does any ReplaceStep in this batch target a
@@ -759,9 +897,32 @@ export function createKernelMode({
         // in which case the rebind fails against the orphaned empty
         // paragraph and verifyPlainTextProjection's repair reconcile removes
         // it (the parse never contains it) and rebinds.
+        //
+        // Two commits keep the SYNCHRONOUS verify under the debounce (§9 #5),
+        // because for both the view is KNOWN to differ from the bytes and the
+        // verify's reconcile is what settles it — neither ever occurs inside
+        // an ordinary typing burst:
+        //   * `hadPlaceholders` — the session-ending commit: an orphan at the
+        //     document end is byte-legally TOLERATED by the rebind as a
+        //     trailing placeholder (kernel.map non-null), so the
+        //     immediate-repair branch of `requestVerify` alone would not
+        //     catch it, yet the cleanup is a pinned session contract
+        //     (Case 14). At most once per Enter.
+        //   * `committed.rewrote` — the gateway re-spelled the step (a
+        //     whitespace heal, the task-seed dissolve, a virtual-block
+        //     prefix, the code-fence newline expansion): the view shows the
+        //     PM slice while the bytes hold the rewrite, and until the
+        //     reconcile runs the block cannot be proven against the view —
+        //     debouncing would leave it refusing keystrokes for the whole
+        //     interval (Case I5's dissolve pin).
+        const hadPlaceholders = splitPlaceholders.length > 0
         bindMap(newState?.doc || null)
         verifyEditObservable(committed.observability)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        if ((hadPlaceholders || committed.rewrote) && newState?.doc) {
+          verifyPlainTextProjection(newState.doc)
+        } else {
+          requestVerify(newState?.doc)
+        }
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -903,7 +1064,7 @@ export function createKernelMode({
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        requestVerify(newState?.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -941,7 +1102,7 @@ export function createKernelMode({
         kernel.doc = committed.applied.doc
         recordHistory(committed.applied, committed.transaction)
         bindMap(newState?.doc || null)
-        if (newState?.doc) verifyPlainTextProjection(newState.doc)
+        requestVerify(newState?.doc)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -1281,8 +1442,10 @@ export function createKernelMode({
     }
     // The map must be rebound to the reconciled doc BEFORE any further
     // caret work: rawToPmPos is only meaningful on a map built for this
-    // revision.
-    bindMap(view.state.doc)
+    // revision. When the reconcile landed the view exactly on `parsed`,
+    // the map validated above IS this revision's map — adopt it (see
+    // bindMap's reuse guard) instead of rebuilding it.
+    bindMap(view.state.doc, null, nextMap ? { map: nextMap, doc: parsed } : null)
     // MINIMAL-DIFF FALLBACK for a STRUCTURE-CHANGING edit (2026-08-20).
     // `reconcileProjection` replaces only the smallest differing range, which is
     // what preserves node-view identity everywhere else — but `tr.replace`
@@ -1530,13 +1693,19 @@ export function createKernelMode({
   // `pmPosToRaw` relies on). Virtual pairs are excluded — a placeholder
   // has no real bytes to mark or tab into; refusing is the fail-closed
   // choice.
-  const editablePairForRange = (from, to) =>
-    (kernel.map?.blockPairs || []).find((candidate) => {
-      if (!candidate.charMap || candidate.virtual) return false
-      const contentPos = candidate.pmPos + 1
-      const end = contentPos + candidate.charMap.visibleLength
-      return from >= contentPos && to <= end
-    }) || null
+  // Resolved through the map's own `pairAt` (rather than a hand-rolled scan
+  // over blockPairs reading every candidate's charMap) since lazy charMaps
+  // (§9 #4): pairAt range-checks deferred pairs without materializing them,
+  // so this builds only the block the range lands in. Equivalent by
+  // construction — content ranges of distinct pairs are disjoint, so the
+  // pair containing `from` is the only one that could contain [from, to].
+  const editablePairForRange = (from, to) => {
+    const pair = kernel.map?.pairAt?.(from)
+    if (!pair || pair.virtual || !pair.charMap) return null
+    const contentPos = pair.pmPos + 1
+    if (from < contentPos || to > contentPos + pair.charMap.visibleLength) return null
+    return pair
+  }
 
   // Whitespace at a block's END — the other position CommonMark strips (see
   // lib/source-kernel/commands/trailing-whitespace.js). Measured before this
@@ -2608,6 +2777,9 @@ export function createKernelMode({
     flushMarkdown: (...args) => {
       const delegate = legacy('flushMarkdown')
       if (delegate) return delegate(...args)
+      // A flush reader (save, mode switch, export) must not read past a
+      // pending debounced verify — run it now (see the debounce ADR above).
+      flushPendingVerify()
       return kernel.doc.text
     },
     // Await any in-flight IME composition before serving the flush: a save
@@ -2621,6 +2793,7 @@ export function createKernelMode({
       const delegate = legacy('flushMarkdownSettled')
       if (delegate) return delegate(...args)
       await composition.settled()
+      flushPendingVerify()
       return kernel.doc.text
     },
     replaceMarkdown: (markdown) => {
@@ -2663,6 +2836,7 @@ export function createKernelMode({
     getRecoveryMarkdown: (...args) => {
       const delegate = legacy('getRecoveryMarkdown')
       if (delegate) return delegate(...args)
+      flushPendingVerify()
       return kernel.doc.text
     },
     markdownOffsetFromSelection: (...args) => {
@@ -2742,6 +2916,10 @@ export function createKernelMode({
   const dispose = () => {
     disposed = true
     kernel.map = null
+    if (verifyTimer) {
+      clearTimeout(verifyTimer)
+      verifyTimer = null
+    }
     compositionSession.dispose()
     // Clear the host's indicator: a torn-down editor must not leave a stale
     // "some blocks are read-only" badge behind.
@@ -2789,6 +2967,9 @@ export function createKernelMode({
     isDegraded: () => degraded,
     // P6 Task 3: the observable-degradation state (see getKernelStatus).
     getKernelStatus,
+    // Perf counters (see perfStats above): a snapshot copy, never the live
+    // object — callers must not be able to write the counts.
+    getPerfStats: () => ({ ...perfStats }),
     composition,
     dispose
   }

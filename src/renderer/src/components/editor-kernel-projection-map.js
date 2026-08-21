@@ -826,6 +826,56 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     const editable = pm.node.isTextblock &&
       !NON_EDITABLE_LEAF_TYPES.has(pmType) &&
       !OPAQUE_TYPES.has(pmType)
+
+    // =======================================================================
+    // LAZY CHARACTER MAP (perf assessment §9 #4, 2026-08-21)
+    // =======================================================================
+    // A NON-EMPTY editable textblock defers its charMap (and its proofs)
+    // behind a caching getter: the eager document-wide pass was ~50 % of
+    // every buildProjectionMap (103 ms at 200 KB, superlinear at 1 MB) while
+    // a keystroke touches ONE block. Nothing about the fail-closed posture
+    // changes — the size proof, the endpoint cross-check and the mapper's own
+    // byte-for-byte units all run at materialization, which every consumer
+    // performs (by reading `pair.charMap`) BEFORE any offset from this pair
+    // can be served. A pair whose proof fails materializes to `null`, exactly
+    // the degraded shape the eager build produced.
+    //
+    // EMPTY textblocks (content.size 0) deliberately stay on the eager path
+    // below: their build is O(1), and the empty-ATX-heading derivation must
+    // set the STATIC `virtual` flag consumers read without touching charMap.
+    // The in-map resolvers (`pairForContentPos`, `rawToPmPos`) range-check a
+    // deferred pair without materializing it — content.size stands in for
+    // visibleLength (the size proof makes them equal for every served map)
+    // and the mdast block span pre-filters raw offsets — so a scan across N
+    // pairs still builds only the block it lands in. `deferred` is the
+    // discriminator those resolvers key on.
+    if (editable && pm.node.content.size > 0) {
+      const pmNode = pm.node
+      const mdNode = md
+      const build = pmType === 'code_block'
+        ? () => buildCodeMap(markdown, mdNode)
+        : () => buildCharacterMap(markdown, mdNode)
+      const pair = { mdBlock: md, pmNode, pmPos: pm.pos, deferred: true }
+      let materialized = false
+      let value = null
+      Object.defineProperty(pair, 'charMap', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          if (!materialized) {
+            materialized = true
+            // Same three proofs, same order, as the eager branches below.
+            let m = build()
+            if (m && pmNode.content.size !== m.visibleLength) m = null
+            if (m && !blockEndpointsAgree(markdown, pmNode, m)) m = null
+            value = m
+          }
+          return value
+        }
+      })
+      blockPairs.push(pair)
+      continue
+    }
     let charMap = null
     // Set only by the empty-ATX-heading derivation at the bottom of this
     // branch: like the empty list item's own placeholder pair, such a pair
@@ -1076,10 +1126,21 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   // just where one `\n` maps to.
   const pairForContentPos = (pmPos) => {
     for (const pair of blockPairs) {
-      if (!pair.charMap) continue
+      // Range-check a deferred pair WITHOUT materializing it: the size proof
+      // makes visibleLength === pmNode.content.size for every served map, so
+      // the node's own size is the same bound. Only the pair the position
+      // lands in pays for its build; a materialization whose proof failed
+      // (charMap null) is skipped exactly like the eager degraded pair was.
+      let size
+      if (pair.deferred) {
+        size = pair.pmNode.content.size
+      } else {
+        if (!pair.charMap) continue
+        size = pair.charMap.visibleLength
+      }
       const contentPos = pair.pmPos + 1
-      const size = pair.charMap.visibleLength
       if (pmPos < contentPos || pmPos > contentPos + size) continue
+      if (!pair.charMap) continue
       return pair
     }
     return null
@@ -1146,8 +1207,19 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
   // fallback).
   const rawToPmPos = (raw) => {
     for (const pair of blockPairs) {
-      if (!pair.charMap) continue
+      // Pre-filter a deferred pair by its mdast block span before paying for
+      // the build: the charMap's raw range is always contained in the block's
+      // own [start, end] (content start can only sit at/after the marker).
+      // A span hit still runs the exact range check below on the
+      // materialized map, so an offset in the marker region resolves
+      // identically to the eager build (skip, keep scanning).
+      if (pair.deferred) {
+        const s = pair.mdBlock?.position?.start?.offset
+        const e = pair.mdBlock?.position?.end?.offset
+        if (Number.isInteger(s) && Number.isInteger(e) && (raw < s || raw > e)) continue
+      } else if (!pair.charMap) continue
       const { charMap } = pair
+      if (!charMap) continue
       const rawMin = charMap.visibleToRaw(0)
       const rawMax = charMap.visibleToRaw(charMap.visibleLength)
       if (raw < rawMin || raw > rawMax) continue

@@ -197,6 +197,10 @@ const FIXTURE_DOCS = {
   '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X'))),
   '- 甲\n\nab': () => doc(bl(li(null, p(text('甲')))), p(text('ab'))),
   '甲乙\n\n\n': () => doc(p(text('甲乙'))),
+  // Case PERF-3 fixtures: a pending debounced verify + a split-placeholder
+  // session on the SAME document (blank-line runs collapse in the reparse).
+  '甲丙乙\n\n\n': () => doc(p(text('甲丙乙'))),
+  '甲丙乙\n\n丁\n': () => doc(p(text('甲丙乙')), p(text('丁'))),
   '甲乙\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
   'X甲乙\n\n\n': () => doc(p(text('X甲乙'))),
   // Task 2 (plan 3) fixtures: repeated Enter inside the trailing placeholder
@@ -3063,17 +3067,30 @@ const toggleVia = (h, markType, from, to) => {
 {
   // onStatusChange fires on real transitions and is de-duplicated, so a
   // keystroke that leaves the status unchanged costs no host re-render.
+  //
+  // TIMING (changed with \u00a79 #4, 2026-08-21): the status COUNT is the one
+  // consumer that walks every pair's charMap, which under lazy charMaps
+  // would force the whole document's materialization on every rebind \u2014 so
+  // the publish is now DEFERRED to a short idle debounce instead of running
+  // synchronously inside bindMap/attach. `getKernelStatus` itself stays
+  // synchronous for direct callers. Dispose still publishes 'off'
+  // immediately: a torn-down editor must not leave a stale badge while a
+  // timer spins.
   const md = '\u7532\u4e59\n'
   const seen = []
   const h = makeHarness(md, doc(p(text('\u7532\u4e59'))), { onStatusChange: (s) => seen.push(s.state) })
   assert.deepEqual(seen, [], 'nothing is published before attach')
   assert.equal(h.controller.attachAfterCreate(), true)
-  assert.deepEqual(seen, ['normal'])
+  assert.deepEqual(seen, [], 'attach schedules the publish off the hot path (lazy charMaps)')
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  assert.deepEqual(seen, ['normal'], 'the deferred publish lands after the debounce')
   h.controller.refreshProjectionMap()
   h.controller.refreshProjectionMap()
+  await new Promise((resolve) => setTimeout(resolve, 250))
   assert.deepEqual(seen, ['normal'], 'an unchanged status is not re-published')
   h.controller.dispose()
-  assert.deepEqual(seen, ['normal', 'off'], 'teardown clears the host indicator')
+  assert.deepEqual(seen, ['normal', 'off'],
+    'teardown clears the host indicator immediately, no timer wait')
 }
 
 // ===========================================================================
@@ -3878,6 +3895,121 @@ const toggleVia = (h, markType, from, to) => {
   await flushMicrotasks()
   assert.equal(verdict, undefined, 'deleting the soft break is allowed')
   assert.equal(h.controller.kernel.doc.text, '- 甲乙\r\n', 'the ending and its indent both go')
+}
+
+// Case PERF-1 (perf assessment §9 #2 — reuse the map you just built):
+// `applyKernelTransaction` builds `nextMap` from (result.doc.text, parsed) to
+// validate the transaction, reconciles the view to `parsed`, then rebinds.
+// When the reconciled view doc EQUALS the parse output (`.eq`, the ordinary
+// success path), the rebind must ADOPT the already-validated map instead of
+// rebuilding the identical one — observable through the controller's perf
+// counters, and provably the same map: it still serves the committed bytes'
+// offsets.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  assert.equal(typeof h.controller.getPerfStats, 'function',
+    'controller exposes perf counters (map builds / reuses)')
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2)))
+  const before = h.controller.getPerfStats()
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  assert.equal(handled, true)
+  const after = h.controller.getPerfStats()
+  assert.equal(after.projectionMapReuses, before.projectionMapReuses + 1,
+    'the map proven against the committed bytes is adopted, not rebuilt')
+  // The adopted map is bound and correct: same offsets the rebuild would serve
+  // (raw 3 = start of the split's second paragraph -> PM pos 4, Case 3's own
+  // expectation).
+  assert.equal(h.controller.kernel.doc.text, '甲\n\n乙\n')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(4), 3)
+  assert.equal(h.view.state.selection.head, 4, 'caret restore still works through the adopted map')
+
+  // And a plain-text commit (no nextMap exists on that route) still REBUILDS:
+  // reuse must never serve a map for a doc the validation never saw.
+  const b2 = h.controller.getPerfStats()
+  const tr = h.view.state.tr.insertText('丙', 4)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  const a2 = h.controller.getPerfStats()
+  assert.equal(a2.projectionMapReuses, b2.projectionMapReuses, 'plain-text rebind does not reuse')
+  assert.ok(a2.projectionMapBuilds > b2.projectionMapBuilds, 'plain-text rebind rebuilds')
+}
+
+// Case PERF-2 (perf assessment §9 #5 — debounce the verify parse): the
+// post-hoc verify (`verifyPlainTextProjection`) is not a gate — the PM
+// transaction is already applied when it runs — so a typing burst must pay
+// for ONE coalesced verify parse after the burst settles, not one per
+// keystroke. Two invariants ride along and are pinned here:
+//   * the REPAIR path stays immediate — when the rebind failed
+//     (kernel.map null), verify is the recovery mechanism and must not be
+//     delayed (covered by the existing placeholder/task-toggle cases, which
+//     would hang unmapped if it were);
+//   * a FLUSH forces the pending verify — a save/mode-switch reader never
+//     sees a view whose scheduled verification was silently dropped.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tr = h.view.state.tr.insertText('丙', 2)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  const s1 = h.controller.getPerfStats()
+  assert.equal(typeof s1.verifyRuns, 'number', 'perf stats expose verifyRuns')
+  assert.equal(s1.verifyRuns, 0,
+    'a healthy plain-text commit schedules the verify instead of parsing synchronously')
+  await new Promise((resolve) => setTimeout(resolve, 350))
+  const s2 = h.controller.getPerfStats()
+  assert.equal(s2.verifyRuns, 1, 'the burst settles into exactly one verify run')
+
+  // Forced flush: a pending verify runs NOW when a flush reader asks for the
+  // text (mode switch / save), never left dangling behind the debounce.
+  const tr2 = h.view.state.tr.insertText('丁', 1)
+  const verdict2 = dispatchThrough(h, tr2)
+  await flushMicrotasks()
+  assert.equal(verdict2, undefined)
+  assert.equal(h.controller.getPerfStats().verifyRuns, 1, 'second commit is debounced too')
+  const flushed = h.controller.apiOverrides.flushMarkdown()
+  assert.equal(flushed, h.controller.kernel.doc.text, 'flush serves the kernel bytes')
+  assert.equal(h.controller.getPerfStats().verifyRuns, 2,
+    'flushMarkdown forces the pending verify to run immediately')
+}
+
+// Case PERF-3 (regression, caught live by test-kernel-mode-ui): the
+// DEBOUNCED verify must never fire while a split-placeholder session is
+// active. The placeholder is a view-only construct the reparse cannot
+// contain, so a verify landing mid-session reads it as a mismatch and its
+// repair DELETES the paragraph under the parked caret — the next keystroke
+// then lands in whatever block the caret collapses into (measured: 乙段
+// typed into the neighbouring list item). The session's own edges already
+// verify synchronously (the session-ending commit's hadPlaceholders branch),
+// so the scheduled run is simply dropped, not deferred.
+{
+  const h = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // A plain-text commit first, so a verify is PENDING when the session opens.
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('丙', 2))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined)
+  // Enter at the block end opens the split-placeholder session.
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 4)))
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲丙乙')), p())), 'placeholder parked under the caret')
+  // Let every pending debounce fire. The placeholder must survive.
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲丙乙')), p())),
+    'the scheduled verify must not delete an active split placeholder')
+  // p1('甲丙乙') spans 0..4, so the placeholder sits at pmPos 5, content 6;
+  // the split wrote '\n\n' at raw 3, parking the caret at raw 5.
+  assert.deepEqual(h.controller.kernel.map.virtualBlockAt(6), { raw: 5, prefix: '' },
+    'the session voucher survives the debounce window')
+  // The continuation keystroke still lands at the blank-line offset.
+  const fill = dispatchThrough(h, h.view.state.tr.insertText('丁', 6))
+  await flushMicrotasks()
+  assert.equal(fill, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲丙乙\n\n丁\n',
+    'typing after the wait still fills the placeholder, never a neighbour')
 }
 
 console.log('PASS kernel mode headless')

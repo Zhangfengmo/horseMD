@@ -2284,3 +2284,52 @@ const fm = (value) => schema.node('frontmatter', { value })
 }
 
 console.log('PASS kernel projection map (front matter pairs, stays read-only)')
+
+// ===========================================================================
+// Lazy character maps (perf assessment §9 #4): building the map must not pay
+// for every block's charMap up front — the document-wide buildCharacterMap
+// pass was ~50 % of buildProjectionMap (103 ms at 200 KB, superlinear at
+// 1 MB) while a keystroke touches ONE block. A non-empty textblock pair's
+// `charMap` therefore materializes on first ACCESS; every proof (size,
+// endpoints, byte-for-byte units) still runs at materialization, i.e. before
+// any offset from that pair can be served — the fail-closed posture is
+// unchanged, only its timing is.
+// ===========================================================================
+{
+  const md = '甲乙\n\n丙丁\n\n戊\n'
+  const pmDoc = doc(p(text('甲乙')), p(text('丙丁')), p(text('戊')))
+  const map = buildProjectionMap(md, pmDoc)
+  assert.ok(map, 'the map builds')
+  const pair = map.blockPairs[0]
+  const descriptor = Object.getOwnPropertyDescriptor(pair, 'charMap')
+  assert.equal(typeof descriptor.get, 'function',
+    'a non-empty textblock pair defers its charMap behind a getter')
+  // Materialization serves the SAME proven map the eager build produced —
+  // and caches it (same object on the second read).
+  const first = pair.charMap
+  assert.ok(first, 'materialized charMap is served')
+  assert.equal(pair.charMap, first, 'materialization is cached, not rebuilt per access')
+  assert.equal(first.visibleLength, 2)
+  // Resolution through the deferred pairs is byte-identical to the eager
+  // behavior: content scans, raw scans, and the marker-gap resolvers.
+  assert.equal(map.pmPosToRaw(1), 0)
+  assert.equal(map.pmPosToRaw(3), 2)
+  assert.equal(map.pmPosToRaw(5), 4) // second paragraph '丙' start
+  assert.equal(map.rawToPmPos(4)?.pos, 5)
+  assert.equal(map.rawToPmPos(8)?.pos, 9) // '戊' start: contentPos 9 + vis 0
+}
+
+// A deferred pair whose proof FAILS at materialization degrades exactly like
+// the eager build did: charMap null, the pair is skipped by every resolver,
+// the neighbours keep serving. (PM text disagreeing with the source at an
+// endpoint is the cheapest way to force the proof to fail.)
+{
+  const md = '甲乙\n\n丙丁\n'
+  const pmDoc = doc(p(text('甲乙')), p(text('丙X')))
+  const map = buildProjectionMap(md, pmDoc)
+  assert.ok(map, 'a content disagreement degrades the pair, never the map')
+  assert.equal(map.blockPairs[1].charMap, null, 'the disagreeing pair fails its proof lazily')
+  assert.equal(map.pmPosToRaw(5), null, 'no offset is ever served from it')
+  assert.equal(map.pmPosToRaw(1), 0, 'the healthy neighbour still serves')
+}
+console.log('PASS kernel projection map (lazy charMaps)')

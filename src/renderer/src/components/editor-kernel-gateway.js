@@ -1382,6 +1382,17 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   // `THE OBSERVABILITY EXPECTATION` directly above this function for what this
   // is and what it deliberately is not.
   let observability = null
+  // Did ANY step's committed bytes differ from what ProseMirror itself
+  // inserted (a heal re-spelling whitespace, the task-seed dissolve, a
+  // virtual-block separator prefix, the code-fence newline expansion)? The
+  // caller needs to know because the VIEW then shows the PM slice while the
+  // bytes hold the rewrite — the post-commit verify is what settles the two,
+  // and it must run synchronously for exactly these commits (the debounced
+  // path — perf assessment §9 #5 — is only safe when bytes and view agree
+  // character for character). Detected at the single push point below by
+  // comparing the final edit against the step's own mapping, so every
+  // current and future rewrite branch is covered without per-site flags.
+  let rewrote = false
   // U+00A0 runs this batch writes, in POST-edit coordinates, for the document's
   // whitespace provenance ledger (markdown-document.js): the heal may only ever
   // rewrite a character THIS kernel wrote. Only the single-step whitespace
@@ -1971,6 +1982,13 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
         return { ok: false, code: stranded.code }
       }
     }
+    // Single-point rewrite detection (see `rewrote` above): the step's own
+    // mapping was (rawFrom, rawTo, step.insertText); anything else means the
+    // bytes about to be committed are not the slice ProseMirror shows.
+    if (editFrom !== rawFrom || editTo !== rawTo ||
+        insertText !== step.insertText || virtualPrefix !== '') {
+      rewrote = true
+    }
     edits.push({
       from: editFrom,
       to: editTo,
@@ -2099,7 +2117,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   if (touchedTableCell && !tableStructurePreserved(kernel, kernel.doc.text, result.doc.text)) {
     return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
   }
-  return { ok: true, applied: result, transaction, observability }
+  return { ok: true, applied: result, transaction, observability, rewrote }
 }
 
 // commitTaskToggle: turns a `task-toggle`-classified batch (see

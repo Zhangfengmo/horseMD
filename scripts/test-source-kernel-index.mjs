@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 
 // 行扫描：LF / CRLF / lone-CR / 末尾换行
 {
@@ -404,3 +404,53 @@ console.log('PASS source-kernel syntax index (inline html is phrasing)')
 }
 
 console.log('PASS source-kernel syntax index (front matter)')
+
+// ===========================================================================
+// Parse memo (perf assessment §9 #3): the kernel parse is pure, so the SAME
+// exact string must be served the SAME object — collapsing the duplicate
+// full-document parses one operation performs (route handler + projection
+// map + command baselines). Keyed on the exact string, never a hash or a
+// revision: a hit is proof the bytes are identical.
+// ===========================================================================
+{
+  const t = '# 甲\n\n乙==丙==丁 `code` **粗**\n'
+  assert.equal(buildSyntaxIndex(t), buildSyntaxIndex(t),
+    'buildSyntaxIndex memoizes by exact string (same object, no re-parse)')
+  assert.equal(parseKernelMarkdown(t), parseKernelMarkdown(t),
+    'parseKernelMarkdown memoizes by exact string')
+  assert.notEqual(buildSyntaxIndex(t + ' '), buildSyntaxIndex(t),
+    'a different string is a different parse')
+
+  // SEPARATION — the load-bearing safety property. buildSyntaxIndex MUTATES
+  // its own tree (injectHighlightNodes splits text nodes and inserts
+  // `highlight` nodes); that mutation must never leak into the tree
+  // parseKernelMarkdown serves for the same string, and vice versa.
+  const raw = parseKernelMarkdown(t)
+  const idx = buildSyntaxIndex(t)
+  assert.notEqual(raw, idx.tree, 'the two memos never share a tree')
+  const types = []
+  const walk = (node) => {
+    types.push(node.type)
+    for (const child of node.children || []) walk(child)
+  }
+  walk(raw)
+  assert.ok(!types.includes('highlight'),
+    'the raw parse stays highlight-free even after buildSyntaxIndex parsed the same string')
+  const idxTypes = []
+  const walkIdx = (node) => {
+    idxTypes.push(node.type)
+    for (const child of node.children || []) walkIdx(child)
+  }
+  walkIdx(idx.tree)
+  assert.ok(idxTypes.includes('highlight'), 'the index tree carries the injected highlight (positive control)')
+  assert.equal(parseKernelMarkdown(t), raw, 'the raw memo entry survives the index build')
+
+  // EVICTION — the memo is a small LRU, not an unbounded pin: parsing more
+  // distinct strings than the cap evicts the oldest, so re-parsing it yields
+  // a fresh object (bounded memory, not a correctness property).
+  const first = parseKernelMarkdown('第0篇\n')
+  for (let i = 1; i <= 8; i += 1) parseKernelMarkdown(`第${i}篇\n`)
+  assert.notEqual(parseKernelMarkdown('第0篇\n'), first,
+    'the oldest entry is evicted once the cap is exceeded')
+}
+console.log('PASS source-kernel syntax index (parse memo)')
