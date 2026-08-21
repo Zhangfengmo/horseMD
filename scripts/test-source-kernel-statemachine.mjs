@@ -281,16 +281,28 @@ const runSeed = (seed, starter) => {
     // 每一行"引用/缩进前缀"字符类(`[ \t>]*`)之内的字符——行数不变，且每行
     // 剥离前导前缀后的剩余内容逐字相同。一个撕裂 marker 或落在词中间的
     // 错误偏移会在这里被发现（前缀之外多/少出的字符会让剥离后的内容不等）。
+    // 唯一的例外(2026-08-22 有序 marker rescue)：indent 打开新子列表时允许
+    // 把该项自己的 marker 数字改写为 `1`（分隔符不变，且整个事务至多一行）——
+    // CommonMark 只允许序号为 1 的有序列表打断段落，不改写就无法嵌套。
     if (result.transaction.intent === 'indent-list-item' || result.transaction.intent === 'outdent-list-item') {
       const beforeLines = scanLines(before)
       const afterLines = scanLines(applied.doc.text)
       assert.equal(afterLines.length, beforeLines.length,
         `${action} changed line count (seed ${seed} step ${step})`)
       const stripPrefix = (s) => s.replace(/^[ \t>]*/, '')
+      let renumbered = 0
       for (let i = 0; i < beforeLines.length; i += 1) {
-        assert.equal(stripPrefix(afterLines[i].text), stripPrefix(beforeLines[i].text),
+        const a = stripPrefix(afterLines[i].text)
+        const b = stripPrefix(beforeLines[i].text)
+        if (a === b) continue
+        const isRescue = result.transaction.intent === 'indent-list-item' &&
+          b.replace(/^(\d+)([.)])/, '1$2') === a
+        assert.ok(isRescue,
           `${action} changed line ${i} content beyond its leading prefix (seed ${seed} step ${step})`)
+        renumbered += 1
       }
+      assert.ok(renumbered <= 1,
+        `${action} renumbered more than the item's own marker (seed ${seed} step ${step})`)
     }
     // 不变式:不产生禁止实体/哨兵(除非编辑前已存在)
     if (!FORBIDDEN.test(before)) {

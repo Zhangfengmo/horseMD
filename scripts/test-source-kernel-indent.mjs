@@ -15,24 +15,51 @@ const run = (src, offset, fn) => {
 
 // bullet 缩进：`- ` 宽 2 → 2 空格
 assert.equal(run('- 甲\n- 乙\n', 6, indentListItem), '- 甲\n  - 乙\n')
-// 有序 marker `10. ` 宽 4 → 4 空格。REWRITTEN 2026-08-20: this used to assert the
-// BYTES `10. 甲\n    11. 乙\n` and never asked what they reparse to — they
-// reparse to ONE paragraph, `甲\n11. 乙`, because an ordered list can only
-// interrupt a paragraph when its number is 1. So the "working" ordered indent
-// was silently merging the two items, and the reparse proof added with the
-// empty-item fix refuses it. Making it WORK means renumbering the nested marker
-// to `1.`, which is its own task (named in the report); until then it fails
-// closed instead of corrupting.
-assert.equal(run('10. 甲\n11. 乙\n', 8, indentListItem).code, 'would-restructure-document')
+// 有序 marker `10. ` 宽 4 → 4 空格 + 该项自己的 marker 改写为 `1.`。
+// HISTORY: this used to assert the BYTES `10. 甲\n    11. 乙\n` and never asked
+// what they reparse to — they reparse to ONE paragraph, `甲\n11. 乙`, because an
+// ordered list can only interrupt a paragraph when its number is 1. The reparse
+// proof then refused it fail-closed for a while ("renumbering is its own task").
+// That task is done (2026-08-22, from a user report with both toasts on screen):
+// opening a NEW sublist rewrites the demoted item's own marker to `1.` — the
+// Typora gesture — and the same proof gates the rewritten bytes.
+assert.equal(run('10. 甲\n11. 乙\n', 8, indentListItem), '10. 甲\n    1. 乙\n')
 {
+  // The control the old refusal was pinned to still holds: the UN-renumbered
+  // bytes really do merge the two items into one paragraph.
   const merged = buildSyntaxIndex('10. 甲\n    11. 乙\n').tree
   const paras = []
   const dec = (n) => (n.value !== undefined ? String(n.value) : (n.children || []).map(dec).join(''))
   const walk = (n) => { if (n.type === 'paragraph') paras.push(dec(n)); for (const c of n.children || []) walk(c) }
   walk(merged)
   assert.deepEqual(paras, ['甲\n11. 乙'],
-    'the refused bytes really do merge the two items into one paragraph')
+    'the un-renumbered bytes really do merge the two items into one paragraph')
 }
+// THE REPORTED SHAPE (2026-08-22, screenshots): a tight ordered list built by
+// kernel Enter; Tab on the typed last item must nest it, renumbered to 1, with
+// the caret staying on its text.
+{
+  const src = '1. 23123\n2. 委屈委屈\n3. ewqeqw\n4. 2313\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = indentListItem({ doc, index, offset: src.indexOf('2313') })
+  assert.equal(r.ok, true, 'a typed ordered item must indent (toast 1 promises it)')
+  const applied = applySourceTransaction(doc, r.transaction)
+  assert.equal(applied.doc.text, '1. 23123\n2. 委屈委屈\n3. ewqeqw\n   1. 2313\n')
+  assert.equal(applied.selection.anchor, applied.doc.text.indexOf('2313'))
+}
+// The `)` delimiter survives the renumber.
+assert.equal(run('1) 甲\n2) 乙\n', 5, indentListItem), '1) 甲\n   1) 乙\n')
+// Joining an EXISTING sublist needs no renumber (mid-list numbers don't parse
+// differently) — the plain prefix edit passes the proof, so the marker keeps
+// its bytes. Byte-minimal preference, locked so the rescue never widens.
+assert.equal(run('1. a\n   1. b\n2. c\n', '1. a\n   1. b\n2. c\n'.indexOf('c'), indentListItem),
+  '1. a\n   1. b\n   2. c\n')
+// The EMPTY ordered item stays refused — even `1.` cannot interrupt a
+// paragraph when the item is empty — with the code whose toast says to type
+// first. After the renumber fix that advice is actually true.
+assert.equal(run('1. 甲\n2. 乙\n3. \n', 13, indentListItem).code,
+  'empty-item-would-become-heading')
 // 首项无前兄弟 → 拒绝
 assert.equal(run('- 甲\n', 2, indentListItem).code, 'unsupported-structure')
 // 子树整体随动（子行同加前缀），一个事务
