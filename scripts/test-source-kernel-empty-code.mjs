@@ -139,6 +139,28 @@ const reparsedValue = (md) => {
     'a doubly quoted fence reproduces its whole prefix')
 }
 
+// Case 6b (2026-08-22): a quoted fence that already carries an EMPTY,
+// prefix-bearing content line — the shape the slash menu's `/code` writes
+// inside a blockquote ('> ```js' LE '> ' LE '> ```'), and equally reachable by
+// hand in source mode. The anchor sits at that line's START, so the first two
+// spellings both corrupt ('> x> ' / a value with a phantom newline) and the
+// 'fill-after-prefix' spelling is the only provable one: the character lands
+// AFTER the line's own prefix bytes, no new prefix, no new line.
+{
+  const out = commit('> ```js\n> \n> ```\n', 'x')
+  assert.equal(out.ok, true, out.code)
+  assert.equal(out.text, '> ```js\n> x\n> ```\n')
+  assert.equal(reparsedValue(out.text), 'x')
+
+  assert.equal(commit('> > ```js\n> > \n> > ```\n', 'x').text, '> > ```js\n> > x\n> > ```\n',
+    'the doubly quoted empty content line fills after its whole prefix')
+
+  // CRLF, same shape — the ending never leaks into the written bytes.
+  const crlf = commit('> ```js\r\n> \r\n> ```\r\n', 'x')
+  assert.equal(crlf.text, '> ```js\r\n> x\r\n> ```\r\n')
+  assert.equal(/(?<!\r)\n/.test(crlf.text), false, 'no bare \\n in a CRLF document')
+}
+
 // Case 7: an INDENTED fence — including the realistic "fenced block inside a
 // list item" shape, whose continuation prefix is the indentation (NOT the list
 // marker; see Case 12 for the shape where those differ).

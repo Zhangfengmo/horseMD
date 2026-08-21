@@ -659,19 +659,21 @@ function taskItemAgrees(item, text) {
 }
 
 // Same exclusive-end + one-step-back recovery idiom as block-type.js's own
-// `topLevelNodeAt` (which mirrors quote-toggle.js and enter.js): walking the
-// ROOT's children is what proves the target is TOP-LEVEL, so a paragraph
-// nested in a blockquote or a list item is never found here and the command
-// refuses instead of writing a multi-line block whose meaning inside that
-// container it has not proven.
+// walk (which mirrors quote-toggle.js and enter.js), applied per nesting
+// level. Since 2026-08-22 the walk descends through BLOCKQUOTES ONLY — the
+// same relaxation block-type.js took for the「引用内嵌套」report: a query
+// paragraph under a pure quote chain starts at its own line's content
+// position, so a block written there means what it means at top level,
+// PROVIDED every continuation line carries the quote prefix (spelled by
+// `quoteSpelling` below) — and the two proof axes then run against the
+// chain, not the root. A list item on the chain still stops the walk cold.
 function within(node, offset) {
   const start = node?.position?.start?.offset
   const end = node?.position?.end?.offset
   return Number.isInteger(start) && Number.isInteger(end) && offset >= start && offset < end
 }
 
-function topLevelNodeAt(index, offset) {
-  const children = index.tree?.children || []
+function levelNodeAt(children, offset) {
   const direct = children.find((node) => within(node, offset))
   if (direct) return direct
   if (offset > 0) {
@@ -679,6 +681,101 @@ function topLevelNodeAt(index, offset) {
     if (before && offset === before.position.end.offset) return before
   }
   return null
+}
+
+function quoteChainNodeAt(tree, offset) {
+  let children = tree?.children || []
+  let quoteDepth = 0
+  for (;;) {
+    const hit = levelNodeAt(children, offset)
+    if (!hit) return null
+    if (hit.type === 'blockquote') {
+      quoteDepth += 1
+      children = hit.children || []
+      continue
+    }
+    return { node: hit, quoteDepth }
+  }
+}
+
+// The quoted spelling of a multi-line block: every CONTINUATION line gets the
+// query line's own prefix bytes, verbatim — including the trailing space of a
+// `> ` and including EMPTY lines (code-map.js checks each content line for
+// the FULL derived prefix byte-for-byte; a bare `>` blank would fail it and
+// leave the created fence read-only). The anchor is remapped through the same
+// transform, with one deliberate asymmetry probed against the projection map:
+// an anchor at a continuation line's COLUMN 0 (the code/math "empty content
+// line" anchor) stays at the LINE START, before the inserted prefix — the
+// quoted code map anchors that line's single visible unit at its raw line
+// start (the unit's span swallows the prefix), so the pre-prefix offset is
+// the one `rawToPmPos` resolves; the post-prefix offset is interior to the
+// unit and resolves to nothing. A mid-line anchor (the table's first-cell
+// `|  ` padding) lands after the prefix at the same column, unchanged.
+function quoteSpelling(bytes, ending, prefix, anchor) {
+  const lines = bytes.split(ending)
+  let out = lines[0]
+  let outAnchor = anchor <= lines[0].length ? anchor : null
+  let consumed = lines[0].length
+  for (let i = 1; i < lines.length; i += 1) {
+    consumed += ending.length
+    out += ending
+    if (outAnchor === null && anchor === consumed) outAnchor = out.length
+    out += prefix
+    if (outAnchor === null && anchor <= consumed + lines[i].length) {
+      outAnchor = out.length + (anchor - consumed)
+    }
+    out += lines[i]
+    consumed += lines[i].length
+  }
+  return { bytes: out, anchor: outAnchor === null ? out.length : outAnchor }
+}
+
+// list-merge.js's `outsideSignature` with ONE difference, for the quoted
+// path only: a node that overlaps the region is still never signed, but its
+// CHILDREN are walked — the region now sits INSIDE blockquote ancestors, and
+// pruning their whole subtree would leave the quote's own sibling blocks
+// unsigned (i.e. unprotected). Fully-contained descendants all overlap the
+// region themselves, so for every top-level region the two functions agree —
+// which is why the shared helper (whose merge-proof account is written
+// against its skip semantics) stays untouched.
+function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta) {
+  const parts = []
+  let ok = true
+  const walk = (node) => {
+    if (!ok) return
+    const start = node.position?.start?.offset
+    const end = node.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+      ok = false
+      return
+    }
+    if (start < regionEnd && end > regionStart) {
+      for (const child of node.children || []) walk(child)
+      return
+    }
+    const from = start <= regionStart ? start : start - delta
+    const to = end <= regionStart ? end : end - delta
+    parts.push(`${node.type}:${from}:${to}`)
+    for (const child of node.children || []) walk(child)
+  }
+  for (const child of tree.children || []) walk(child)
+  return ok ? parts.join('\n') : null
+}
+
+// The bytes standing between the query line's physical start and the query
+// block's own start — accepted as a quote prefix only when they are NOTHING
+// BUT quote markers (with CommonMark's optional indentation/padding) and the
+// marker count equals the parse-verified chain depth. Anything else (a lazy
+// line, list indentation) refuses.
+function quotePrefixOf(text, start, quoteDepth) {
+  let lineStart = start
+  while (lineStart > 0 && text[lineStart - 1] !== '\n' && text[lineStart - 1] !== '\r') {
+    lineStart -= 1
+  }
+  const prefix = text.slice(lineStart, start)
+  if (!/^(?:[ \t]{0,3}>[ \t]*)+$/.test(prefix)) return null
+  if ((prefix.match(/>/g) || []).length !== quoteDepth) return null
+  return prefix
 }
 
 // Identical to block-type.js's: a SETEXT heading's span runs through its
@@ -696,8 +793,11 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     return { ok: false, code: 'unsupported-structure' }
   }
 
-  const node = topLevelNodeAt(index, offset)
-  if (!node || !SOURCE_TYPES.has(node.type)) return { ok: false, code: 'unsupported-structure' }
+  const found = quoteChainNodeAt(index.tree, offset)
+  if (!found || !SOURCE_TYPES.has(found.node.type)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const { node, quoteDepth } = found
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset
   if (!Number.isInteger(start) || !Number.isInteger(end)) {
@@ -713,11 +813,27 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   }
 
   // `/text` writes no block — its whole edit is a proven suffix deletion, so
-  // it branches before the build/spelling machinery.
-  if (target === 'text') return revertToTextFromQuery({ doc, start, end })
+  // it branches before the build/spelling machinery. Inside a quote it stays
+  // refused: its caret homes (trailing pair / vouched placeholders) are
+  // unproven under a quote prefix.
+  if (target === 'text') {
+    if (quoteDepth > 0) return { ok: false, code: 'unsupported-structure' }
+    return revertToTextFromQuery({ doc, start, end })
+  }
 
   const built = buildBlock(target, info, index.dominantEnding || '\n')
   if (!built) return { ok: false, code: 'unsupported-structure' }
+  // Quoted context: only the caret-INSIDE targets. Caret-AFTER targets
+  // (/divider, /image) derive their home from the FOLLOWING block via
+  // caretAfterInsert, whose root-children walk (and the placeholder homes
+  // behind it) this command has not proven under a quote prefix.
+  let quotePrefix = ''
+  if (quoteDepth > 0) {
+    if (built.caretAfter) return { ok: false, code: 'unsupported-structure' }
+    const prefix = quotePrefixOf(text, start, quoteDepth)
+    if (prefix === null) return { ok: false, code: 'unsupported-structure' }
+    quotePrefix = prefix
+  }
 
   let baselineTree
   try {
@@ -730,14 +846,25 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   } catch {
     return { ok: false, code: 'unsupported-structure' }
   }
-  const before = outsideSignature(baselineTree, start, end, 0)
+  // Quoted regions sit inside blockquote ancestors, so their axis (b) walks
+  // THROUGH overlapping containers (see outsideSignatureThroughContainers);
+  // top-level regions keep the shared helper, byte-identically.
+  const signatureOf = quoteDepth > 0 ? outsideSignatureThroughContainers : outsideSignature
+  const before = signatureOf(baselineTree, start, end, 0)
 
   // Every spelling runs the FULL two-axis proof; the first that passes wins
   // (single-spelling targets just have a one-entry list). A spelling that
   // fails an axis is not an error — the next one is tried — but a target
   // whose every spelling fails refuses exactly as before.
   let accepted = null
-  for (const bytes of built.spellings || [built.bytes]) {
+  for (const rawBytes of built.spellings || [built.bytes]) {
+    // The quoted spelling: continuation lines carry the query line's own
+    // quote prefix, and the anchor rides the same transform. At top level
+    // this is the identity.
+    const spelled = quoteDepth > 0
+      ? quoteSpelling(rawBytes, index.dominantEnding || '\n', quotePrefix, built.anchor ?? 0)
+      : { bytes: rawBytes, anchor: built.anchor ?? 0 }
+    const bytes = spelled.bytes
     const candidate = text.slice(0, start) + bytes + text.slice(end)
     const insertedEnd = start + bytes.length
 
@@ -751,17 +878,22 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     const delta = bytes.length - (end - start)
 
     // THE STRUCTURE-IDENTICAL READING.
-    // Axis (a): the block at the insertion point is the one we wrote, and it
-    // ends exactly where our bytes end (nothing after it was absorbed).
+    // Axis (a): the block at the insertion point is the one we wrote — found
+    // through the SAME quote chain the query lived in (root children when
+    // quoteDepth is 0), at the same depth — and it ends exactly where our
+    // bytes end (nothing after it was absorbed).
     // Axis (b): nothing outside the rewritten region changed meaning.
-    const inserted = (candidateTree.children || []).find(
-      (child) => child.position?.start?.offset === start
-    )
+    const chainHit = quoteChainNodeAt(candidateTree, start)
+    const inserted = chainHit &&
+      chainHit.quoteDepth === quoteDepth &&
+      chainHit.node.position?.start?.offset === start
+      ? chainHit.node
+      : undefined
     if (inserted && inserted.position?.end?.offset === insertedEnd &&
         shapeAgrees(target, inserted, candidate, info)) {
-      const after = outsideSignature(candidateTree, start, insertedEnd, delta)
+      const after = signatureOf(candidateTree, start, insertedEnd, delta)
       if (before !== null && after !== null && before === after) {
-        accepted = { bytes, candidate, candidateTree, inserted }
+        accepted = { bytes, candidate, candidateTree, inserted, anchorOffset: spelled.anchor }
         break
       }
       continue
@@ -783,7 +915,10 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     // still has to pass this command's OWN interior check — the same one the
     // standalone reading runs — so nothing about "the item I wrote" is
     // relaxed; only "what may stand around it" is.
-    if (!spec.merges) continue
+    // The merge reading is a ROOT-LEVEL argument (neighbour lists as root
+    // children); inside a quote it is not attempted — a quoted /task beside a
+    // quoted list refuses rather than guesses.
+    if (!spec.merges || quoteDepth > 0) continue
     const merge = provePredictedListMerge({
       baselineText: text,
       baselineTree,
@@ -796,7 +931,7 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     })
     if (!merge) continue
     if (target !== 'task' || !taskItemAgrees(merge.item, candidate)) continue
-    accepted = { bytes, candidate, candidateTree, inserted: merge.merged }
+    accepted = { bytes, candidate, candidateTree, inserted: merge.merged, anchorOffset: spelled.anchor }
     break
   }
   if (!accepted) return { ok: false, code: 'unsupported-structure' }
@@ -808,7 +943,7 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     if (!caret.ok) return { ok: false, code: caret.code }
     anchor = caret.anchor
   } else {
-    anchor = start + built.anchor
+    anchor = start + accepted.anchorOffset
   }
   // The task seed's ledger entry (`ascii: ''` — "this U+00A0 stands for NO
   // keystroke; it may only ever be DISSOLVED, never healed to a space"). The

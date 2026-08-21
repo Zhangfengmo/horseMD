@@ -154,23 +154,38 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
   // — the same expansion the gateway applies to a NON-empty fence, for the same
   // reason (`buildCodeMap` requires every content line to reproduce the prefix
   // byte-for-byte).
-  const body = linePrefix +
-    (linePrefix ? insert.split(lineEnding).join(lineEnding + linePrefix) : insert)
+  const continued = linePrefix
+    ? insert.split(lineEnding).join(lineEnding + linePrefix)
+    : insert
+  const body = linePrefix + continued
 
-  // TWO CANDIDATE SPELLINGS, tried in order and each proven identically. They
-  // differ in exactly one fact the empty character map cannot express: whether
-  // the anchor line is a line the block ALREADY OWNS or the closing fence.
+  // THREE CANDIDATE SPELLINGS, tried in order and each proven identically.
+  // They differ in exactly one fact the empty character map cannot express:
+  // what the anchor line already IS.
   //
-  //   'open'  '```js' LE '```'      the anchor line IS the closing fence, so a
-  //                                 new content line has to be opened and
-  //                                 terminated -> body + LE.
-  //   'fill'  '```js' LE LE '```'   the block already has one EMPTY content
-  //                                 line (still `value === ''`, same anchor) —
-  //                                 this is the spelling commands/block-insert.js
-  //                                 writes for the slash menu's `/code`. Adding
-  //                                 a terminator here would decode as 'x' + a
-  //                                 newline, i.e. a character the user did not
-  //                                 type -> body alone.
+  //   'open'  '```js' LE '```'        the anchor line IS the closing fence, so
+  //                                   a new content line has to be opened and
+  //                                   terminated -> body + LE, at the anchor.
+  //   'fill'  '```js' LE LE '```'     the block already has one EMPTY content
+  //                                   line (still `value === ''`, same anchor)
+  //                                   — the spelling commands/block-insert.js
+  //                                   writes for the slash menu's `/code`.
+  //                                   Adding a terminator here would decode as
+  //                                   'x' + a newline -> body alone, at the
+  //                                   anchor.
+  //   'fill-after-prefix' (2026-08-22, quoted fences) — the empty content
+  //                                   line already CARRIES this block's line
+  //                                   prefix in its own bytes ('> ```js' LE
+  //                                   '> ' LE '> ```', the slash menu's /code
+  //                                   inside a blockquote): the anchor sits at
+  //                                   the LINE START, so writing body there
+  //                                   would land the character BEFORE the
+  //                                   existing prefix ('> x> '). The insert
+  //                                   belongs AFTER those prefix bytes, with
+  //                                   no new prefix of its own. Only attempted
+  //                                   when the bytes at the anchor literally
+  //                                   spell the prefix; the proof still
+  //                                   decides.
   //
   // Deciding by trial-and-PROOF rather than by inspecting the bytes at the
   // anchor is deliberate: the decision is exactly "what does the parser make of
@@ -178,7 +193,17 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
   // else. 'open' is tried first because it is the shape every ordinary document
   // has; a first-match win is safe because a passing proof already establishes
   // that the candidate says exactly what ProseMirror shows.
-  const attempts = [body + lineEnding, body]
+  const attempts = [
+    { written: body + lineEnding, at: offset, caret: offset + linePrefix.length + insert.length },
+    { written: body, at: offset, caret: offset + linePrefix.length + insert.length },
+    ...(linePrefix && text.startsWith(linePrefix, offset)
+      ? [{
+          written: continued,
+          at: offset + linePrefix.length,
+          caret: offset + linePrefix.length + insert.length
+        }]
+      : [])
+  ]
 
   const blockStart = block.position?.start?.offset
   const blockEnd = block.position?.end?.offset
@@ -216,8 +241,8 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
   walk(baselineTree)
   if (!baseline || codeValue(baseline) !== '') return UNSUPPORTED
 
-  for (const written of attempts) {
-    const candidate = text.slice(0, offset) + written + text.slice(offset)
+  for (const { written, at, caret } of attempts) {
+    const candidate = text.slice(0, at) + written + text.slice(at)
     const proven = blockEditIsObservable({
       baselineTree,
       block: baseline,
@@ -240,15 +265,14 @@ export function spellEmptyCodeInsert({ doc, block, charMap, offset, insert }) {
         (found.meta ?? null) === (baseline.meta ?? null)
     })
     if (!proven) continue
-    const caret = offset + linePrefix.length + insert.length
     return {
       ok: true,
       opened: written.length > body.length,
-      edit: { from: offset, to: offset, insert: written },
+      edit: { from: at, to: at, insert: written },
       transaction: {
         baseRevision: doc.revision,
-        from: offset,
-        to: offset,
+        from: at,
+        to: at,
         insert: written,
         intent: 'empty-code-insert',
         selection: { anchor: caret, head: caret }

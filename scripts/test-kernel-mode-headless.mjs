@@ -294,6 +294,21 @@ const FIXTURE_DOCS = {
   '> /ul\n': () => doc(bq(p(text('/ul')))),
   '> - \n': () => doc(bq(bl(li(null, p())))),
   '> - x\n': () => doc(bq(bl(li(null, p(text('x')))))),
+  // Case IQ1-IQ3 (2026-08-22): block INSERTS inside a blockquote — every
+  // continuation line carries the `> ` prefix byte-for-byte (code-map's own
+  // per-line requirement), and the created block is typable in place.
+  '> /table\n': () => doc(bq(p(text('/table')))),
+  '> |  |  |  |\n> | --- | --- | --- |\n> |  |  |  |\n': () =>
+    doc(bq(tbl([[[''], [''], ['']], [[''], [''], ['']]]))),
+  '> | x |  |  |\n> | --- | --- | --- |\n> |  |  |  |\n': () =>
+    doc(bq(tbl([[['x'], [''], ['']], [[''], [''], ['']]]))),
+  '> /js\n': () => doc(bq(p(text('/js')))),
+  '> ```javascript\n> \n> ```\n': () => doc(bq(cb('javascript'))),
+  '> ```javascript\n> x\n> ```\n': () => doc(bq(cb('javascript', 'x'))),
+  '> /task\n': () => doc(bq(p(text('/task')))),
+  ['> - [ ] ' + SEED_NBSP + '\n']: () => doc(bq(bl(li(false, p(text(SEED_NBSP)))))),
+  ['> - [ ] ' + SEED_NBSP + '买\n']: () => doc(bq(bl(li(false, p(text(SEED_NBSP + '买')))))),
+  ['> - [ ] 买\n']: () => doc(bq(bl(li(false, p(text('买')))))),
   // Block-INSERT domain (Cases I1-I4): the slash query blocks and every
   // document `runInsertBlockFromQuery` can produce from them. Same
   // `withTrailingParagraph` convention as above — a document ending in a TABLE
@@ -3257,6 +3272,70 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(dispatchThrough(h, h.view.state.tr.insertText('x', 4)), undefined)
   await flushMicrotasks()
   assert.equal(h.controller.kernel.doc.text, '> - x\n', 'typing into the quoted item lands after its marker')
+}
+
+// Case IQ1 (2026-08-22): "/table" INSIDE a blockquote -> a quoted table
+// skeleton, every row carrying the `> ` prefix, first header cell typable.
+{
+  const h = makeHarness('> /table\n', doc(bq(p(text('/table'))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 8)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'table' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> |  |  |  |\n> | --- | --- | --- |\n> |  |  |  |\n',
+    'the quoted query became the whole prefixed skeleton, in one commit')
+  assert.ok(h.view.state.doc.eq(doc(bq(tbl([[[''], [''], ['']], [[''], [''], ['']]])), p())),
+    'view reconciled to a table inside the quote')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 5, 'caret is in the first header cell, under the quote')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(caret), 4,
+    'and that PM position maps back to the quoted cell content anchor')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the quoted table cell is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '> | x |  |  |\n> | --- | --- | --- |\n> |  |  |  |\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '> |  |  |  |\n> | --- | --- | --- |\n> |  |  |  |\n')
+  assert.equal(h.controller.runHistory('undo'), true)
+  assert.equal(h.controller.kernel.doc.text, '> /table\n', 'the original quoted query comes back')
+}
+
+// Case IQ2: "/js" inside a blockquote -> a quoted fence whose empty content
+// line is `> ` (the FULL prefix — code-map refuses anything less), typable.
+{
+  const h = makeHarness('> /js\n', doc(bq(p(text('/js'))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'code', language: 'javascript' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> ```javascript\n> \n> ```\n')
+  assert.ok(h.view.state.doc.eq(doc(bq(cb('javascript')), p())), 'view: empty JS block inside the quote')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 2, 'caret sits inside the quoted code block')
+  assert.equal(h.controller.kernel.map.pmPosToRaw(caret), 16,
+    'and maps to the quoted content line (its raw unit starts at the line start — the prefix is part of the unit\'s span)')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('x', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing into the quoted code block is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '> ```javascript\n> x\n> ```\n',
+    'the character becomes quoted fence content; both fences survive')
+}
+
+// Case IQ3: "/task" inside a blockquote -> a quoted seeded task item; the
+// first label character DISSOLVES the seed exactly like at top level.
+{
+  const h = makeHarness('> /task\n', doc(bq(p(text('/task'))), p()))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 7)))
+  assert.equal(h.controller.runInsertBlockFromQuery({ target: 'task' }, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> - [ ] ' + SEED_NBSP + '\n')
+  assert.ok(h.view.state.doc.eq(doc(bq(bl(li(false, p(text(SEED_NBSP))))), p())),
+    'view: a checked-false task item inside the quote, carrying the seed')
+  const caret = h.view.state.selection.head
+  assert.equal(caret, 5, 'caret sits AFTER the seed, inside the quoted item')
+  const verdict = dispatchThrough(h, h.view.state.tr.insertText('买', caret))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'the first label character is NOT vetoed')
+  assert.equal(h.controller.kernel.doc.text, '> - [ ] 买\n',
+    'the seed dissolves under the first label character, inside the quote')
 }
 
 // Case B5: an unsupported target refuses fail-closed — nothing committed,

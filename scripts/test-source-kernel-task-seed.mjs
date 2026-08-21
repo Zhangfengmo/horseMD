@@ -259,12 +259,17 @@ const insertTask = (text, offset) => {
     assert.equal(routed.code, 'unsupported-structure', label)
   }
   // (Adjacent-list positions are NO LONGER refused — see section 1c. What
-  // stays refused is everything that is not a proven merge.)
+  // stays refused is everything that is not a proven merge. A PURE blockquote
+  // chain is accepted since 2026-08-22 — the quoted positive path is pinned
+  // in test-source-kernel-blockinsert.mjs section 13.)
   // No info string exists for a task item.
   refuse('language on a task', '/task\n', 5, 'js')
-  // Non-top-level contexts, like every other target.
-  refuse('inside a blockquote', '> /task\n', 7)
+  // A LIST on the ancestor chain, like every other target.
   refuse('inside a list item', '- /task\n', 7)
+  refuse('inside a quoted list item', '> - /task\n', 9)
+  // A quoted task NEXT TO a quoted list is a merge shape, and the merge
+  // reading is root-level only — refused, never guessed.
+  refuse('quoted task beside a quoted list', '> - 甲\n>\n> /task\n', 15)
 }
 
 // The exported target table is the menu's routing contract — pin the new row.

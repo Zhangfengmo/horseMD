@@ -214,9 +214,10 @@ refuses('language with a newline', '/x\n', 2, 'code', 'js\nx')
 refuses('language with a space', '/x\n', 2, 'code', 'js x')
 refuses('empty-ish language', '/x\n', 2, 'code', '-js')
 
-// Nested contexts: NOT a root child, so `topLevelNodeAt` never finds one.
-refuses('inside a blockquote', '> /table\n', 8, 'table')
+// Nested contexts: a LIST on the ancestor chain stops the quote-chain walk —
+// only pure blockquote chains are accepted (section 13 below owns those).
 refuses('inside a list item', '- /table\n', 8, 'table')
+refuses('inside a quoted list item', '> - /table\n', 10, 'table')
 
 // Block types whose span is not "one line of content".
 refuses('code block', '```\n/table\n```\n', 11, 'table')
@@ -368,9 +369,9 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     language: 'tex'
   }).code, 'unsupported-structure')
 
-  // Non-top-level contexts stay refused, exactly like the other targets: the
-  // command only ever walks the ROOT's children.
-  for (const [text, label] of [['- /math\n', 'list item'], ['> /math\n', 'blockquote']]) {
+  // A LIST on the ancestor chain stays refused (a pure blockquote chain is
+  // accepted since 2026-08-22 — section 13 owns those cases).
+  for (const [text, label] of [['- /math\n', 'list item'], ['> - /math\n', 'quoted list item']]) {
     const routed = insertBlockFromQuery({
       doc: createMarkdownDocument(text),
       index: buildSyntaxIndex(text),
@@ -915,6 +916,88 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     assert.equal(proven.merged.children.indexOf(proven.item), 1,
       'our item is the MIDDLE one — the neighbours kept their order')
   }
+}
+
+// ---------------------------------------------------------------------------
+// 13. QUOTED inserts (2026-08-22, the「引用内嵌套」report's block-INSERT half):
+//     a query paragraph whose ancestor chain is PURE blockquotes takes the
+//     caret-INSIDE targets — /table, /code(+language), /math, /task. The
+//     spelling is the top-level one with every CONTINUATION line carrying the
+//     query line's own quote prefix byte-for-byte (code-map.js refuses
+//     anything less than the full derived prefix per content line), the
+//     anchor is remapped through the same transform, and both proof axes run
+//     against the quote chain. Caret-AFTER targets (/divider, /image) and
+//     /text keep refusing inside quotes — their caret homes (following-block
+//     anchor / vouched placeholders) are unproven under a quote prefix.
+// ---------------------------------------------------------------------------
+{
+  const QUOTED_TABLE = TABLE_LF.split('\n').join('\n> ')
+  const insertQuoted = (text, offset, target, language, expected, anchor, label) => {
+    const { c, r } = run(text, offset, target, language)
+    assert.equal(r.ok, true, `${label}: ${r.code}`)
+    assert.equal(r.transaction.edits.length, 1, `${label}: exactly ONE edit (atomic)`)
+    assert.deepEqual(r.transaction.selection, { anchor, head: anchor }, `${label}: caret`)
+    const out = apply(c.doc, r)
+    assert.equal(out, expected, label)
+    return { r, out }
+  }
+  // (a) /table in a quote: every row carries the prefix, caret in the first
+  //     header cell (first line — the anchor needs no shift there).
+  {
+    const { out } = insertQuoted('> /table\n', 8, 'table', undefined,
+      '> ' + QUOTED_TABLE + '\n', 4, 'quoted /table')
+    const tree = parseKernelMarkdown(out)
+    assert.equal(tree.children[0].type, 'blockquote')
+    assert.equal(tree.children[0].children[0].type, 'table')
+    assert.equal(tree.children[0].children[0].children.length, 2)
+  }
+  // (b) /js in a quote: the empty content line is `> ` (the FULL prefix —
+  //     code-map's per-line prefix check is byte-for-byte), and the caret
+  //     sits after that prefix.
+  {
+    const { out } = insertQuoted('> /js\n', 5, 'code', 'javascript',
+      '> ```javascript\n> \n> ```\n', 16, 'quoted /js')
+    const tree = parseKernelMarkdown(out)
+    const code = tree.children[0].children[0]
+    assert.equal(code.type, 'code')
+    assert.equal(code.lang, 'javascript')
+    assert.equal(code.value, '', 'quoted fence starts empty')
+  }
+  // (c) /math in a quote.
+  {
+    const { out } = insertQuoted('> /math\n', 7, 'math', undefined,
+      '> $$\n> \n> $$\n', 5, 'quoted /math')
+    assert.equal(parseKernelMarkdown(out).children[0].children[0].type, 'math')
+  }
+  // (d) /task in a quote: single line, so bytes and seed are the top-level
+  //     ones; the ledger entry still points at the U+00A0.
+  {
+    const { r, out } = insertQuoted('> /task\n', 7, 'task', undefined,
+      '> - [ ]  \n', 9, 'quoted /task')
+    assert.deepEqual(r.transaction.whitespaceMarks, [{ from: 8, to: 9, ascii: '' }],
+      'quoted /task: the seed is ledgered at its quoted offset')
+    const item = parseKernelMarkdown(out).children[0].children[0].children[0]
+    assert.equal(item.checked, false, 'quoted /task: a real GFM task item')
+  }
+  // (e) a NESTED quote chain: the prefix is the whole `> > `.
+  insertQuoted('> > /table\n', 10, 'table', undefined,
+    '> > ' + TABLE_LF.split('\n').join('\n> > ') + '\n', 6, 'nested-quoted /table')
+  // (f) CRLF: the ending inside the written bytes is the document's own.
+  {
+    const { out } = insertQuoted('> /js\r\n', 5, 'code', 'javascript',
+      '> ```javascript\r\n> \r\n> ```\r\n', 17, 'CRLF quoted /js')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+  }
+  // (g) sibling protection: a quoted paragraph above the query survives
+  //     byte-identical.
+  insertQuoted('> 甲\n>\n> /math\n', 13, 'math', undefined,
+    '> 甲\n>\n> $$\n> \n> $$\n', 11, 'quoted /math below a sibling')
+  // (h) refusals: the caret-after family and /text stay refused in quotes,
+  //     and a list on the chain still refuses everything.
+  refuses('divider inside a quote', '> /hr\n', 5, 'divider')
+  refuses('image inside a quote', '> /image\n', 8, 'image')
+  refuses('text inside a quote', '> /text\n', 7, 'text')
+  refuses('table inside a quoted list item', '> - /table\n', 10, 'table')
 }
 
 console.log('ok - source kernel block-insert')
