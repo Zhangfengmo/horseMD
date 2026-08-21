@@ -45,6 +45,8 @@ const LINES = [
   '',
   '寅卯辰巳',
   '',
+  '> 引用甲',
+  '',
   '尾段落。',
   ''
 ]
@@ -58,6 +60,7 @@ const FIXTURE_LF = LINES.join('\n')
 const TABLE = ['|  |  |  |', '| --- | --- | --- |', '|  |  |  |'].join('\n')
 const TABLE_TYPED = ['| 表头 |  |  |', '| --- | --- | --- |', '|  |  |  |'].join('\n')
 const CODE = ['```javascript', '', '```'].join('\n')
+const QUOTED_CODE = ['> ```javascript', '> ab', '> ```'].join('\n')
 // Preview-backed blocks (2026-08-18). Both used to keep the phase-1 refusal:
 // `/mermaid` because a preview-rendered fence was paired `charMap: null`, and
 // `/math` because block math was. Both pairings are gone (see the ADR that
@@ -420,6 +423,33 @@ async function run() {
       `/math must commit a $$ block whose empty content line is immediately typable (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
+    // 2d) `/js` INSIDE A BLOCKQUOTE (2026-08-22, the「引用内嵌套」report's
+    //     insert half): every fence line carries the `> ` prefix, the quote
+    //     survives in the projection, and the first keystroke fills AFTER
+    //     the empty content line's own prefix (empty-code-insert's
+    //     'fill-after-prefix' spelling) — never in front of it.
+    // ============================================================
+    await selectBlock(evaluate, send, '引用甲')
+    await runSlashItem(evaluate, send, 'js', 'code:javascript')
+
+    const quotedCaret = await caretHome(evaluate)
+    console.log('  [/js in quote] ->', JSON.stringify({ caret: quotedCaret }))
+    assert.ok(quotedCaret && (quotedCaret.kind === 'codemirror' || quotedCaret.kind === 'code-block'),
+      `the caret must land inside the new quoted code block, got ${JSON.stringify(quotedCaret)}`)
+    const quotedShape = await evaluate(`(() => {
+      const quotes = [...((${VISIBLE_EDITOR})?.querySelectorAll('blockquote') || [])]
+      return quotes.map((q) => !!q.querySelector('.cm-editor, .milkdown-code-block'))
+    })()`)
+    assert.deepEqual(quotedShape, [true],
+      `the fence must PROJECT inside the surviving blockquote, got ${JSON.stringify(quotedShape)}`)
+
+    await typeTextLikeUser(send, 'ab', { delayMs: delay })
+    await sleep(500)
+    const afterQuoted = afterMath.replace('> 引用甲', () => QUOTED_CODE)
+    await assertSource(evaluate, afterQuoted,
+      `/js inside a blockquote must commit a fully prefixed fence and the first keystroke must fill after the line's own prefix (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
     // 3) `/image` (2026-08-20, caret-after family): the query becomes the
     //    literal `![]()`, the view renders Crepe's real image-block CARD
     //    (whose own upload/paste-link UI is the src entry point — it routes
@@ -444,7 +474,7 @@ async function run() {
     // The replaced tail block keeps its own line ending ('![]()\n'); typing
     // in the trailing placeholder appends the separator plus the text and
     // never invents a NEW trailing ending.
-    const afterImage = afterMath.replace('尾段落。\n', '![]()\n\n图后段')
+    const afterImage = afterQuoted.replace('尾段落。\n', '![]()\n\n图后段')
     await assertSource(evaluate, afterImage,
       `/image must commit the literal ![]() and the follow-up keystroke must land below the card (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
@@ -462,6 +492,7 @@ async function run() {
       .replace('戊己庚辛', () => eol(CODE))
       .replace('壬癸子丑', () => eol(['```mermaid', 'graph TD', '```'].join('\n')))
       .replace('寅卯辰巳', () => eol(['$$', 'E=mc^2', '$$'].join('\n')))
+      .replace('> 引用甲', () => eol(QUOTED_CODE))
       .replace('尾段落。' + EOL, () => eol('![]()\n\n图后段'))
     assert.equal(disk, expectedDisk, 'disk bytes must match the kernel-derived expectation exactly')
     if (crlf) {
@@ -469,7 +500,7 @@ async function run() {
     }
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
-    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js, /mermaid, /math and /image commit their block bytes, project, and land a typable caret`)
+    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js (top-level AND quoted), /mermaid, /math and /image commit their block bytes, project, and land a typable caret`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
