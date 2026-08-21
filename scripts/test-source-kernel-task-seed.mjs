@@ -707,4 +707,79 @@ const routeEnter = (doc, offset) =>
   assert.equal(routeEnter(healed, 7).transaction.intent, 'split-list-item')
 }
 
+// ---------------------------------------------------------------------------
+// 7. BACKSPACE ON THE SESSION-LEDGERED SEED (2026-08-22 user report — the
+//    screenshot's flow: an empty task item the user is trying to CULL, and
+//    the empty-task wall refused with 「任务项不能删成空」). The item is
+//    EFFECTIVELY empty by the same doctrine Enter already applies (cell 3:
+//    the seed stands for NO keystroke), so Backspace takes the same
+//    ledger-gated lift-out exit an empty PLAIN item takes: top level exits
+//    the list, nested outdents one level (Typora). The wall below stays for
+//    every delete that would DEMOTE the bytes; this routing means the plain
+//    single-character deletion is never produced in the first place.
+//    Pre-fix: both routes answer `not-structural`, PM deletes the seed char,
+//    and the gateway wall refuses — a dead end whose only exits were Enter
+//    or undo.
+// ---------------------------------------------------------------------------
+const routeBackspace = (doc, offset) =>
+  routeStructuralKey('Backspace', { doc, index: buildSyntaxIndex(doc.text), offset })
+
+{
+  // (a) Top-level ledgered seed: Backspace exits the list, exactly like
+  // Enter's cell 3 — marker line removed, ledger entry dies with its byte.
+  const { doc } = insertTask('/task\n', 5)
+  for (const offset of [6, 7]) { // before AND after the seed — same item
+    const routed = routeBackspace(doc, offset)
+    assert.equal(routed.ok, true, `Backspace must lift, not refuse: ${routed.code}`)
+    assert.equal(routed.transaction.intent, 'exit-empty-list-item',
+      'the ledgered, never-labelled seed item is EFFECTIVELY empty for Backspace too')
+  }
+  const applied = applySourceTransaction(doc, routeBackspace(doc, 7).transaction)
+  assert.equal(applied.doc.text, '\n', 'the marker line is removed — list ended')
+  assert.deepEqual(applied.doc.whitespaceMarks, [], 'the seed entry died with its line')
+}
+
+{
+  // (b) NESTED ledgered seed — the reported shape (an Enter-continued child
+  // item the user never labelled): Backspace outdents one level first, the
+  // ledger entry rides the shift, and a second Backspace exits the list.
+  const doc = createMarkdownDocument('- 父\n  - [ ] 子\n')
+  const routed = routeStructuralKey('Enter',
+    { doc, index: buildSyntaxIndex(doc.text), offset: '- 父\n  - [ ] 子'.length })
+  const seeded = applySourceTransaction(doc, routed.transaction).doc
+  assert.equal(seeded.text, '- 父\n  - [ ] 子\n  - [ ] ' + NBSP + '\n')
+  assert.deepEqual(seeded.whitespaceMarks, [{ from: 22, to: 23, ascii: '' }])
+
+  const lifted = routeBackspace(seeded, 23)
+  assert.equal(lifted.ok, true, `nested seed must outdent, not refuse: ${lifted.code}`)
+  assert.equal(lifted.transaction.intent, 'outdent-list-item')
+  const outdented = applySourceTransaction(seeded, lifted.transaction).doc
+  assert.equal(outdented.text, '- 父\n  - [ ] 子\n- [ ] ' + NBSP + '\n',
+    'one level up, the seed spelling intact')
+  assert.deepEqual(outdented.whitespaceMarks, [{ from: 20, to: 21, ascii: '' }],
+    'the ledger entry shifted with the edit — the item is STILL a claimable seed')
+  const items = parseKernelMarkdown(outdented.text).children[0].children
+  assert.deepEqual(items.map((i) => i.checked), [null, false],
+    '父 stays a plain bullet; the outdented seed item is STILL a real task')
+
+  const exited = routeBackspace(outdented, 21)
+  assert.equal(exited.ok, true, exited.code)
+  assert.equal(exited.transaction.intent, 'exit-empty-list-item',
+    'the second Backspace finishes the cull — the Typora dance')
+  const done = applySourceTransaction(outdented, exited.transaction).doc
+  assert.equal(done.text, '- 父\n  - [ ] 子\n\n')
+  assert.deepEqual(done.whitespaceMarks, [])
+}
+
+{
+  // (c) The exits are LEDGER-GATED, same as Enter's: an UNLEDGERED seed
+  // (reopened file — the author's byte) and a heal-provenance U+00A0 (stands
+  // for a pressed Space) both keep the text-path answer, so an author's
+  // content is never structurally deleted by this routing.
+  const reopened = createMarkdownDocument(SEED_BYTES + '\n')
+  assert.deepEqual(routeBackspace(reopened, 7), { ok: false, code: 'not-structural' })
+  const healed = { ...createMarkdownDocument(SEED_BYTES + '\n'), whitespaceMarks: [{ from: 6, to: 7, ascii: ' ' }] }
+  assert.deepEqual(routeBackspace(healed, 7), { ok: false, code: 'not-structural' })
+}
+
 console.log('ok - source kernel task seed')

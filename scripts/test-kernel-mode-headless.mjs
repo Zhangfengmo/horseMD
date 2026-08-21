@@ -3418,15 +3418,20 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '/task\n', 'the original query bytes come back')
 }
 
-// Case I5b (2026-08-20 adversarial audit, Critical): BACKSPACE ON THE FRESH
-// SEED refuses LOUDLY — the documented empty-task wall, end to end through
-// the controller. Pre-fix, syntax-index.js classified the seeded item EMPTY
-// (String.trim() strips U+00A0), so `structuralHandlers.Backspace` routed to
-// exitEmptyListItem and SILENTLY deleted the whole `- [ ]  ` line: zero
-// toasts, a `caret-unmappable` diagnostic, and item-less bytes on save —
-// while guide/ai-handoff §5.2g documented the keystroke as refused. This case
-// fails pre-fix at the `handled === false` pin (the handler answered true and
-// the bytes were gone).
+// Case I5b: BACKSPACE ON THE FRESH SEED, end to end through the controller.
+// Two contracts pinned, in order:
+//  1) The WALL still guards the byte answer (2026-08-20 adversarial audit,
+//     Critical): a plain deletion TRANSACTION consuming the ledgered seed
+//     (any non-key path — a plugin, a programmatic tr.delete) is vetoed
+//     LOUDLY with the empty-task code, because the committed bytes `- [ ] `
+//     would demote to checked:null with literal "[ ]" text.
+//  2) The KEY takes the Typora exit (2026-08-22 user report — the pre-fix
+//     contract made the wall the key's ONLY answer, a dead end whose exits
+//     were Enter or undo while the user was simply culling the item):
+//     `structuralHandlers.Backspace` routes the ledgered seed item like an
+//     empty item, deleting the whole representable marker LINE — the same
+//     ledger-gated lift-out Enter has had since the task-Enter matrix. The
+//     wall therefore fires only for transactions no structural route owns.
 {
   const NBSP = ' '
   const h = makeHarness('/task\n', doc(p(text('/task'))))
@@ -3439,21 +3444,10 @@ const toggleVia = (h, markType, from, to) => {
   assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, seedLedger)
   const caret = h.view.state.selection.head // after the seed (pinned = 4 in I5)
 
-  // 1) The STRUCTURAL route must not own this keystroke any more: the seed
-  //    item is not empty (its U+00A0 is parser-visible content), so Backspace
-  //    is a text-path question and the handler passes it through.
-  const diagnosticsBefore = (globalThis.__hmKernelDiagnostics || []).length
-  const handled = h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view)
-  assert.equal(handled, false,
-    'Backspace on the seed is NOT a structural exit — pre-fix this applied exit-empty-list-item')
-  assert.equal(h.controller.kernel.doc.text, seedBytes, 'no byte moved')
-  assert.ok(!(globalThis.__hmKernelDiagnostics || []).slice(diagnosticsBefore)
-    .some((entry) => entry.type === 'caret-unmappable'),
-    'and no silent caret failure was recorded')
-
-  // 2) The text path (PM's own character deletion) hits the WALL: vetoed,
-  //    bytes and ledger untouched, the view still shows the checkbox, and the
-  //    refusal is LOUD (a toast naming the code fires — never silence).
+  // 1) The text path (a plain character-deletion transaction, the shape any
+  //    non-key path produces) hits the WALL: vetoed, bytes and ledger
+  //    untouched, the view still shows the checkbox, and the refusal is LOUD
+  //    (a toast naming the code fires — never silence).
   const notificationsBefore = h.notifications.length
   const verdict = dispatchThrough(h, h.view.state.tr.delete(caret - 1, caret))
   await flushMicrotasks()
@@ -3467,16 +3461,33 @@ const toggleVia = (h, markType, from, to) => {
     .some((message) => /empty-task-unrepresentable/.test(message)),
     'with the empty-task wall\'s own code, so the toast names the exits')
 
-  // 3) Both documented exits stay real: typing the label still dissolves the
-  //    seed, and undo still unwinds to the query bytes.
-  const typed = dispatchThrough(h, h.view.state.tr.insertText('x', h.view.state.selection.head))
+  // 2) The KEY is a structural exit: the ledgered seed item is EFFECTIVELY
+  //    empty for Backspace (the seed stands for NO keystroke), so the handler
+  //    owns the key and removes the whole marker line — no wall, no toast.
+  //    Pre-fix (2026-08-22) this pin fails at `handled === true`: the handler
+  //    answered false, PM produced the character deletion, and the wall above
+  //    was the keystroke's dead end. (A `caret-unmappable` diagnostic is
+  //    EXPECTED here and not asserted against: the exit leaves '\n', whose
+  //    parse has no block for anchor 0 — the same recorded-fallback Enter's
+  //    own seed exit takes on this document.)
+  const structuralNotificationsBefore = h.notifications.length
+  const handled = h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view)
   await flushMicrotasks()
-  assert.equal(typed, undefined, 'the first label keystroke is not vetoed')
-  assert.equal(h.controller.kernel.doc.text, '- [ ] x\n', 'exit 1: the label dissolves the seed')
+  assert.equal(handled, true,
+    'Backspace on the ledgered seed IS a structural exit — the Typora cull, like Enter')
+  assert.equal(h.controller.kernel.doc.text, '\n', 'the marker line is removed — list ended')
+  assert.deepEqual(h.controller.kernel.doc.whitespaceMarks, [],
+    'the seed entry died with its line')
+  assert.equal(h.notifications.length, structuralNotificationsBefore,
+    'a successful exit is silent — no refusal toast')
+  assert.ok(!h.view.state.doc.toString().includes('list'),
+    'the checkbox item left the screen with its line')
+
+  // 3) Undo unwinds the exit, then the insert — the query bytes come back.
   assert.equal(h.controller.runHistory('undo'), true)
   assert.equal(h.controller.kernel.doc.text, seedBytes)
   assert.equal(h.controller.runHistory('undo'), true)
-  assert.equal(h.controller.kernel.doc.text, '/task\n', 'exit 2: undo returns the query bytes')
+  assert.equal(h.controller.kernel.doc.text, '/task\n', 'undo returns the query bytes')
 }
 
 // Case I5c (2026-08-20 adversarial panel, Important): the IME path reaches

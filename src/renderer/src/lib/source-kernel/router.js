@@ -58,10 +58,12 @@ export function routeStructuralKey(key, ctx) {
       // lift-out exit a plain empty item takes (2026-08-21 task-Enter
       // matrix cell 3). The check is LEDGER-gated: a reopened file's U+00A0
       // is the author's byte, the item has real content, and Enter splits —
-      // never deletes — exactly as the 2026-08-20 audit pinned. Backspace is
-      // deliberately NOT routed this way: deleting one character from the
-      // seed item leaves the unrepresentable `- [ ] ` demotion, which is the
-      // empty-task wall's own documented refusal.
+      // never deletes — exactly as the 2026-08-20 audit pinned. Backspace
+      // takes the SAME ledger-gated exit since 2026-08-22 (see its branch
+      // below) — an earlier note here argued it must not, but that reasoning
+      // was about the CHARACTER-delete the text path produces (which demotes
+      // to `- [ ] ` and is the empty-task wall's refusal), not about routing
+      // the key structurally, which deletes the whole representable line.
       if (item) {
         return item.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item)
           ? exitEmptyListItem(ctx)
@@ -73,7 +75,17 @@ export function routeStructuralKey(key, ctx) {
     case 'Shift-Tab':
       return item ? outdentListItem(ctx) : NOT_STRUCTURAL
     case 'Backspace': {
-      if (item?.empty) return liftEmptyListItem(ctx)
+      // A session-ledgered, never-labelled seed item is EFFECTIVELY empty
+      // for Backspace by the same doctrine as Enter above (2026-08-22 user
+      // report: the user was culling the item, and the only text-path
+      // outcome — deleting the seed character — is the empty-task wall's
+      // refusal, a dead end whose exits were Enter or undo). Routing the
+      // key structurally deletes/outdents the whole marker LINE, which is
+      // representable, and stays ledger-gated: a reopened file's U+00A0 is
+      // the author's content and keeps the text-path answer.
+      if (item?.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item)) {
+        return liftEmptyListItem(ctx)
+      }
       const block = index.blockAt(offset)
       if (block && offset === block.start && !item) return joinParagraphBackward(ctx)
       return NOT_STRUCTURAL

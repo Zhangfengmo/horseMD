@@ -39,7 +39,7 @@ const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
 // `provePredictedListMerge` owns them since 2026-08-21 — and step 5 exercises
 // exactly that, deliberately AFTER the standalone cases so the two readings
 // are covered separately rather than one hiding behind the other.
-const LINES = ['# 标题', '', '甲乙丙丁', '', '中间说明段。', '', '戊己庚辛', '', '尾段落。', '']
+const LINES = ['# 标题', '', '甲乙丙丁', '', '中间说明段。', '', '戊己庚辛', '', '尾段落。', '', '剔除试验段。', '']
 const FIXTURE = LINES.join('\n')
 
 async function waitFor(fn, message, tries = 60) {
@@ -243,50 +243,9 @@ async function run() {
     assert.equal(await caretInTask(evaluate), true,
       'the caret must land inside the new task item — a task you cannot label is worse than a blocked item')
 
-    // ============================================================
-    // 1b) THE AUDIT'S KEYSTROKE (2026-08-20, Critical): Backspace on the
-    //     fresh seed must REFUSE LOUDLY. Pre-fix, syntax-index classified the
-    //     seeded item EMPTY (String.trim() strips U+00A0), the structural
-    //     route ran exit-empty-list-item, and this exact keystroke silently
-    //     deleted the checkbox — zero toasts, a caret-unmappable diagnostic,
-    //     and item-less bytes on the next save — while the guide documented
-    //     it as refused.
-    // ============================================================
-    await evaluate(`(() => {
-      window.__ieToasts = []
-      if (!window.__ieToastHook) {
-        window.__ieToastHook = true
-        window.addEventListener('hm:toast', (e) => window.__ieToasts.push(e.detail?.msg ?? String(e.detail)))
-      }
-      return 1
-    })()`)
-    const diagnosticsBefore = await evaluate(`(window.__hmKernelDiagnostics || []).length`)
-    {
-      const bs = { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }
-      // A REAL keyDown (not rawKeyDown): the fixed path lets the keymap pass
-      // the key through, so the deletion must come from Chromium's own
-      // editing command for the gateway wall to be the thing that stops it.
-      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...bs })
-      await sleep(20)
-      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...bs })
-    }
-    await sleep(600)
-    const itemsAfterBackspace = await taskItems(evaluate)
-    console.log('  [backspace on seed] ->', JSON.stringify(itemsAfterBackspace))
-    assert.deepEqual(itemsAfterBackspace, [{ checked: false, label: NBSP }],
-      'the checkbox must survive the refused Backspace — pre-fix it vanished on this keystroke')
-    const backspaceToasts = JSON.parse(await evaluate(`JSON.stringify(window.__ieToasts || [])`))
-    assert.ok(backspaceToasts.length >= 1,
-      `the refusal must be LOUD — pre-fix this keystroke was silent (got ${JSON.stringify(backspaceToasts)})`)
-    assert.ok(backspaceToasts.some((message) => /任务项|task item/i.test(message)),
-      `the toast must name the empty-task wall and its exits — got ${JSON.stringify(backspaceToasts)}`)
-    const backspaceDiagnostics = await evaluate(
-      `JSON.stringify((window.__hmKernelDiagnostics || []).slice(${diagnosticsBefore}))`)
-    assert.ok(!backspaceDiagnostics.includes('caret-unmappable'),
-      `no silent caret failure may be recorded — got ${backspaceDiagnostics}`)
-
-    // The documented exit stays real: typing the label still dissolves the
-    // seed (the flow below is the pre-existing main-path assertion).
+    // The main path: typing the label dissolves the seed. (Backspace on a
+    // fresh seed is no longer a refusal — since 2026-08-22 it CULLS the item,
+    // exercised on a real multi-item list in step 3c below.)
     await typeTextLikeUser(send, '待办事项', { delayMs: delay })
     await sleep(500)
     const afterFirst = FIXTURE.replace('甲乙丙丁', '- [ ] 待办事项')
@@ -380,9 +339,64 @@ async function run() {
       `the merged item's label must dissolve the seed like any other (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
     assert.ok(!mergedSource.includes(NBSP), 'no U+00A0 survives the merged item\'s label')
 
+    // ============================================================
+    // 3c) THE CULL (2026-08-22 user report): Backspace on a fresh seed in a
+    //     REAL multi-item list removes the item — the user was culling it,
+    //     and the pre-fix contract answered with the empty-task wall (a dead
+    //     end whose exits were Enter or undo). The keystroke is a structural
+    //     exit now, same ledger-gated lift-out Enter has; the wall still
+    //     guards non-key deletion transactions (pinned in headless I5b and
+    //     the task-seed suite). This step drives the exact reported shape:
+    //     /task below the merged list joins it as a fourth (empty) item,
+    //     then one Backspace culls that item, silently, list intact.
+    // ============================================================
+    await selectBlock(evaluate, send, '剔除试验段。')
+    await runTaskItem(evaluate, send)
+    await sleep(300)
+    const preCullItems = await taskItems(evaluate)
+    console.log('  [/task before cull] ->', JSON.stringify(preCullItems))
+    assert.deepEqual(preCullItems, [
+      { checked: false, label: '待办事项' },
+      { checked: false, label: '补充' },
+      { checked: false, label: '合并项' },
+      { checked: false, label: NBSP }
+    ], 'the fourth (empty) item joined the list, ready to be culled')
+    await evaluate(`(() => {
+      window.__ieToasts = []
+      if (!window.__ieToastHook) {
+        window.__ieToastHook = true
+        window.addEventListener('hm:toast', (e) => window.__ieToasts.push(e.detail?.msg ?? String(e.detail)))
+      }
+      return 1
+    })()`)
+    {
+      const bs = { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }
+      // A REAL keyDown: the structural keymap must own this key — pre-fix it
+      // passed the key through and the gateway wall refused the deletion.
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...bs })
+      await sleep(20)
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...bs })
+    }
+    await sleep(600)
+    const culledItems = await taskItems(evaluate)
+    console.log('  [backspace culls seed] ->', JSON.stringify(culledItems))
+    assert.deepEqual(culledItems, [
+      { checked: false, label: '待办事项' },
+      { checked: false, label: '补充' },
+      { checked: false, label: '合并项' }
+    ], 'the empty item is CULLED — pre-fix this keystroke was refused with the empty-task toast')
+    const cullToasts = JSON.parse(await evaluate(`JSON.stringify(window.__ieToasts || [])`))
+    assert.deepEqual(cullToasts, [],
+      `a successful cull is silent — pre-fix this fired the empty-task refusal (got ${JSON.stringify(cullToasts)})`)
+    const culledExpected = mergedExpected.replace('剔除试验段。', '')
+    const culledSource = await readSource(evaluate, 'after cull')
+    assert.equal(culledSource, culledExpected,
+      'the seed line is gone byte-for-byte; the three labelled items are untouched')
+    assert.ok(!culledSource.includes(NBSP), 'no U+00A0 survives the cull')
+
     await save(evaluate)
     const finalDisk = await readFile(file, 'utf8')
-    assert.equal(finalDisk, mergedExpected, 'final disk bytes match the kernel-derived expectation exactly')
+    assert.equal(finalDisk, culledExpected, 'final disk bytes match the kernel-derived expectation exactly')
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
 
@@ -404,10 +418,10 @@ async function run() {
       { checked: false, label: '补充' },
       { checked: false, label: '合并项' }
     ], 'all three tasks survive a cold reopen as REAL checkboxes with exact labels')
-    assert.equal(await readFile(file, 'utf8'), mergedExpected, 'reopen must not rewrite the file')
+    assert.equal(await readFile(file, 'utf8'), culledExpected, 'reopen must not rewrite the file')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on reopen')
 
-    console.log('PASS kernel-mode /task UI regression: the slash item creates a real checkbox with a typable caret, the seed dissolves under the label (immediately AND after an awkward-instant save), an item written next to an existing list JOINS it through the predicted-merge proof, and all three tasks survive a cold reopen')
+    console.log('PASS kernel-mode /task UI regression: the slash item creates a real checkbox with a typable caret, the seed dissolves under the label (immediately AND after an awkward-instant save), an item written next to an existing list JOINS it through the predicted-merge proof, Backspace CULLS an unlabelled seed item from a real list, and all three tasks survive a cold reopen')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await stopBuiltElectron(reopened, { removeProfile: true })
