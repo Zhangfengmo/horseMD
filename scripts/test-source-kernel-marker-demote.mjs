@@ -24,7 +24,9 @@
 // a bare `>` pairs editable through the empty-quote virtual anchor already —
 // claiming it would give one byte two owners.
 import assert from 'node:assert/strict'
-import { spellMarkerFollowingText } from '../src/renderer/src/lib/source-kernel/commands/marker-space.js'
+import { unified } from 'unified'
+import { spellMarkerFollowingText, spellMarkerRunGrowth } from '../src/renderer/src/lib/source-kernel/commands/marker-space.js'
+import { NO_BREAK_SPACE } from '../src/renderer/src/lib/source-kernel/commands/trailing-whitespace.js'
 import { parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 
 console.log('--- source kernel marker-following text ---')
@@ -122,6 +124,13 @@ const REFUSED = [
   // A bare task checkbox has literal `[ ]` content (checked: null) — not empty,
   // not this command's shape.
   ['bare checkbox', '- [ ]', '- [ ]', 'a'],
+  // THE SEEDED TASK ITEM — `/task`'s exact bytes: `- [ ] ` plus the ledgered
+  // U+00A0 seed, caret after the seed, first label character arriving. The
+  // seed-dissolve path owns that keystroke; this command must never claim it.
+  // Today it is unclaimable by construction (the byte before the caret is
+  // U+00A0, which no MARKER_TOKEN alternative ends with), but constructions
+  // change — this row pins the interaction, not the mechanism.
+  ['seeded task item', '- [ ] ' + NO_BREAK_SPACE, '- [ ] ' + NO_BREAK_SPACE, 'a'],
   // Caret midway through the marker run: the structure the line spells does not
   // end at the caret.
   ['mid-run caret', '甲\n\n##', '#', 'a'],
@@ -139,6 +148,83 @@ for (const [label, text, needle, typed] of REFUSED) {
   assert.equal(routed.code, 'not-structural', `${label}: refusal is the quiet kind`)
 }
 
+// ---------------------------------------------------------------------------
+// REFUSED BY THE PROOF (review condition, 2026-08-21) — rows every PREFILTER
+// passes. Every REFUSED row above is turned away by a cheap check (whitespace,
+// token, owner, bare-structure shape), so deleting the candidate-reparse proof
+// entirely left this suite green: the proof itself was unpinned. These rows
+// exercise IT. A bare `#` heading typed `#` is a live candidate all the way
+// down — token matched, not `>`/`[`, line start fine, the current structure is
+// bare and ends at the caret — but the candidate `##` reparses to a heading
+// STILL standing at the marker's offset: no "structure gone + literal text at
+// the marker's offset", the acceptance clause the proof requires. (In the
+// running plugin these keystrokes are claimed by run growth first; the command
+// must refuse them ON ITS OWN — proven, not shadowed.)
+// ---------------------------------------------------------------------------
+const PROOF_REFUSED = [
+  ['hash after bare h1', '甲\n\n#', '#', '#'],
+  ['hash after bare h2', '甲\n\n##', '##', '#'],
+  ['CRLF hash after bare h1', '甲\r\n\r\n#', '#', '#']
+]
+
+for (const [label, text, needle, typed] of PROOF_REFUSED) {
+  const offset = at(text, needle)
+  const routed = spellMarkerFollowingText({ doc: doc(text), offset, text: typed })
+  assert.ok(!routed.ok, `${label}: the reparse proof must refuse a candidate that stays structural`)
+  assert.equal(routed.code, 'not-structural', `${label}: refusal is the quiet kind`)
+}
+
+// ---------------------------------------------------------------------------
+// THE PREFILTER RUNS BEFORE THE PARSE (review condition, 2026-08-21). This
+// command sits on `handleTextInput` — the marker input plugin asks run growth
+// and then this command about EVERY non-whitespace character typed in kernel
+// mode. As first landed, the answer for an ordinary letter cost a full-document
+// `buildSyntaxIndex` reparse (~50 ms at 100 KB) BEFORE the token check could
+// say "not a marker". Deterministic budget, not a timing: one ordinary
+// keystroke through the marker family triggers ZERO kernel parses — N
+// unchanged from pre-60c4cd9, where the plugin ran run growth alone, which
+// refuses a non-`#` character before any parse. Counted at the one funnel both
+// `parseKernelMarkdown` and `buildSyntaxIndex` share: the unified processor's
+// own `parse`.
+// ---------------------------------------------------------------------------
+const countKernelParses = (fn) => {
+  const proto = Object.getPrototypeOf(unified())
+  const original = proto.parse
+  let calls = 0
+  proto.parse = function (...args) {
+    calls += 1
+    return original.apply(this, args)
+  }
+  try {
+    fn()
+  } finally {
+    proto.parse = original
+  }
+  return calls
+}
+
+{
+  // The everyday keystroke: caret after ordinary text, nothing marker-shaped.
+  const text = '甲\n\nab'
+  const offset = at(text, 'ab')
+  const parses = countKernelParses(() => {
+    assert.ok(!spellMarkerRunGrowth({ doc: doc(text), offset, character: 'c' }).ok)
+    assert.ok(!spellMarkerFollowingText({ doc: doc(text), offset, text: 'c' }).ok)
+  })
+  assert.equal(parses, 0,
+    `an ordinary keystroke pays ZERO full-document parses in the marker family, saw ${parses}`)
+
+  // And the deferral is a deferral, not a deletion: a live candidate still
+  // pays exactly its two parses — the baseline index and the candidate proof.
+  const candidateText = '甲\n\n*'
+  const candidateOffset = at(candidateText, '*')
+  const candidateParses = countKernelParses(() => {
+    assert.ok(spellMarkerFollowingText({ doc: doc(candidateText), offset: candidateOffset, text: 'a' }).ok)
+  })
+  assert.equal(candidateParses, 2,
+    `a live candidate pays the baseline parse + the proof reparse, saw ${candidateParses}`)
+}
+
 // A refusal must never be reached by throwing: hostile inputs answer, not crash.
 for (const args of [
   {},
@@ -151,4 +237,4 @@ for (const args of [
   assert.equal(routed.ok, false)
 }
 
-console.log('PASS marker-following text: bare markers demote to literal content under ordinary typing, whitespace/quote/non-empty shapes refuse')
+console.log('PASS marker-following text: bare markers demote to literal content under ordinary typing, whitespace/quote/non-empty/seeded shapes refuse, the reparse proof refuses on its own, and an ordinary keystroke parses nothing')

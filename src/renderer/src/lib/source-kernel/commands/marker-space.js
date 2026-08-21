@@ -265,6 +265,22 @@ export function spellMarkerFollowingText({ doc, offset, text: typed }) {
   // completion / re-speller family; a line ending could never be one edit.
   if (/\s/.test(typed)) return NOT_STRUCTURAL
 
+  // CHEAP PREFILTER FIRST — before any parse (review condition, 2026-08-21).
+  // This command sits on `handleTextInput`, so it is asked about EVERY
+  // non-whitespace character typed in kernel mode; as first landed it paid
+  // `buildSyntaxIndex` (a full-document reparse, ~50 ms at 100 KB) before the
+  // token check could answer "the byte before the caret is an ordinary
+  // letter". The physical line start is findable by string scan alone, and a
+  // marker token can never span a line ending (none of its bytes are \r or
+  // \n), so this gate refuses exactly the shapes the parse-side re-derivation
+  // below refuses at its own MARKER_TOKEN / owner / line-start checks — it
+  // only decides whether the parse is worth paying, never differently.
+  const guessLineStart = text.lastIndexOf('\n', offset - 1) + 1
+  const guess = MARKER_TOKEN.exec(text.slice(guessLineStart, offset))
+  if (!guess) return NOT_STRUCTURAL
+  if (guess[0] === '>' || guess[0][0] === '[') return NOT_STRUCTURAL
+  if (!looksLikeBlockLineStart(text, offset - guess[0].length)) return NOT_STRUCTURAL
+
   const index = buildSyntaxIndex(text)
   const line = index.lineAt(offset)
   if (!line || offset < line.start) return NOT_STRUCTURAL
