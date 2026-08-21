@@ -392,6 +392,8 @@ android/, ios/           Capacitor 原生壳
 
 钉:`test-source-kernel-marker-demote.mjs`(纯命令,LF/CRLF/合并列表/围栏/whitespace 拒绝),`test-kernel-projection-map.mjs` rawToPmCaret 案例(写路径拒绝、光标路径解析、直通等价、空行仍 null),`test:kernel-marker-text-ui`(LF+CRLF 双跑:`*ab`/`1.x`/`#x` 降级渲染为段落、`* x` 仍建真列表、行中 `*` 不被认领、保存落盘)。已跑过的邻居回归:marker-space/mode/task-item/line-start-whitespace/quote/indent-empty-item/trailing-backspace 各 UI 套件 + `test:source-kernel` + `test:kernel-headless` 全绿。
 
+**2026-08-22 有序列表 Tab 缩进的 marker rescue（用户报告：两个拒绝 toast 同屏）**：紧凑有序列表（内核 Enter 建出的默认形态）里对**已输入文字**的项按 Tab 一直被 `would-restructure-document` 拒绝——空项拒绝 toast 承诺的补救「先输入文字再缩进」因此是假的。根因不是证明错了，是写的字节错：缩进只加行前缀、保留原 marker，`   4. x` 直接跟在上一项段落后面时，CommonMark 只允许**序号为 1** 的有序列表打断段落，该行被吞成上一项段落的惰性续行——重解析证明（`provenNestingOnly`）如实拒绝。修复（`commands/indent.js`）＝ Typora 手势：素朴前缀编辑先试（能过证明就保持字节最小——并入既有子列表时序号不影响解析，marker 原样保留，state machine 钉死「至多一行被改号」）；被拒且项是序号≠1 的有序项时**重试一次**，把该项**自己的** marker 改写为 `1`（分隔符 `.`/`)` 不变，兄弟一概不动，marker-line 的 pad 与改号合成**一笔**编辑避免 applyEdits 同 `from` 的次序歧义），同一证明把关，再拒则维持原拒绝码。空项仍拒（`1.` 空项照样打不断段落——CommonMark 硬约束），但 toast 文案已改为对 bullet/有序都准确（旧文案的「变成标题」机制只对 bullet 成立），且其补救承诺现在真的成立。钉：`test-source-kernel-indent.mjs`（报告原形状 + `10.`/`1)` 变体 + 并入既有子列表不改号 + 空项仍拒）、statemachine 不变式放宽为「前缀外唯一允许的差异 = 单行 marker 改 `1`」、`test:kernel-indent-ordered-ui`（LF+CRLF：真实按键复现两张截图的完整剧本——空项 Tab 拒绝一次、照补救输入后 Tab 嵌套为 `   1.`、Shift-Tab 回来、落盘）。
+
 ### 5.3 PDF 导出
 
 - PDF 导出读取 `getPdfSource()` 生成的结构化 `{ html, headings, title }`，不是直接打印 live editor DOM。

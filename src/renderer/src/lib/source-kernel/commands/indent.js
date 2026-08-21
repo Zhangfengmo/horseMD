@@ -47,11 +47,12 @@ const ownedLineIndexes = (index, item) => {
 // edit at or before `offset` shifts it, not just the one on offset's own
 // line (a caret on a continuation/owned line sits after the marker line's
 // edit AND its own line's edit). Sum every edit's effect that lands at or
-// before offset, in original-document coordinates. These edits are always
-// either a pure insert (from === to) or a pure whitespace deletion
-// (insert === ''), never both in one edit, and — being prefix edits placed
-// at a line's own start — offset can only fall inside a deleted range for a
-// deletion, never inside an inserted pad; still clamp defensively.
+// before offset, in original-document coordinates. These edits are a pure
+// insert (from === to), a pure whitespace deletion (insert === ''), or the
+// ordered-rescue marker replacement (pad + rewritten marker over the old
+// indent+marker span) — the general sum handles all three. Being prefix
+// edits placed at a line's own start, offset rarely falls inside a replaced
+// range (only a caret parked inside the marker itself); clamp defensively.
 const selectionFor = (edits, offset) => {
   let delta = 0
   for (const edit of edits) {
@@ -131,13 +132,13 @@ const applyEdits = (text, edits) => {
 
 // Two codes, because the two reachable causes have different remedies and the
 // user can act on both:
-//   * an EMPTY item cannot open a nested list, so its marker line is read as a
-//     setext underline and the item ABOVE becomes a heading — type something in
-//     the item first, and the same Tab works;
-//   * anything else (today: an ORDERED item, which can only interrupt a
-//     paragraph when its number is 1, so an indented `2. ` is swallowed as a
-//     lazy continuation of the previous item's paragraph) has no one-line
-//     remedy, so its message states the fact rather than inventing advice.
+//   * an EMPTY item cannot open a nested list (in a bullet list its marker
+//     line is even read as a setext underline, turning the item ABOVE into a
+//     heading; in an ordered list it is swallowed as a lazy continuation) —
+//     type something in the item first, and the same Tab works;
+//   * anything else that survives the ordered-marker rescue below has no
+//     one-line remedy, so its message states the fact rather than inventing
+//     advice.
 const EMPTY_ITEM = { ok: false, code: 'empty-item-would-become-heading' }
 const RESTRUCTURES = { ok: false, code: 'would-restructure-document' }
 
@@ -221,8 +222,35 @@ export function indentListItem({ doc, index, offset }) {
     return { from: at, to: at, insert: pad }
   })
   const refused = provenNestingOnly(index.text, edits, item)
-  if (refused) return refused
-  return multiTxn(doc, edits, 'indent-list-item', offset)
+  if (!refused) return multiTxn(doc, edits, 'indent-list-item', offset)
+
+  // ORDERED-MARKER RESCUE (2026-08-22, from a user report with both refusal
+  // toasts on screen). When the indented line opens a NEW sublist directly
+  // after the previous item's paragraph, CommonMark only lets it interrupt
+  // that paragraph if its number is 1 — `   4. x` is swallowed as a lazy
+  // continuation instead, which is exactly what the proof above refused. The
+  // Typora gesture is to renumber the demoted item to 1, so retry ONCE with
+  // the item's OWN marker rewritten to `1` (same delimiter; siblings stay
+  // untouched, per this file's contract). The marker-line pad and the marker
+  // rewrite are ONE combined edit — two edits sharing a `from` would make
+  // applyEdits' right-to-left order ambiguous. The same proof gates the
+  // rewritten bytes; if they too restructure, the original refusal stands
+  // (an EMPTY item still cannot interrupt a paragraph even as `1.`, so the
+  // empty-item advice — type first, then indent — is now actually true).
+  if (!item.ordered || item.ordered.number === 1) return refused
+  const markerLine = index.lines[item.markerLineIndex]
+  const prefixEnd = markerLine.start + item.quotePrefix.length
+  const renumbered = rows.map((i) => {
+    const at = index.lines[i].start + item.quotePrefix.length
+    if (i !== item.markerLineIndex) return { from: at, to: at, insert: pad }
+    return {
+      from: prefixEnd,
+      to: prefixEnd + item.indent.length + item.marker.length,
+      insert: pad + item.indent + '1' + item.ordered.delimiter
+    }
+  })
+  if (provenNestingOnly(index.text, renumbered, item)) return refused
+  return multiTxn(doc, renumbered, 'indent-list-item', offset)
 }
 
 export function outdentListItem({ doc, index, offset }) {
