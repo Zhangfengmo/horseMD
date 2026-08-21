@@ -73,7 +73,12 @@ const phrasingBlocks = (tree) => {
 const pmSize = (node) => {
   let size = 0
   for (const c of node.children || []) {
-    if (c.type === 'text' || c.type === 'inlineCode') size += c.value.length
+    // A text value keeps a soft break's bytes verbatim ('\n', '\r\n' or
+    // lone '\r'), but ProseMirror holds ONE character per line ending —
+    // measured in the real editor (see the CRLF widening pin in
+    // test-kernel-projection-map.mjs). The simulator must count like PM.
+    if (c.type === 'text') size += c.value.replace(/\r\n?/g, '\n').length
+    else if (c.type === 'inlineCode') size += c.value.length
     else if (c.children) size += pmSize(c)
     else size += 1
   }

@@ -291,14 +291,16 @@ const mapOf = (src, findText = null) => {
   assert.equal(map.rawNeutralInsert(10), 16) // 块尾插入落在闭 `**` 之外
 }
 
-// CRLF：atom 与 linebreak unit 共存
+// CRLF：atom 与 linebreak unit 共存。'\r\n' 是**一个**行尾（CRLF 加宽，
+// 2026-08-21）：一个 width-1 linebreak unit 跨下整对字节 —— ProseMirror 对
+// 任何行尾拼写都只持有一个 '\n' 字符，可见计数必须与它一致。
 {
   const { map } = mapOf('a $x$ b\r\nsecond\r\n')
-  assert.equal(map.visibleLength, 13)      // 'a ' + 1 + ' b\r\nsecond'
+  assert.equal(map.visibleLength, 12)      // 'a ' + 1 + ' b' + 1 + 'second'
   assert.equal(map.visibleToRaw(2), 2)
   assert.equal(map.visibleToRaw(3), 5)     // 跳过整个 `$x$`
   assert.deepEqual(map.units.filter((u) => u.kind === 'linebreak')
-    .map((u) => [u.rawStart, u.rawEnd]), [[8, 9]]) // '\r' 是普通 char，'\n' 才跨行
+    .map((u) => [u.rawStart, u.rawEnd]), [[7, 9]]) // 整对 '\r\n' 一个 unit
 }
 
 // 货币形状（`$5 and $6`）：内核跟随编辑器链，同样是 atom + 文本（见
@@ -475,16 +477,16 @@ const unitsOf = (src, i = 0) => {
   assert.equal(map.visibleLength, 1)
 }
 
-// CRLF：合并段之后仍能正常继续（linebreak unit 只吞 '\n'，'\r' 是普通 char）
+// CRLF：合并段之后仍能正常继续（'\r\n' 整对是一个 linebreak unit）
 {
   const src = 'a <span>x</span> b\r\nnext\r\n'
   const { map, shape } = unitsOf(src)
   assert.deepEqual(shape, [
     ['char', 0, 1], ['char', 1, 2], ['atom', 2, 16], ['char', 16, 17], ['char', 17, 18],
-    ['char', 18, 19], ['linebreak', 19, 20],
+    ['linebreak', 18, 20],
     ['char', 20, 21], ['char', 21, 22], ['char', 22, 23], ['char', 23, 24]
   ])
-  assert.equal(map.visibleLength, 11)
+  assert.equal(map.visibleLength, 10)
 }
 
 // 标题里的片段（heading 也是 phrasing 容器）
@@ -593,9 +595,9 @@ const unitsOf = (src, i = 0) => {
     ['char', 4, 5], ['char', 5, 6],
     ['char', 8, 9], ['char', 9, 10]
   ])
-  // 'a hl b' (6) + literal '\r' + the linebreak + 'next' — the '\r' is an
-  // ordinary char unit, same convention as the inline-html CRLF case above.
-  assert.equal(map.visibleLength, 12)
+  // 'a hl b' (6) + the linebreak (the whole '\r\n' pair, ONE unit) + 'next'
+  // — same convention as the inline-html CRLF case above.
+  assert.equal(map.visibleLength, 11)
 }
 
 // 引用段落里的高亮（mdast 位置是绝对偏移，无需前缀调整）
@@ -697,6 +699,83 @@ console.log('PASS source-kernel character map (inline html)')
   assert.ok(map)
   const atom = map.units.find((u) => u.kind === 'atom')
   assert.equal(src.slice(atom.rawStart, atom.rawEnd), '  \n')
+}
+
+// ============================================================================
+// CRLF 软换行加宽（2026-08-21）：一个 '\r\n' 对是**一个**行尾，因此是**一个**
+// width-1 `linebreak` unit —— raw 跨下 '\r'+'\n' 两个字节再加续行前缀。
+// ProseMirror 对每个软换行只持有一个 '\n' 字符（不论源文件拼写），旧模型
+// （'\r' 记普通 char）让 visibleLength 每个软换行多 1，块级 size 证明失配，
+// CRLF 文件里所有带续行的块整块降级只读（用户报告的主形态是列表续行）。
+// ============================================================================
+{
+  // 用户报告的主形态：列表项续行。
+  const src = '- 甲\r\n  乙\r\n'
+  const { map } = mapOf(src, '甲')
+  assert.ok(map, 'CRLF 列表续行必须可映射')
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd, u.width]), [
+    ['char', 2, 3, 1], ['linebreak', 3, 7, 1], ['char', 7, 8, 1]
+  ])
+  assert.equal(map.visibleLength, 3) // 甲 + 换行 + 乙 —— 与 PM 的 content.size 一致
+  // 换行 unit 记录 value 里的行尾拼写（offsetTables 靠它对齐 value 索引）。
+  assert.equal(map.units[1].ending, '\r\n')
+  // 三个解析器在换行两侧给出同一个字节；'\r\n' 内部不再是任何可见边界。
+  assert.equal(map.visibleToRaw(1), 3)
+  assert.equal(map.visibleToRaw(2), 7)
+  assert.equal(map.rawStartForVisible(1), 3)
+  assert.equal(map.rawNeutralInsert(2), 7)
+  // 删除软换行 = 恰好它自己的字节（含前缀）：'- 甲乙' 的合并。
+  assert.deepEqual(map.rawRangeForVisibleRange(1, 2), { from: 3, to: 7 })
+}
+{
+  // 无前缀段落：raw 只有 '\r\n' 两字节。
+  const src = 'a\r\nb\r\n'
+  const { map } = mapOf(src)
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]), [
+    ['char', 0, 1], ['linebreak', 1, 3], ['char', 3, 4]
+  ])
+  assert.equal(map.visibleLength, 3)
+  assert.equal(map.units[1].ending, '\r\n')
+}
+{
+  // 引用前缀：'\r\n> ' 全部进换行 unit。
+  const src = '> a\r\n> b\r\n'
+  const { map } = mapOf(src, 'a')
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]), [
+    ['char', 2, 3], ['linebreak', 3, 7], ['char', 7, 8]
+  ])
+  assert.equal(map.visibleLength, 3)
+}
+{
+  // 孤立 CR（classic Mac）：同样是一个行尾 —— 一个 linebreak unit，
+  // 旧模型把它记成普通 char（无前缀时靠巧合对齐，带前缀时直接 null）。
+  const src = 'a\rb\r'
+  const { map } = mapOf(src)
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]), [
+    ['char', 0, 1], ['linebreak', 1, 2], ['char', 2, 3]
+  ])
+  assert.equal(map.units[1].ending, '\r')
+  assert.equal(map.visibleLength, 3)
+}
+{
+  // 孤立 CR + 引用前缀：旧模型 null（前缀无人认领），加宽后可映射。
+  const src = '> a\r> b\r'
+  const { map } = mapOf(src, 'a')
+  assert.ok(map, '孤立 CR 的引用续行必须可映射')
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]), [
+    ['char', 2, 3], ['linebreak', 3, 6], ['char', 6, 7]
+  ])
+  assert.equal(map.visibleLength, 3)
+}
+{
+  // LF 控制组：行为逐字节不变（ending 记 '\n'）。
+  const src = 'a\nb\n'
+  const { map } = mapOf(src)
+  assert.deepEqual(map.units.map((u) => [u.kind, u.rawStart, u.rawEnd]), [
+    ['char', 0, 1], ['linebreak', 1, 2], ['char', 2, 3]
+  ])
+  assert.equal(map.units[1].ending, '\n')
+  assert.equal(map.visibleLength, 3)
 }
 
 console.log('PASS source-kernel character map (hard break: continuation prefix folded, two shapes fail closed)')

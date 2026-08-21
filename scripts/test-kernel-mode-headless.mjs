@@ -186,6 +186,14 @@ const FIXTURE_DOCS = {
   '- [ ] 乙\n': () => doc(bl(li(false, p(text('乙'))))),
   // Task 11.5 fixtures: trailing-placeholder typing + split placeholder.
   '- 甲\n': () => doc(bl(li(null, p(text('甲'))))),
+  // Case CRLF-SB fixtures (soft-break widening, 2026-08-21): a CRLF list item
+  // wrapping onto a continuation line, before and after each typed byte. PM
+  // holds ONE '\n' character for the soft break regardless of the source
+  // spelling — which is exactly why the map must count it as one unit.
+  '- 甲\r\n  乙\r\n': () => doc(bl(li(null, p(text('甲\n乙'))))),
+  '- 甲\r\n  乙X\r\n': () => doc(bl(li(null, p(text('甲\n乙X'))))),
+  '- 甲\r\n  Y乙X\r\n': () => doc(bl(li(null, p(text('甲\nY乙X'))))),
+  '- 甲乙\r\n': () => doc(bl(li(null, p(text('甲乙'))))),
   '- 甲\n\nX': () => doc(bl(li(null, p(text('甲')))), p(text('X'))),
   '- 甲\n\nab': () => doc(bl(li(null, p(text('甲')))), p(text('ab'))),
   '甲乙\n\n\n': () => doc(p(text('甲乙'))),
@@ -3825,6 +3833,51 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.notifications.length, notificationsBefore, 'and raises no toast')
   assert.equal(h.view.state.doc.child(0).attrs.id, '标题-#2', 'the view keeps the refreshed id')
   assert.ok(h.controller.kernel.map, 'the map is rebound around the rewritten heading node')
+}
+
+// ===========================================================================
+// Case CRLF-SB (2026-08-21, soft-break widening): a CRLF list item wrapping
+// onto a continuation line — the user-report shape — is TYPABLE. The map's
+// `linebreak` unit spans the whole '\r\n' pair plus the continuation indent,
+// so a plain insert lands on provable byte boundaries and a delete of the
+// soft break removes exactly the ending + prefix (joining the two lines).
+// ===========================================================================
+{
+  const listDoc = (s) => doc(bl(li(null, p(text(s)))))
+  const h = makeHarness('- 甲\r\n  乙\r\n', listDoc('甲\n乙'))
+  assert.equal(h.controller.attachAfterCreate(), true, 'the CRLF soft-wrapped doc attaches')
+
+  // (a) Type after '乙' (end of the continuation line).
+  // PM: bullet_list@0, list_item@1, paragraph@2, text from 3: 甲3 \n4 乙5.
+  {
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText('X', 6))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, 'typing in a CRLF soft-wrapped item is allowed')
+    assert.equal(h.controller.kernel.doc.text, '- 甲\r\n  乙X\r\n', 'bytes land after 乙')
+    assert.equal(/\r(?!\n)/.test(h.controller.kernel.doc.text), false, 'no lone \\r injected')
+  }
+
+  // (b) Type at the continuation line's visible start (just after the break).
+  // The linebreak unit ends AFTER the continuation indent, so the insert
+  // lands before '乙', not inside the syntax-only indent bytes.
+  {
+    const verdict = dispatchThrough(h, h.view.state.tr.insertText('Y', 5))
+    await flushMicrotasks()
+    assert.equal(verdict, undefined, 'typing at the continuation start is allowed')
+    assert.equal(h.controller.kernel.doc.text, '- 甲\r\n  Y乙X\r\n',
+      'the insert lands right after the linebreak unit (ending + indent)')
+  }
+}
+{
+  // (c) Deleting the soft break joins the two lines: exactly the '\r\n  '
+  // bytes go, nothing else.
+  const listDoc = (s) => doc(bl(li(null, p(text(s)))))
+  const h = makeHarness('- 甲\r\n  乙\r\n', listDoc('甲\n乙'))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const verdict = dispatchThrough(h, h.view.state.tr.delete(4, 5))
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'deleting the soft break is allowed')
+  assert.equal(h.controller.kernel.doc.text, '- 甲乙\r\n', 'the ending and its indent both go')
 }
 
 console.log('PASS kernel mode headless')

@@ -141,7 +141,15 @@ function offsetTables(text, node) {
   let v = 0
   for (const unit of units) {
     starts.set(v, unit.rawStart)
-    v += unit.width
+    // These tables are keyed by VALUE indices, and a `linebreak` unit's
+    // width (always 1, the DECODED width) can undercount the value chars it
+    // consumes: a CRLF (or lone-CR) soft break keeps its bytes verbatim in
+    // the value, so the unit records the value spelling in `ending` (CRLF
+    // widening, 2026-08-21). Advancing by width here would shift every
+    // index after the break and silently mis-resolve a highlight's bytes.
+    // The index BETWEEN a pair's '\r' and '\n' gets no entry — a match
+    // boundary landing there fails closed, as it must.
+    v += unit.kind === 'linebreak' && unit.ending ? unit.ending.length : unit.width
     ends.set(v, unit.rawEnd)
   }
   return { starts, ends, length: v }

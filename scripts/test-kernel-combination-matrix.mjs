@@ -516,29 +516,15 @@ const KNOWN_UNEDITABLE = new Map([])
 //                 its siblings stay editable, and the status bar reports
 //                 "some blocks read-only". No byte is at risk.
 //
-// D2. CRLF + SOFT LINE BREAK IN PROSE  ->  that PARAGRAPH is read-only.
-//     Shape:      `甲\r\n乙` (a multi-line paragraph, or a multi-line
-//                 blockquote paragraph, in a CRLF document). The LF spelling of
-//                 the very same paragraph is fully editable.
-//     Mechanism:  measured, not inferred — for `'甲\r\n乙\r\n'`
-//                 `buildCharacterMap` emits units
-//                 [char 0-1, char 1-2, linebreak 2-3, char 3-4], i.e. it counts
-//                 the `\r` as its OWN width-1 visible unit, giving
-//                 visibleLength 4; ProseMirror's paragraph holds `甲\n乙`,
-//                 content.size 3. The projection map's size check
-//                 (`pm.node.content.size !== charMap.visibleLength`) then nulls
-//                 the charMap for that block. For LF the units are
-//                 [char, linebreak, char] and both counts are 3.
-//     Scope:      this makes EVERY multi-line paragraph and multi-line
-//                 blockquote paragraph read-only in a CRLF-authored document.
-//                 A code block is unaffected (`buildCodeMap` keeps `\r` as
-//                 content on both sides, so the two counts agree), and so is a
-//                 CRLF paragraph with no interior line break, and so is a CRLF
-//                 HARD break.
-//     Posture:    fail-closed and LOUD, exactly like D1 — read-only, not wrong
-//                 bytes. Recorded here rather than "fixed" in a test, because a
-//                 fix belongs in the kernel's line-ending handling, not in the
-//                 suite that found it.
+// D2. (FIXED 2026-08-21 — family removed.) CRLF + SOFT LINE BREAK IN PROSE
+//     used to make the paragraph read-only: `textUnits` counted the `\r` of a
+//     CRLF pair as its own width-1 `char` unit, so `visibleLength` exceeded
+//     ProseMirror's `content.size` by one per soft break and the projection
+//     map's size check nulled the charMap. The widening (character-map.js)
+//     makes the whole ending — any spelling, plus its continuation prefix —
+//     ONE width-1 `linebreak` unit, so both counts agree exactly as they
+//     always did for LF. Every former D2 entry disappeared at once, per this
+//     family's own fix-scheduled contract.
 // D3. PARAGRAPH WHOSE SOFT-BREAK CONTINUATION LINE STARTS WITH `> `
 //     ->  that PARAGRAPH is read-only.
 //     Shape:      a paragraph whose second line begins with a blockquote
@@ -565,6 +551,12 @@ const KNOWN_UNEDITABLE = new Map([])
 //   same). In every entry the read-only block is the OLD element's own block
 //   — verified per entry, never a block a new element contributed — so the
 //   new constructs themselves are fully editable in every composition.
+//   2026-08-21 (CRLF soft-break widening): family D2 REMOVED in full — its
+//   fix landed (one `linebreak` unit per line ending, character-map.js), so
+//   every D2-classified entry narrowed at once, exactly as the family's
+//   fix-scheduled status promised. Entries that also carried a D1 cell keep
+//   the cell (`table-br` compositions: the paragraph left the read-only
+//   list, the `<br>` cell stays). No entry widened; no new family.
 //
 // Each family carries a STATUS, and the snapshot stores the family alongside
 // every entry, because these are not all the same kind of fact:
@@ -581,10 +573,6 @@ const KNOWN_DEGRADED_FAMILIES = {
     status: 'known-degraded',
     summary: 'table cell containing <br> -> cell read-only'
   },
-  D2: {
-    status: 'fix-scheduled',
-    summary: 'CRLF + soft line break in prose -> paragraph read-only (the `\\r` unit-model widening; scheduled as its own task)'
-  },
   D3: {
     status: 'known-degraded',
     summary: 'paragraph whose soft-break continuation line starts with "> " -> paragraph read-only'
@@ -596,7 +584,9 @@ const KNOWN_DEGRADED_FAMILIES = {
 // through to D3, and D3 entries are printed by name on every run.
 function classifyReadOnly(compositionId, entry) {
   if (entry.endsWith('(cell)')) return 'D1'
-  if (compositionId.endsWith('#crlf')) return 'D2'
+  // (`#crlf` used to classify as D2; that family's fix landed 2026-08-21, so
+  // any residual CRLF read-only block falls through to D3 and is printed by
+  // name — never quietly absorbed into a fixed family.)
   return 'D3'
 }
 

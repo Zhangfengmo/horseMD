@@ -304,7 +304,14 @@ const ATOM_PLACEHOLDER = '￼'
 // `null` (unknown leaf with neither `value` nor `children`) mirrors
 // `collectUnits`' own fail-closed answer for the same shape.
 function visibleTextOf(node) {
-  if (node?.type === 'text' || node?.type === 'inlineCode') return String(node.value ?? '')
+  // A text value keeps a soft break's bytes verbatim ('\n', '\r\n', lone
+  // '\r'), but the character map counts ONE visible unit per line ending
+  // (CRLF widening, 2026-08-21 — matching ProseMirror's single '\n' char),
+  // so this walk must count the same way or the index-compatibility
+  // invariant below refuses every CRLF soft-wrapped block. Inline code is
+  // untouched: its units are per-VALUE-char by construction.
+  if (node?.type === 'text') return String(node.value ?? '').replace(/\r\n?/g, '\n')
+  if (node?.type === 'inlineCode') return String(node.value ?? '')
   const children = node?.children
   if (!Array.isArray(children)) return null
   // Same question `collectUnits` asks per recursion level, answered from the
