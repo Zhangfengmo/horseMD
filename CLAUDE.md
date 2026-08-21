@@ -493,10 +493,30 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   split-placeholder session ends (and NEVER mid-session — Case PERF-3), or
   when the rebind failed (verify IS the repair). **Still not default-on
   material**: 130 ms ≫ the 16 ms frame goal (only §9 #6's incremental map —
-  the one that trades away a proof — closes that, deliberately not done), and
-  kernel mode still cannot attach above `CHUNK_THRESHOLD` (120 000 chars —
-  the refusal is a named, honest message, but the document can't be edited in
-  kernel mode).
+  the one that trades away a proof — closes that, deliberately not done).
+- **Above `CHUNK_THRESHOLD` (120 000 chars) kernel mode now ATTACHES**
+  (2026-08-21; it previously could not, at any size). `appendChunks` parses
+  each ~40 KB chunk separately, and a chunked parse structurally disagrees
+  with a whole-document parse on real shapes (two item runs split by a blank
+  line: ONE loose list whole, TWO lists chunked), so the projection map's
+  block zip refused. The kernel still never learns what a chunk is — the
+  rejected-mirroring ADR in `editor-kernel-mode.js` stands. Instead the VIEW
+  is repaired once, at the end of the load, inside the loader's read-only
+  window: `repairChunkedProjection` reparses `kernel.doc.text` with the
+  editor's own parser and `diffReplaceRegions`
+  (`editor-kernel-reconciler.js`) replaces ONLY the regions that genuinely
+  disagree; attach then runs the ordinary full pairing. Multi-region, not
+  `diffReplaceRange`: one range brackets the first and last disagreement and
+  on a 646 KB docs/ concatenation spans **90.8 %** of the document (≈ every
+  node view remounted) where the region diff spans **7.8 %**. Measured in the
+  real app at 200 KB: repair **235–604 ms** + attach **106–159 ms**, one
+  time, and every code block keeps its PM identity. Two refusals stay named:
+  `kernelMode.chunkRepairFailed` (the whole-document reparse failed) and
+  `kernelMode.unmappableChunked` (repaired, still unpairable). Chunk appends
+  are `addToHistory: false`, and the kernel toggle waits for the load instead
+  of serializing a truncated prefix. Locked by
+  `scripts/test-kernel-chunk-attach.mjs` (headless, Case 0 is the pre-fix
+  control) and `test:kernel-chunk-attach-ui` (LF + CRLF).
 - **List Backspace** (`editor-list-backspace.js`): Backspace on an EMPTY list
   item lifts it out of the list (Typora behavior). The CommonMark preset's
   `joinBackward` merged it into the previous item as a second paragraph — the
