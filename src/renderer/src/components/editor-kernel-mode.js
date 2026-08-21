@@ -47,6 +47,7 @@ import {
   spellLineStartWhitespace,
   spellMarkerCompletingSpace,
   spellMarkerRunGrowth,
+  spellMarkerFollowingText,
   trimTrailingBlankLines,
   looksLikeBlockLineStart,
   healableLineStartRun,
@@ -653,7 +654,7 @@ export function createKernelMode({
     })
   }
 
-  const verifyPlainTextProjection = (newDoc) => {
+  const verifyPlainTextProjection = (newDoc, caretRaw = null) => {
     perfStats.verifyRuns += 1
     const parsed = safeParse(kernel.doc.text)
     if (!parsed) {
@@ -671,8 +672,49 @@ export function createKernelMode({
     queueMicrotask(() => {
       const view = getView?.()
       if (!view || disposed) return
+      // SELECTION IS SOURCE-AUTHORITATIVE TOO (2026-08-21). This repair fires
+      // exactly when a plain-text commit's reparse changed STRUCTURE — the
+      // bare-marker family (`*` on a blank line becomes an empty bullet item)
+      // is its everyday case, not an anomaly. `tr.replace` then maps the old
+      // selection through the diff, which threw the caret into the trailing
+      // placeholder: the user's next keystroke landed in the WRONG block,
+      // severing their text from the marker they just typed (measured: `*`
+      // then `a` produced `*\n\na`). The committed transaction's own
+      // selection anchor is the byte the caret must follow, so resolve it
+      // against the map of the PARSED doc — `rawToPmCaret`, whose empty-
+      // textblock fallback is exactly the bare-marker shape — and ride the
+      // selection on the SAME reconcile transaction (a follow-up dispatch
+      // cannot target content whose node-view DOM hasn't mounted; see
+      // applyKernelTransaction's identical protocol).
+      let caretPos = null
+      if (Number.isFinite(caretRaw)) {
+        try {
+          const nextMap = buildProjectionMap(kernel.doc.text, parsed)
+          const found = nextMap?.rawToPmCaret?.(caretRaw)
+          if (found && Number.isFinite(found.pos)) caretPos = found.pos
+        } catch {
+          caretPos = null
+        }
+        if (caretPos === null) {
+          pushKernelDiagnostic({ type: 'caret-unmappable', intent: 'projection-repair', rawOffset: caretRaw })
+        }
+      }
       try {
-        reconcileProjection({ view, newDoc: parsed })
+        reconcileProjection({
+          view,
+          newDoc: parsed,
+          decorateTransaction: caretPos !== null
+            ? (tr) => {
+                try {
+                  const clamped = Math.max(0, Math.min(caretPos, tr.doc.content.size))
+                  tr.setSelection(TextSelection.near(tr.doc.resolve(clamped), 1))
+                  if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+                } catch {
+                  pushKernelDiagnostic({ type: 'caret-restore-failed', rawOffset: caretRaw })
+                }
+              }
+            : null
+        })
       } catch {
         pushKernelDiagnostic({ type: 'projection-repair-failed' })
       }
@@ -733,9 +775,17 @@ export function createKernelMode({
     // commit verifies synchronously (`hadPlaceholders`), so nothing is left
     // unchecked.
     if (splitPlaceholders.length) return
-    verifyPlainTextProjection(view.state.doc)
+    const caretRaw = pendingVerifyCaret
+    pendingVerifyCaret = null
+    verifyPlainTextProjection(view.state.doc, caretRaw)
   }
-  const scheduleVerify = () => {
+  // The caret anchor of the LATEST commit that scheduled the pending verify.
+  // A deferred repair that changes structure must restore the caret to the
+  // byte it belongs to (the bare-marker family); consecutive keystrokes
+  // overwrite it, which is correct — the newest bytes own the caret.
+  let pendingVerifyCaret = null
+  const scheduleVerify = (caretRaw = null) => {
+    pendingVerifyCaret = caretRaw
     if (verifyTimer) clearTimeout(verifyTimer)
     verifyTimer = setTimeout(runScheduledVerify, VERIFY_DEBOUNCE_MS)
     // Never keep a headless process alive for a pending verify (Node timers
@@ -748,15 +798,15 @@ export function createKernelMode({
     clearTimeout(verifyTimer)
     runScheduledVerify()
   }
-  const requestVerify = (newDoc) => {
+  const requestVerify = (newDoc, caretRaw = null) => {
     if (!kernel.map) {
       // Rebind failed: verify is the repair path and must run NOW, against
       // the doc the caller is installing (the live view may not carry it yet
       // — handleTransactions runs before updateState).
-      if (newDoc) verifyPlainTextProjection(newDoc)
+      if (newDoc) verifyPlainTextProjection(newDoc, caretRaw)
       return
     }
-    scheduleVerify()
+    scheduleVerify(caretRaw)
   }
 
   // Best-effort scan: does any ReplaceStep in this batch target a
@@ -918,10 +968,20 @@ export function createKernelMode({
         const hadPlaceholders = splitPlaceholders.length > 0
         bindMap(newState?.doc || null)
         verifyEditObservable(committed.observability)
+        // The committed selection anchor rides along so a structure-changing
+        // repair reconcile can restore the caret to the byte it belongs to
+        // (the bare-marker family) instead of letting the diff throw it into
+        // a neighboring block. It must survive the DEBOUNCE too: a healthy
+        // identity insert after a bare marker (e.g. a paste the marker input
+        // plugin did not claim) restructures on reparse, so the repair that
+        // needs this anchor can fire from the timer rather than
+        // synchronously — requestVerify threads it through, latest commit
+        // wins, exactly the caret the repaired structure belongs to.
+        const caretRide = committed.applied?.selection?.anchor
         if ((hadPlaceholders || committed.rewrote) && newState?.doc) {
-          verifyPlainTextProjection(newState.doc)
+          verifyPlainTextProjection(newState.doc, caretRide)
         } else {
-          requestVerify(newState?.doc)
+          requestVerify(newState?.doc, caretRide)
         }
         onChange?.(kernel.doc.text, false)
         return undefined
@@ -1946,7 +2006,13 @@ export function createKernelMode({
     const node = pair?.pmNode
     if (!pair || pair.virtual || pair.charMap || !node?.isTextblock) return null
     if (node.content.size !== 0) return null
-    const end = pair.mdBlock?.position?.end?.offset
+    // A bare LIST marker's empty item pairs with mdBlock: null (the
+    // syntheticEmptyItemParagraph shape) — its byte identity rides the
+    // `mdItem` record instead, whose contentStart is the marker's own end
+    // (spacing is '' for a bare marker). Without this arm the derivation
+    // covered only the heading family, so `- `/`* `/`1. ` at an empty
+    // paragraph never routed at all.
+    const end = pair.mdBlock?.position?.end?.offset ?? pair.mdItem?.contentStart
     return Number.isInteger(end) ? end : null
   }
 
@@ -2021,6 +2087,37 @@ export function createKernelMode({
       const routed = spellMarkerRunGrowth({ doc: kernel.doc, offset, character })
       if (!routed.ok) return false
       return applyMarkerTransaction(routed, view) === 'handled'
+    } catch {
+      return false
+    }
+  }
+
+  // MARKER-FOLLOWING TEXT — the bare-marker rule's second exit (see
+  // marker-space.js `spellMarkerFollowingText`). A bare `*`/`-`/`1.`/`#` is an
+  // ambiguous intermediate state; a completing Space says "it was syntax"
+  // (route above), an ordinary character says "it was content" — `*` then `a`
+  // is the literal paragraph `*a`, which is what the bytes already reparse
+  // to. Without this route the empty structure has no provable content
+  // anchor, so the character either refused (「只读」) or — after the caret
+  // restore landed it in the empty item — could still not be committed.
+  //
+  // Same channel, same fail-closed posture as run growth directly above: a
+  // throw here would eat the keystroke silently (ProseMirror calls this prop
+  // unguarded), so the body answers "not mine" on every doubt. `requireMap`
+  // is set because the demoted result is an ORDINARY paragraph — the map must
+  // rebuild and the caret's own offset must resolve in it, or nothing is
+  // written.
+  const handleMarkerFollowingText = (view, from, to, character) => {
+    try {
+      if (inactive()) return false
+      if (typeof character !== 'string' || character.length === 0 || /\s/.test(character)) return false
+      if (from !== to || view.composing) return false
+      if (!kernel.map) return false
+      const offset = markerRawOffsetAt(from)
+      if (!Number.isFinite(offset)) return false
+      const routed = spellMarkerFollowingText({ doc: kernel.doc, offset, text: character })
+      if (!routed.ok) return false
+      return applyMarkerTransaction(routed, view, { requireMap: true }) === 'handled'
     } catch {
       return false
     }
@@ -2692,8 +2789,15 @@ export function createKernelMode({
   // ATX heading marker growth (`#` -> `##`). A CHARACTER, not a key, so it
   // rides `handleTextInput` — the same channel ProseMirror's own input rules
   // use — and is mounted in the kernel plugin slot so it runs ahead of them.
+  // Run growth first (it claims only '#'), then the demoting character — the
+  // two exits of the same bare-marker state, in the order that keeps `##`
+  // growth ahead of "a seventh # is literal text".
   const markerInputPlugin = () => new Plugin({
-    props: { handleTextInput: handleMarkerRunGrowth }
+    props: {
+      handleTextInput: (view, from, to, character) =>
+        handleMarkerRunGrowth(view, from, to, character) ||
+        handleMarkerFollowingText(view, from, to, character)
+    }
   })
 
   // Empty-selection mark-shortcut guard (Plan 4 Task 3 ADR): PM's

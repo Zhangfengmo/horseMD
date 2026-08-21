@@ -735,7 +735,15 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         pmPos: pm.pos,
         charMap: editable ? virtualCharMap(item.contentStart) : null,
         virtual: editable,
-        insertPrefix: editable ? '' : undefined
+        insertPrefix: editable ? '' : undefined,
+        // The item's OWN byte identity, kept even when the pair is not
+        // editable. A BARE marker (`*` with no spacing) pairs charMap: null
+        // AND mdBlock: null, which used to leave the pair with no byte
+        // anchor at all — so neither the marker keymap routes
+        // (`markerRawOffsetAt`) nor the caret resolver (`rawToPmCaret`)
+        // could reach the one offset that matters: the marker's end, where
+        // a completing Space or a demoting character must land.
+        mdItem: item || null
       })
       continue
     }
@@ -1248,6 +1256,38 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     return null
   }
 
+  // CARET resolution for a raw offset the write-path resolver refuses.
+  // `rawToPmPos` fails closed outside charMap unit boundaries — correct for
+  // WRITES, but a committed selection anchor still needs a home in the view
+  // after a structure-changing reconcile (the bare-marker family: typing `*`
+  // on a blank line makes an EMPTY bullet item whose pair has no charMap, so
+  // the repair reconcile had no caret target and the caret was thrown into
+  // the trailing placeholder — the next keystroke landed in the WRONG block,
+  // measured 2026-08-21). The weaker, safe question answered here: an EMPTY
+  // textblock has exactly ONE caret position, so when the offset falls inside
+  // such a pair's own byte span (its mdBlock, or the mdItem record a bare
+  // list marker carries), that position is a derivation, not a guess. This
+  // never makes an unmappable offset writable — writers keep using
+  // `rawToPmPos`/`pmPosToRaw`.
+  const rawToPmCaret = (raw) => {
+    const direct = rawToPmPos(raw)
+    if (direct) return direct
+    if (!Number.isFinite(raw)) return null
+    for (const pair of blockPairs) {
+      if (pair.charMap) continue
+      const node = pair.pmNode
+      if (!node?.isTextblock || node.content.size !== 0) continue
+      const span = pair.mdBlock?.position
+        ? { start: pair.mdBlock.position.start?.offset, end: pair.mdBlock.position.end?.offset }
+        : pair.mdItem
+          ? { start: pair.mdItem.start, end: pair.mdItem.contentStart }
+          : null
+      if (!span || !Number.isInteger(span.start) || !Number.isInteger(span.end)) continue
+      if (raw >= span.start && raw <= span.end) return { pos: pair.pmPos + 1, atom: false }
+    }
+    return null
+  }
+
   // Writers (gateway commitPlainText, kernel-mode commitReplace) consult
   // this BEFORE the generic pmPosToRaw path: a virtual pair's raw anchor can
   // be byte-ambiguous with a real block's end (e.g. a doc without a final
@@ -1273,6 +1313,7 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
     pmPosToRawStart,
     pmPosToRawInsert,
     rawToPmPos,
+    rawToPmCaret,
     virtualBlockAt,
     pairAt: pairForContentPos
   }
