@@ -89,6 +89,30 @@
 //     names the workaround, per the standing rule against inventing an
 //     anchor-into-an-unwritten-block proof class.
 //
+// THAT RULE HAS SINCE BEEN PARTLY DISSOLVED, and this note exists so the next
+// reader does not re-derive it (2026-08-21 named-refusal sweep; the `/quote`
+// precedent is what an un-revisited "impossible" costs). The missing proof
+// class arrived with `revertMidDocument`'s CONVERGENCE proof below: type a
+// probe character at the anchor and require a root-level paragraph spanning
+// exactly the probe with everything else unchanged. Measured against it, the
+// refusal above is right for two of the four block kinds its message
+// enumerates and WRONG for the other two:
+//
+//   `---` then a FENCED CODE BLOCK -> converges ('---\nx\n```js…' is
+//       thematicBreak, paragraph(x), code)
+//   `---` then a TABLE             -> converges
+//   `---` then a BULLET LIST       -> does NOT ('x\n- 甲' is ONE paragraph)
+//   `---` then a BLOCKQUOTE        -> does NOT (same)
+//   `![]()` then a bullet list     -> does NOT (the probe joins the image's
+//       own paragraph — an image-block atom has no root-level gap after it)
+//
+// Not fixed here, and the blocker is specific rather than budgetary: the
+// controller's placeholder route verifies a DELETION (`docNode.childCount ===
+// childrenBefore - 1`, editor-kernel-mode.js `runInsertBlockFromQuery`). An
+// insert keeps the child count, so it needs its own post-commit facts before
+// `materializePlaceholder` may be called — a new route, not a widened
+// condition. Recorded in named-refusals-report.md §Item 3.
+//
 // `image` joined the caret-after set the same day. `![]()` is the ONE byte
 // answer every reference agrees on (muya writes the identical literal, and
 // CommonMark has no grammar ambiguity here — unlike the task-item case):

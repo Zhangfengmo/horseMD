@@ -206,9 +206,21 @@ export function inlineMarkAt(index, rawFrom, rawTo) {
   // flank check. `findExactMark` recurses through the ENTIRE block subtree
   // (e.g. a GFM `table` block's rows/cells), so without this gate it would
   // happily return a byte-correct strong/emphasis/delete/inlineCode match
-  // sitting inside a table cell — correct offsets, but table domain is
-  // explicitly deferred (unprobed) per the plan, so it must not be resolved
-  // here at all. Table cells are ALSO opaque to the projection map at a
+  // sitting inside a table cell — correct offsets, but table domain was
+  // explicitly deferred (unprobed) when this was written, so it must not be
+  // resolved here at all.
+  //
+  // STATUS NOTE (2026-08-21 named-refusal sweep): "deferred per the plan" is
+  // no longer the whole truth — table CELL EDITING landed since
+  // (`table-map.js`), so the sentence above describes a world that has moved.
+  // What has NOT been answered is the question this gate actually turns on:
+  // whether a cell's character map can carry a mark RANGE the way a
+  // paragraph's can. That is a real investigation, not a stale sentence, so
+  // the gate stays and the open question is named here instead of being
+  // implied by a plan reference nobody can check. See
+  // named-refusals-report.md §Item 3.
+  //
+  // Table cells are ALSO opaque to the projection map at a
   // higher layer (double protection), but this gate is the structural
   // guarantee that THIS module never answers outside its declared scope,
   // regardless of what any caller layer does or forgets to do.
