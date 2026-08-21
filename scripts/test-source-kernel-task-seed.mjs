@@ -109,6 +109,146 @@ const insertTask = (text, offset) => {
   assert.equal(taskAt(doc.text).item.checked, false)
 }
 
+// ---------------------------------------------------------------------------
+// 1c. THE PREDICTED LIST MERGE (2026-08-21). `/task` in a paragraph next to an
+//     existing list of the SAME marker used to refuse `unsupported-structure`:
+//     a blank line makes a CommonMark list LOOSE, it does not END it, so the
+//     written item is absorbed by the neighbour and the structure-identical
+//     axes could not tell that from bytes meaning something else.
+//     `provePredictedListMerge` (commands/list-merge.js) now predicts the
+//     merge and verifies it item by item.
+//
+//     Every case below asserts the BYTES, then REPARSES them: the merged list
+//     is one list holding the neighbours' items and ours, in order, each
+//     neighbour's label intact and OUR item a real `checked: false` task whose
+//     whole content is the seed — the same standard the standalone insert is
+//     held to, asked of an item that now has company.
+// ---------------------------------------------------------------------------
+{
+  // The caret always sits at the query block's own end — derived from the
+  // fixture rather than restated as a literal, so a fixture edit can never
+  // silently move the caret into a block's interior (where the command
+  // refuses for an unrelated reason and the case would pass vacuously).
+  const queryEnd = (text) => {
+    const at = text.indexOf('/task')
+    assert.ok(at >= 0, 'the fixture must contain the query')
+    return at + '/task'.length
+  }
+  // `labels` are the merged list's items in order; `null` marks OUR item,
+  // which is additionally proven to be a real task holding only the seed.
+  const merge = (label, text, expected, labels) => {
+    const { routed, doc } = insertTask(text, queryEnd(text))
+    assert.equal(doc.text, expected, label)
+    const roots = parseKernelMarkdown(doc.text).children.filter((n) => n.type === 'list')
+    assert.equal(roots.length, 1, `${label}: the neighbours and the new item are ONE list`)
+    const items = roots[0].children
+    assert.equal(items.length, labels.length, `${label}: item count`)
+    const ours = labels.indexOf(null)
+    items.forEach((item, index) => {
+      const decoded = (item.children[0]?.children || []).map((n) => n.value ?? '').join('')
+      if (index === ours) {
+        assert.equal(item.checked, false, `${label}: our item is a REAL task`)
+        assert.equal(decoded, NBSP, `${label}: holding exactly the seed`)
+      } else {
+        assert.equal(decoded, labels[index],
+          `${label}: neighbour item ${index} survives unchanged`)
+      }
+    })
+    // The caret sits after the seed, inside OUR item — derived from the
+    // command, then checked against the reparsed item's own span.
+    const anchor = routed.transaction.selection.anchor
+    assert.ok(anchor > items[ours].position.start.offset &&
+      anchor <= items[ours].position.end.offset, `${label}: the caret lands in our item`)
+    // The ledger vouches for exactly the byte the reparse calls our content.
+    assert.deepEqual(doc.whitespaceMarks,
+      [{ from: anchor - 1, to: anchor, ascii: '' }], `${label}: the seed is ledgered`)
+    assert.equal(doc.text.slice(anchor - 1, anchor), NBSP, `${label}: and that byte IS the seed`)
+    return doc
+  }
+
+  // (a) Merge DOWNWARD: the item is written above an existing list and joins
+  //     it as the first item. Across a blank line (loose) …
+  merge('above a list', '/task\n\n- 乙\n', SEED_BYTES + '\n\n- 乙\n', [null, '乙'])
+  // … and with no blank line at all (the list interrupts the paragraph; the
+  // merged list stays TIGHT, so this shape has no spread flip whatsoever).
+  merge('above a list, no blank line', '/task\n- 乙\n', SEED_BYTES + '\n- 乙\n', [null, '乙'])
+
+  // (b) Merge UPWARD: no root child starts at the insertion offset at all —
+  //     the neighbour list swallowed it — which is why axis (a) alone could
+  //     never accept this. The shape measured in the real app: a second
+  //     `/task` under a fresh task list.
+  merge('below a task list', '- [ ] 甲\n\n/task\n', '- [ ] 甲\n\n' + SEED_BYTES + '\n',
+    ['甲', null])
+  merge('below a bullet list', '- 甲\n\n/task\n', '- 甲\n\n' + SEED_BYTES + '\n',
+    ['甲', null])
+
+  // (c) BOTH neighbours at once — three items, ours in the middle.
+  merge('between two lists', '- 甲\n\n/task\n\n- 乙\n',
+    '- 甲\n\n' + SEED_BYTES + '\n\n- 乙\n', ['甲', null, '乙'])
+
+  // (d) A multi-item neighbour with NESTED content: every item is compared as
+  //     a full subtree, so a nested list that moved or changed depth would
+  //     fail. Here it must survive byte-identically.
+  {
+    const doc = merge('below a list with a nested item', '- 甲\n  - 甲1\n- 乙\n\n/task\n',
+      '- 甲\n  - 甲1\n- 乙\n\n' + SEED_BYTES + '\n', ['甲', '乙', null])
+    const outer = parseKernelMarkdown(doc.text).children[0]
+    const nested = outer.children[0].children[1]
+    assert.equal(nested.type, 'list', 'the nested list is still nested')
+    assert.deepEqual([nested.position.start.offset, nested.position.end.offset], [6, 10],
+      'and it did not move a byte')
+  }
+
+  // (e) The query block is a HEADING sitting next to a list (delta is
+  //     NEGATIVE here — `## /task` is longer than the seed spelling).
+  merge('a heading query above a list', '## /task\n\n- 乙\n', SEED_BYTES + '\n\n- 乙\n',
+    [null, '乙'])
+
+  // (f) CRLF: the seed bytes carry no line ending, so a merged CRLF document
+  //     gains no lone LF.
+  {
+    const doc = merge('below a list, CRLF', '- 甲\r\n\r\n/task\r\n',
+      '- 甲\r\n\r\n' + SEED_BYTES + '\r\n', ['甲', null])
+    assert.equal(/(?<!\r)\n/.test(doc.text), false, 'no lone LF was introduced')
+  }
+
+  // (g) A DIFFERENT marker does not merge in CommonMark at all (probed:
+  //     `- a` beside `* b`, or beside `1. b`, are two lists), so these
+  //     shapes take the structure-identical axes and always have. Asserted
+  //     as a PREMISE of (a)-(f) rather than assumed: it is what makes the
+  //     merge proof necessary only for same-marker neighbours.
+  {
+    const two = (text, expected) => {
+      const { doc } = insertTask(text, queryEnd(text))
+      assert.equal(doc.text, expected)
+      const lists = parseKernelMarkdown(doc.text).children.filter((n) => n.type === 'list')
+      assert.equal(lists.length, 2, 'a different marker keeps them two lists')
+      return doc
+    }
+    two('/task\n\n* 乙\n', SEED_BYTES + '\n\n* 乙\n')
+    two('/task\n\n1. 乙\n', SEED_BYTES + '\n\n1. 乙\n')
+    two('1. 甲\n\n/task\n', '1. 甲\n\n' + SEED_BYTES + '\n')
+  }
+
+  // (h) THE SPREAD FLIP, stated rather than hidden (list-merge.js's one
+  //     accepted difference): two TIGHT lists joined across a blank line
+  //     become one LOOSE list. mdast's items are structurally identical
+  //     either way — which is why the projection map cannot see it and why
+  //     the proof accepts it.
+  {
+    const before = parseKernelMarkdown('- 甲\n- 乙\n').children[0]
+    assert.equal(before.spread, false, 'the premise: the neighbour list is tight')
+    const { doc } = insertTask('- 甲\n- 乙\n\n/task\n', queryEnd('- 甲\n- 乙\n\n/task\n'))
+    const after = parseKernelMarkdown(doc.text).children[0]
+    assert.equal(after.spread, true, 'the merged list is loose — the accepted difference')
+    assert.deepEqual(after.children.map((item) => item.spread), [false, false, false],
+      'every ITEM keeps its own spread; only the list-level flag flipped')
+    assert.deepEqual(
+      after.children.slice(0, 2).map((item) => [item.position.start.offset, item.position.end.offset]),
+      [[0, 3], [4, 7]], 'and no neighbour item moved a byte')
+  }
+}
+
 // REFUSALS specific to the task target.
 {
   const refuse = (label, text, offset, language) => {
@@ -118,18 +258,8 @@ const insertTask = (text, offset) => {
     assert.equal(routed.ok, false, label)
     assert.equal(routed.code, 'unsupported-structure', label)
   }
-  // Directly above an existing list the written item would MERGE into it —
-  // the reparsed list ends past the written bytes (probed: ONE two-item
-  // list), so axis (a) refuses rather than proving a merge it did not write.
-  refuse('directly above an existing list', '/task\n- x\n', 5)
-  // Directly BELOW one merges the same way even across a blank line (a blank
-  // line makes a CommonMark list LOOSE, it does not end it): the reparsed
-  // list then STARTS before the written bytes, so no root child starts at
-  // the insertion offset and axis (a) refuses. Measured first in the real
-  // app: a second `/task` under a fresh task list. The remedy is the one the
-  // toast names — or simply Enter at the first item's end, which continues
-  // the list through the kernel's own split command.
-  refuse('directly below an existing list', '- [ ] 甲\n\n/task\n', 14)
+  // (Adjacent-list positions are NO LONGER refused — see section 1c. What
+  // stays refused is everything that is not a proven merge.)
   // No info string exists for a task item.
   refuse('language on a task', '/task\n', 5, 'js')
   // Non-top-level contexts, like every other target.

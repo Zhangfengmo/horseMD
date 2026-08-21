@@ -121,6 +121,7 @@
 import { parseKernelMarkdown } from '../syntax-index.js'
 import { buildCharacterMap } from '../character-map.js'
 import { NO_BREAK_SPACE } from './trailing-whitespace.js'
+import { outsideSignature, provePredictedListMerge } from './list-merge.js'
 
 // A caret-after insert whose following block cannot host the caret. Its own
 // code (not the generic `unsupported-structure`) because the refusal has a
@@ -155,7 +156,10 @@ export const BLOCK_INSERT_TARGETS = Object.freeze({
   math: Object.freeze({ language: false }),
   // GFM task item (2026-08-20): `- [ ] ` + U+00A0 — the only representable
   // spelling of an "empty" task; see the seed ADR in this file's header.
-  task: Object.freeze({ language: false }),
+  // `merges` (2026-08-21): the ONE target that writes a LIST ITEM, so it is
+  // the one whose neighbours CommonMark may legally absorb it into. See the
+  // predicted-merge branch below and commands/list-merge.js.
+  task: Object.freeze({ language: false, merges: true, ordered: false }),
   // Thematic break (2026-08-20): a caret-AFTER target — the written block has
   // no text position, so the caret lands in the trailing virtual pair (doc
   // end) or the following paragraph/heading's content anchor. See the
@@ -595,55 +599,39 @@ function shapeAgrees(target, node, text, language) {
     // decoded content is the single seed U+00A0 sitting at the marker's end —
     // which is also the byte the caret anchor and the ledger span are derived
     // from, so it is asserted against the candidate bytes directly. A
-    // neighbouring list this insert would MERGE into fails the caller's span
+    // neighbouring list this insert MERGES into fails this reading's span
     // check (the reparsed list ends past the written bytes — probed:
     // '- [ ]  \n- x\n' is ONE two-item list), so `/task` refuses right
-    // above an existing list rather than proving a merge it did not write.
+    // above an existing list), which is exactly the shape the predicted-merge
+    // proof in list-merge.js takes over — that reading calls `taskItemAgrees`
+    // on the merged list's own item instead of on a wrapper that no longer
+    // exists.
     if (node.type !== 'list' || node.ordered) return false
     const items = node.children || []
-    if (items.length !== 1 || items[0]?.type !== 'listItem') return false
-    if (items[0].checked !== false) return false
-    const blocks = items[0].children || []
-    if (blocks.length !== 1 || blocks[0]?.type !== 'paragraph') return false
-    const inline = blocks[0].children || []
-    if (inline.length !== 1 || inline[0]?.type !== 'text') return false
-    if (inline[0].value !== NO_BREAK_SPACE) return false
-    const seedStart = inline[0].position?.start?.offset
-    const seedEnd = inline[0].position?.end?.offset
-    if (!Number.isInteger(seedStart) || seedEnd !== seedStart + 1) return false
-    return text.slice(seedStart, seedEnd) === NO_BREAK_SPACE
+    if (items.length !== 1) return false
+    return taskItemAgrees(items[0], text)
   }
   return false
 }
 
-// Axis (b): the document OUTSIDE the rewritten region, as a pre-order
-// type+span signature with post-region offsets normalized back to baseline
-// coordinates. A node that overlaps the region at all is skipped on both
-// sides — that is the region each side is allowed to differ in — so any
-// absorption across the boundary shows up as a node present on one side and
-// absent (or differently spanned) on the other.
-//
-// Returns null when any node lacks a usable position: an unprovable baseline
-// is refused, never treated as "nothing to compare".
-function outsideSignature(tree, regionStart, regionEnd, delta) {
-  const parts = []
-  let ok = true
-  const walk = (node) => {
-    if (!ok) return
-    const start = node.position?.start?.offset
-    const end = node.position?.end?.offset
-    if (!Number.isInteger(start) || !Number.isInteger(end)) {
-      ok = false
-      return
-    }
-    if (start < regionEnd && end > regionStart) return
-    const from = start <= regionStart ? start : start - delta
-    const to = end <= regionStart ? end : end - delta
-    parts.push(`${node.type}:${from}:${to}`)
-    for (const child of node.children || []) walk(child)
-  }
-  for (const child of tree.children || []) walk(child)
-  return ok ? parts.join('\n') : null
+// The task item's own interior, asked independently of WHICH list holds it.
+// The standalone reading above checks the one-item list wrapper and then
+// this; the predicted-merge reading (see insertBlockFromQuery) has no
+// standalone wrapper to check and asks this of the merged list's own item.
+// Splitting the two is what lets the merge accept a neighbour's items
+// without ever relaxing what "the item I wrote" has to be.
+function taskItemAgrees(item, text) {
+  if (item?.type !== 'listItem') return false
+  if (item.checked !== false) return false
+  const blocks = item.children || []
+  if (blocks.length !== 1 || blocks[0]?.type !== 'paragraph') return false
+  const inline = blocks[0].children || []
+  if (inline.length !== 1 || inline[0]?.type !== 'text') return false
+  if (inline[0].value !== NO_BREAK_SPACE) return false
+  const seedStart = inline[0].position?.start?.offset
+  const seedEnd = inline[0].position?.end?.offset
+  if (!Number.isInteger(seedStart) || seedEnd !== seedStart + 1) return false
+  return text.slice(seedStart, seedEnd) === NO_BREAK_SPACE
 }
 
 // Same exclusive-end + one-step-back recovery idiom as block-type.js's own
@@ -736,20 +724,55 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
       continue
     }
 
+    const delta = bytes.length - (end - start)
+
+    // THE STRUCTURE-IDENTICAL READING.
     // Axis (a): the block at the insertion point is the one we wrote, and it
     // ends exactly where our bytes end (nothing after it was absorbed).
+    // Axis (b): nothing outside the rewritten region changed meaning.
     const inserted = (candidateTree.children || []).find(
       (child) => child.position?.start?.offset === start
     )
-    if (!inserted || inserted.position?.end?.offset !== insertedEnd) continue
-    if (!shapeAgrees(target, inserted, candidate, info)) continue
+    if (inserted && inserted.position?.end?.offset === insertedEnd &&
+        shapeAgrees(target, inserted, candidate, info)) {
+      const after = outsideSignature(candidateTree, start, insertedEnd, delta)
+      if (before !== null && after !== null && before === after) {
+        accepted = { bytes, candidate, candidateTree, inserted }
+        break
+      }
+      continue
+    }
 
-    // Axis (b): nothing outside the rewritten region changed meaning.
-    const delta = bytes.length - (end - start)
-    const after = outsideSignature(candidateTree, start, insertedEnd, delta)
-    if (before === null || after === null || before !== after) continue
-
-    accepted = { bytes, candidate, candidateTree, inserted }
+    // THE PREDICTED-MERGE READING (2026-08-21), for the one target that
+    // writes a list item. A blank line makes a CommonMark list LOOSE, it does
+    // not END it, so an item written next to an existing list of the SAME
+    // marker is absorbed by it — the reading above then finds either a node
+    // running past the written bytes or (merging upward) no root child at the
+    // insertion offset at all, and both axes fail on a document that is
+    // exactly what CommonMark says these bytes mean.
+    //
+    // `provePredictedListMerge` accepts precisely that diff and nothing
+    // wider: the merged list's items must BE the neighbours' items plus ours,
+    // in order, each neighbour item's full subtree signature unchanged modulo
+    // the edit's shift, the merged span exactly the union, and everything
+    // outside the union `outsideSignature`-identical. The item it hands back
+    // still has to pass this command's OWN interior check — the same one the
+    // standalone reading runs — so nothing about "the item I wrote" is
+    // relaxed; only "what may stand around it" is.
+    if (!spec.merges) continue
+    const merge = provePredictedListMerge({
+      baselineText: text,
+      baselineTree,
+      candidateText: candidate,
+      candidateTree,
+      start,
+      end,
+      insertedLength: bytes.length,
+      ordered: spec.ordered
+    })
+    if (!merge) continue
+    if (target !== 'task' || !taskItemAgrees(merge.item, candidate)) continue
+    accepted = { bytes, candidate, candidateTree, inserted: merge.merged }
     break
   }
   if (!accepted) return { ok: false, code: 'unsupported-structure' }

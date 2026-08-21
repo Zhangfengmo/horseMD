@@ -10,6 +10,7 @@ import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/s
 import { insertBlockFromQuery, BLOCK_INSERT_TARGETS } from '../src/renderer/src/lib/source-kernel/commands/block-insert.js'
 import { buildCodeMap } from '../src/renderer/src/lib/source-kernel/code-map.js'
 import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/character-map.js'
+import { provePredictedListMerge } from '../src/renderer/src/lib/source-kernel/commands/list-merge.js'
 
 console.log('--- source kernel block-insert ---')
 
@@ -732,6 +733,39 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     assert.equal(r.ok, false, 'ordered lists merge the same way')
     assert.equal(r.code, 'text-neighbors-would-merge')
   }
+  // (k2) …but ONLY the same marker merges (probed 2026-08-21, and the reason
+  // the refusal must not be stated as "between two lists"). CommonMark starts
+  // a NEW list when the marker character changes, so `-` beside `*`, `-`
+  // beside `1.` and `1.` beside `1)` leave two lists standing — the deletion
+  // is structure-identical and `/text` has always LANDED there. Pinned so a
+  // future widening of the refusal cannot quietly swallow these.
+  {
+    const twoLists = (text, offset, expected, label) => {
+      const shape = parseKernelMarkdown(expected).children.map((node) => node.type)
+      assert.deepEqual(shape, ['list', 'list'],
+        `${label}: the premise — different markers do NOT merge`)
+      revertMid(text, offset, expected, label)
+    }
+    twoLists('- a\n\n/text\n\n* b\n', 10, '- a\n\n\n\n* b\n', 'bullet then a different bullet')
+    twoLists('- a\n\n/text\n\n1. b\n', 10, '- a\n\n\n\n1. b\n', 'bullet then ordered')
+    twoLists('1. a\n\n/text\n\n1) b\n', 11, '1. a\n\n\n\n1) b\n', 'two ordered delimiters')
+  }
+  // (k3) And the merge cases refuse for a reason that is NOT "the bytes are
+  // unprovable" — the deletion is perfectly predictable (commands/list-merge.js
+  // proves exactly this shape for `/task`). What `/text` lacks is a caret
+  // HOME: the gap it would leave sits between two items of ONE list, which is
+  // not a root-level position and cannot hold a paragraph in ProseMirror's
+  // list schema, so the placeholder session has nowhere to put the empty
+  // paragraph the user asked for. Stated as an assertion so the reason is
+  // pinned, not just written in a comment.
+  {
+    const merged = parseKernelMarkdown('- a\n\n\n\n- b\n')
+    assert.deepEqual(merged.children.map((node) => node.type), ['list'])
+    const items = merged.children[0].children
+    assert.equal(items.length, 2, 'the gap is INSIDE one list, between its two items')
+    assert.ok(items[0].position.end.offset < 5 && items[1].position.start.offset > 5,
+      'and the anchor offset falls strictly between them — no block owns it')
+  }
 
   // (l) THE CONVERGENCE PROOF IS LOAD-BEARING: an ATX heading may interrupt a
   // paragraph, so `甲\n# /text` deletes cleanly (the deletion proof passes —
@@ -758,6 +792,123 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   // takes (`unsupported-structure`).
   refuses('text mid-document inside a blockquote', '甲\n\n> /text\n\n乙\n', 10, 'text')
   refuses('text mid-document inside a list item', '甲\n\n- /text\n\n乙\n', 10, 'text')
+}
+
+// ---------------------------------------------------------------------------
+// 13. `provePredictedListMerge` (commands/list-merge.js) — the proof itself,
+//     asked directly. The `/task` command can only ever hand it HONEST
+//     candidates (it builds them by splicing its own bytes), so the guards
+//     that catch a DISHONEST one are unreachable through the command and
+//     would rot into comments if they were only exercised end to end. Here
+//     the candidate is supplied independently of the baseline, which is what
+//     makes each guard assertable.
+// ---------------------------------------------------------------------------
+{
+  const SEED = '- [ ] ' + ' '
+  // baseline / candidate are parsed from the strings given; `start`/`end` are
+  // the region the caller CLAIMS to have replaced with `insertedLength` bytes.
+  const prove = (baseline, candidate, start, end, insertedLength, ordered = false) =>
+    provePredictedListMerge({
+      baselineText: baseline,
+      baselineTree: parseKernelMarkdown(baseline),
+      candidateText: candidate,
+      candidateTree: parseKernelMarkdown(candidate),
+      start,
+      end,
+      insertedLength,
+      ordered
+    })
+  // The HONEST candidate for a claimed edit — used wherever a case is about
+  // what the PARSER does rather than about a caller telling the truth.
+  const splice = (baseline, start, end, bytes) =>
+    baseline.slice(0, start) + bytes + baseline.slice(end)
+
+  // The honest shape it exists for, as a control: without this passing, every
+  // negative below would be vacuous.
+  {
+    const proven = prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n', 5, 10, SEED.length)
+    assert.ok(proven, 'the control: a real upward merge is proven')
+    assert.equal(proven.mergedUp, true)
+    assert.equal(proven.mergedDown, false)
+    assert.equal(proven.item.checked, false, 'and it hands back OUR item')
+    assert.deepEqual(
+      [proven.item.position.start.offset, proven.item.position.end.offset],
+      [5, 5 + SEED.length], 'spanning exactly the written bytes')
+  }
+
+  // NOT A MERGE AT ALL. A candidate whose written block stands alone must
+  // answer null even though it is perfectly valid — accepting it here would
+  // make this proof a second, weaker path to the structure-identical case.
+  assert.equal(prove('甲\n\n/task\n', '甲\n\n' + SEED + '\n', 3, 8, SEED.length), null,
+    'a standalone insert is not this proof’s business')
+
+  // ORDEREDNESS MISMATCH: the caller claims to have written an item of an
+  // ORDERED list, but the merged list is a bullet list.
+  assert.equal(prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n', 5, 10, SEED.length, true), null,
+    'a bullet merge cannot answer an ordered claim')
+
+  // THE BYTE RELATION. A candidate that is NOT the baseline with the claimed
+  // region replaced is refused before any structural question is asked —
+  // these three all have the right item count, the right merged span and
+  // structurally indistinguishable neighbours, and differ only in bytes the
+  // caller had no business changing.
+  assert.equal(prove('- a\n\n/task\n', '- A\n\n' + SEED + '\n', 5, 10, SEED.length), null,
+    'a neighbour whose TEXT changed without moving is not a merge')
+  assert.equal(prove('- a\n\n/task\n甲\n', '- a\n\n' + SEED + '\n乙\n', 5, 10, SEED.length), null,
+    'a byte changed AFTER the region is not a merge')
+  assert.equal(prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n\n', 5, 10, SEED.length), null,
+    'a candidate of the wrong LENGTH is not a merge')
+
+  // THE ITEM ACCOUNT, on shapes the parser really produces (found by sweeping
+  // neighbour shapes, not invented): an INDENTED list below the query becomes
+  // a NESTED list inside the item we just wrote instead of a sibling of it.
+  // The bytes are an honest splice and the merged list's span is exactly the
+  // union — only the item COUNT betrays that the document was restructured,
+  // which is precisely what this half of the proof is for.
+  {
+    const baseline = '- a\n\n/task\n\n  - b\n'
+    const start = baseline.indexOf('/task')
+    const candidate = splice(baseline, start, start + 5, SEED)
+    const nested = parseKernelMarkdown(candidate).children[0]
+    assert.equal(nested.children.length, 2,
+      'the premise: the indented list nested itself into our item, so there are TWO items, not three')
+    assert.equal(nested.children[1].children.length, 2,
+      'and our item grew a child list it never asked for')
+    assert.equal(prove(baseline, candidate, start, start + 5, SEED.length), null,
+      'a merge that nests the neighbour is not the predicted merge')
+    // …and end to end, the command refuses it rather than writing the bytes.
+    refuses('task above an INDENTED list', baseline, start + 5, 'task')
+  }
+  // The same shape with a multi-item up-neighbour: the count is off by one in
+  // a document where a naive "did anything merge?" test would say yes.
+  {
+    const baseline = '- a\n- b\n\n/task\n\n  - c\n'
+    const start = baseline.indexOf('/task')
+    assert.equal(prove(baseline, splice(baseline, start, start + 5, SEED),
+      start, start + 5, SEED.length), null, 'and with two items above')
+    refuses('task between a list and an indented list', baseline, start + 5, 'task')
+  }
+
+  // A CLAIMED REGION THAT IS NOT A ROOT CHILD's span: the query block the
+  // caller names does not exist in the baseline at those offsets.
+  assert.equal(prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n', 6, 10, SEED.length), null,
+    'the claimed region must BE a root child')
+  assert.equal(prove('- a\n\n/task\n', '- a\n\n' + SEED + '\n', 5, 9, SEED.length), null,
+    'including its end')
+
+  // BOTH neighbours, proven, with the item in the middle — the three-way
+  // shape, and the one where a mis-indexed item comparison would still find
+  // the right COUNT.
+  {
+    const proven = prove('- a\n\n/task\n\n- b\n', '- a\n\n' + SEED + '\n\n- b\n',
+      5, 10, SEED.length)
+    assert.ok(proven, 'a two-sided merge is proven')
+    assert.equal(proven.mergedUp, true)
+    assert.equal(proven.mergedDown, true)
+    assert.equal(proven.merged.children.length, 3)
+    assert.equal(proven.merged.children.indexOf(proven.item), 1,
+      'our item is the MIDDLE one — the neighbours kept their order')
+  }
 }
 
 console.log('ok - source kernel block-insert')

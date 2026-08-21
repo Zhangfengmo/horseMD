@@ -33,12 +33,12 @@ const file = join(root, 'task-item.md')
 const port = Number(process.env.CDP_PORT || 10082)
 const delay = Number(process.env.KERNEL_KEY_DELAY || 60)
 
-// `中间说明段。` is LOAD-BEARING: a `/task` in a paragraph directly ABOVE or
-// BELOW an existing list would MERGE into it (a blank line makes a CommonMark
-// list loose, it does not end it), which the insert command's two-axis proof
-// correctly REFUSES (pinned in scripts/test-source-kernel-task-seed.mjs). The
-// spacer keeps the two task paragraphs non-adjacent so both inserts are the
-// provable shape.
+// `中间说明段。` keeps the two task paragraphs non-adjacent, so each insert
+// below is the STANDALONE shape (its own one-item list) rather than a merge
+// into the one above. The adjacent-list positions are no longer refused —
+// `provePredictedListMerge` owns them since 2026-08-21 — and step 5 exercises
+// exactly that, deliberately AFTER the standalone cases so the two readings
+// are covered separately rather than one hiding behind the other.
 const LINES = ['# 标题', '', '甲乙丙丁', '', '中间说明段。', '', '戊己庚辛', '', '尾段落。', '']
 const FIXTURE = LINES.join('\n')
 
