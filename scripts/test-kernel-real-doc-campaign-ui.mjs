@@ -524,9 +524,15 @@ async function campaign(document, port) {
     // ---- 3) `/text` MID-DOCUMENT, then type in the placeholder -----------
     {
       const target = pickTarget(expected, used, 'text', 'text')
-      if (target.skipped) {
-        state.skipped.push(`/text mid-document — ${target.skipped}`)
-      } else {
+      // The ONE step that may not skip. Every mature document has a paragraph
+      // between two blocks that do not merge, so a skip here does not mean
+      // "this document cannot host it" — it means mid-document `/text` refuses
+      // again, which is exactly the regression this campaign must be RED for
+      // (at 1db62b2 the command refuses every mid-document position, and an
+      // adaptive skip would have let the whole campaign pass anyway).
+      assert.ok(!target.skipped,
+        `mid-document /text found no target in a real document: ${target.skipped}`)
+      {
         used.add(target.value)
         await selectBlock(evaluate, send, target.value)
         await runSlashItem(evaluate, send, 'text', 'text')
