@@ -1156,7 +1156,11 @@ export function createKernelMode({
         //     debouncing would leave it refusing keystrokes for the whole
         //     interval (Case I5's dissolve pin).
         const hadPlaceholders = splitPlaceholders.length > 0
-        bindMap(newState?.doc || null)
+        // An emptying delete on a root/quote paragraph opens a placeholder
+        // session for the surviving empty PM paragraph (the gateway's
+        // `emptiedBlock` voucher) — the same session Enter opens, so typing
+        // fills it, Enter extends it, and any other commit retires it.
+        bindMap(newState?.doc || null, committed.emptiedBlock || null)
         verifyEditObservable(committed.observability)
         // The committed selection anchor rides along so a structure-changing
         // repair reconcile can restore the caret to the byte it belongs to

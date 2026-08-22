@@ -178,14 +178,31 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
   const c = ctx(src)
   assert.equal(apply(c.doc, splitTextBlock({ ...c, offset: 3 })), '# 头\n\n\n')
 }
-// A blank-line GAP between two paragraphs must stay rejected: it is not any
-// block's end (block1 '甲乙' ends at 2, block2 '丙' starts at 4), so the
-// end-boundary recovery must not let it fall through to block1.
+// A blank-line GAP between two paragraphs: Enter EXTENDS the gap by one
+// ending (2026-08-23 user report — the second Enter on a fresh mid-document
+// placeholder paragraph was refused; the mid-document split-placeholder
+// session has served /text since 2026-08-21, so the caret has a home). The
+// insert is reparse-PROVEN structure-neutral: every block keeps its type,
+// shifted span and leaf values.
 {
   const src = '甲乙\n\n丙\n'
   const c = ctx(src)
-  assert.deepEqual(splitTextBlock({ ...c, offset: 3 }),
-    { ok: false, code: 'unsupported-structure' })
+  const r = splitTextBlock({ ...c, offset: 3 })
+  assert.equal(r.ok, true, 'mid-document gap Enter must extend the gap: ' + (r.code || ''))
+  assert.equal(r.transaction.intent, 'split-block')
+  assert.equal(apply(c.doc, r), '甲乙\n\n\n丙\n')
+  assert.equal(r.transaction.selection.anchor, 4)
+}
+// The QUOTED blank line: a bare ending would split the blockquote in two —
+// the proof rejects it and the quote-prefixed spelling commits instead.
+{
+  const src = '> 甲\n>\n> 乙\n'
+  const c = ctx(src)
+  const offset = src.indexOf('>\n') + 1   // caret on the blank quote line, after its prefix
+  const r = splitTextBlock({ ...c, offset })
+  assert.equal(r.ok, true, 'quoted blank-line Enter must extend with the prefix: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '> 甲\n>\n>\n> 乙\n',
+    'the inserted line carries the quote prefix so the blockquote stays ONE block')
 }
 
 // splitTextBlock must fail-closed inside a heading's `#{n} ` marker/spacing
@@ -316,16 +333,16 @@ console.log('PASS source-kernel commands (enter)')
   }
 }
 
-// 块尾连续 Enter must NOT swallow a genuine mid-document blank-line GAP
-// between two real blocks — the existing regression this file already locks
-// (line ~176 above) stays true with the new fallback branch in place: a gap
-// offset that has a REAL block starting somewhere after it is never treated
-// as a "trailing" run.
+// 块尾连续 Enter and the mid-document gap now share the same outcome family
+// (one more ending, proven structure-neutral) — but the TRAILING branch keeps
+// its own byte-minimal path, and the mid-document branch is proof-gated. The
+// pin here used to assert the mid-gap REFUSAL; flipped 2026-08-23 with the
+// mid-document placeholder in place (see the widened pin above ~line 181).
 {
   const src = '甲乙\n\n丙\n'
   const c = ctx(src)
-  assert.deepEqual(splitTextBlock({ ...c, offset: 3 }),
-    { ok: false, code: 'unsupported-structure' })
+  const r = splitTextBlock({ ...c, offset: 3 })
+  assert.equal(r.ok && r.transaction.intent, 'split-block')
 }
 
 console.log('PASS source-kernel commands (splitTextBlock polish: paragraph-start + repeated-enter)')

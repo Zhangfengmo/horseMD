@@ -399,6 +399,44 @@ const structure = (md) => {
       { ok: false, code: 'not-structural' })
   }
 
+  // (h) EMPTYING A ROOT/QUOTE PARAGRAPH (2026-08-23 family sweep, reproduced
+  // live: deleting a mid-document paragraph's last character left an
+  // unvouched empty PM paragraph over a blank byte line — map-refresh-failed,
+  // and the NEXT keystroke was swallowed). A paragraph has no marker and no
+  // representable empty spelling; the honest home for the surviving empty PM
+  // paragraph is a VOUCHED PLACEHOLDER at the deletion offset (the same
+  // split-placeholder session Enter opens). The command claims the shape and
+  // answers ok with the LITERAL edit plus `placeholder: true` so the gateway
+  // can vouch the pair.
+  {
+    const md = '哈哈\n\n丁一\n\n后文\n'
+    const { doc, block, charMap } = targetPara(md, '丁一')
+    const from = block.position.start.offset
+    const to = block.position.end.offset
+    const r = spellEmptyListItemDelete({ doc, block, charMap, from, to, insert: '' })
+    assert.equal(r.ok, true, 'emptying a root paragraph must be claimed: ' + (r.code || ''))
+    assert.deepEqual(r.edit, { from, to, insert: '' }, 'the literal delete commits')
+    assert.equal(r.placeholder, true, 'and the gateway is told to vouch the empty paragraph')
+  }
+  {
+    const md = '> 甲\n>\n> 乙丙\n'
+    const { doc, block, charMap } = targetPara(md, '乙丙')
+    const from = block.position.start.offset
+    const to = block.position.end.offset
+    const r = spellEmptyListItemDelete({ doc, block, charMap, from, to, insert: '' })
+    assert.equal(r.ok, true, 'emptying a QUOTED paragraph must be claimed too: ' + (r.code || ''))
+    assert.equal(r.placeholder, true)
+  }
+  // Control: a partial delete that leaves content is untouched.
+  {
+    const md = '哈哈\n\n丁一\n'
+    const { doc, block, charMap } = targetPara(md, '丁一')
+    const from = block.position.start.offset
+    assert.deepEqual(
+      spellEmptyListItemDelete({ doc, block, charMap, from, to: from + 1, insert: '' }),
+      { ok: false, code: 'not-structural' })
+  }
+
   // (g) THE BATCH GATE: a multi-edit batch that empties the same trapped
   // single-line item must REFUSE (it has no edit-rewriting channel to seed
   // through), never commit the restructuring bytes.

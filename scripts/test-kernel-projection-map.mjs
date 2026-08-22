@@ -733,28 +733,32 @@ console.log('--- kernel projection map ---')
   )
 }
 
-// Case 15b (review fix): the `pendingPlaceholders` CHAIN form must reject a
-// voucher positioned BEFORE real trailing content, even though every
-// per-item check (empty paragraph, all entries matched) would otherwise
-// pass. Reuses Case 13's exact fixture and numbers ('P1\n\n\n\nP2\n', voucher
-// at pmPos 4 / rawOffset 4 — a blank-line gap that sits BETWEEN P1 and P2,
-// not after all real content) to prove the distinction is deliberate: the
-// SAME shape is accepted via the single-object `pendingPlaceholder` (Case
-// 13, `ensureSplitPlaceholder`'s own legitimate mid-document case) but
-// rejected via the plural `pendingPlaceholders` chain (only ever meant for
-// `extendTrailingPlaceholder`'s trailing-blank chain, which must never
-// vouch anything before the document's real content actually ends).
+// Case 15b (review fix; WIDENED 2026-08-23): the chain form used to reject
+// any voucher before the last top-level block's end — the chain was
+// trailing-only. Since Enter extends MID-document blank runs too
+// (splitTextBlock's proof-gated gap branch — the user-reported "Enter
+// refused on an empty placeholder paragraph"), the floor is restated as
+// what it actually protected: no voucher may sit INSIDE a LEAF block's raw
+// span. The mid-document gap chain now MAPS (both forms agree on Case 13's
+// fixture), and the restated floor keeps rejecting a voucher whose raw
+// offset lies inside real content.
 {
   const md = 'P1\n\n\n\nP2\n'
   const d = doc(p(text('P1')), p(), p(text('P2')))
   assert.ok(
     buildProjectionMap(md, d, { pendingPlaceholder: { pmPos: 4, rawOffset: 4 } }),
-    'sanity: the singular form still accepts this exact mid-document shape (Case 13)'
+    'sanity: the singular form accepts this exact mid-document shape (Case 13)'
   )
+  const chainMap = buildProjectionMap(md, d, { pendingPlaceholders: [{ pmPos: 4, rawOffset: 4 }] })
+  assert.ok(chainMap, 'the chain form now accepts the mid-document gap voucher')
+  assert.equal(chainMap.blockPairs[1].virtual, true)
+  assert.equal(chainMap.blockPairs[1].charMap.visibleToRaw(0), 4)
+  // The restated floor: a voucher whose rawOffset sits INSIDE a leaf block
+  // (offset 1 is inside P1's paragraph span) still rejects the whole map.
   assert.equal(
-    buildProjectionMap(md, d, { pendingPlaceholders: [{ pmPos: 4, rawOffset: 4 }] }),
+    buildProjectionMap(md, d, { pendingPlaceholders: [{ pmPos: 4, rawOffset: 1 }] }),
     null,
-    'the chain form must reject a voucher positioned before real trailing content (P2)'
+    'a chain voucher inside a LEAF block span must still reject'
   )
 }
 

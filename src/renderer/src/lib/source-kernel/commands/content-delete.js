@@ -425,6 +425,39 @@ const provenEmptyItemResult = (baselineTree, baselineItemStart, baselineChecked,
   return JSON.stringify(leafValues(after)) === JSON.stringify(expectedLeaves)
 }
 
+// The vanish proof for the paragraph clause: parse the candidate and require
+// every node EXCEPT the emptied paragraph to survive byte-identically modulo
+// the offset shift — type, span (positions past the deletion shifted back by
+// `delta`), value, and list facts all equal, and the paragraph itself gone.
+// Containers spanning the deletion (the enclosing blockquote) keep their
+// node with a shifted end, which the normalization covers.
+const provenParagraphVanishes = (baselineTree, blockStart, blockEnd, candidate, delta) => {
+  let after
+  try {
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  const signature = (tree, excludeStart, excludeEnd, shift) => {
+    const rows = []
+    const walk = (node) => {
+      const start = node.position?.start?.offset
+      const end = node.position?.end?.offset
+      if (Number.isInteger(start) && Number.isInteger(end)) {
+        if (excludeStart !== null && start >= excludeStart && end <= excludeEnd) return
+        const s = shift && start > excludeStart ? start - delta : start
+        const e = shift && end > excludeStart ? end - delta : end
+        rows.push(`${node.type}:${s}:${e}:${typeof node.value === 'string' ? node.value : ''}:${node.checked ?? ''}:${node.ordered ?? ''}`)
+      }
+      for (const child of node.children || []) walk(child)
+    }
+    walk(tree)
+    return rows.join('')
+  }
+  return signature(baselineTree, blockStart, blockEnd, true) ===
+    signature(after, blockStart, blockStart, false)
+}
+
 export function spellEmptyListItemDelete({ doc, block, charMap, from, to, insert = '' }) {
   const text = doc?.text
   if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
@@ -455,13 +488,54 @@ export function spellEmptyListItemDelete({ doc, block, charMap, from, to, insert
     }
   }
   const item = emptiedItemAt(text, blockStart, blockEnd)
-  if (!item) return NOT_STRUCTURAL
 
   let baselineTree
   try {
     baselineTree = parseKernelMarkdown(text)
   } catch {
     return NOT_STRUCTURAL
+  }
+
+  // EMPTYING A ROOT/QUOTE PARAGRAPH (2026-08-23 family sweep). A paragraph
+  // outside any list item has no marker and no representable empty spelling —
+  // the blank line it leaves behind IS "no block" to CommonMark, and the
+  // surviving empty PM paragraph's honest home is a VOUCHED PLACEHOLDER at
+  // the deletion offset (the split-placeholder session Enter already opens;
+  // typing fills it, another Enter extends it, any other commit's reconcile
+  // retires it). Unclaimed, the delete used to leave the pair unvouched:
+  // map-refresh-failed, the repair deleted the paragraph under the caret,
+  // and the next keystroke was swallowed — measured live. The proof is the
+  // same vanish-signature the item clause uses: this paragraph's leaf gone,
+  // every other node byte-identical modulo the offset shift.
+  if (!item) {
+    let paragraphOnly = null
+    const findBaseline = (node) => {
+      if (paragraphOnly) return
+      if (node?.type === 'paragraph' && node.position?.start?.offset === blockStart &&
+          node.position?.end?.offset === blockEnd) {
+        paragraphOnly = node
+        return
+      }
+      for (const child of node?.children || []) findBaseline(child)
+    }
+    findBaseline(baselineTree)
+    if (!paragraphOnly) return NOT_STRUCTURAL
+    const removed = []
+    const collectValues = (node) => {
+      if (typeof node?.value === 'string') removed.push(node.value)
+      for (const child of node?.children || []) collectValues(child)
+    }
+    collectValues(paragraphOnly)
+    const bare = text.slice(0, from) + text.slice(to)
+    if (!provenParagraphVanishes(baselineTree, blockStart, blockEnd, bare, to - from)) {
+      return NOT_STRUCTURAL
+    }
+    return {
+      ok: true,
+      edit: { from, to, insert: '' },
+      whitespaceMarks: [],
+      placeholder: true
+    }
   }
   // The emptied paragraph's own leaf values, read from THIS parse (the
   // caller's block may carry injectHighlightNodes' split text nodes).

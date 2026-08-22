@@ -655,26 +655,43 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         Number.isFinite(options.pendingPlaceholder.rawOffset)
       ? [options.pendingPlaceholder]
       : []
-  // Chain-only self-check (review finding, Task 2 plan 3): the `pendingPlaceholders`
-  // LIST form exists for exactly one caller shape — extendTrailingPlaceholder's
-  // trailing-blank chain, where every entry's rawOffset must sit at/after the
-  // TRUE end of the document's real content (enter.js's own `isTrailingGap`
-  // floor). Without this, a voucher could sit BEFORE real trailing content
-  // that keeps flowing normally elsewhere in the pm/md sequences — the per-item
-  // "empty paragraph" check alone can't catch that, because an empty PM node
-  // with no mdast counterpart looks identical whether it is genuinely trailing
-  // or a mid-document placeholder. The single-object `pendingPlaceholder` form
-  // is NOT covered by this floor: that shape is `ensureSplitPlaceholder`'s own,
-  // long-standing "Enter at the end of a paragraph that still has more content
-  // AFTER it elsewhere in the document" case (see Case 13 in
-  // scripts/test-kernel-projection-map.mjs) — a legitimately mid-document
-  // placeholder, not a trailing one, and must keep working unchanged.
+  // Chain-only self-check (review finding, Task 2 plan 3; widened
+  // 2026-08-23): the `pendingPlaceholders` LIST form is
+  // extendTrailingPlaceholder's chain. The original check required every
+  // entry at/after the last top-level block's end — the chain was
+  // trailing-only, and a voucher sitting inside real content would commit
+  // later keystrokes at a wrong offset (the per-item "empty paragraph" check
+  // alone can't catch that: an empty PM node with no mdast counterpart looks
+  // identical wherever it is). Since Enter now extends MID-document blank
+  // runs too (splitTextBlock's proof-gated gap branch, 2026-08-23 — the
+  // user-reported "Enter refused on an empty placeholder paragraph"), the
+  // floor is restated as what it actually protected: no voucher may sit
+  // INSIDE any LEAF block's raw span. Blank-run offsets — trailing OR
+  // mid-document, root or inside a blockquote (a `>` blank line is inside
+  // the quote CONTAINER's span but no leaf's) — all pass; an offset inside
+  // a paragraph/heading/code/table still rejects the map. The single-object
+  // `pendingPlaceholder` form keeps its long-standing uncovered shape
+  // (ensureSplitPlaceholder's Case 13) unchanged.
   if (pendingIsChain && pendingList.length) {
-    const topLevel = index.tree.children || []
-    const trailingFloor = topLevel.length
-      ? topLevel[topLevel.length - 1].position?.end?.offset
-      : 0
-    if (!Number.isFinite(trailingFloor) || pendingList.some((p) => p.rawOffset < trailingFloor)) {
+    const LEAF_SPAN_TYPES = new Set(['paragraph', 'heading', 'code', 'math', 'html', 'thematicBreak', 'table'])
+    const insideLeaf = (raw) => {
+      let hit = false
+      const walk = (node) => {
+        if (hit) return
+        const start = node.position?.start?.offset
+        const end = node.position?.end?.offset
+        if (LEAF_SPAN_TYPES.has(node.type) &&
+            Number.isInteger(start) && Number.isInteger(end) &&
+            raw >= start && raw < end) {
+          hit = true
+          return
+        }
+        for (const child of node.children || []) walk(child)
+      }
+      walk(index.tree)
+      return hit
+    }
+    if (pendingList.some((p) => !Number.isFinite(p.rawOffset) || insideLeaf(p.rawOffset))) {
       return null
     }
   }

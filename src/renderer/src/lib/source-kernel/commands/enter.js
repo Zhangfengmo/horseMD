@@ -76,6 +76,39 @@ const isTrailingGap = (index, offset) => {
   return offset >= lastEnd && offset <= index.text.length
 }
 
+// 中段空白游程 Enter 的证明：在 `at` 处插入 `insert`（一个行终止符，或行终止
+// 符+引用前缀）后，除「插入点之后的偏移整体平移 insert.length」外，文档全树
+// 必须逐节点等价——type、span、叶值全同。跨越插入点的容器（包着这条空行的
+// blockquote/list）允许 end 平移；任何块的出现/消失/换型（裸 ending 把引用劈
+// 成两半、把松紧列表改判）都会让签名失配而拒绝。解析器裁决，不靠上面的散文。
+const gapInsertPreservesStructure = (text, at, insert) => {
+  let before
+  let after
+  try {
+    before = parseKernelMarkdown(text)
+    after = parseKernelMarkdown(text.slice(0, at) + insert + text.slice(at))
+  } catch {
+    return false
+  }
+  const delta = insert.length
+  const signature = (tree, shiftFrom) => {
+    const rows = []
+    const walk = (node) => {
+      const start = node.position?.start?.offset
+      const end = node.position?.end?.offset
+      if (Number.isInteger(start) && Number.isInteger(end)) {
+        const s = shiftFrom !== null && start > shiftFrom ? start - delta : start
+        const e = shiftFrom !== null && end > shiftFrom ? end - delta : end
+        rows.push(`${node.type}:${s}:${e}:${typeof node.value === 'string' ? node.value : ''}:${node.checked ?? ''}:${node.ordered ?? ''}:${node.spread ?? ''}`)
+      }
+      for (const child of node.children || []) walk(child)
+    }
+    walk(tree)
+    return rows.join('')
+  }
+  return signature(before, null) === signature(after, at)
+}
+
 // 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
 // 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
 export function splitTextBlock({ doc, index, offset }) {
@@ -84,9 +117,31 @@ export function splitTextBlock({ doc, index, offset }) {
     // 块尾连续 Enter：见 isTrailingGap 注释。这里没有「块」可分，只有空白
     // 游程可延——复用该行本就有的行终止符（同分裂惯例：新块尾复用原终止
     // 符），caret 紧邻它，为下一次 Enter/输入留出同样的锚点。
-    if (!isTrailingGap(index, offset)) return { ok: false, code: 'unsupported-structure' }
     const ending = endingAt(index, offset)
-    return txn(doc, offset, offset, ending, 'split-block', offset + ending.length)
+    if (isTrailingGap(index, offset)) {
+      return txn(doc, offset, offset, ending, 'split-block', offset + ending.length)
+    }
+    // 文档中段的空白行（2026-08-23 用户报告：占位符段落上再按一次 Enter 被
+    // 拒）。历史上这里必须 fail-closed，因为 split-placeholder 只会在文档末
+    // 尾物化；/text 中段化（2026-08-21）之后同一会话已服务任意中段空行，所
+    // 以 Enter 在这里的含义与块尾一致——把空白游程再延一行，caret 骑到新行
+    // 上。每个拼写都要过重解析证明（gapInsertPreservesStructure：除插入点之
+    // 后的偏移平移外，全树 type/span/叶值逐一不变）：裸 ending 在引用内会把
+    // blockquote 劈成两半，由证明当场拒绝，改试 ending + 该行自己的引用前
+    // 缀；两个拼写都证不出才维持具名拒绝。
+    const line = index.lines[index.lineIndexAt(offset)]
+    const prefix = (line.text.match(/^[>\t ]*/) || [''])[0]
+    if (line.text.slice(prefix.length).trim() !== '' || offset < line.start + prefix.length) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+    const attempts = [ending]
+    if (prefix.includes('>')) attempts.push(ending + prefix)
+    for (const insert of attempts) {
+      if (gapInsertPreservesStructure(index.text, offset, insert)) {
+        return txn(doc, offset, offset, insert, 'split-block', offset + insert.length)
+      }
+    }
+    return { ok: false, code: 'unsupported-structure' }
   }
   if (block.type !== 'paragraph' && block.type !== 'heading') {
     return { ok: false, code: 'unsupported-structure' }

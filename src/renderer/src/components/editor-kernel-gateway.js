@@ -1567,6 +1567,11 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   // `THE OBSERVABILITY EXPECTATION` directly above this function for what this
   // is and what it deliberately is not.
   let observability = null
+  // An emptying delete on a root/quote paragraph keeps the empty PM paragraph
+  // as a VOUCHED placeholder (spellEmptyListItemDelete's `placeholder`
+  // clause) — the controller passes this to bindMap so the pair is proven
+  // instead of orphaned (2026-08-23 family sweep).
+  let emptiedBlock = null
   // Did ANY step's committed bytes differ from what ProseMirror itself
   // inserted (a heal re-spelling whitespace, the task-seed dissolve, a
   // virtual-block separator prefix, the code-fence newline expansion)? The
@@ -2149,11 +2154,19 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
         editTo = emptiedItem.edit.to
         insertText = emptiedItem.edit.insert
         pendingMarks = emptiedItem.whitespaceMarks
-        // The block's visible content after this commit is exactly the one
-        // seed character — PM's own step left the paragraph empty, and the
-        // `rewrote` verify repairs the view to show the seed, same as the
-        // whitespace heals.
-        respelledVisibleDelta = 1 - stepPair.charMap.visibleLength
+        if (emptiedItem.placeholder) {
+          // Root/quote paragraph clause: the LITERAL delete commits and the
+          // surviving empty PM paragraph rides a placeholder voucher at the
+          // deletion offset (single-step batch: the paragraph's own pmPos is
+          // unmoved by a delete inside it, and the offset needs no rebase).
+          emptiedBlock = { pmPos: stepPair.pmPos, rawOffset: editFrom }
+        } else {
+          // List-item clause: the block's visible content after this commit
+          // is exactly the one seed character — PM's own step left the
+          // paragraph empty, and the `rewrote` verify repairs the view to
+          // show the seed, same as the whitespace heals.
+          respelledVisibleDelta = 1 - stepPair.charMap.visibleLength
+        }
       } else if (emptiedItem.code !== KERNEL_CODES.NOT_STRUCTURAL) {
         return { ok: false, code: emptiedItem.code }
       }
@@ -2336,7 +2349,7 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   if (touchedTableCell && !tableStructurePreserved(kernel, kernel.doc.text, result.doc.text)) {
     return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
   }
-  return { ok: true, applied: result, transaction, observability, rewrote }
+  return { ok: true, applied: result, transaction, observability, rewrote, emptiedBlock }
 }
 
 // commitTaskToggle: turns a `task-toggle`-classified batch (see
