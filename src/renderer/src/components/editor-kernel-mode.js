@@ -1280,10 +1280,19 @@ export function createKernelMode({
         // block, so every raw offset the map serves past this image is stale
         // until it is rebuilt.
         //
-        // Refusal is loud and total: `caption`/`ratio` never reach here
-        // (the gateway does not classify them), and anything `setImageAttrs`
-        // cannot prove byte-for-byte vetoes the PM transaction too, so the
-        // view never shows an attribute the source does not carry.
+        // Refusal is loud and total: `ratio` and a SCALED image's `caption`
+        // never reach here (the gateway leaves them `blocked`, with their own
+        // named codes — see extractImageDisplayRefusal), and anything
+        // `setImageAttrs` cannot prove byte-for-byte vetoes the PM
+        // transaction too — including the caption's own named refusals
+        // (`image-caption-scaled` re-derived at commit,
+        // `empty-image-caption-unrepresentable` for the shadowed clear) — so
+        // the view never shows an attribute the source does not carry.
+        // An UNSCALED image-block's `caption` classifies since
+        // kernel/image-caption and commits into the markdown TITLE slot (the
+        // legacy byte home; commands/image-attrs.js CAPTION ADR): after the
+        // commit the view's caption and the projection's `title || alt`
+        // agree, so the pass-through costs no projection mismatch.
         const committed = commitImageAttrs({
           kernel,
           index: buildSyntaxIndex(kernel.doc.text),

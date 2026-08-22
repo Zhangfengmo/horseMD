@@ -2039,25 +2039,74 @@ const imgText = (s) => imgSchema.text(s)
   }
 }
 
-// Case I4: DISPLAY-ONLY attrs. `caption` (caption editing) and `ratio` (the
-// resize handle) are ProseMirror-side state whose only Markdown expression is
-// the historical ratio-in-alt convention owned by
-// components/editor-image-markdown.js. They are deliberately NOT classified,
-// so the batch stays `blocked`/INPUT_TYPE and the dispatch veto refuses it —
-// never a silent PM-only change the next reparse would discard.
+// Case I4: display attrs after kernel/image-caption. `caption` on an
+// UNSCALED image-block is a REAL byte edit now: it classifies as
+// `image-attrs` and commits into the markdown TITLE slot — the legacy
+// scheme's own byte home for the caption (editor-image-markdown.js parses
+// `caption: title || alt` and serializes the caption as the title). `ratio`
+// (the resize handle) still has no kernel byte scheme — the refusal stays,
+// but carries its own NAMED code instead of the generic INPUT_TYPE.
 {
   const md = '![a](x.png)\n'
   const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }))
   const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  assert.ok(map)
 
-  const caption = classifyTransactions([state.tr.setNodeAttribute(0, 'caption', '新标题')], state)
-  assert.equal(caption.kind, 'blocked')
-  assert.equal(caption.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  const caption = classifyTransactions([state.tr.setNodeAttribute(0, 'caption', '新图注')], state)
+  assert.equal(caption.kind, 'image-attrs')
+  assert.deepEqual(
+    { pmPos: caption.pmPos, blockImage: caption.blockImage, attr: caption.attr, value: caption.value },
+    { pmPos: 0, blockImage: true, attr: 'caption', value: '新图注' }
+  )
+  const kernel = { doc: createMarkdownDocument(md) }
+  const committed = commitImageAttrs({ kernel, map, ...caption })
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, '![a](x.png "新图注")\n',
+    'the caption commits into the TITLE slot — the legacy byte home, alt untouched')
+  assert.equal(committed.transaction.intent, 'image-attrs')
 
   const ratio = classifyTransactions([state.tr.setNodeAttribute(0, 'ratio', 0.5)], state)
   assert.equal(ratio.kind, 'blocked')
-  assert.equal(ratio.blockedCode, KERNEL_CODES.INPUT_TYPE)
-  assert.equal(md, '![a](x.png)\n', 'nothing was committed')
+  assert.equal(ratio.blockedCode, KERNEL_CODES.IMAGE_RESIZE,
+    'the resize refusal must carry its own name — the gesture, not the generic code')
+}
+
+// Case I4b: the two caption refusals the COMMAND names surface through the
+// gateway commit unchanged (notifyBlocked shows `committed.code` verbatim, so
+// these ARE the user-facing codes):
+//   * clearing the caption while the image has alt text — `title || alt`
+//     means no byte spelling shows an empty caption, the alt would shadow
+//     straight back;
+//   * the numeric-alt trap — `![2](x)` parses UNSCALED (no title), but
+//     writing one would flip the parse into the legacy-scaled reading and
+//     snap the image to 2x. The mdast axes cannot see either; the schema
+//     projection axis refuses both.
+{
+  const md = '![a](x.png)\n'
+  const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }))
+  const state = EditorState.create({ schema: imgSchema, doc: d })
+  const map = buildProjectionMap(md, state.doc)
+  const clear = classifyTransactions([state.tr.setNodeAttribute(0, 'caption', '')], state)
+  assert.equal(clear.kind, 'image-attrs', 'the clear still classifies — the refusal is the COMMAND’s, with its own name')
+  const kernel = { doc: createMarkdownDocument(md) }
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, ...clear }),
+    { ok: false, code: KERNEL_CODES.IMAGE_CAPTION_EMPTY }
+  )
+
+  const trapMd = '![2](x.png)\n'
+  const trapDoc = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: '2', caption: '2' }))
+  const trapState = EditorState.create({ schema: imgSchema, doc: trapDoc })
+  const trapMap = buildProjectionMap(trapMd, trapState.doc)
+  const trap = classifyTransactions([trapState.tr.setNodeAttribute(0, 'caption', '图')], trapState)
+  assert.equal(trap.kind, 'image-attrs')
+  const trapKernel = { doc: createMarkdownDocument(trapMd) }
+  assert.deepEqual(
+    commitImageAttrs({ kernel: trapKernel, map: trapMap, ...trap }),
+    { ok: false, code: KERNEL_CODES.IMAGE_CAPTION_SCALED }
+  )
+  assert.equal(trapKernel.doc.text, trapMd, 'the refused trap wrote nothing')
 }
 
 // Case I5: RATIO-IN-ALT PRESERVATION. A genuinely resized image-block
@@ -2078,12 +2127,23 @@ const imgText = (s) => imgSchema.text(s)
     assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
   }
 
+  // The CAPTION on a resized image-block refuses too — but with the NAMED
+  // code (both slots belong to the ratio scheme), at the classification
+  // boundary already.
+  const scaledCaption = classifyTransactions([state.tr.setNodeAttribute(0, 'caption', '想改')], state)
+  assert.equal(scaledCaption.kind, 'blocked')
+  assert.equal(scaledCaption.blockedCode, KERNEL_CODES.IMAGE_CAPTION_SCALED)
+
   // A ratio of exactly 1 (and one within the 0.001 tolerance) is NOT resized —
-  // those keep routing normally.
+  // those keep routing normally, caption included.
   const unresized = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a', ratio: 1.0005 }))
   const unresizedState = EditorState.create({ schema: imgSchema, doc: unresized })
   assert.equal(
     classifyTransactions([unresizedState.tr.setNodeAttribute(0, 'src', 'y.png')], unresizedState).kind,
+    'image-attrs'
+  )
+  assert.equal(
+    classifyTransactions([unresizedState.tr.setNodeAttribute(0, 'caption', '图')], unresizedState).kind,
     'image-attrs'
   )
 }
@@ -2119,6 +2179,17 @@ const imgText = (s) => imgSchema.text(s)
     commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'alt', value: 'a\nb' }),
     { ok: false, code: KERNEL_CODES.UNSUPPORTED }
   )
+  // Caption hygiene at the commit boundary: a non-string value, and a
+  // caption on a NON-block image (the inline `image` node has no caption
+  // concept — no UI can produce this, so it fails closed as an input error).
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'caption', value: 7 }),
+    { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  )
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: false, attr: 'caption', value: 'x' }),
+    { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  )
   assert.equal(kernel.doc.text, md, 'no refusal path mutated the document')
 }
 
@@ -2142,6 +2213,14 @@ const imgText = (s) => imgSchema.text(s)
       `${attr} must be refused at COMMIT even when classification is bypassed`
     )
   }
+  // The caption re-derives the SAME resized predicate at commit — and keeps
+  // its NAMED code there, so a bypassed classification still tells the user
+  // the real reason.
+  assert.deepEqual(
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'caption', value: '想改' }),
+    { ok: false, code: KERNEL_CODES.IMAGE_CAPTION_SCALED },
+    'caption must be refused BY NAME at COMMIT even when classification is bypassed'
+  )
   assert.equal(kernel.doc.text, md, 'the numeric ratio alt and the caption title are intact')
 
   // The predicate is the SERIALIZER's, verbatim (editor-image-markdown.js:51):
@@ -2180,7 +2259,7 @@ const imgText = (s) => imgSchema.text(s)
   assert.notEqual(classifyTransactions([multi], state).kind, 'image-attrs')
 }
 
-console.log('PASS kernel gateway (image attrs: src/alt/title route, caption/ratio refused, ratio-in-alt preserved)')
+console.log('PASS kernel gateway (image attrs: src/alt/title/caption route, ratio + scaled-caption named-refused, ratio-in-alt preserved)')
 
 // ---- Link editing (Plan 5 Task 6) ----
 //

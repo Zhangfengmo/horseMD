@@ -451,7 +451,12 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   narrowed, because a Vue `hidden` class on the CodeMirror host is not a byte
   fact), block math `$$..$$` (editable except `Mod-Enter` exit and the
   language switch, each refused by its own command), bold/italic/strike/
-  inline-code/quote toggle, tables, links, image `src`, yellow highlight,
+  inline-code/quote toggle, tables, links, image `src` — and, since
+  kernel/image-caption, the image-block CAPTION on an UNSCALED image (it
+  commits into the markdown TITLE slot, legacy's own byte home; a SCALED
+  image's caption, the shadowed clear, and drag-resize refuse with NAMED
+  codes `image-caption-scaled` / `empty-image-caption-unrepresentable` /
+  `image-resize-unsupported`), yellow highlight,
   frontmatter documents (no longer whole-document-degrade; the frontmatter
   block itself stays a read-only leaf), typing around an inline atom (image /
   inline math / inline HTML / footnote ref) inside an otherwise-plain

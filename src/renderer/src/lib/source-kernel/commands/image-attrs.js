@@ -59,12 +59,40 @@
 // `setAttr` only fires on a real change), so this is documented rather than
 // special-cased.
 //
-// SCOPE. `alt`, `src` (the destination) and `title` only. Crepe's image UI
-// also carries `caption` and `ratio` on its `image-block` node; those are
-// ProseMirror-side display state and are NOT written to the source here —
-// the historical ratio-in-alt convention (components/editor-image-markdown.js)
-// keeps owning that byte form, unchanged. The gateway refuses those attrs at
-// classification time; see editor-kernel-gateway.js `extractImageAttrStep`.
+// SCOPE. `alt`, `src` (the destination), `title` — and, since
+// kernel/image-caption, `caption` for the UNSCALED image-block.
+//
+// CAPTION ADR (kernel/image-caption). Crepe's `image-block` node carries
+// `caption` and `ratio` as ProseMirror attrs. Their legacy byte scheme is
+// components/editor-image-markdown.js, verified line-by-line:
+//   * serialize (toMarkdown): a RESIZED image (`|ratio-1| > 0.001`) writes
+//     `alt: ratio.toFixed(2)` and `title: caption` — the ratio-in-alt
+//     convention; an UNSCALED image writes `alt: alt || caption` and
+//     `title: caption && caption !== alt ? caption : undefined`.
+//   * parse (parseMarkdown): a numeric alt WITH a title is the legacy-scaled
+//     reading (`caption: title`, `ratio: Number(alt)`, `alt: ''`); otherwise
+//     `caption: title || alt`.
+// So for an unscaled image the caption's byte home IS the markdown TITLE
+// slot, and this command maps `caption` -> the title segment. Two deliberate
+// choices, recorded here:
+//   1. caption === alt still writes the title EXPLICITLY (legacy's
+//      serializer would drop it and lean on the `title || alt` fallback).
+//      Both spellings project the same caption; the explicit byte keeps the
+//      round trip literal instead of shadow-dependent.
+//   2. an extra proof axis runs for caption only: the candidate's
+//      SCHEMA-level interpretation (`projectBlockAttrs` below, a pure mirror
+//      of the parse runner) must equal the view's post-AttrStep attrs. The
+//      mdast axes are blind to the reinterpretation family — writing a title
+//      next to a numeric alt (`![2](x)` + caption) flips the parse into the
+//      scaled reading and would snap the image to 2x — and to the shadow
+//      family — clearing the caption while an alt exists has NO byte
+//      spelling, because the projection would show the alt as the caption.
+// `ratio` itself is STILL never written here: persisting a resize means
+// rewriting alt to a number and migrating the caption into the title slot, a
+// multi-slot rewrite this command does not own. The gateway refuses ratio at
+// classification with its own named code (`image-resize-unsupported`), and a
+// caption edit on an already-scaled image refuses `image-caption-scaled` at
+// EVERY boundary (classification, commit, and here).
 import { parseKernelMarkdown } from '../syntax-index.js'
 
 const isWs = (ch) => ch === ' ' || ch === '\t'
@@ -230,6 +258,69 @@ const titleCandidates = (value, existingOpen) => {
   return [...quoteTitle(value, first), ...rest.flatMap((q) => quoteTitle(value, q))]
 }
 
+// ---- caption -> title mapping (see the CAPTION ADR in the header) ----
+
+// Character-for-character the pattern editor-image-markdown.js:3 parses
+// legacy numeric alts with (`ratioPattern` + `parseLegacyRatio`). Kept as a
+// LOCAL mirror because this directory must not import @milkdown (the schema
+// module imports `@milkdown/kit`); any drift between the two is caught by
+// the schema-projection cases in scripts/test-source-kernel-commands.mjs.
+const LEGACY_RATIO_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/
+const legacyRatioOf = (value) => {
+  if (typeof value !== 'string' || !LEGACY_RATIO_PATTERN.test(value)) return null
+  const ratio = Number(value)
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : null
+}
+
+// Pure mirror of imageBlockMarkdownSchema's parse runner
+// (editor-image-markdown.js:31-43): what the editor would project a
+// standalone `![alt](src "title")` into. `src` is untouched by a caption
+// edit, so only the three attrs a title write can move are modeled.
+const projectBlockAttrs = (alt, title) => {
+  const a = typeof alt === 'string' ? alt : ''
+  const t = typeof title === 'string' ? title : ''
+  const legacy = legacyRatioOf(a)
+  const isLegacy = legacy !== null && Boolean(t)
+  return {
+    alt: isLegacy ? '' : a,
+    caption: isLegacy ? t : t || a,
+    ratio: isLegacy ? legacy : 1
+  }
+}
+
+const sameProjection = (left, right) =>
+  left.alt === right.alt && left.caption === right.caption && left.ratio === right.ratio
+
+// Decides what title write realizes a caption edit — or which NAMED code
+// refuses it. `alt`/`title` are the node's CURRENT (decoded, mdast) values;
+// `caption` is the requested one ('' clears).
+function resolveCaptionWrite({ alt, title, caption }) {
+  const current = projectBlockAttrs(alt, title)
+  // The serializer's own resized predicate (|ratio-1| > 0.001,
+  // editor-image-markdown.js:51), evaluated on the BYTE form: both source
+  // slots belong to the ratio scheme, refuse before trying anything.
+  if (Math.abs(current.ratio - 1) > 0.001) {
+    return { ok: false, code: 'image-caption-scaled' }
+  }
+  if (caption === '') {
+    const removed = projectBlockAttrs(alt, null)
+    if (!sameProjection(removed, { alt: current.alt, caption: '', ratio: current.ratio })) {
+      // `caption: title || alt` — with a non-empty alt the projection can
+      // never show an empty caption, so the state is unrepresentable.
+      return { ok: false, code: 'empty-image-caption-unrepresentable' }
+    }
+    return { ok: true, title: null }
+  }
+  const predicted = { alt: current.alt, caption, ratio: current.ratio }
+  if (!sameProjection(projectBlockAttrs(alt, caption), predicted)) {
+    // The numeric-alt trap: the new title would flip the parse into the
+    // legacy-scaled reading (alt swallowed as a ratio). Same family, same
+    // named code — the slots are claimed by the ratio scheme.
+    return { ok: false, code: 'image-caption-scaled' }
+  }
+  return { ok: true, title: caption }
+}
+
 const applyEdits = (text, edits) => {
   let out = ''
   let cursor = 0
@@ -275,7 +366,12 @@ const MAX_ATTEMPTS = 24
 // whitespace that separated it from the destination) — ProseMirror's image
 // schema defaults `title` to `''`, so an empty string is "no title", never
 // `""` written literally into the source.
-export function setImageAttrs({ doc, index, offset, src, alt, title }) {
+//
+// `caption`: the image-block caption edit (see the CAPTION ADR in the
+// header). Must be the WHOLE request — it owns the title slot, so mixing it
+// with the raw fields is contradictory and refused. `caption: ''` clears
+// (removes the title) when the projection can represent the cleared state.
+export function setImageAttrs({ doc, index, offset, src, alt, title, caption }) {
   const rawOffset = Number(offset)
   if (!doc || !index?.tree || !Number.isFinite(rawOffset)) {
     return { ok: false, code: 'unsupported-structure' }
@@ -284,14 +380,22 @@ export function setImageAttrs({ doc, index, offset, src, alt, title }) {
   const wantsAlt = alt !== undefined
   const wantsSrc = src !== undefined
   const wantsTitle = title !== undefined
-  if (!wantsAlt && !wantsSrc && !wantsTitle) return { ok: false, code: 'unsupported-structure' }
+  const wantsCaption = caption !== undefined
+  if (!wantsAlt && !wantsSrc && !wantsTitle && !wantsCaption) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (wantsCaption && (wantsAlt || wantsSrc || wantsTitle)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
 
   const nextAlt = wantsAlt ? String(alt ?? '') : null
   const nextSrc = wantsSrc ? String(src ?? '') : null
-  const nextTitle = wantsTitle ? (title == null || title === '' ? null : String(title)) : undefined
+  const nextCaption = wantsCaption ? String(caption ?? '') : null
+  let nextTitle = wantsTitle ? (title == null || title === '' ? null : String(title)) : undefined
+  let wantsTitleWrite = wantsTitle
   // A line ending inside any written value would end the block (or the table
   // row) the image lives in — a structural change this command does not own.
-  for (const value of [nextAlt, nextSrc, nextTitle]) {
+  for (const value of [nextAlt, nextSrc, nextTitle, nextCaption]) {
     if (typeof value === 'string' && /[\r\n]/.test(value)) {
       return { ok: false, code: 'unsupported-structure' }
     }
@@ -328,10 +432,21 @@ export function setImageAttrs({ doc, index, offset, src, alt, title }) {
   const currentAlt = node.alt ?? ''
   const currentUrl = node.url ?? ''
   const currentTitle = node.title ?? null
+
+  // Caption resolves into a title write (or a named refusal) HERE, against
+  // the node's own decoded values — after this point it is byte-for-byte the
+  // ordinary title path, so every existing proof covers it unchanged.
+  if (wantsCaption) {
+    const resolved = resolveCaptionWrite({ alt: currentAlt, title: currentTitle, caption: nextCaption })
+    if (!resolved.ok) return { ok: false, code: resolved.code }
+    wantsTitleWrite = true
+    nextTitle = resolved.title
+  }
+
   const expected = {
     alt: wantsAlt ? nextAlt : currentAlt,
     url: wantsSrc ? nextSrc : currentUrl,
-    title: wantsTitle ? nextTitle : currentTitle
+    title: wantsTitleWrite ? nextTitle : currentTitle
   }
 
   const altList = wantsAlt ? altCandidates(nextAlt) : [doc.text.slice(seg.labelStart, seg.labelEnd)]
@@ -340,7 +455,7 @@ export function setImageAttrs({ doc, index, offset, src, alt, title }) {
     : [doc.text.slice(seg.destStart, seg.destEnd)]
   const hasTitle = seg.titleStart >= 0
   let titleList
-  if (!wantsTitle) titleList = [hasTitle ? doc.text.slice(seg.titleStart, seg.titleEnd) : null]
+  if (!wantsTitleWrite) titleList = [hasTitle ? doc.text.slice(seg.titleStart, seg.titleEnd) : null]
   else if (nextTitle === null) titleList = [null]
   else titleList = titleCandidates(nextTitle, hasTitle ? seg.titleOpen : '')
 
