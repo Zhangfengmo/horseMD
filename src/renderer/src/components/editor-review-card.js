@@ -78,8 +78,39 @@ function replaceAnnotationRange(view, annotation, replacement, pluginKey, review
   return true
 }
 
+// Source-kernel branch (review domain): when the kernel owns the tab, a card
+// action must become a raw-byte kernel commit instead of the legacy PM
+// insertText (which the kernel gateway could only refuse). `resolve` answers
+// null while the kernel is NOT the owner (legacy tab, degraded tab,
+// pre-attach) and the caller then runs the unchanged legacy path — the same
+// delegation convention the slash items use. A boolean answer means the
+// kernel owned the action (true = committed and reconciled; false = refused
+// with its own toast, nothing changed).
+function kernelResolveAnnotation(options, annotation, action, replacement = null) {
+  const resolve = options?.kernelReview?.resolve
+  if (typeof resolve !== 'function') return null
+  const handled = resolve({ annotation, action, replacement })
+  return handled === null || handled === undefined ? null : Boolean(handled)
+}
+
 function removeAnnotationMarkup(view, part, options, pluginKey) {
   const annotation = part.annotation
+  const kernelled = kernelResolveAnnotation(options, annotation, 'remove')
+  if (kernelled !== null) {
+    if (kernelled) {
+      // The marker bytes are gone and the view was reconciled from the
+      // source; the plugin group state still points at the removed note, so
+      // hand it the same removal meta the legacy transaction carries — on a
+      // meta-only transaction, which the kernel gateway passes through.
+      try {
+        view?.dispatch(view.state.tr.setMeta(pluginKey, getReviewGroupRemovalMeta(part)))
+      } catch {
+        /* the decorations recompute from the new doc either way */
+      }
+    }
+    return kernelled
+  }
+
   if (!validateAnnotationRange(view, annotation)) {
     notify(options, 'review.stale', 'Review note changed')
     return false
@@ -325,9 +356,20 @@ function renderEditMode(card, view, part, options, pluginKey) {
   save.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
+    if (!textInput.value || !commentInput.value) {
+      notify(options, 'review.invalid', 'Invalid markup fields')
+      return
+    }
+    // Source-kernel branch: the whole marker span is replaced as one proven
+    // byte edit (the kernel re-spells the markup itself and refuses invalid
+    // fields with its own toast). Null = kernel not the owner -> legacy path.
+    const kernelled = kernelResolveAnnotation(options, annotation, 'replace', {
+      text: textInput.value,
+      comment: commentInput.value
+    })
+    if (kernelled !== null) return
     let replacement
     try {
-      if (!textInput.value || !commentInput.value) throw new Error('empty')
       replacement =
         annotation.source === 'raw'
           ? replaceReviewMarker(

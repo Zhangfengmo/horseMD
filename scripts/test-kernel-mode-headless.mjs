@@ -249,6 +249,15 @@ const FIXTURE_DOCS = {
   // (Crepe's, WITH the highlight remark plugin) turns committed marker
   // bytes into real marks — mirrored here exactly.
   '甲乙丙\n': () => doc(p(text('甲乙丙'))),
+  // Review domain fixtures (Cases R1-R3): CriticMarkup markers are LITERAL
+  // text to BOTH chains (HIGHLIGHT_RE's `(?<![={])`/`(?!\})` guards exist so
+  // `{==a==}{>>c<<}` never becomes a highlight mark), so the reconciled PM
+  // doc carries the marker bytes verbatim and the decorations own the display.
+  '甲{--乙--}丙\n': () => doc(p(text('甲{--乙--}丙'))),
+  'x {==aim==}{>>note<<} y\n': () => doc(p(text('x {==aim==}{>>note<<} y'))),
+  'x aim y\n': () => doc(p(text('x aim y'))),
+  'x {==goal==}{>>better<<} y\n': () => doc(p(text('x {==goal==}{>>better<<} y'))),
+  'x goal y\n': () => doc(p(text('x goal y'))),
   // P5-3 review follow-up (Case M4c): the ONE mark shape that still trips
   // `requireMap`'s anchor half. The wrap is byte-legal but the RESULT block
   // cannot character-map, so the toggle must refuse before writing anything.
@@ -854,13 +863,21 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   const before = h.notifications.length
   assert.equal(api.applyTextFormat('bold'), false)
   assert.equal(api.toggleHighlight(), false)
-  assert.equal(api.applyReviewMarkup('insert'), false)
   assert.equal(h.notifications.length, before + 1,
     'unsupported APIs notify (cooldown collapses the burst to one toast)')
+  // Review markup is NO LONGER an unsupported API (review domain, 2026-08-22):
+  // the override routes into runReviewWrap, and a bogus KIND is refused by the
+  // kernel command itself — its own code, its own toast, no unsupported-api
+  // diagnostic. (The real wrap/resolve behavior is Cases R1-R3 below.)
+  assert.equal(api.applyReviewMarkup('insert'), false)
+  assert.equal(h.notifications.length, before + 2,
+    'the review-kind refusal carries its own message')
+  assert.ok(h.notifications.at(-1).includes('unsupported-structure'),
+    `the refusing party is the review command, got: ${h.notifications.at(-1)}`)
   assert.equal(
     globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'unsupported-api').length,
-    3,
-    'every refusal is individually diagnosed'
+    2,
+    'every remaining unsupported-API refusal is individually diagnosed'
   )
 
   // replaceMarkdown resets the kernel + history, reconciles the view, runs
@@ -4437,6 +4454,99 @@ const toggleVia = (h, markType, from, to) => {
     assert.ok(dc <= 2, `keystroke ${ch}: at most 2 charMap builds (got ${dc})`)
   }
   assert.equal(h.controller.kernel.doc.text, '守甲丙丁戊\n\n守乙\n', 'the keystrokes landed')
+}
+
+// Case R1 (review domain, 2026-08-22): the review WRAP is a raw-byte kernel
+// commit. `runReviewWrap` (reached in the app through
+// apiOverrides.applyReviewMarkup — the toolbar picker and the app menu) maps
+// the live selection through the pair's charMap, proves the splice with the
+// review command's reparse proof, and reconciles the view from the committed
+// bytes — the literal marker text the decorations already know how to render.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const before = h.notifications.length
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2, 3)))
+  assert.equal(h.controller.runReviewWrap('deletion'), true)
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '甲{--乙--}丙\n', 'the wrap commits the CriticMarkup bytes')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲{--乙--}丙')))),
+    'the view reconciles to the literal marker (display is the decorations\' job)')
+  assert.ok(h.controller.kernel.map, 'the map rebinds')
+  assert.ok(h.controller.kernel.map.blockPairs[0].charMap, 'the wrapped paragraph stays editable')
+  assert.equal(h.notifications.length, before, 'a successful wrap notifies nothing')
+  // wrapReviewSelection's contract: the wrapped text stays selected inside
+  // the marker (raw 4..5 -> PM 5..6 — the marker bytes are literal chars).
+  assert.equal(h.view.state.selection.from, 5)
+  assert.equal(h.view.state.selection.to, 6)
+  assert.deepEqual(h.changes.at(-1), ['甲{--乙--}丙\n', false], 'onChange publishes the wrapped bytes')
+
+  // One kernel history group: a single undo restores the original bytes.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'undo removes the whole marker')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))))
+}
+
+// Case R2: the substitution wrap refuses BY NAME — its `{~~a~>b~~}` bytes
+// read as GFM strikethrough to the kernel chain while the editor chain
+// reconstructs the literal marker (editor-criticmarkup-plugins.js), so the
+// result block could never be proven. Bytes and view untouched.
+{
+  const h = makeHarness('甲乙丙\n', doc(p(text('甲乙丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 2, 3)))
+  assert.equal(h.controller.runReviewWrap('substitution'), false)
+  assert.equal(h.controller.kernel.doc.text, '甲乙丙\n', 'kernel bytes untouched')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙丙')))), 'view untouched')
+  assert.ok(h.notifications.at(-1).includes('review-substitution'),
+    `the substitution refusal is named, got: ${h.notifications.at(-1)}`)
+}
+
+// Case R3: the review card's Done/Delete and Edit→Save reach the kernel
+// through `runReviewResolve` (editor-review-card.js's kernelReview branch).
+// The marker is re-located by RESCANNING THE SOURCE and must carry exactly
+// the content the card showed — a mismatch is stale and refuses by name.
+{
+  const src = 'x {==aim==}{>>note<<} y\n'
+  const h = makeHarness(src, doc(p(text('x {==aim==}{>>note<<} y'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // The 'raw'-source annotation the PM-side scan derives: the whole literal
+  // marker span in PM coordinates (contentPos 1 + raw [2, 21)).
+  const annotation = { from: 3, to: 22, text: 'aim', comment: 'note' }
+
+  // Stale first: the card's content no longer matches the source.
+  assert.equal(
+    h.controller.runReviewResolve({ annotation: { ...annotation, comment: 'other' }, action: 'remove' }),
+    false
+  )
+  assert.ok(h.notifications.at(-1).includes('review-marker-not-found'),
+    `the stale refusal is named, got: ${h.notifications.at(-1)}`)
+  assert.equal(h.controller.kernel.doc.text, src, 'a stale resolve writes nothing')
+
+  // Edit→Save: the whole marker span becomes the re-spelled markup.
+  assert.equal(
+    h.controller.runReviewResolve({
+      annotation,
+      action: 'replace',
+      replacement: { text: 'goal', comment: 'better' }
+    }),
+    true
+  )
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, 'x {==goal==}{>>better<<} y\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('x {==goal==}{>>better<<} y')))))
+
+  // Done/Delete on the REPLACED marker: markup goes, highlighted text stays.
+  assert.equal(
+    h.controller.runReviewResolve({
+      annotation: { from: 3, to: 25, text: 'goal', comment: 'better' },
+      action: 'remove'
+    }),
+    true
+  )
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, 'x goal y\n')
 }
 
 console.log('PASS kernel mode headless')

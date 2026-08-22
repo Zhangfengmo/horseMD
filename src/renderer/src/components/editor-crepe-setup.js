@@ -549,7 +549,16 @@ export function createConfiguredCrepe({
         },
         notify: (key, fallback) => notify(getT(key) || fallback),
         copyText: (text, doneKey, doneFallback) =>
-          copyText(text, getT(doneKey) || doneFallback)
+          copyText(text, getT(doneKey) || doneFallback),
+        // Source-kernel mode (review domain): the review card's
+        // Done/Delete/Edit actions must become raw-byte kernel commits, never
+        // the legacy PM insertText the gateway can only refuse. `resolve`
+        // answers null while the kernel is not the owner (degraded tab,
+        // pre-attach), and the card then falls back to its legacy dispatch —
+        // the same delegation convention as the slash items' `isBlocked`.
+        kernelReview: kernelMode && kernelPlugins
+          ? { resolve: (args) => kernelPlugins.runReviewResolve?.(args) }
+          : null
       }),
       // Source-kernel mode (2026-08-18): NOT registered. This plugin's
       // appendTransaction replaces one mermaid `code_block` with N, i.e. its
