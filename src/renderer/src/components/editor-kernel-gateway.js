@@ -486,13 +486,19 @@ function extractLanguageStep(transactions, oldState) {
 // WHICH ATTRS REACH THE SOURCE — and which must not:
 //   * `src`/`alt`/`title` map 1:1 onto `![alt](src "title")` and route to
 //     `setImageAttrs`.
-//   * `caption`/`ratio` are ProseMirror-side DISPLAY state. The one place
-//     they touch Markdown is the historical ratio-in-alt convention in
-//     components/editor-image-markdown.js (a genuinely resized image
-//     serializes its ratio as a numeric `alt` and its caption as the
-//     `title`), which this task must not change. They are therefore NOT
-//     classified — the batch falls through to `blocked`/INPUT_TYPE exactly as
-//     it did before this task (the dispatch veto refuses the edit and toasts,
+//   * `caption` on an UNSCALED `image-block` routes too, since
+//     kernel/image-caption: its byte home is the markdown TITLE slot — the
+//     legacy scheme's own (editor-image-markdown.js parses
+//     `caption: title || alt` and serializes the caption as the title), so
+//     `setImageAttrs({ caption })` maps caption→title under an extra
+//     schema-projection proof (see that command's CAPTION ADR). Block-image
+//     only: the inline `image` node has no caption concept.
+//   * `ratio` stays DISPLAY-ONLY. Persisting a resize means rewriting alt to
+//     a numeric ratio and migrating the caption into the title slot — a
+//     multi-slot rewrite the kernel deliberately does not own. The batch
+//     falls through to `blocked` as before, but `extractImageDisplayRefusal`
+//     below NAMES it (`image-resize-unsupported`) instead of the generic
+//     INPUT_TYPE (the dispatch veto still refuses the edit and toasts,
 //     rather than silently accepting a PM-only change that the next reparse
 //     from the authoritative source would discard).
 //   * An `image-block` currently in the RESIZED state (`isResizedImageBlock`
@@ -500,7 +506,8 @@ function extractLanguageStep(transactions, oldState) {
 //     EVERY attr: in that state the raw `alt`/`title` slots are owned by the
 //     ratio convention, so writing a user alt there would delete the
 //     persisted resize. Fail closed instead. The refusal is enforced at BOTH
-//     boundaries — here and again inside `commitImageAttrs`.
+//     boundaries — here and again inside `commitImageAttrs` — and for the
+//     caption it carries its own name (`image-caption-scaled`) at both.
 const IMAGE_SOURCE_ATTRS = new Set(['src', 'alt', 'title'])
 const IMAGE_NODE_TYPES = new Set(['image-block', 'image'])
 
@@ -528,7 +535,7 @@ function extractImageAttrStep(transactions, oldState) {
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
   if (step?.constructor?.name !== 'AttrStep') return null
-  if (!IMAGE_SOURCE_ATTRS.has(step.attr)) return null
+  if (!IMAGE_SOURCE_ATTRS.has(step.attr) && step.attr !== 'caption') return null
   if (!Number.isFinite(step.pos)) return null
   if (typeof step.value !== 'string') return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
@@ -541,8 +548,44 @@ function extractImageAttrStep(transactions, oldState) {
   }
   const typeName = node?.type?.name
   if (!typeName || !IMAGE_NODE_TYPES.has(typeName)) return null
+  // Caption is an image-BLOCK concept only (the inline `image` schema has no
+  // caption attr and no caption UI) — anything else falls through to blocked.
+  if (step.attr === 'caption' && typeName !== 'image-block') return null
   if (isResizedImageBlock(node)) return null
   return { pmPos: step.pos, blockImage: typeName === 'image-block', attr: step.attr, value: step.value }
+}
+
+// A NAMING function in the `extractHeadingDemotion` mold, never a gate: the
+// caller has already decided to refuse, this only decides what the toast
+// SAYS. Recognizes the two image-block display gestures whose refusals used
+// to hide behind the generic INPUT_TYPE:
+//   * `ratio` — the resize handle's pointerup (`setAttr('ratio', <number>)`,
+//     @milkdown/components image-block/index.js:436). Value type is NOT
+//     checked (upstream sends a number; the refusal names the gesture either
+//     way).
+//   * `caption` on a RESIZED image-block — `extractImageAttrStep` above
+//     declines it (both raw slots belong to the ratio scheme), so it lands
+//     here and gets the same named code the commit boundary uses.
+function extractImageDisplayRefusal(trs, oldState) {
+  const changed = trs.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (step?.constructor?.name !== 'AttrStep') return null
+  if (!Number.isFinite(step.pos)) return null
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let node
+  try {
+    node = stepDoc.nodeAt(step.pos)
+  } catch {
+    return null
+  }
+  if (node?.type?.name !== 'image-block') return null
+  if (step.attr === 'ratio') return KERNEL_CODES.IMAGE_RESIZE
+  if (step.attr === 'caption' && isResizedImageBlock(node)) return KERNEL_CODES.IMAGE_CAPTION_SCALED
+  return null
 }
 
 // PM mark name -> kernel inline-mark kind (Plan 4 Task 3). Names probed from
@@ -1111,10 +1154,11 @@ export function routeTrailingAtomTyping({ kernel, map, transactions, oldState })
 //      language-switch shape (see `extractLanguageStep` above) — same reason
 //      as rule 5, checked right alongside it (both are AttrStep shapes the
 //      plain-text ReplaceStep guard can never match).
-//   6b. A lone `AttrStep` setting an image node's `src`/`alt`/`title` (see
+//   6b. A lone `AttrStep` setting an image node's `src`/`alt`/`title` — or,
+//      since kernel/image-caption, an UNSCALED image-block's `caption` (see
 //      `extractImageAttrStep` above) — the third AttrStep shape, same
-//      reasoning. `caption`/`ratio` are deliberately NOT matched and keep
-//      falling through to `blocked`.
+//      reasoning. `ratio` and a scaled image's `caption` keep falling
+//      through to `blocked`, where `extractImageDisplayRefusal` NAMES them.
 //   7. The trailing plugin's own empty-paragraph append (see
 //      `extractTrailingAppend` above) — view-only, no kernel bytes, must not
 //      be vetoed.
@@ -1192,11 +1236,12 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
     // The refusal is unchanged; only its NAME improves when the shape is one
     // we have since identified. Asked here, after every extractor has passed,
     // so it can never steal a batch something else would have classified.
+    const namedCode = extractHeadingDemotion(trs, oldState)
+      ? KERNEL_CODES.HEADING_DEMOTE
+      : extractImageDisplayRefusal(trs, oldState)
     return {
       kind: 'blocked',
-      blockedCode: extractHeadingDemotion(trs, oldState)
-        ? KERNEL_CODES.HEADING_DEMOTE
-        : KERNEL_CODES.INPUT_TYPE,
+      blockedCode: namedCode || KERNEL_CODES.INPUT_TYPE,
       blockedShape: describeUnclassified(trs, oldState)
     }
   }
@@ -2366,9 +2411,13 @@ export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
 export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, value }) {
   if (!kernel?.doc || !map) return { ok: false, code: KERNEL_CODES.UNMAPPED }
   if (!Number.isFinite(pmPos)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
-  if (!IMAGE_SOURCE_ATTRS.has(attr) || typeof value !== 'string') {
+  if ((!IMAGE_SOURCE_ATTRS.has(attr) && attr !== 'caption') || typeof value !== 'string') {
     return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
   }
+  // Caption is image-BLOCK-only (see extractImageAttrStep): the inline
+  // `image` node has no caption attr, so a non-block caption here is a
+  // caller error, never a byte question.
+  if (attr === 'caption' && !blockImage) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
 
   let offset = null
   if (blockImage) {
@@ -2383,7 +2432,14 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
     // `'![1.50](x.png "说明")'` wrote `'![user alt](x.png "说明")'` and
     // destroyed the persisted resize. The pair already carries the live PM
     // node, so the same predicate is re-applied here against proven state.
-    if (isResizedImageBlock(pair?.pmNode)) return { ok: false, code: KERNEL_CODES.UNSUPPORTED }
+    // For the caption the refusal keeps its NAME at this boundary too — a
+    // bypassed classification must not demote the message to the generic one.
+    if (isResizedImageBlock(pair?.pmNode)) {
+      return {
+        ok: false,
+        code: attr === 'caption' ? KERNEL_CODES.IMAGE_CAPTION_SCALED : KERNEL_CODES.UNSUPPORTED
+      }
+    }
     const children = pair?.mdBlock?.children
     const image = Array.isArray(children) && children.length === 1 && children[0]?.type === 'image'
       ? children[0]

@@ -1369,6 +1369,109 @@ const setImage = (text, offset, patch) => {
 
 console.log('PASS source-kernel commands (image attrs: minimal segment rewrites, proven byte-for-byte)')
 
+// ---- Image CAPTION edits (kernel/image-caption) ----
+//
+// The byte home is the legacy scheme's own, verified against
+// components/editor-image-markdown.js: an UNSCALED image-block's caption is
+// the markdown TITLE slot (serialize `title: caption…`, parse
+// `caption: title || alt`). `setImageAttrs({ caption })` maps caption→title
+// and adds ONE proof axis on top of the existing mdast ladder: the candidate
+// bytes' SCHEMA-level interpretation (the imageBlockMarkdownSchema parse
+// decision, mirrored) must equal the view's post-AttrStep attrs — this is
+// what catches the numeric-alt trap below, which the mdast axes are blind to.
+{
+  // Replace an existing title — the caption's byte home, minimal edit.
+  const replaced = setImage('![a](b "t")\n', 0, { caption: 'z' })
+  assert.equal(replaced.text, '![a](b "z")\n')
+  assert.deepEqual(replaced.edits, [{ from: 7, to: 10, insert: '"z"' }],
+    'only the title segment is rewritten')
+  assert.equal(replaced.transaction.intent, 'image-attrs')
+
+  // Insert a title where none existed (alt is prose, not a ratio).
+  assert.equal(setImage('![描述](b.png)\n', 0, { caption: '新图注' }).text, '![描述](b.png "新图注")\n')
+
+  // caption === alt still writes the title EXPLICITLY (kernel design
+  // decision, see image-attrs.js ADR: the projection `title || alt` reads
+  // identically either way; writing the byte makes the round trip literal
+  // instead of relying on the alt-fallback shadow).
+  assert.equal(setImage('![a](b)\n', 0, { caption: 'a' }).text, '![a](b "a")\n')
+
+  // Quote escaping rides the SAME earned-escape ladder as `title`.
+  assert.equal(setImage('![a](b "t")\n', 0, { caption: 'x"y' }).text, '![a](b "x\\"y")\n')
+  {
+    const table = '| ![a](b "t") | x |\n| --- | --- |\n| y | z |\n'
+    const piped = setImage(table, 2, { caption: 'a|b' })
+    assert.equal(piped.ok, true, 'a piped caption must be expressible inside a table cell')
+    assert.equal(piped.text, '| ![a](b "a\\|b") | x |\n| --- | --- |\n| y | z |\n')
+    const reparsed = buildSyntaxIndex(piped.text)
+    assert.equal(reparsed.tree.children[0].type, 'table', 'the table survived')
+    assert.equal(reparsed.tree.children[0].children[0].children[0].children[0].title, 'a|b')
+  }
+
+  // CRLF documents: the image span is single-line, the rewrite is
+  // byte-identical, and no `\r\n` pair is ever split.
+  assert.equal(setImage('![a](b "t")\r\n', 0, { caption: 'z' }).text, '![a](b "z")\r\n')
+  assert.equal(setImage('甲\r\n\r\n![a](b "t")\r\n', 5, { caption: '乙' }).text, '甲\r\n\r\n![a](b "乙")\r\n')
+}
+
+// Clearing the caption: representable ONLY while nothing would shadow it —
+// the projection is `title || alt`, so with a non-empty alt there is NO byte
+// spelling of "alt present, caption empty".
+{
+  assert.equal(setImage('![](b "t")\n', 0, { caption: '' }).text, '![](b)\n',
+    'empty alt: clearing the caption removes the title')
+  const noop = setImage('![](b)\n', 0, { caption: '' })
+  assert.equal(noop.text, '![](b)\n')
+  assert.deepEqual(noop.edits, [{ from: 0, to: 0, insert: '' }],
+    'clearing an already-absent caption is the zero-width no-op, never invalid-range')
+
+  assert.deepEqual(setImage('![a](b "t")\n', 0, { caption: '' }),
+    { ok: false, code: 'empty-image-caption-unrepresentable' })
+  assert.deepEqual(setImage('![a](b)\n', 0, { caption: '' }),
+    { ok: false, code: 'empty-image-caption-unrepresentable' })
+}
+
+// The ratio-in-alt scheme owns BOTH slots of a scaled image (alt = numeric
+// ratio, title = caption), so every caption edit there refuses with the
+// NAMED code — at the command layer too, not only in the gateway.
+{
+  assert.deepEqual(setImage('![1.50](b.png "说明")\n', 0, { caption: '新' }),
+    { ok: false, code: 'image-caption-scaled' })
+  assert.deepEqual(setImage('![1.50](b.png "说明")\n', 0, { caption: '' }),
+    { ok: false, code: 'image-caption-scaled' })
+
+  // The NUMERIC-ALT TRAP: `![2](b.png)` parses UNSCALED today (numeric alt
+  // but no title), yet writing a title next to that alt flips
+  // editor-image-markdown.js's parse into the legacy-scaled reading — the
+  // image would snap to 2x and the alt would vanish. The mdast axes cannot
+  // see this (alt/title bytes are exactly as requested); the schema
+  // projection axis refuses it.
+  assert.deepEqual(setImage('![2](b.png)\n', 0, { caption: '图' }),
+    { ok: false, code: 'image-caption-scaled' })
+  assert.deepEqual(setImage('![1.00](b.png)\n', 0, { caption: '图' }),
+    { ok: false, code: 'image-caption-scaled' })
+
+  // …but a numeric alt WITH a title at ratio≈1 stays legacy-parsed either
+  // way (the serializer's own |ratio-1|>0.001 tolerance): the caption edit
+  // is provable and commits.
+  assert.equal(setImage('![1.00](b.png "t")\n', 0, { caption: '新' }).text, '![1.00](b.png "新")\n')
+}
+
+// Caption request hygiene: caption is the WHOLE request (it owns the title
+// slot — mixing it with the raw fields is contradictory), and a line ending
+// in the value would end the block.
+{
+  const { doc, index } = imageSetup('![a](b "t")\n')
+  assert.deepEqual(setImageAttrs({ doc, index, offset: 0, caption: 'x', title: 'y' }),
+    { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(setImageAttrs({ doc, index, offset: 0, caption: 'x', alt: 'y' }),
+    { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(setImageAttrs({ doc, index, offset: 0, caption: 'a\nb' }),
+    { ok: false, code: 'unsupported-structure' })
+}
+
+console.log('PASS source-kernel commands (image caption: title-slot byte home, scaled/shadowed shapes named-refused)')
+
 // ---- Link editing (Plan 5 Task 6) ----
 //
 // Byte cases for `applyLinkEdit`. Every expectation is the FULL document text

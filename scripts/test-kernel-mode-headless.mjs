@@ -501,6 +501,12 @@ const FIXTURE_DOCS = {
   '![a](x.png)\n\n甲乙\n': () => doc(ib({ src: 'x.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
   '![a](y/pic.png)\n\n甲乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲乙'))),
   '![a](y/pic.png)\n\n甲丙乙\n': () => doc(ib({ src: 'y/pic.png', alt: 'a', caption: 'a' }), p(text('甲丙乙'))),
+  // kernel/image-caption: the committed caption's projection (`caption:
+  // title || alt`), and the SCALED byte form (numeric alt + title -> the
+  // legacy reading: alt '', caption = title, ratio = the number).
+  '![a](x.png "新图注")\n\n甲乙\n': () => doc(ib({ src: 'x.png', alt: 'a', caption: '新图注' }), p(text('甲乙'))),
+  '![1.50](x.png "说明")\n\n甲乙\n': () =>
+    doc(ib({ src: 'x.png', alt: '', caption: '说明', ratio: 1.5 }), p(text('甲乙'))),
   '![说明文字](x.png)\n\n甲乙\n': () =>
     doc(ib({ src: 'x.png', alt: '说明文字', caption: '说明文字' }), p(text('甲乙'))),
   // Inline image: one width-1 atom inside its paragraph.
@@ -2771,25 +2777,64 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '前![a](x.png "标题")后\n\n甲乙\n')
 }
 
-// 22d: DISPLAY-ONLY attrs never reach the source. `caption` (caption editing)
-// and `ratio` (the resize handle) are refused at classification, so the
-// dispatch is vetoed and the kernel bytes do not move — the historical
-// ratio-in-alt convention (components/editor-image-markdown.js) keeps owning
-// that byte form.
+// 22d: display attrs after kernel/image-caption. An UNSCALED image-block's
+// `caption` is a REAL byte edit now: the AttrStep passes through and the
+// caption commits into the markdown TITLE slot (the legacy scheme's own byte
+// home — editor-image-markdown.js parses `caption: title || alt`). `ratio`
+// (the resize handle) still never reaches the source; its refusal now
+// carries the NAMED code `image-resize-unsupported`.
+{
+  const md = '![a](x.png)\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true)
+
+  const committed = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'caption', '新图注'))
+  await flushMicrotasks()
+  assert.equal(committed, undefined, 'an unscaled caption edit passes through like src/alt/title')
+  assert.equal(h.controller.kernel.doc.text, '![a](x.png "新图注")\n\n甲乙\n',
+    'the caption commits into the TITLE slot, alt untouched')
+
+  const revision = h.controller.kernel.doc.revision
+  const ratio = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'ratio', 0.5))
+  await flushMicrotasks()
+  assert.equal(ratio?.veto, true, 'ratio must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, '![a](x.png "新图注")\n\n甲乙\n', 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.ok(h.notifications.some((n) => n.includes('image-resize-unsupported')),
+    `the ratio refusal must carry its NAMED code, got ${JSON.stringify(h.notifications)}`)
+}
+
+// 22d2: the two NAMED caption refusals end to end. A SCALED image's caption
+// is refused at classification (`image-caption-scaled` — both raw slots
+// belong to the ratio scheme); clearing a caption the projection cannot
+// represent (`title || alt` would shadow the alt straight back) is refused
+// by the COMMAND (`empty-image-caption-unrepresentable`). Zero bytes either
+// way.
+{
+  const md = '![1.50](x.png "说明")\n\n甲乙\n'
+  const h = makeHarness(md, stubParse(md))
+  assert.equal(h.controller.attachAfterCreate(), true, 'a scaled image still maps')
+  const revision = h.controller.kernel.doc.revision
+  const scaled = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'caption', '想改'))
+  await flushMicrotasks()
+  assert.equal(scaled?.veto, true, 'a scaled caption edit must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.ok(h.notifications.some((n) => n.includes('image-caption-scaled')),
+    `the scaled refusal must carry its NAMED code, got ${JSON.stringify(h.notifications)}`)
+}
 {
   const md = '![a](x.png)\n\n甲乙\n'
   const h = makeHarness(md, stubParse(md))
   assert.equal(h.controller.attachAfterCreate(), true)
   const revision = h.controller.kernel.doc.revision
-
-  for (const [attr, value] of [['caption', '新标题'], ['ratio', 0.5]]) {
-    const verdict = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, attr, value))
-    await flushMicrotasks()
-    assert.equal(verdict?.veto, true, `${attr} must be vetoed`)
-    assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
-    assert.equal(h.controller.kernel.doc.revision, revision)
-  }
-  assert.ok(h.notifications.length >= 1, 'the refusal notifies')
+  const cleared = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'caption', ''))
+  await flushMicrotasks()
+  assert.equal(cleared?.veto, true, 'the unrepresentable clear must be vetoed')
+  assert.equal(h.controller.kernel.doc.text, md, 'kernel bytes untouched')
+  assert.equal(h.controller.kernel.doc.revision, revision)
+  assert.ok(h.notifications.some((n) => n.includes('empty-image-caption-unrepresentable')),
+    `the shadowed clear must carry its NAMED code, got ${JSON.stringify(h.notifications)}`)
 }
 
 // 22e: PER-PAIR DEGRADATION. An image whose raw span carries a line ending

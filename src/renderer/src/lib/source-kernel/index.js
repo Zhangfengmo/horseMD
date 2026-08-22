@@ -99,5 +99,24 @@ export const KERNEL_CODES = Object.freeze({
   // hides two real remedies. Was the anonymous half of `INPUT_TYPE`; the
   // 2026-08-19 write-path pass deferred it as "needs the app instrumented to
   // dump tr.steps".
-  HEADING_DEMOTE: 'heading-demote-unsupported'
+  HEADING_DEMOTE: 'heading-demote-unsupported',
+  // A caption edit whose source slots are claimed by the ratio-in-alt scheme
+  // (commands/image-attrs.js CAPTION ADR): either the image-block is
+  // genuinely resized (raw alt = numeric ratio, raw title = caption), or the
+  // write would FLIP the parse into that reading (a numeric alt gaining a
+  // title). Refused at classification, commit AND command; the remedy is
+  // concrete (restore original size, or edit in source mode), so it is named.
+  IMAGE_CAPTION_SCALED: 'image-caption-scaled',
+  // Clearing an image-block caption while the image has alt text: the
+  // projection is `caption: title || alt` (editor-image-markdown.js), so no
+  // byte spelling shows "alt present, caption empty" — the alt would shadow
+  // straight back into the caption slot. Same family as EMPTY_TASK: the
+  // state itself is unrepresentable, and the refusal names the exits.
+  IMAGE_CAPTION_EMPTY: 'empty-image-caption-unrepresentable',
+  // The drag-resize gesture (an image-block `ratio` AttrStep). Persisting a
+  // resize means rewriting alt to a numeric ratio and migrating the caption
+  // into the title slot — a multi-slot byte scheme the kernel deliberately
+  // does not own (see the CAPTION ADR). A NAMING code only: the refusal
+  // itself predates it, this gives the toast the gesture and its exits.
+  IMAGE_RESIZE: 'image-resize-unsupported'
 })

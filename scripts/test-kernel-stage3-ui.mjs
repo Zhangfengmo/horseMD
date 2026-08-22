@@ -141,6 +141,13 @@ const S6 = S5.replace(`[伍陆柒捌](${LINK_URL})`, '伍陆柒捌')
 const IMG_SRC = 'https://z.example/pic.png'
 const S7 = S6.replace('![]()', `![](${IMG_SRC})`)
 const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
+// kernel/image-caption: the caption AttrStep is a REAL byte edit on an
+// unscaled image-block now — it commits into the markdown TITLE slot (the
+// legacy byte home, editor-image-markdown.js `caption: title || alt`). It
+// runs AFTER the alt probe so the alt-staleness proof (one repaired
+// projection-mismatch, see the header) keeps its title-less precondition.
+const IMG_CAPTION = '图注入源'
+const S8cap = S8.replace('![新说明](./stage3.svg)', `![新说明](./stage3.svg "${IMG_CAPTION}")`)
 // The three "this block is really MAPPED" commits (step 10). S10/S11 are
 // paragraph-END Enters: `splitTextBlock`'s non-quoted branch inserts
 // `ending + ending` at the caret, i.e. exactly one extra blank line.
@@ -162,7 +169,7 @@ const S8 = S7.replace('![说明](./stage3.svg)', '![新说明](./stage3.svg)')
 // into the formula's CodeMirror and requires the byte commit, which is a
 // STRONGER statement than the old refusal: only a genuinely mapped block can
 // produce it.
-const S8m = S8.replace('E=mc^2', 'E=mc^2X')
+const S8m = S8cap.replace('E=mc^2', 'E=mc^2X')
 const S8b = S8m.replace('行内公式 $x^2$ 结束。', '行内公式 $x^2$ 结束。W')
 const S9 = S8b.replace('已有==高亮==片段。', '已有==高亮==片段。Y')
 const S10 = S9.replace('行内公式 $x^2$ 结束。W\n', '行内公式 $x^2$ 结束。W\n\n\n')
@@ -818,37 +825,16 @@ async function run() {
 
     // ============================================================
     // 8) IMAGE (b): the `alt` AttrStep, dispatched directly (no UI exists —
-    //    see resolveView's comment). Fail-closed control FIRST: `caption`
-    //    is PM display state with no source expression and must be refused
-    //    with zero bytes written.
+    //    see resolveView's comment), THEN the `caption` AttrStep — a real
+    //    byte edit since kernel/image-caption (the alt goes first so its
+    //    staleness proof keeps the title-less precondition; a title would
+    //    pin the derived caption and erase the mismatch this step exists to
+    //    measure).
     // ============================================================
-    await resolveView(evaluate)
-    const captionResult = await evaluate(`(() => {
-      const v = window.__hmStage3View
-      let pos = null
-      v.state.doc.forEach((node, p) => { if (node.type.name === 'image-block' && node.attrs.alt === '说明') pos = p })
-      if (pos === null) return 'no-image-block'
-      v.dispatch(v.state.tr.setNodeAttribute(pos, 'caption', '不该落盘'))
-      return 'dispatched'
-    })()`)
-    assert.equal(captionResult, 'dispatched', 'the block image with alt="说明" must be present for the caption probe')
-    await sleep(400)
-    // "Zero bytes" alone does NOT discriminate a veto from a silently
-    // ACCEPTED display-only attribute (caption has no source expression, so
-    // an accepted one would also write nothing). The veto is observable in
-    // the view: `editor-kernel-gateway.js` blocks caption/ratio, and the
-    // dispatch-veto protocol discards the whole transaction — so the LIVE
-    // node must still carry its original caption. (The repaired-caption
-    // assertion after the alt commit below cannot retro-prove this: the
-    // repair reconcile would produce the parse-derived value either way.)
-    assert.equal((await imageBlockAttrs(evaluate, '说明'))?.caption, '说明',
-      'the caption AttrStep must be VETOED, not merely byte-neutral: the live node keeps its original caption')
-    await assertSource(evaluate, S7, 'a caption AttrStep must be refused fail-closed: zero bytes')
-
     // Everything from the first commit up to here — table cell, Tab,
-    // highlight wrap/unwrap, three link flows, the image `src` commit and
-    // this refusal — must not have produced a SINGLE further
-    // projection-mismatch beyond the tolerated first-commit table repair.
+    // highlight wrap/unwrap, three link flows and the image `src` commit —
+    // must not have produced a SINGLE further projection-mismatch beyond the
+    // tolerated first-commit table repair.
     assert.equal(await mismatchCount(evaluate), mismatchesAfterFirstCommit,
       'no interaction up to the image src commit may produce a further projection-mismatch')
 
@@ -861,7 +847,7 @@ async function run() {
       v.dispatch(v.state.tr.setNodeAttribute(pos, 'alt', '新说明'))
       return 'dispatched'
     })()`)
-    assert.equal(altResult, 'dispatched', 'the caption refusal must not have disturbed the image node (positive control)')
+    assert.equal(altResult, 'dispatched', 'the block image with alt="说明" must be present for the alt probe')
     await sleep(400)
     assert.equal(app.dialogs.length, 0, 'no dialog from the image alt rewrite')
     await assertSource(evaluate, S8, 'an alt AttrStep must rewrite ONLY the image label bytes')
@@ -884,6 +870,32 @@ async function run() {
     assert.ok(repairedImage, 'the live image-block must carry the new alt after the commit')
     assert.equal(repairedImage.caption, '新说明',
       'the repair reconcile must have refreshed the parse-derived caption to match the new alt')
+
+    // 8b) CAPTION: commits into the markdown TITLE slot — the legacy byte
+    //    home (`caption: title || alt`). Unlike alt, the pass-through costs
+    //    ZERO further mismatches: the AttrStep already put the caption in
+    //    the view and the fresh parse of the committed bytes derives the
+    //    same value, so view and projection agree by construction. (The
+    //    scaled-image refusal and the shadowed-clear refusal are pinned in
+    //    test-kernel-image-caption-ui.mjs against real caption-input
+    //    gestures, and headlessly in gateway I4b/I5/I6b and mode 22d2.)
+    await resolveView(evaluate)
+    const captionResult = await evaluate(`(() => {
+      const v = window.__hmStage3View
+      let pos = null
+      v.state.doc.forEach((node, p) => { if (node.type.name === 'image-block' && node.attrs.alt === '新说明') pos = p })
+      if (pos === null) return 'no-image-block'
+      v.dispatch(v.state.tr.setNodeAttribute(pos, 'caption', ${JSON.stringify(IMG_CAPTION)}))
+      return 'dispatched'
+    })()`)
+    assert.equal(captionResult, 'dispatched', 'the repaired image must be present for the caption edit')
+    await sleep(400)
+    assert.equal(app.dialogs.length, 0, 'no dialog from the caption edit')
+    await assertSource(evaluate, S8cap, 'the caption must commit into the TITLE slot — and nothing else may move')
+    assert.equal((await imageBlockAttrs(evaluate, '新说明'))?.caption, IMG_CAPTION,
+      'the live node carries the committed caption (the AttrStep passed through)')
+    assert.equal(await mismatchCount(evaluate), mismatchesAfterAlt,
+      'a caption commit must cost ZERO further projection-mismatches — view and projection agree by construction')
 
     // ============================================================
     // 9) MATH. Block math is MAPPED AND EDITABLE since 2026-08-18 (see the
@@ -1143,7 +1155,7 @@ async function run() {
       'the compact table must reach disk with its structure intact')
     await assertNoFatalDiagnostics(evaluate, 'compact-table session')
 
-    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the block-math byte commit, the inline-math cross-block refusal, the link-boundary bold refusal, save, cold reopen, the CRLF variant and the compact-table backslash refusal all match the kernel-derived byte strings')
+    console.log('PASS kernel-mode stage-3 domains UI regression: a document mixing inline+block math, inline HTML, a highlight, a table, two images and a link attaches LIVE, then table cell editing, Tab navigation, the highlight swatch, the link wrap/edit/remove flows, the image src input, the image alt AttrStep, the caption commit into the title slot, the block-math byte commit, the inline-math cross-block refusal, the link-boundary bold refusal, save, cold reopen, the CRLF variant and the compact-table backslash refusal all match the kernel-derived byte strings')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
