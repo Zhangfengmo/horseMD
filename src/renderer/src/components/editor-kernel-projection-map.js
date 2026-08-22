@@ -701,7 +701,12 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
         pmPos: pm.pos,
         charMap: virtualCharMap(pendingMatch.rawOffset),
         virtual: true,
-        insertPrefix: ''
+        // '' for the split/doc-end sessions (their separator bytes already
+        // exist); the QUOTED list-exit voucher passes '\n> ' so the committed
+        // body line stays SEPARATED from the list (a bare `> text` line right
+        // after `> - item` is a lazy continuation CommonMark absorbs into the
+        // item — measured, 2026-08-22).
+        insertPrefix: pendingMatch.insertPrefix ?? ''
       })
       continue
     }

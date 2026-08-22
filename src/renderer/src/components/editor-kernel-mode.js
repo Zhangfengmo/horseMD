@@ -1427,7 +1427,7 @@ export function createKernelMode({
   // `ensureSplitPlaceholder` (Enter's degenerate split, insert after the
   // ORIGIN textblock) and `runExitCode` (Mod-Enter code-block exit, insert
   // after the CODE BLOCK node).
-  const materializePlaceholder = (view, insertPos, rawOffset) => {
+  const materializePlaceholder = (view, insertPos, rawOffset, insertPrefix = '') => {
     try {
       const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
       if (!paragraph) return false
@@ -1437,7 +1437,7 @@ export function createKernelMode({
       tr.setMeta('addToHistory', false)
       if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
       view.dispatch(tr)
-      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset })) return true
+      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset, insertPrefix })) return true
       // Could not prove the vouched pairing: remove the placeholder again
       // and rebind plain.
       pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
@@ -2603,7 +2603,21 @@ export function createKernelMode({
               if ($p.node(d).type.name === 'blockquote') { quoteDepth = d; break }
             }
             const insertPos = quoteDepth ? $p.end(quoteDepth) : $p.after(1)
-            materializePlaceholder(view, insertPos, exitAnchor)
+            // The commit prefix keeps the body line SEPARATED from the list:
+            // the exit left `> ` on the anchor's line, and committing straight
+            // into it makes a lazy continuation CommonMark absorbs into the
+            // item. Prefixing `\n> ` (the anchor line's own quote prefix,
+            // ending-spelled like the previous line) turns that line into the
+            // blank-quote separator and opens a fresh body line. Outside
+            // quotes the line prefix is empty and this stays ''.
+            const text = kernel.doc.text
+            const lineStart = text.lastIndexOf('\n', exitAnchor - 1) + 1
+            const linePrefix = text.slice(lineStart, exitAnchor)
+            const ending = lineStart >= 2 && text[lineStart - 2] === '\r' ? '\r\n' : '\n'
+            const insertPrefix = /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
+              ? ending + linePrefix
+              : ''
+            materializePlaceholder(view, insertPos, exitAnchor, insertPrefix)
           } catch {
             pushKernelDiagnostic({ type: 'exit-placeholder-failed', rawOffset: exitAnchor })
           }

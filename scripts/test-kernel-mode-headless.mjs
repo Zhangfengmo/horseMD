@@ -306,7 +306,7 @@ const FIXTURE_DOCS = {
   '> - x\n': () => doc(bq(bl(li(null, p(text('x')))))),
   '> - 牛\n> - \n': () => doc(bq(bl(li(null, p(text('牛'))), li(null, p())))),
   '> - 牛\n> \n': () => doc(bq(bl(li(null, p(text('牛')))))),
-  '> - 牛\n> x\n': () => doc(bq(bl(li(null, p(text('牛')))), p(text('x')))),
+  '> - 牛\n> \n> x\n': () => doc(bq(bl(li(null, p(text('牛')))), p(text('x')))),
   // Case IQ1-IQ3 (2026-08-22): block INSERTS inside a blockquote — every
   // continuation line carries the `> ` prefix byte-for-byte (code-map's own
   // per-line requirement), and the created block is typable in place.
@@ -4640,7 +4640,8 @@ const toggleVia = (h, markType, from, to) => {
   const verdict = dispatchThrough(h, tr)
   await flushMicrotasks()
   assert.ok(!verdict?.veto, 'typing in the placeholder must commit')
-  assert.equal(h.controller.kernel.doc.text, '> - 牛\n> x\n', 'the typed character becomes the quote body line')
+  assert.equal(h.controller.kernel.doc.text, '> - 牛\n> \n> x\n',
+    'the typed character becomes a SEPARATED quote body line (the blank-quote line keeps it out of the list)')
 }
 
 console.log('PASS kernel mode headless')
