@@ -58,7 +58,9 @@ import {
   demoteHeadingAtCaret,
   looksLikeAtxContentStart,
   insertBlockFromQuery,
-  toggleInlineMark
+  toggleInlineMark,
+  wrapReviewMarkup,
+  resolveReviewMarker
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
@@ -2719,6 +2721,118 @@ export function createKernelMode({
     return true
   }
 
+  // CriticMarkup review commands (review domain). CriticMarkup is PLAIN TEXT
+  // syntax, so in kernel mode each review command is a raw-byte edit at a
+  // proven offset (lib/source-kernel/commands/review-markup.js owns the byte
+  // spellings — shared with legacy via reviewMarkup.js — and the reparse
+  // proof). Two entry points reach these:
+  //  * `runReviewWrap` — apiOverrides.applyReviewMarkup below (the selection
+  //    toolbar's review picker + the app menu, both of which call the editor
+  //    API surface).
+  //  * `runReviewResolve` — the review CARD's Done/Delete/Edit actions
+  //    (editor-review-card.js), which in legacy dispatch a PM insertText the
+  //    gateway could only refuse; in kernel mode the card branches here via
+  //    the decoration plugin's `kernelReview` option (editor-crepe-setup.js)
+  //    BEFORE any PM dispatch, so the gateway's fail-closed net for unrouted
+  //    review transactions stays exactly as it was.
+  // Accept/reject-ALL needs no kernel entry point at all: it is a
+  // whole-document string rewrite of tab.content (kept current by onChange on
+  // every kernel commit) plus a reloadNonce remount, which re-attaches the
+  // kernel on the resolved bytes — no PM transaction is ever dispatched.
+  const REVIEW_INLINE_ONLY = 'review-inline-only'
+  const notifyReviewInlineOnly = () => {
+    // Same message the legacy paths raise for a multiline selection
+    // (review.inlineOnly), with notifyBlocked's own cooldown bookkeeping.
+    const now = Date.now()
+    if (now - (lastNotifyAt.get(REVIEW_INLINE_ONLY) || 0) < NOTIFY_COOLDOWN_MS) return
+    lastNotifyAt.set(REVIEW_INLINE_ONLY, now)
+    notify?.(tOr('review.inlineOnly', 'Review markup works on a single-line selection'))
+  }
+  const runReviewWrap = (kind, selectionRange = null) => {
+    if (inactive()) return null
+    const view = getView?.()
+    if (!view || !kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return false
+    }
+    let from = view.state.selection.from
+    let to = view.state.selection.to
+    if (Number.isFinite(selectionRange?.anchor) && Number.isFinite(selectionRange?.head)) {
+      from = Math.min(selectionRange.anchor, selectionRange.head)
+      to = Math.max(selectionRange.anchor, selectionRange.head)
+    }
+    // A selection spanning blocks is the legacy 'multiline' refusal — say so
+    // with the same message instead of a generic unmapped toast.
+    try {
+      if (view.state.doc.textBetween(from, to, '\n').includes('\n')) {
+        notifyReviewInlineOnly()
+        return false
+      }
+    } catch {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return false
+    }
+    const pair = editablePairForRange(from, to)
+    if (!pair) {
+      notifyRefusal(KERNEL_CODES.UNMAPPED, from)
+      return false
+    }
+    const contentPos = pair.pmPos + 1
+    const routed = wrapReviewMarkup({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      map: pair.charMap,
+      visFrom: from - contentPos,
+      visTo: to - contentPos,
+      kind
+    })
+    if (!routed.ok) {
+      if (routed.code === 'review-multiline') notifyReviewInlineOnly()
+      else notifyBlocked(routed.code)
+      return false
+    }
+    const applied = applyKernelTransaction(routed.transaction, view, { requireMap: true })
+    if (applied) view.focus?.()
+    return applied
+  }
+  const runReviewResolve = ({ annotation, action, replacement } = {}) => {
+    // `null` = "kernel not the owner": the card falls back to its legacy PM
+    // dispatch (degraded/legacy tabs). Any boolean means the kernel owned the
+    // action (true = committed, false = refused with its own toast).
+    if (inactive()) return null
+    const view = getView?.()
+    if (!view || !kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return false
+    }
+    if (!annotation ||
+        !Number.isFinite(annotation.from) || !Number.isFinite(annotation.to)) {
+      notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+      return false
+    }
+    const pair = editablePairForRange(annotation.from, annotation.to)
+    if (!pair) {
+      notifyRefusal(KERNEL_CODES.UNMAPPED, annotation.from)
+      return false
+    }
+    const contentPos = pair.pmPos + 1
+    const routed = resolveReviewMarker({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      map: pair.charMap,
+      visFrom: annotation.from - contentPos,
+      visTo: annotation.to - contentPos,
+      expected: { text: annotation.text, comment: annotation.comment },
+      action,
+      replacement
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return false
+    }
+    return applyKernelTransaction(routed.transaction, view, { requireMap: true })
+  }
+
   // Slash-only entry point (Plan 4 Task 5, real-bug fix — found while
   // building this item's first genuine end-to-end UI regression; probe
   // transcript in the task report). `shouldShow` (editor-slash-menu.js) only
@@ -3251,12 +3365,19 @@ export function createKernelMode({
       }
       return impl(...args)
     },
-    // Review markup stays refused: CriticMarkup spans are not a kernel
-    // domain yet. (In degraded mode the legacy implementation owns it.)
-    applyReviewMarkup: (...args) => {
+    // Review markup (review domain): the wrap routes through the kernel as a
+    // raw-byte edit (runReviewWrap above). Substitution and non-literal
+    // selections keep their own named refusals inside the command; a degraded
+    // tab still delegates to the captured legacy implementation.
+    applyReviewMarkup: (kind, selectionRange = null) => {
       const delegate = legacy('applyReviewMarkup')
-      if (delegate) return delegate(...args)
-      return notifyUnsupportedApi('applyReviewMarkup')
+      if (delegate) return delegate(kind, selectionRange)
+      const handled = runReviewWrap(kind, selectionRange)
+      // `null` means the kernel is not attached yet (and not degraded —
+      // otherwise the delegate above would have run): refuse loudly rather
+      // than silently dropping the command.
+      if (handled === null) return notifyUnsupportedApi('applyReviewMarkup')
+      return handled
     }
   }
 
@@ -3300,6 +3421,12 @@ export function createKernelMode({
     runQuoteToggleFromQuery,
     runBlockTypeFromQuery,
     runInsertBlockFromQuery,
+    // CriticMarkup review (review domain): the wrap is reached through
+    // apiOverrides.applyReviewMarkup; the resolve is handed to the review
+    // decoration plugin's card actions via editor-crepe-setup.js's
+    // `kernelReview` option.
+    runReviewWrap,
+    runReviewResolve,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's
