@@ -148,6 +148,32 @@ async function run() {
     const freshDiag2 = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).map((d) => d.type))`)
     assert.ok(!freshDiag2.includes('attach-unmappable'),
       `still no degradation after typing: ${freshDiag2}`)
+
+    // The everyday list gesture right after the body line: Enter -> `- ` ->
+    // text. The `-` restructures into a bare item (the DESIGNED
+    // map-refresh/projection-mismatch transient), and the completing SPACE is
+    // a KEYMAP route — it must be driven as a real keydown (`Input.insertText`
+    // never reaches spaceHandler; that driver artifact once masqueraded as a
+    // kernel corruption — see ai-handoff §5.2d's autopsy note).
+    const keyType = async (ch, code, vk) => {
+      const common = { key: ch, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...common, text: ch })
+      await sleep(30)
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+      await sleep(450)
+    }
+    await pressKey(send, { key: 'Enter', code: 'Enter' })
+    await sleep(400)
+    await keyType('-', 'Minus', 189)
+    await keyType(' ', 'Space', 32)
+    await typeTextLikeUser(send, '清单项', { delayMs: delay })
+    await sleep(500)
+    const listBlocks = await evaluate(`JSON.stringify([...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName.toLowerCase() + ':' + (n.textContent || '').replace(/\\s+/g, '')))`)
+    assert.ok(listBlocks.includes('ul:清单项'),
+      `Enter then '- ' then text must form a real list item under the kernel default, got ${listBlocks}`)
+    const freshDiag3 = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).map((d) => d.type))`)
+    assert.ok(!freshDiag3.includes('attach-unmappable') && !freshDiag3.includes('block-read-only'),
+      `the list gesture must not strand a read-only block: ${freshDiag3}`)
     // Back to the file tab for the toggle-off leg below.
     await evaluate(`(() => {
       const tab = [...document.querySelectorAll('.tab')].find((t) => (t.textContent || '').includes('default'))
