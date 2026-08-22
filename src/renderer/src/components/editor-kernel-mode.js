@@ -2571,7 +2571,44 @@ export function createKernelMode({
       }
     }
     if (routed.ok) {
-      applyKernelTransaction(routed.transaction, view)
+      const exitIntent = routed.transaction.intent === 'exit-empty-list-item'
+      const exitAnchor = routed.transaction.selection?.anchor
+      if (!applyKernelTransaction(routed.transaction, view)) return true
+      // QUOTED EXIT LANDS A TYPABLE CARET (2026-08-22). Exiting an empty item
+      // inside a blockquote leaves `> ` — a line the reparse DROPS, so the
+      // anchor has no projection home and the caret was tossed to wherever
+      // the reconcile put it ("跳到下一行"). The native answer is the vouched
+      // split-placeholder session (the same one Enter's gap and /text ride):
+      // when the exit's anchor is unmappable, materialize the placeholder at
+      // the enclosing quote's content end (or after the enclosing top-level
+      // node outside quotes — the doc-end case already maps through the
+      // trailing machinery and skips this by the rawToPmPos guard). Typing
+      // there commits prefix-less at the anchor: `> 正文`, the quote-body
+      // line. materializePlaceholder is itself fail-closed — an unprovable
+      // voucher removes the node again and rebinds plain.
+      if (exitIntent && Number.isFinite(exitAnchor) &&
+          kernel.map && !kernel.map.rawToPmPos(exitAnchor)) {
+        let probe = exitAnchor
+        let mapped = null
+        while (probe > 0 && !mapped) {
+          probe -= 1
+          mapped = kernel.map.rawToPmPos(probe)
+        }
+        if (mapped && Number.isFinite(mapped.pos)) {
+          try {
+            const docNode = view.state.doc
+            const $p = docNode.resolve(Math.max(0, Math.min(mapped.pos, docNode.content.size)))
+            let quoteDepth = 0
+            for (let d = $p.depth; d > 0; d -= 1) {
+              if ($p.node(d).type.name === 'blockquote') { quoteDepth = d; break }
+            }
+            const insertPos = quoteDepth ? $p.end(quoteDepth) : $p.after(1)
+            materializePlaceholder(view, insertPos, exitAnchor)
+          } catch {
+            pushKernelDiagnostic({ type: 'exit-placeholder-failed', rawOffset: exitAnchor })
+          }
+        }
+      }
       return true
     }
     // Every refused structural key leaves a CONTENT-FREE breadcrumb: the key,

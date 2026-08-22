@@ -304,6 +304,9 @@ const FIXTURE_DOCS = {
   '> /ul\n': () => doc(bq(p(text('/ul')))),
   '> - \n': () => doc(bq(bl(li(null, p())))),
   '> - x\n': () => doc(bq(bl(li(null, p(text('x')))))),
+  '> - 牛\n> - \n': () => doc(bq(bl(li(null, p(text('牛'))), li(null, p())))),
+  '> - 牛\n> \n': () => doc(bq(bl(li(null, p(text('牛')))))),
+  '> - 牛\n> x\n': () => doc(bq(bl(li(null, p(text('牛')))), p(text('x')))),
   // Case IQ1-IQ3 (2026-08-22): block INSERTS inside a blockquote — every
   // continuation line carries the `> ` prefix byte-for-byte (code-map's own
   // per-line requirement), and the created block is typable in place.
@@ -4597,6 +4600,47 @@ const toggleVia = (h, markType, from, to) => {
   await flushMicrotasks()
   assert.ok(!globalThis.__hmKernelDiagnostics.some((d) => d.type === 'refusal-self-heal'),
     'a coherent split must not trigger the self-heal')
+}
+
+// Case QX: QUOTED EMPTY-ITEM EXIT LANDS A TYPABLE CARET (2026-08-22, user:
+// the last item's Enter/Backspace exit "jumps to the next line" inside a
+// quote). The exit's own bytes leave `> ` — a line the reparse DROPS, so the
+// anchor has no projection home and the caret was tossed. The native answer
+// is the vouched split-placeholder session: after an exit whose anchor is
+// unmappable, the controller materializes the placeholder at the quote's
+// content end; the first typed character commits prefix-less at the anchor —
+// `> x`, the quote-body line the user wanted.
+{
+  const h = makeHarness('> - 牛\n> - \n', doc(bq(bl(li(null, p(text('牛'))), li(null, p())))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  globalThis.__hmKernelDiagnostics = []
+  // Caret inside the empty second item (its paragraph position).
+  const emptyItemPos = (() => {
+    let pos = null
+    h.view.state.doc.descendants((node, p2) => {
+      if (node.type.name === 'paragraph' && node.content.size === 0) pos = p2 + 1
+      return true
+    })
+    return pos
+  })()
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, emptyItemPos)))
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  await flushMicrotasks()
+  assert.equal(h.controller.kernel.doc.text, '> - 牛\n> \n', 'the exit deletes the marker, keeps the quote prefix')
+  // The vouched placeholder stands INSIDE the quote, and the caret sits in it.
+  const viewDoc = h.view.state.doc
+  const quote = viewDoc.firstChild
+  assert.equal(quote.type.name, 'blockquote')
+  assert.equal(quote.lastChild.type.name, 'paragraph', 'the placeholder paragraph is the quote body line')
+  assert.equal(quote.lastChild.content.size, 0)
+  const sel = h.view.state.selection
+  assert.ok(sel.$from.parent === quote.lastChild, 'the caret sits in the placeholder')
+  // Typing commits at the vouched anchor: the quote-body line.
+  const tr = h.view.state.tr.insertText('x', sel.from)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.ok(!verdict?.veto, 'typing in the placeholder must commit')
+  assert.equal(h.controller.kernel.doc.text, '> - 牛\n> x\n', 'the typed character becomes the quote body line')
 }
 
 console.log('PASS kernel mode headless')
