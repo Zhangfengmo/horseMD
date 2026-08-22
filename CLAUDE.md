@@ -429,15 +429,19 @@ guide/                 VitePress user tutorial + versioned current-app screensho
 - **Source-authoritative kernel** (`editor-kernel-mode.js` + `editor-kernel-gateway.js`
   + `editor-kernel-reconciler.js` + `editor-kernel-projection-map.js` +
   `editor-kernel-cm-bridge.js` + `src/renderer/src/lib/source-kernel/`):
-  an experimental, **per-tab, default-OFF** alternate editing architecture
-  (toggled from the ▾ menu next to the status-bar rich/source button;
-  **persisted per tab in the session since 2026-08-22** — path tabs by path,
-  scratch tabs on their `untitled` entries. It used to be session-only, and a
-  restart silently dropped every kernel tab back to LEGACY, whose save
-  boundary demotes a kernel-written seeded task item to the literal-"[ ]"
-  spelling — measured corruption, locked by
-  `test:kernel-restart-persistence-ui`. Removing legacy outright is the
-  recorded direction; this persistence is its first step). Markdown source bytes are the sole authority — a PM transaction
+  the **DEFAULT editing architecture since 2026-08-22** (per-tab; the ▾ menu
+  next to the status-bar rich/source button toggles a tab back to legacy, and
+  that choice persists in the session as an EXCEPTION — `kernelExceptionPaths`
+  + `untitled[].kernelException`. The TEST HARNESS passes
+  `--horsemd-legacy-default` (electron-test-app.mjs) so every legacy-pinned
+  suite keeps its meaning while the matrix migrates; a suite that wants the
+  shipped default passes `kernelDefault: true`. History: the flag was
+  session-only first — a restart silently dropped kernel tabs into LEGACY,
+  whose save boundary demotes a kernel-written seeded task item to the
+  literal-"[ ]" spelling (measured corruption) — then persisted, then the
+  default flipped. Locked by `test:kernel-restart-persistence-ui` +
+  `test:kernel-default-on-ui`. Removing legacy code outright is the recorded
+  direction; default-on is its second step). Markdown source bytes are the sole authority — a PM transaction
   is classified, mapped to a raw-byte edit via a `charMap` built by re-parsing
   the live document, and committed to source directly; anything unprovable
   vetoes fail-closed (`{ veto: true }`, PM view untouched — a swallowed

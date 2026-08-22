@@ -68,6 +68,12 @@ export async function launchBuiltElectron({
   executable = electronPath,
   entrypoint = 'out/main/index.cjs',
   background = true,
+  // MIGRATION BRIDGE (2026-08-22): the app's product default is the source
+  // KERNEL; the harness passes `--horsemd-legacy-default` unless a suite opts
+  // into the shipped default with `kernelDefault: true`. This keeps every
+  // legacy-pinned suite meaningful while the matrix migrates — the kernel
+  // suites are unaffected either way (they enable kernel mode explicitly).
+  kernelDefault = false,
   env = process.env
 }) {
   if (cleanProfile && profileDir) await rm(profileDir, { recursive: true, force: true })
@@ -81,6 +87,7 @@ export async function launchBuiltElectron({
     `--remote-debugging-port=${port}`,
     ...(entrypoint ? [entrypoint] : []),
     ...(background ? ['--horsemd-test-background'] : []),
+    ...(kernelDefault ? [] : ['--horsemd-legacy-default']),
     ...appArgs
   ], {
     cwd,

@@ -20,6 +20,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const MD_EXTS = ['md', 'markdown', 'mdx', 'txt']
 const MD_RE = new RegExp(`\\.(${MD_EXTS.join('|')})$`, 'i')
 const backgroundTestMode = process.argv.includes('--horsemd-test-background')
+// The source kernel is the DEFAULT editing architecture (2026-08-22). This
+// flag flips the default back to legacy — a TEST-HARNESS bridge only
+// (scripts/lib/electron-test-app.mjs passes it so the legacy-pinned suites
+// keep their meaning while they migrate); production launches never carry it.
+const legacyDefaultMode = process.argv.includes('--horsemd-legacy-default')
 
 let mainWindow = null
 // When true, the window is allowed to close without re-prompting (the renderer
@@ -173,7 +178,10 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: true,
-      backgroundThrottling: !backgroundTestMode
+      backgroundThrottling: !backgroundTestMode,
+      // The renderer reads this from its own argv in the preload (the flag is
+      // main-process argv; additionalArguments is the sanctioned channel).
+      additionalArguments: legacyDefaultMode ? ['--horsemd-legacy-default'] : []
     }
   })
 

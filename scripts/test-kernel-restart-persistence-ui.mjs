@@ -96,7 +96,7 @@ async function run() {
       const { evaluate, send } = app
       await waitFor(() => evaluate(`(${VISIBLE_EDITOR})?.textContent?.includes('非常棒')`), 'mount')
       await toggleKernelMode(evaluate)
-      await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`), 'kernel mode on')
+      await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`), 'kernel mode on')
       await sleep(400)
 
       await clickAt(evaluate, send, '非常棒', 3)
@@ -122,7 +122,7 @@ async function run() {
     {
       const { evaluate, send } = app
       await waitFor(() => evaluate(`(${VISIBLE_EDITOR})?.textContent?.includes('非常棒')`), 'session tab did not restore')
-      await waitFor(() => evaluate(`!!document.querySelector('.hm-kernel-mode')`),
+      await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`),
         'the restored tab must come back IN KERNEL MODE (the flag survives the restart)')
       await sleep(400)
 

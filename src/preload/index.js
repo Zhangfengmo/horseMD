@@ -131,6 +131,12 @@ const api = {
 
   platform: process.platform,
 
+  // TRUE only under the test harness's `--horsemd-legacy-default` bridge
+  // (delivered via webPreferences.additionalArguments): the source kernel is
+  // the product default; this flag flips new tabs back to legacy so the
+  // legacy-pinned suites keep their meaning while they migrate.
+  legacyDefault: process.argv.includes('--horsemd-legacy-default'),
+
   // Feature capabilities for the renderer to gate UI uniformly across desktop /
   // mobile (mobile provides its own set via the Capacitor shim). Exposed HERE,
   // not added later in the renderer: contextBridge freezes this object, so

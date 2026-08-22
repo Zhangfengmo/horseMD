@@ -28,7 +28,7 @@ export default function EditorArea({
   sourceRichSplitRatio,
   richPreviewState,
   richForced,
-  kernelModeIds,
+  isKernelOn,
   onKernelStatus,
   mountedIds,
   activeTab,
@@ -104,7 +104,7 @@ export default function EditorArea({
         // Source-kernel mode (Plan 2, Task 8): only a real rich-eligible tab
         // can run the kernel — a plain-text doc or an un-opted-into heavy doc
         // never mounts a Crepe host to attach it to.
-        const sourceKernelMode = !!kernelModeIds?.has(tab.id) && !plainText && !heavyAsSource
+        const sourceKernelMode = !!isKernelOn?.(tab.id) && !plainText && !heavyAsSource
         const isSourceRichSplit = sourceRichSplitMode && isLeft && !plainText && !heavyAsSource
         const onPaneFocus = (pane = null) => {
           focusedTabRef.current = tab.id

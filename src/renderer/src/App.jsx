@@ -198,12 +198,20 @@ export default function App() {
   // Tab ids the user explicitly chose to render richly despite being "heavy"
   // (would otherwise open in the fast plain-text editor to avoid a long freeze).
   const [richForced, setRichForced] = useState(() => new Set())
-  // Source-kernel mode (Plan 2, Task 8): a per-tab, session-only experiment
-  // toggle. Deliberately NOT persisted to session/localStorage — this is an
-  // in-flight architecture switch, not a user preference (see docs/handoff
-  // for P2 plan). An empty Set means zero tabs are opted in, which is the
-  // default for every existing user and reproduces today's behavior exactly.
-  const [kernelModeIds, setKernelModeIds] = useState(() => new Set())
+  // Source-kernel mode. Since 2026-08-22 the kernel is the DEFAULT editing
+  // architecture for every eligible doc tab; `--horsemd-legacy-default` (the
+  // test-harness migration bridge, surfaced by the preload) flips the default
+  // back to legacy so the legacy-pinned suites keep their meaning while they
+  // migrate. `kernelExceptionIds` holds the tabs that DIFFER from the running
+  // default (user toggles + session-restored choices), so one Set serves both
+  // polarities: `isKernelTabOn` is default XOR exception. An empty Set means
+  // "everything follows the default" — kernel-on everywhere in the product.
+  const kernelDefaultOn = !window.api?.legacyDefault
+  const [kernelExceptionIds, setKernelExceptionIds] = useState(() => new Set())
+  const isKernelTabOn = useCallback(
+    (id) => kernelDefaultOn !== kernelExceptionIds.has(id),
+    [kernelDefaultOn, kernelExceptionIds]
+  )
   // Per-tab source-kernel degradation state (P6 Task 3), reported by the
   // Editor only when it actually changes. Feeds the StatusBar indicator so a
   // read-only block / a fallback to legacy stops being invisible.
@@ -653,11 +661,13 @@ export default function App() {
       fireToast(tRef.current('kernelMode.toggleFailed'), { sticky: true })
       return
     }
-    const turningOn = !kernelModeIds.has(id)
-    setKernelModeIds((prev) => {
+    const turningOn = !isKernelTabOn(id)
+    // Toggling flips this tab's membership in the exception set — correct for
+    // either polarity (under kernel-default, an exception means "legacy here").
+    setKernelExceptionIds((prev) => {
       const next = new Set(prev)
-      if (turningOn) next.add(id)
-      else next.delete(id)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
       return next
     })
     // On the dirty path getSettledMarkdownForTab already committed `md` into
@@ -674,7 +684,7 @@ export default function App() {
     tabsRef.current = bump(tabsRef.current)
     setTabs((prev) => bump(prev))
     fireToast(tRef.current(turningOn ? 'kernelMode.toggleOn' : 'kernelMode.toggleOff'))
-  }, [activeIdRef, getSettledMarkdownForTab, isKernelEligibleTab, kernelModeIds, richLoadingIds, setTabs, tabsRef, tRef])
+  }, [activeIdRef, getSettledMarkdownForTab, isKernelEligibleTab, isKernelTabOn, richLoadingIds, setTabs, tabsRef, tRef])
 
   // Source/rich view state and anchor restoration live in useSourceModeSwitch.
 
@@ -1090,8 +1100,8 @@ export default function App() {
     openPaths,
     isMobile,
     tabsRef,
-    kernelModeIds,
-    setKernelModeIds,
+    kernelExceptionIds,
+    setKernelExceptionIds,
     setActiveId,
     setTabs,
     setSidebarMode,
@@ -1332,7 +1342,7 @@ export default function App() {
             sourceRichSplitRatio={sourceRichSplitRatio}
             richPreviewState={richPreviewState}
             richForced={richForced}
-            kernelModeIds={kernelModeIds}
+            isKernelOn={isKernelTabOn}
             onKernelStatus={handleKernelStatus}
             mountedIds={mountedIds}
             activeTab={activeTab}
@@ -1473,7 +1483,7 @@ export default function App() {
         effectiveKeybindings={effectiveKeybindings}
         sourceMode={sourceMode}
         onToggleSource={toggleSourceView}
-        kernelMode={!!statusBarTab && kernelModeIds.has(statusBarTab.id)}
+        kernelMode={!!statusBarTab && isKernelTabOn(statusBarTab.id)}
         kernelStatus={statusBarTab ? kernelStatuses[statusBarTab.id] : null}
         kernelEligible={isKernelEligibleTab(statusBarTab)}
         onToggleKernelMode={toggleKernelMode}
