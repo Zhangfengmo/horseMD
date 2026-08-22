@@ -455,7 +455,12 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   narrowed, because a Vue `hidden` class on the CodeMirror host is not a byte
   fact), block math `$$..$$` (editable except `Mod-Enter` exit and the
   language switch, each refused by its own command), bold/italic/strike/
-  inline-code/quote toggle, tables, links, image `src` — and, since
+  inline-code/quote toggle, tables (cell text and, since 2026-08-22, the
+  block-handle STRUCTURAL ops — add/delete row & column, column alignment —
+  as proven byte rewrites via `commands/table-ops.js` + `runTableOperation`;
+  row/col drag-reorder stays vetoed, and `table-last-row` /
+  `table-last-column` / `table-op-unsupported` are the named refusals),
+  links, image `src` — and, since
   kernel/image-caption, the image-block CAPTION on an UNSCALED image (it
   commits into the markdown TITLE slot, legacy's own byte home; a SCALED
   image's caption, the shadowed clear, and drag-resize refuse with NAMED

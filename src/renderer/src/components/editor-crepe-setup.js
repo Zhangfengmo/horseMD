@@ -1,11 +1,20 @@
 import { Crepe, CrepeFeature as Feature } from '@milkdown/crepe'
 import {
+  commandsCtx,
   editorViewOptionsCtx,
   nodeViewCtx,
   prosePluginsCtx,
   remarkPluginsCtx,
   remarkStringifyOptionsCtx
 } from '@milkdown/kit/core'
+import {
+  addColAfterCommand,
+  addColBeforeCommand,
+  addRowAfterCommand,
+  addRowBeforeCommand,
+  deleteSelectedCellsCommand,
+  setAlignCommand
+} from '@milkdown/kit/preset/gfm'
 import { imageBlockConfig } from '@milkdown/kit/component/image-block'
 import { inlineImageConfig } from '@milkdown/kit/component/image-inline'
 import { codeBlockConfig } from '@milkdown/kit/component/code-block'
@@ -214,6 +223,58 @@ function kernelSlashInsertRoute(id) {
   if (!KERNEL_LANGUAGE_IDS.has(id)) return null
   if (!Object.hasOwn(BLOCK_INSERT_TARGETS, 'code')) return null
   return { target: 'code', language: id.slice('code:'.length) }
+}
+
+// Kernel mode: route the table block-handle's structural buttons through the
+// source kernel. The gestures live inside @milkdown/components' table-block
+// Vue component (node_modules — the `+` line handles, the row/col drag
+// handles' delete buttons, the alignment button group), and they all reach
+// the document through SIX Milkdown commands. Those command slices are
+// re-registered here AFTER crepe.create() with wrappers that consult
+// `kernelPlugins.isActive()` AT CALL TIME (a tab that degrades after mount
+// falls back to the original implementation, same convention as the slash
+// menu's isBlocked) and call `runTableOperation` — which rewrites the table's
+// SOURCE bytes and reconciles the view — instead of letting prosemirror-
+// tables dispatch the structural transaction the gateway would veto.
+//
+// Commands deliberately NOT wrapped: selectRowCommand / selectColCommand
+// (selection-only — no bytes, the gateway passes them), and moveRowCommand /
+// moveColCommand (row/col DRAG-reorder — no kernel byte command yet, so the
+// drag keeps dispatching and the gateway's veto stays as the fail-closed
+// net; the drop is refused with a toast, bytes untouched).
+//
+// Re-registration goes through CommandManager.create(key, fn) — the same
+// channel $command used to register the original, so the override is a
+// SECOND registration of the same slice id, not a monkey-patch. It must run
+// after crepe.create() (commands register during plugin init).
+export function routeTableCommandsThroughKernel(crepe, kernelPlugins) {
+  let commands
+  try {
+    commands = crepe.editor.ctx.get(commandsCtx)
+  } catch {
+    return
+  }
+  const route = (command, kind) => {
+    let original
+    try {
+      original = commands.get(command.key)
+    } catch {
+      original = null
+    }
+    if (typeof original !== 'function') return
+    commands.create(command.key, (payload) => (state, dispatch, view) => {
+      if (kernelPlugins?.isActive?.()) {
+        return !!kernelPlugins.runTableOperation?.({ kind, payload }, view)
+      }
+      return original(payload)(state, dispatch, view)
+    })
+  }
+  route(addRowBeforeCommand, 'add-row-before')
+  route(addRowAfterCommand, 'add-row-after')
+  route(addColBeforeCommand, 'add-col-before')
+  route(addColAfterCommand, 'add-col-after')
+  route(deleteSelectedCellsCommand, 'delete-selected')
+  route(setAlignCommand, 'align')
 }
 
 export function applyImageText(ctx, tt) {

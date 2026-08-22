@@ -306,32 +306,24 @@ function walkPmTable(pmTable, pmPos) {
   return ok ? rows : null
 }
 
-// buildTableCellMaps: the module's only export.
+// buildTableSourceMaps: the SOURCE-SIDE half of buildTableCellMaps, exported
+// on its own (2026-08-22, table-ops) so commands/table-ops.js can prove that
+// a candidate table it is about to write stays cell-addressable WITHOUT a
+// live ProseMirror node (a pure command has none). Same structural refusals
+// as the full zip minus the PM-shape checks; per-cell failure degrades only
+// that cell (`charMap: null`), exactly as before.
 //
-// Returns `{ cells, delimiter, width }` where `cells` is one entry per cell in
-// document order — `{ mdBlock, pmNode, pmPos, charMap }`, the exact shape the
-// projection map's `blockPairs` uses, with `charMap: null` for a cell whose
-// bytes could not be proven. Returns `null` when the TABLE as a whole cannot
-// be zipped (the caller then records the table as one opaque, non-editable
-// pair, which is the pre-Task-4 behavior and keeps the rest of the map).
-//
-// Structural refusals (whole table degrades):
+// Returns `{ cells, delimiter, width }` — one `{ mdBlock, charMap, row,
+// column }` entry per cell in document order — or `null` when the table's
+// own structure cannot be proven:
 //   * anything other than `table`/`tableRow` mdast shape;
 //   * a non-rectangular (ragged / over-wide) table — the delimiter row
-//     declares the column count and every row must match it. ProseMirror's
-//     table model is rectangular by intent (prosemirror-tables' TableMap
-//     records "problems" for a ragged table and `fixTables` — not installed
-//     here — would rewrite it), so a ragged table is exactly the shape whose
-//     PM representation this module cannot claim to know;
-//   * a header-only markdown table: `table_header_row table_row+` forces
-//     ProseMirror's `createAndFill` to invent an empty body row that has no
-//     mdast counterpart, so the row counts disagree;
-//   * any PM shape other than row -> cell -> paragraph;
+//     declares the column count and every row must match it;
 //   * a delimiter row that cannot be recovered from the bytes or disagrees
 //     with `align.length` / the header's cell count.
-export function buildTableCellMaps(text, mdTable, pmTable, pmPos) {
+export function buildTableSourceMaps(text, mdTable) {
   if (typeof text !== 'string') return null
-  if (mdTable?.type !== 'table' || !pmTable || !Number.isInteger(pmPos)) return null
+  if (mdTable?.type !== 'table') return null
   const mdRows = mdTable.children || []
   if (!mdRows.length || mdRows.some((row) => row?.type !== 'tableRow')) return null
 
@@ -350,18 +342,11 @@ export function buildTableCellMaps(text, mdTable, pmTable, pmPos) {
     if (cells.some((cell) => cell?.type !== 'tableCell')) return null
   }
 
-  const pmRows = walkPmTable(pmTable, pmPos)
-  if (!pmRows || pmRows.length !== mdRows.length) return null
-  for (let r = 0; r < pmRows.length; r += 1) {
-    if (pmRows[r].length !== width) return null
-  }
-
   const cells = []
   for (let r = 0; r < mdRows.length; r += 1) {
     const mdCells = mdRows[r].children
     for (let c = 0; c < width; c += 1) {
       const mdCell = mdCells[c]
-      const pm = pmRows[r][c]
       const charMap = buildCellCharMap(text, mdCell)
       // No cell's mapped bytes may reach the delimiter row.
       const touchesDelimiter = charMap && charMap.units.length
@@ -370,14 +355,51 @@ export function buildTableCellMaps(text, mdTable, pmTable, pmPos) {
         : false
       cells.push({
         mdBlock: mdCell,
-        pmNode: pm.pmNode,
-        pmPos: pm.pmPos,
         charMap: touchesDelimiter ? null : charMap,
-        tableCell: true,
         row: r,
         column: c
       })
     }
   }
+  return { cells, delimiter, width }
+}
+
+// buildTableCellMaps: the full source<->PM zip (the module's original export).
+//
+// Returns `{ cells, delimiter, width }` where `cells` is one entry per cell in
+// document order — `{ mdBlock, pmNode, pmPos, charMap }`, the exact shape the
+// projection map's `blockPairs` uses, with `charMap: null` for a cell whose
+// bytes could not be proven. Returns `null` when the TABLE as a whole cannot
+// be zipped (the caller then records the table as one opaque, non-editable
+// pair, which is the pre-Task-4 behavior and keeps the rest of the map).
+//
+// Structural refusals (whole table degrades): everything
+// `buildTableSourceMaps` above refuses, plus the PM side:
+//   * a header-only markdown table: `table_header_row table_row+` forces
+//     ProseMirror's `createAndFill` to invent an empty body row that has no
+//     mdast counterpart, so the row counts disagree;
+//   * any PM shape other than row -> cell -> paragraph.
+export function buildTableCellMaps(text, mdTable, pmTable, pmPos) {
+  if (!pmTable || !Number.isInteger(pmPos)) return null
+  const source = buildTableSourceMaps(text, mdTable)
+  if (!source) return null
+  const { cells: sourceCells, delimiter, width } = source
+  const mdRows = mdTable.children || []
+
+  const pmRows = walkPmTable(pmTable, pmPos)
+  if (!pmRows || pmRows.length !== mdRows.length) return null
+  for (let r = 0; r < pmRows.length; r += 1) {
+    if (pmRows[r].length !== width) return null
+  }
+
+  const cells = sourceCells.map((cell) => ({
+    mdBlock: cell.mdBlock,
+    pmNode: pmRows[cell.row][cell.column].pmNode,
+    pmPos: pmRows[cell.row][cell.column].pmPos,
+    charMap: cell.charMap,
+    tableCell: true,
+    row: cell.row,
+    column: cell.column
+  }))
   return { cells, delimiter, width }
 }

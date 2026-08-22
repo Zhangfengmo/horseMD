@@ -37,7 +37,7 @@ import { REVIEW_KINDS } from './editor-review.js'
 import { createEditorApi } from './editor-api.js'
 import { createKernelMode } from './editor-kernel-mode.js'
 import { useEditorLightboxControls } from './editor-lightbox.js'
-import { applyImageText, createConfiguredCrepe } from './editor-crepe-setup.js'
+import { applyImageText, createConfiguredCrepe, routeTableCommandsThroughKernel } from './editor-crepe-setup.js'
 import { mountEditorDomBindings } from './editor-dom-bindings.js'
 import { getCommandShortcut } from '../lib/commands/shortcut-labels.js'
 import {
@@ -1750,6 +1750,16 @@ export default function Editor({
           try { view.setProps({ editable: () => interactionReadyRef.current && !readOnlyRef.current }) } catch { /* */ }
           view.dom.contentEditable = 'false'
           view.dom.dataset.horsemdReady = 'false'
+        }
+
+        // Kernel mode: swap the table block-handle's six structural commands
+        // (add/delete row & column, alignment) for kernel-routed wrappers.
+        // Must run AFTER create() — the originals register during plugin init
+        // — and is a no-op for non-kernel editors. The wrappers read
+        // `isActive()` at call time, so a tab that later degrades to legacy
+        // falls back to the original prosemirror-tables commands.
+        if (kernelModeEnabled && kernelController) {
+          routeTableCommandsThroughKernel(crepe, kernelController)
         }
 
         // Content is in the DOM now — remove the loading skeleton SYNCHRONOUSLY
