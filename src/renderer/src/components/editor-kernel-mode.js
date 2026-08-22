@@ -2416,6 +2416,21 @@ export function createKernelMode({
     return 'handled'
   }
 
+  // Character CLASSES around a raw offset, for refusal diagnostics — shape
+  // without content (`nl` newline, `cr`, `sp` space, `tab`, `nb` U+00A0,
+  // `#`/`-`/`*`/`>`/`|`/`.`/`[`/`]`/`(`/`)` markers verbatim, `d` digit,
+  // `a` ascii letter, `u` anything else). `·` marks the caret.
+  const byteClassContext = (text, offset, span = 12) => {
+    if (typeof text !== 'string' || !Number.isFinite(offset)) return null
+    const cls = (ch) => ch === '\n' ? 'nl' : ch === '\r' ? 'cr' : ch === ' ' ? 'sp'
+      : ch === '\t' ? 'tab' : ch === '\u00A0' ? 'nb'
+      : '#-*>|.[]()'.includes(ch) ? ch
+      : /[0-9]/.test(ch) ? 'd' : /[A-Za-z]/.test(ch) ? 'a' : 'u'
+    const before = [...text.slice(Math.max(0, offset - span), offset)].map(cls)
+    const after = [...text.slice(offset, offset + span)].map(cls)
+    return [...before, '·', ...after].join(',')
+  }
+
   const structuralHandler = (key) => (state, dispatch, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -2499,6 +2514,20 @@ export function createKernelMode({
       applyKernelTransaction(routed.transaction, view)
       return true
     }
+    // Every refused structural key leaves a CONTENT-FREE breadcrumb: the key,
+    // the raw offset, the named code, and the byte-CLASS context around the
+    // caret (never the bytes themselves — the diagnostics doctrine). The
+    // HEADING_DEMOTE lesson, applied to the whole family: a generic toast on
+    // a refused Enter is undiagnosable from a screenshot without this.
+    if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+      pushKernelDiagnostic({
+        type: 'structural-refusal',
+        key,
+        offset,
+        code: routed.code,
+        context: byteClassContext(kernel.doc.text, offset)
+      })
+    }
     if (routed.code === KERNEL_CODES.NOT_STRUCTURAL) {
       // Backspace/Delete: FIRST the heading-demote gesture (top-level ATX
       // content start — see commitHeadingDemote; a heading's content start is
@@ -2528,7 +2557,15 @@ export function createKernelMode({
       // Shift-Tab outside a list has no source meaning: swallow silently.
       if (key === 'Shift-Tab') return true
       // Enter: PM's splitBlock must never run in kernel mode; anything
-      // splitTextBlock/list commands did not cover is refused loudly.
+      // splitTextBlock/list commands did not cover is refused loudly — with
+      // the same content-free breadcrumb the named refusals above leave.
+      pushKernelDiagnostic({
+        type: 'structural-refusal',
+        key,
+        offset,
+        code: KERNEL_CODES.UNSUPPORTED,
+        context: byteClassContext(kernel.doc.text, offset)
+      })
       notifyBlocked(KERNEL_CODES.UNSUPPORTED)
       return true
     }
