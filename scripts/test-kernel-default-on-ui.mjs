@@ -12,7 +12,7 @@ import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBuiltElectron, stopBuiltElectron } from './lib/electron-test-app.mjs'
 import { sleep } from './lib/cdp.mjs'
-import { typeTextLikeUser } from './lib/human-input.mjs'
+import { pressKey, typeTextLikeUser } from './lib/human-input.mjs'
 
 const root = `/tmp/horsemd-kernel-default-${process.pid}`
 const file = join(root, 'default.md')
@@ -98,6 +98,11 @@ async function run() {
   try {
     const { evaluate, send } = app
     await waitFor(() => evaluate(`(${VISIBLE_EDITOR})?.textContent?.includes('默认段落甲')`), 'product mount')
+    // The quit path runs the close guard; with a dirty scratch tab open its
+    // window.confirm would BLOCK the graceful quit, the harness would SIGKILL,
+    // and Chromium's un-flushed localStorage writes (the session!) would be
+    // lost wholesale. Auto-confirm — a clean quit is what flushes leveldb.
+    await evaluate(`(window.confirm = () => true, 1)`)
     await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`),
       'a real (flagless) launch must mount the doc tab IN KERNEL MODE with no toggle')
     await sleep(400)
@@ -112,6 +117,44 @@ async function run() {
     await saveNow(evaluate)
     assert.equal(await readFile(file, 'utf8'), '默认段落甲x\n\n默认段落乙\n',
       'a keystroke under the default-on kernel must commit bytes')
+
+    // ---- (2b) A brand-NEW untitled tab (the + button): the Typora-style
+    // synthetic-title init (empty H1 + empty paragraph) must NOT break the
+    // kernel attach — the kernel doc is seeded with the matching '# ' bytes.
+    await evaluate(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.offsetParent && (b.title || '').match(/新建|New/i))
+      btn?.click(); return !!btn
+    })()`)
+    await sleep(900)
+    const freshDiag = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).map((d) => d.type))`)
+    assert.ok(!freshDiag.includes('attach-unmappable'),
+      `a fresh untitled tab must attach the kernel (the synthetic-title init must be byte-backed): ${freshDiag}`)
+    assert.ok(await evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`),
+      'the fresh untitled tab must be in kernel mode')
+    // Title line is the caret home; type a title, then ENTER opens the body
+    // line (the kernel's universal next-line gesture — heading-final docs have
+    // no hand-faked body paragraph in kernel mode; legacy keeps its two-block
+    // init).
+    await evaluate(`(() => { (${VISIBLE_EDITOR})?.focus(); return 1 })()`)
+    await typeTextLikeUser(send, '新文档标题', { delayMs: delay })
+    await sleep(300)
+    await pressKey(send, { key: 'Enter', code: 'Enter' })
+    await sleep(300)
+    await typeTextLikeUser(send, '正文乙', { delayMs: delay })
+    await sleep(500)
+    const freshBlocks = await evaluate(`JSON.stringify([...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName.toLowerCase() + ':' + n.textContent))`)
+    assert.ok(freshBlocks.includes('h1:新文档标题') && freshBlocks.includes('p:正文乙'),
+      `typing title, Enter, body must commit through the kernel, got ${freshBlocks}`)
+    const freshDiag2 = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).map((d) => d.type))`)
+    assert.ok(!freshDiag2.includes('attach-unmappable'),
+      `still no degradation after typing: ${freshDiag2}`)
+    // Back to the file tab for the toggle-off leg below.
+    await evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.tab')].find((t) => (t.textContent || '').includes('default'))
+      tab?.click(); return !!tab
+    })()`)
+    await sleep(600)
+    await waitFor(() => evaluate(`(${VISIBLE_EDITOR})?.textContent?.includes('默认段落甲')`), 'file tab did not reactivate')
 
     // Toggling OFF is the exception — it must survive a restart.
     await toggleKernelMode(evaluate)

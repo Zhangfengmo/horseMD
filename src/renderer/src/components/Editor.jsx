@@ -393,9 +393,21 @@ export default function Editor({
     // create effect runs once): the Crepe feature set and keymap order below
     // are established at create() and cannot flip afterwards.
     const kernelModeEnabled = sourceKernelMode === true
+    // The Typora-style new-document init (below, "first line is an empty
+    // Heading 1") rewrites an EMPTY doc's view into [empty H1, empty
+    // paragraph] — view-only in legacy. The kernel's document must hold the
+    // byte spelling of that view or the attach fails on a block mismatch
+    // (bytes '' project to NO blocks) and every fresh untitled tab silently
+    // degrades to legacy (measured: 'attach-unmappable' on the + button under
+    // the kernel default). `'# '` IS that spelling: an empty ATX heading with
+    // its editable marker spacing, and the trailing empty paragraph is exactly
+    // the plugin-trailing shape the projection pairs virtually. tab.content
+    // stays '' — the kernel only publishes on a real commit, so the pristine
+    // tab is not dirty, same as legacy's init.
+    const syntheticTitleInit = !readOnly && (initialContent || '') === ''
     const kernelController = kernelModeEnabled
       ? createKernelMode({
-          initialContent: initialContent || '',
+          initialContent: syntheticTitleInit ? '# ' : (initialContent || ''),
           // Was this document loaded through the CHUNKED parse path (P6 Task
           // 5)? Passed as the fact, not re-derived from a length threshold:
           // `chunks` above IS the decision, so the controller and the loader
@@ -1938,7 +1950,15 @@ export default function Editor({
           ) {
             hasSyntheticEmptyTitle = true
             let tr = state.tr.setNodeMarkup(0, headingType, { level: 1 })
-            tr = tr.insert(tr.doc.content.size, paragraphType.create())
+            // The body paragraph below the title: in LEGACY it is hand-inserted
+            // here. In KERNEL mode it must NOT be — plugin-trailing appends its
+            // own empty paragraph after the heading, and that node is the one
+            // the projection pairs virtually and every reconcile preserves. A
+            // hand-inserted paragraph is indistinguishable at attach (the
+            // trailing tolerance pairs it) but is NOT plugin-owned, so the
+            // first commit's byte-reparse reconcile deletes it — measured: the
+            // title line swallowed the ↓-then-type body flow on fresh tabs.
+            if (!kernelModeEnabled) tr = tr.insert(tr.doc.content.size, paragraphType.create())
             // Leave the cursor in the title; the body paragraph is one ↓ / click away.
             tr = tr.setSelection(TextSelection.create(tr.doc, 1))
             view.dispatch(tr)
