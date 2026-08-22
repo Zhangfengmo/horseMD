@@ -10,6 +10,7 @@ import { setImageAttrs } from '../src/renderer/src/lib/source-kernel/commands/im
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
 import { applyLinkEdit } from '../src/renderer/src/lib/source-kernel/commands/link-toggle.js'
 import { joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
+import { deleteEmptyCodeBlock } from '../src/renderer/src/lib/source-kernel/commands/code-exit.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 import { markerFor } from '../src/renderer/src/lib/source-kernel/mark-map.js'
 
@@ -2016,6 +2017,40 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
   const tindex = buildSyntaxIndex(tsrc)
   const rt = routeStructuralKey('Backspace', { doc: tdoc, index: tindex, offset: 6, empty: true })
   assert.equal(rt.ok, false, 'an authored task seed keeps its own doctrine (no ledger entry -> content)')
+}
+
+// ---------------------------------------------------------------------------
+// deleteEmptyCodeBlock (2026-08-22): an EMPTY fence — especially as a quote's
+// LAST block — was an unremovable island (no line below to stand on, the
+// block handle hidden in kernel mode). Backspace inside the empty CM editor
+// now deletes the whole fence: the exitEmptyListItem posture, keeping the
+// line prefix so the caret machinery lands a quote-body line.
+{
+  const src = '> 甲\n> ```\n> ```\n\n# 后\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const start = src.indexOf('```')
+  const r = deleteEmptyCodeBlock({ doc, index, offset: start })
+  assert.equal(r.ok, true, 'quoted empty fence must delete: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '> 甲\n> \n\n# 后\n')
+  assert.equal(r.transaction.selection.anchor, src.indexOf('```'))
+}
+{
+  // Top-level empty fence deletes to a blank line.
+  const src = '甲\n\n```js\n```\n\n乙\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = deleteEmptyCodeBlock({ doc, index, offset: src.indexOf('```') })
+  assert.equal(r.ok, true, 'top-level empty fence must delete: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '甲\n\n\n\n乙\n')
+}
+{
+  // NON-empty fences refuse — deletion is only for the empty island.
+  const src = '```js\nx\n```\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = deleteEmptyCodeBlock({ doc, index, offset: 0 })
+  assert.equal(r.ok, false, 'a fence with content must refuse')
 }
 
 console.log('PASS source-kernel commands (whole-branch review: link-boundary wraps + CRLF bisection chokepoint)')

@@ -389,6 +389,7 @@ export function createConfiguredCrepe({
                 runUndo: () => kernelPlugins?.runHistory?.('undo'),
                 runRedo: () => kernelPlugins?.runHistory?.('redo'),
                 runExitCode: (cmView) => kernelPlugins?.runExitCode?.(cmView),
+                runDeleteEmptyBlock: (cmView) => kernelPlugins?.runDeleteEmptyCodeBlock?.(cmView),
                 isActive: () => !!kernelPlugins?.isActive?.(),
                 isEditable: (cmView) => !!kernelPlugins?.isCmBlockEditable?.(cmView)
               })

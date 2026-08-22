@@ -139,7 +139,7 @@ export function classifyBlockedCmKeydown(event) {
 // is omitted (a legacy caller/unit test) the gate treats every block as
 // editable, which combined with the default always-active `isActive` yields
 // "no blocking, kernel undo bridge only".
-export function createKernelCmExtensions({ runUndo, runRedo, runExitCode, isActive, isEditable } = {}) {
+export function createKernelCmExtensions({ runUndo, runRedo, runExitCode, runDeleteEmptyBlock, isActive, isEditable } = {}) {
   const active = typeof isActive === 'function' ? isActive : () => true
   const editable = typeof isEditable === 'function' ? isEditable : () => true
   // True when the kernel owns the document AND this specific CM instance's
@@ -163,7 +163,22 @@ export function createKernelCmExtensions({ runUndo, runRedo, runExitCode, isActi
       // nodeview's own Mod-Enter binding) must never produce a structural
       // transaction in kernel mode — the kernel command either writes the
       // exit bytes or notifies why it refused.
-      { key: 'Mod-Enter', run: bridge(runExitCode) }
+      { key: 'Mod-Enter', run: bridge(runExitCode) },
+      // Backspace in an EMPTY code block deletes the whole fence (the
+      // unremovable-island exit — a quote-final block has no line below to
+      // stand on and the block handle is hidden in kernel mode). Gated on
+      // doc.length === 0 so every other Backspace falls through to CM's own
+      // handling untouched; swallowed while active even on refusal, same
+      // posture as Mod-Enter above.
+      {
+        key: 'Backspace',
+        run: (view) => {
+          if (!active()) return false
+          if (view.state.doc.length !== 0) return false
+          if (typeof runDeleteEmptyBlock === 'function') runDeleteEmptyBlock(view)
+          return true
+        }
+      }
     ])),
     // Prec.highest: must run BEFORE the shared Prec.default keymap keydown
     // handler (funnel 3) and before the built-in paste/drop/cut handlers

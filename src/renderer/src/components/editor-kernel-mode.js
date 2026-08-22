@@ -45,6 +45,7 @@ import {
   createSourceHistory,
   dissolvableTaskSeed,
   exitCodeBlock,
+  deleteEmptyCodeBlock,
   insertHeadingLeadingWhitespace,
   spellBlockTailInsert,
   spellTaskSeedInsert,
@@ -2453,6 +2454,45 @@ export function createKernelMode({
     return 'handled'
   }
 
+  // Shared by the empty-list-item exit and the empty-code-block delete: the
+  // structural edit's anchor sits on a prefix-only line the reparse cannot
+  // show, so — when it is genuinely unmappable — a vouched placeholder is
+  // materialized at the enclosing blockquote's content end (or after the
+  // enclosing top-level node), with the `\n> `-style insertPrefix that keeps
+  // the committed body line SEPARATED from the block above (a bare `> text`
+  // line right after `> - item` is a lazy continuation CommonMark absorbs —
+  // measured 2026-08-22). Outside quotes the line prefix is empty and the
+  // voucher stays prefix-less. materializePlaceholder remains fail-closed.
+  const placeholderForUnmappableAnchor = (view, anchor) => {
+    if (!Number.isFinite(anchor) || !kernel.map || kernel.map.rawToPmPos(anchor)) return
+    let probe = anchor
+    let mapped = null
+    while (probe > 0 && !mapped) {
+      probe -= 1
+      mapped = kernel.map.rawToPmPos(probe)
+    }
+    if (!mapped || !Number.isFinite(mapped.pos)) return
+    try {
+      const docNode = view.state.doc
+      const $p = docNode.resolve(Math.max(0, Math.min(mapped.pos, docNode.content.size)))
+      let quoteDepth = 0
+      for (let d = $p.depth; d > 0; d -= 1) {
+        if ($p.node(d).type.name === 'blockquote') { quoteDepth = d; break }
+      }
+      const insertPos = quoteDepth ? $p.end(quoteDepth) : $p.after(1)
+      const text = kernel.doc.text
+      const lineStart = text.lastIndexOf('\n', anchor - 1) + 1
+      const linePrefix = text.slice(lineStart, anchor)
+      const ending = lineStart >= 2 && text[lineStart - 2] === '\r' ? '\r\n' : '\n'
+      const insertPrefix = /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
+        ? ending + linePrefix
+        : ''
+      materializePlaceholder(view, insertPos, anchor, insertPrefix)
+    } catch {
+      pushKernelDiagnostic({ type: 'exit-placeholder-failed', rawOffset: anchor })
+    }
+  }
+
   // Character CLASSES around a raw offset, for refusal diagnostics — shape
   // without content (`nl` newline, `cr`, `sp` space, `tab`, `nb` U+00A0,
   // `#`/`-`/`*`/`>`/`|`/`.`/`[`/`]`/`(`/`)` markers verbatim, `d` digit,
@@ -2586,43 +2626,7 @@ export function createKernelMode({
       // there commits prefix-less at the anchor: `> 正文`, the quote-body
       // line. materializePlaceholder is itself fail-closed — an unprovable
       // voucher removes the node again and rebinds plain.
-      if (exitIntent && Number.isFinite(exitAnchor) &&
-          kernel.map && !kernel.map.rawToPmPos(exitAnchor)) {
-        let probe = exitAnchor
-        let mapped = null
-        while (probe > 0 && !mapped) {
-          probe -= 1
-          mapped = kernel.map.rawToPmPos(probe)
-        }
-        if (mapped && Number.isFinite(mapped.pos)) {
-          try {
-            const docNode = view.state.doc
-            const $p = docNode.resolve(Math.max(0, Math.min(mapped.pos, docNode.content.size)))
-            let quoteDepth = 0
-            for (let d = $p.depth; d > 0; d -= 1) {
-              if ($p.node(d).type.name === 'blockquote') { quoteDepth = d; break }
-            }
-            const insertPos = quoteDepth ? $p.end(quoteDepth) : $p.after(1)
-            // The commit prefix keeps the body line SEPARATED from the list:
-            // the exit left `> ` on the anchor's line, and committing straight
-            // into it makes a lazy continuation CommonMark absorbs into the
-            // item. Prefixing `\n> ` (the anchor line's own quote prefix,
-            // ending-spelled like the previous line) turns that line into the
-            // blank-quote separator and opens a fresh body line. Outside
-            // quotes the line prefix is empty and this stays ''.
-            const text = kernel.doc.text
-            const lineStart = text.lastIndexOf('\n', exitAnchor - 1) + 1
-            const linePrefix = text.slice(lineStart, exitAnchor)
-            const ending = lineStart >= 2 && text[lineStart - 2] === '\r' ? '\r\n' : '\n'
-            const insertPrefix = /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
-              ? ending + linePrefix
-              : ''
-            materializePlaceholder(view, insertPos, exitAnchor, insertPrefix)
-          } catch {
-            pushKernelDiagnostic({ type: 'exit-placeholder-failed', rawOffset: exitAnchor })
-          }
-        }
-      }
+      if (exitIntent) placeholderForUnmappableAnchor(view, exitAnchor)
       return true
     }
     // Every refused structural key leaves a CONTENT-FREE breadcrumb: the key,
@@ -2849,7 +2853,39 @@ export function createKernelMode({
     return true
   }
 
-  // Slash `/quote` entry point (Plan 4 Task 4): unlike every other slash item
+  // Backspace inside an EMPTY code block (bridge-gated: the CM doc has zero
+  // characters) deletes the whole fence — the unremovable-island exit. Same
+  // resolution as runExitCode; the caret rides the shared placeholder helper.
+  const runDeleteEmptyCodeBlock = (cmView) => {
+    if (inactive()) return false
+    const view = getView?.()
+    if (!view) return false
+    const pair = codePairFromCm(cmView)
+    const start = pair?.mdBlock?.position?.start?.offset
+    if (!Number.isFinite(start)) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    const routed = deleteEmptyCodeBlock({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: start
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    if (!applyKernelTransaction(routed.transaction, view)) return true
+    placeholderForUnmappableAnchor(view, routed.transaction.selection?.anchor)
+    try {
+      view.focus?.()
+    } catch {
+      /* focus is best-effort */
+    }
+    return true
+  }
+
+    // Slash `/quote` entry point (Plan 4 Task 4): unlike every other slash item
   // (still refused, `isBlocked: () => 'kernelMode.unsupported'`), the quote
   // item is enabled in kernel mode and its `run` is swapped (see
   // editor-slash-menu.js's `quoteRun` / editor-crepe-setup.js's `quoteToggle`
@@ -3724,6 +3760,7 @@ export function createKernelMode({
     // createKernelCmExtensions' `isEditable`/`runExitCode` callbacks.
     isCmBlockEditable,
     runExitCode,
+    runDeleteEmptyCodeBlock,
     // Slash `/quote` entry point (Plan 4 Task 4): consumed by
     // editor-crepe-setup.js's `quoteToggle` slash-plugin option, which wires
     // it into editor-slash-menu.js's per-item `run` override.

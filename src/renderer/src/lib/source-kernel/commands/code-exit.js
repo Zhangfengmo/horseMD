@@ -20,6 +20,8 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 
 // GFM 栅栏标记：反引号或波浪号，至少 3 个同字符连续（与 code-language.js 同式）。
+import { parseKernelMarkdown } from '../syntax-index.js'
+
 const FENCE_MARKER_RE = /^([`~])\1{2,}/
 // 闭栅行内容（去掉容器前缀后）：同字符栅栏游程 + 可选行尾空白，别无其他。
 const CLOSE_FENCE_RE = /^([`~]+)[ \t]*$/
@@ -125,3 +127,91 @@ export function exitCodeBlock({ doc, index, offset }) {
     }
   }
 }
+
+// deleteEmptyCodeBlock (2026-08-22, user: the empty fence was an unremovable
+// island — a quote-FINAL code block has no line below to stand on, and kernel
+// mode hides the block drag handle). Backspace inside the EMPTY CM editor
+// (bridge-gated: doc.length === 0) deletes the whole fence, in the
+// exitEmptyListItem posture: the edit spans from the opening fence line's
+// content (AFTER its quote prefix) through the closing fence line's end, so
+// ONE prefix-only line survives with its ending — exactly the shape the
+// quoted list-exit leaves, and the controller's placeholder machinery then
+// gives the caret its home (quote-body line with the blank-quote separator
+// prefix, or the top-level blank line / trailing pair outside quotes).
+// Content-bearing fences refuse — this is the empty-island exit, not a
+// block-delete.
+//
+// PROVEN, NOT ASSUMED: the candidate reparse must show exactly one fewer
+// `code` node, the same heading count (the setext-trap detector this file
+// family shares), and leaf values identical minus the fence's own empty
+// value — nothing else may change meaning.
+export function deleteEmptyCodeBlock({ doc, index, offset }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return unsupported
+  if (!Number.isInteger(offset)) return unsupported
+  let node = null
+  const findCode = (candidate) => {
+    if (node) return
+    if (candidate?.type === 'code' && candidate.position?.start?.offset === offset) {
+      node = candidate
+      return
+    }
+    for (const child of candidate?.children || []) findCode(child)
+  }
+  let baseline
+  try {
+    baseline = parseKernelMarkdown(text)
+  } catch {
+    return unsupported
+  }
+  findCode(baseline)
+  if (!node || (node.value ?? '') !== '') return unsupported
+  const first = index.lineAt(node.position.start.offset)
+  const last = index.lineAt(node.position.end.offset - 1)
+  if (!first || !last || last.start < first.start) return unsupported
+  const prefix = (first.text.match(/^[ \t]*(?:>[ \t]*)*/) || [''])[0]
+  if (prefix && !QUOTE_ONLY_PREFIX_RE.test(prefix) && prefix.trim() !== '') return unsupported
+  const from = first.start + prefix.length
+  const to = last.end
+  if (to <= from) return unsupported
+  const candidate = text.slice(0, from) + text.slice(to)
+  let after
+  try {
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return unsupported
+  }
+  const countType = (tree, type) => {
+    let n = 0
+    const walk = (t) => {
+      if (t?.type === type) n += 1
+      for (const child of t?.children || []) walk(child)
+    }
+    walk(tree)
+    return n
+  }
+  const leaves = (tree) => {
+    const out = []
+    const walk = (t) => {
+      if (typeof t?.value === 'string') out.push(t.value)
+      for (const child of t?.children || []) walk(child)
+    }
+    walk(tree)
+    return out.sort()
+  }
+  if (countType(after, 'code') !== countType(baseline, 'code') - 1) return unsupported
+  if (countType(after, 'heading') !== countType(baseline, 'heading')) return unsupported
+  const beforeLeaves = leaves(baseline)
+  beforeLeaves.splice(beforeLeaves.indexOf(''), 1)
+  if (JSON.stringify(leaves(after)) !== JSON.stringify(beforeLeaves)) return unsupported
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from, to, insert: '' }],
+      intent: 'delete-empty-code-block',
+      selection: { anchor: from, head: from }
+    }
+  }
+}
+
