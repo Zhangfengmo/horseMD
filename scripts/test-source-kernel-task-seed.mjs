@@ -706,10 +706,14 @@ const routeEnter = (doc, offset) =>
   assert.deepEqual(appliedReopened.doc.whitespaceMarks, [{ from: 14, to: 15, ascii: '' }],
     'only the NEW seed is ledgered — the author\'s byte stays theirs')
 
-  // A heal-provenance U+00A0 (stands for a pressed key) is not a seed item
-  // either: split, not exit.
+  // A heal-provenance U+00A0 (stands for a pressed SPACE) as the whole label:
+  // the user typed one space and nothing else, so the item is EFFECTIVELY
+  // empty too — Enter exits. (This pin used to demand `split-list-item` under
+  // the seed-ONLY rule; the 2026-08-22 widening to all-session-ledgered
+  // whitespace deliberately supersedes it — the narrow rule is what bred
+  // endless seeded siblings once a space joined the seed.)
   const healed = { ...createMarkdownDocument(SEED_BYTES + '\n'), whitespaceMarks: [{ from: 6, to: 7, ascii: ' ' }] }
-  assert.equal(routeEnter(healed, 7).transaction.intent, 'split-list-item')
+  assert.equal(routeEnter(healed, 7).transaction.intent, 'exit-empty-list-item')
 }
 
 // ---------------------------------------------------------------------------
@@ -778,13 +782,18 @@ const routeBackspace = (doc, offset) =>
 
 {
   // (c) The exits are LEDGER-GATED, same as Enter's: an UNLEDGERED seed
-  // (reopened file — the author's byte) and a heal-provenance U+00A0 (stands
-  // for a pressed Space) both keep the text-path answer, so an author's
-  // content is never structurally deleted by this routing.
+  // (reopened file — the author's byte) keeps the text-path answer, so an
+  // author's content is never structurally deleted by this routing.
   const reopened = createMarkdownDocument(SEED_BYTES + '\n')
   assert.deepEqual(routeBackspace(reopened, 7), { ok: false, code: 'not-structural' })
+  // A heal-provenance U+00A0 (stands for a pressed Space) as the LAST
+  // remaining label character exits too since the 2026-08-22 widening: its
+  // character-deletion has no representable spelling (removing it demotes
+  // the checkbox — the old pin here left the user in a vetoed dead end),
+  // and the byte is session-vouched whitespace, so the line exit is the
+  // honest answer.
   const healed = { ...createMarkdownDocument(SEED_BYTES + '\n'), whitespaceMarks: [{ from: 6, to: 7, ascii: ' ' }] }
-  assert.deepEqual(routeBackspace(healed, 7), { ok: false, code: 'not-structural' })
+  assert.equal(routeBackspace(healed, 7).transaction.intent, 'exit-empty-list-item')
 }
 
 console.log('ok - source kernel task seed')

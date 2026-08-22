@@ -43,27 +43,46 @@ import { NO_BREAK_SPACE, blockText, blockEditIsObservable } from './trailing-whi
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
 
-// Is this list item's ENTIRE content the session-ledgered seed — i.e. a task
-// the user created this session and never labelled? The Enter router treats
-// such an item as EFFECTIVELY EMPTY (2026-08-21 task-Enter matrix): pressing
-// Enter on it takes the same lift-out exit an empty PLAIN item takes, because
-// the seed "stands for NO keystroke" — the item is conceptually empty even
-// though the parser (correctly) sees one content character. Three facts, all
-// required:
+// Is this task item's ENTIRE content session-ledgered whitespace — i.e. a
+// task the user created this session and never actually labelled? The Enter/
+// Backspace routers treat such an item as EFFECTIVELY EMPTY (2026-08-21
+// task-Enter matrix; widened 2026-08-22): pressing Enter on it takes the same
+// lift-out exit an empty PLAIN item takes.
+//
+// The original form of this test demanded EXACTLY the one `ascii: ''` seed.
+// That left a hole the user walked straight into (screenshot, 2026-08-22):
+// Enter seeds a continuation, the first "label" keystroke is a SPACE — which
+// the trailing machinery correctly spells as a second, `ascii: ' '` U+00A0 —
+// and the item now fails the seed-only test, so the next Enter SPLITS it and
+// breeds another seeded sibling, forever. Every byte of that label is still
+// ledger-vouched session whitespace standing for no content, so the exit is
+// still the honest answer. Three facts, all required:
 //   * a real task item (`task` present — boolean checkbox);
-//   * its content span is EXACTLY the one U+00A0 (`[contentStart, end)` —
-//     `end` is the mdast item end, so a continuation line or any label byte
-//     makes the slice longer and the answer false);
-//   * the LEDGER vouches for that byte with the seed provenance
-//     (`ascii: ''`). A reopened file's U+00A0 (empty ledger) and a
-//     heal-written one (non-empty ascii) both answer FALSE — Enter then
-//     splits like any labelled item, and the author's byte is never deleted.
-export const isLedgeredSeedOnlyItem = (doc, text, item) => {
+//   * its content span `[contentStart, end)` is ONLY invisible whitespace
+//     (U+00A0 / ASCII space / tab — a continuation line's line ending or any
+//     label byte fails the character class);
+//   * EVERY U+00A0 in it is covered by a ledger entry (any session
+//     provenance — the seed's `ascii: ''` or a spelled space/tab's non-empty
+//     ascii). ASCII space/tab bytes need no voucher: the parser strips them
+//     here, so they carry nothing an author could lose.
+// A reopened file's U+00A0s (empty ledger) and any half-vouched mix answer
+// FALSE — Enter then splits like any labelled item, and the author's bytes
+// are never deleted. The provenance partition, not the byte values, is what
+// keeps the pinned authored-seed doctrine intact.
+export const isLedgeredWhitespaceTaskItem = (doc, text, item) => {
   if (!item?.task || typeof text !== 'string') return false
   if (!Number.isInteger(item.contentStart) || !Number.isInteger(item.end)) return false
-  if (text.slice(item.contentStart, item.end) !== NO_BREAK_SPACE) return false
-  return (doc?.whitespaceMarks || []).some((entry) =>
-    entry?.ascii === '' && entry.from === item.contentStart && entry.to === item.contentStart + 1)
+  const content = text.slice(item.contentStart, item.end)
+  if (!content || !/^[\u00A0 \t]+$/.test(content)) return false
+  const marks = doc?.whitespaceMarks || []
+  for (let i = 0; i < content.length; i += 1) {
+    if (content[i] !== NO_BREAK_SPACE) continue
+    const at = item.contentStart + i
+    if (!marks.some((entry) =>
+      Number.isInteger(entry?.from) && Number.isInteger(entry?.to) &&
+      entry.from <= at && at < entry.to)) return false
+  }
+  return true
 }
 
 // Does a ledger-vouched task seed abut the insert offset? Returns

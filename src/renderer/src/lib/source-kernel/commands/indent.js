@@ -177,12 +177,25 @@ const multiTxn = (doc, edits, intent, offset) => {
 // inclusive at an item's end, so stepping there and then `+= 1` in the loop
 // lands right back on the same offset and never advances; see Task 6 brief
 // notes) so every iteration strictly progresses to the next physical line.
+//
+// Each line is probed at its own MARKER position (past `[ \t>]*`), never at
+// the raw line start: a NESTED sibling's line start is its indentation, and
+// listItemAt maps those bytes to the ENCLOSING item (an item's own `start`
+// begins after its indent), so the raw-start probe resolved to the wrong
+// depth and nested items never found their previous sibling — every depth≥2
+// Tab refused (2026-08-22 user report: Tab at a nested task's tail
+// 「不会自动适配」). A continuation line probed this way resolves to its
+// OWNING item, which the depth/listStart filters below judge like any other
+// candidate.
 const previousSibling = (index, item) => {
   let best = null
   const firstLine = index.lineIndexAt(item.listStart)
   const lastLine = item.markerLineIndex - 1
   for (let li = firstLine; li <= lastLine; li += 1) {
-    const candidate = itemContaining(index, index.lines[li].start)
+    const line = index.lines[li]
+    const contentAt = line.start + (line.text.match(/^[ \t>]*/) || [''])[0].length
+    if (contentAt >= line.end) continue
+    const candidate = itemContaining(index, contentAt)
     if (
       candidate &&
       candidate.depth === item.depth &&

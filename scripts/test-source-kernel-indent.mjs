@@ -113,6 +113,32 @@ assert.equal(run('- 甲\n', 2, outdentListItem).code, 'unsupported-structure')
   assert.equal(applied.selection.head, applied.doc.text.indexOf('two'))
 }
 
+// ---------------------------------------------------------------------------
+// NESTED-SIBLING INDENT (2026-08-22, user: 任务列表「尾部按 tab 不会自动适配」).
+// previousSibling used to probe each candidate line at its RAW line start —
+// but a nested sibling's line start is its indentation, and listItemAt maps
+// those bytes to the ENCLOSING item (depth mismatch), so nested items never
+// found their previous sibling and every depth≥2 Tab refused. The probe must
+// land on the line's own marker (past `[ \t>]*`).
+{
+  // Plain nested sibling: 丙 nests under 乙.
+  assert.equal(run('- 甲\n  - 乙\n  - 丙\n', 15, indentListItem),
+    '- 甲\n  - 乙\n    - 丙\n')
+  // The user's exact shape: a nested TASK item whose label is session
+  // whitespace (seed + spelled space — parser-visible content, so this is the
+  // ORDINARY indent path, not the empty-item rescue).
+  const NB = '\u00A0'
+  const tsrc = '- [ ] 32131212\n  - [ ] 甲\n  - [ ] ' + NB + NB + '\n'
+  assert.equal(run(tsrc, tsrc.lastIndexOf(NB) + 1, indentListItem),
+    '- [ ] 32131212\n  - [ ] 甲\n    - [ ] ' + NB + NB + '\n')
+  // Quoted nested sibling keeps its quote prefix.
+  assert.equal(run('> - 甲\n>   - 乙\n>   - 丙\n', 21, indentListItem),
+    '> - 甲\n>   - 乙\n>     - 丙\n')
+  // Control: a nested FIRST child still has no previous sibling — refused.
+  const first = run('- 甲\n  - 乙\n', 8, indentListItem)
+  assert.equal(first.ok, false, 'nested first child must still refuse')
+}
+
 console.log('PASS source-kernel indent')
 
 // ---------------------------------------------------------------------------

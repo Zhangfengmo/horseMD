@@ -6,7 +6,7 @@
 import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock, isVisuallyEmptyListItem } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
-import { isLedgeredSeedOnlyItem } from './commands/task-seed.js'
+import { isLedgeredWhitespaceTaskItem } from './commands/task-seed.js'
 import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
@@ -54,7 +54,7 @@ export function routeStructuralKey(key, ctx) {
     case 'Enter':
       // A session-created `/task`/split seed the user never labelled is
       // EFFECTIVELY empty for Enter (the U+00A0 stands for NO keystroke —
-      // task-seed.js `isLedgeredSeedOnlyItem`), so it takes the same
+      // task-seed.js `isLedgeredWhitespaceTaskItem`), so it takes the same
       // lift-out exit a plain empty item takes (2026-08-21 task-Enter
       // matrix cell 3). The check is LEDGER-gated: a reopened file's U+00A0
       // is the author's byte, the item has real content, and Enter splits —
@@ -65,7 +65,7 @@ export function routeStructuralKey(key, ctx) {
       // to `- [ ] ` and is the empty-task wall's refusal), not about routing
       // the key structurally, which deletes the whole representable line.
       if (item) {
-        return item.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item) ||
+        return item.empty || isLedgeredWhitespaceTaskItem(ctx.doc, index.text, item) ||
           isVisuallyEmptyListItem(index.text, item)
           ? exitEmptyListItem(ctx)
           : splitListItem(ctx)
@@ -84,7 +84,19 @@ export function routeStructuralKey(key, ctx) {
       // key structurally deletes/outdents the whole marker LINE, which is
       // representable, and stays ledger-gated: a reopened file's U+00A0 is
       // the author's content and keeps the text-path answer.
-      if (item?.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item) ||
+      //
+      // Unlike Enter, the whole-line exit claims the task item only at ONE
+      // remaining character: Backspace is a per-keystroke gesture, and on a
+      // WIDER session-whitespace label (seed + a spelled space) the text
+      // path's single-character deletion still lands on a representable
+      // task (`- [ ] ` + seed), so the finer gesture must win — type a
+      // space, Backspace, and you are back on the seed, not minus the whole
+      // item. Only the last character has no deletable spelling (removing
+      // it demotes the checkbox), so only there does the key route to the
+      // line exit.
+      if (item?.empty ||
+          (isLedgeredWhitespaceTaskItem(ctx.doc, index.text, item) &&
+            item.end - item.contentStart === 1) ||
           isVisuallyEmptyListItem(index.text, item)) {
         return liftEmptyListItem(ctx)
       }

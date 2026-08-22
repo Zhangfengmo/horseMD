@@ -3,7 +3,7 @@
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
 import { parseKernelMarkdown } from '../syntax-index.js'
 import { NO_BREAK_SPACE, blockText } from './trailing-whitespace.js'
-import { isLedgeredSeedOnlyItem } from './task-seed.js'
+import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
 
 const endingAt = (index, offset) => {
   const line = index.lineAt(offset)
@@ -256,9 +256,11 @@ export function splitListItem({ doc, index, offset }) {
 
 // 空列表项 Enter：删除该 marker 行的 `indent+marker+spacing(+task+taskSpacing)`
 // （从引用前缀之后到行尾），保留引用前缀；caret 停在删除点。
-// 会话内新建、从未输入正文的种子任务项（isLedgeredSeedOnlyItem——账本为该
-// U+00A0 记着 `ascii:''`）走同一出口：种子"不代表任何按键"，对 Enter 而言该
-// 项与空项等价（2026-08-21 task-Enter matrix cell 3，Typora 的 lift-out）。
+// 会话内新建、从未输入过真实正文的任务项（isLedgeredWhitespaceTaskItem——内容
+// 全为不可见空白且每个 U+00A0 都有账本条目：种子的 `ascii:''` 或拼写空格的
+// `ascii:' '`）走同一出口：这些字节"不代表任何内容"，对 Enter 而言该项与
+// 空项等价（2026-08-21 task-Enter matrix cell 3；2026-08-22 由 seed-only 拓宽，
+// 否则种子+拼写空格的项会被再次分裂、无限繁殖种子兄弟）。
 // 重开文件后的 U+00A0 是作者的字节（账本为空），仍走普通分裂，绝不删除。
 
 // 视觉空项（2026-08-22，用户报告「无法删除」）：普通（非任务）列表项的解码
@@ -278,7 +280,7 @@ export const isVisuallyEmptyListItem = (text, item) => {
 export function exitEmptyListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
   if (!item) return { ok: false, code: 'unsupported-structure' }
-  if (!item.empty && !isLedgeredSeedOnlyItem(doc, index.text, item) &&
+  if (!item.empty && !isLedgeredWhitespaceTaskItem(doc, index.text, item) &&
       !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
   }

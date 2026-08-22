@@ -3,7 +3,7 @@
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
 import { exitEmptyListItem, isVisuallyEmptyListItem } from './enter.js'
 import { outdentListItem } from './indent.js'
-import { isLedgeredSeedOnlyItem } from './task-seed.js'
+import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
 
 // QUOTE_PREFIX's leading `[ \t]*` is unconditional, so it also matches pure
 // leading whitespace with zero '>' — treat a match as a real quote prefix
@@ -17,14 +17,14 @@ const quotePrefixOfLine = (line) => {
 // 空列表项 Backspace（Typora 语义）：depth > 0 委托 outdentListItem（先反缩进
 // 一级，落到父列表成为其项）；depth 0（顶层）委托 exitEmptyListItem（清空
 // marker 行，退出列表）。会话内新建、从未输入正文的种子任务项
-// （isLedgeredSeedOnlyItem——账本为该 U+00A0 记着 `ascii:''`）视同空项，走
+// （isLedgeredWhitespaceTaskItem——账本为该 U+00A0 记着 `ascii:''`）视同空项，走
 // 同一出口：种子"不代表任何按键"，与 Enter 侧 exitEmptyListItem 的契约对称
 // （2026-08-22 用户报告——此前该项唯一的删除路径是字符级删种子字节，被
 // empty-task 墙拒绝，形成只能 Enter 或撤销的死角）。重开文件后的 U+00A0 是
 // 作者的字节（账本为空），仍拒绝——字符级删除走文本路径。
 export function liftEmptyListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
-  if (!item?.empty && !isLedgeredSeedOnlyItem(doc, index.text, item) &&
+  if (!item?.empty && !isLedgeredWhitespaceTaskItem(doc, index.text, item) &&
       !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
   }

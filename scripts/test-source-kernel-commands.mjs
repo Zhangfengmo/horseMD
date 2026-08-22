@@ -2020,6 +2020,72 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
 }
 
 // ---------------------------------------------------------------------------
+// SESSION-LEDGERED WHITESPACE TASK ITEM (2026-08-22, user screenshot: a task
+// list where Space-then-Enter on a fresh item bred endless seeded siblings).
+// Enter splits a seeded task, Space is spelled U+00A0 by the trailing
+// machinery \u2014 the label is now TWO session NBSPs. Byte-wise that is a real
+// task, but every byte of it is ledger-vouched session whitespace: the item
+// stands for NO content, so Enter/Backspace must take the SAME empty exit the
+// single seed takes. The provenance partition is what keeps the pinned
+// authored-seed doctrine intact: any unledgered NBSP keeps the item CONTENT
+// (an author's honest `- [ ] \u00A0` still splits, never deletes).
+{
+  const NB = '\u00A0'
+  // Earn the ledger through the real commands: Enter at \u7532's end seeds the
+  // continuation; the spelled Space arrives as a transaction carrying its own
+  // mark (the exact shape trailing-whitespace.js commits).
+  let doc = createMarkdownDocument('- [ ] \u7532\n')
+  let index = buildSyntaxIndex(doc.text)
+  const split = routeStructuralKey('Enter', { doc, index, offset: 7, empty: false })
+  assert.equal(split.ok, true, 'the split must seed: ' + (split.code || ''))
+  doc = applySourceTransaction(doc, split.transaction).doc
+  assert.equal(doc.text, '- [ ] \u7532\n- [ ] ' + NB + '\n')
+  const seedAt = doc.text.lastIndexOf(NB)
+  doc = applySourceTransaction(doc, {
+    baseRevision: doc.revision,
+    from: seedAt + 1,
+    to: seedAt + 1,
+    insert: NB,
+    intent: 'block-trailing-whitespace',
+    selection: { anchor: seedAt + 2, head: seedAt + 2 },
+    whitespaceMarks: [{ from: seedAt + 1, to: seedAt + 2, ascii: ' ' }]
+  }).doc
+  assert.equal(doc.text, '- [ ] \u7532\n- [ ] ' + NB + NB + '\n')
+  assert.equal(doc.whitespaceMarks.length, 2, 'both bytes are vouched')
+  index = buildSyntaxIndex(doc.text)
+  const enter = routeStructuralKey('Enter', { doc, index, offset: seedAt + 2, empty: true })
+  assert.equal(enter.ok, true,
+    'Enter on an all-ledgered whitespace task label must take the empty exit: ' + (enter.code || ''))
+  assert.equal(enter.transaction.intent, 'exit-empty-list-item',
+    'Enter must exit, not split another seed (got ' + enter.transaction.intent + ')')
+  assert.equal(applySourceTransaction(doc, enter.transaction).doc.text, '- [ ] \u7532\n\n')
+  // Backspace keeps its per-keystroke granularity on the two-byte label: the
+  // text path deletes the spelled space (a representable task remains), so
+  // the router answers not-structural here \u2014 and routes the LINE exit only
+  // once a single character is left.
+  const back = routeStructuralKey('Backspace', { doc, index, offset: seedAt + 2, empty: true })
+  assert.equal(back.ok, false, 'two-byte label: Backspace stays on the text path')
+  assert.equal(back.code, 'not-structural')
+  // CONTROL: the SAME bytes with an empty ledger (a reopened file) are the
+  // author's content \u2014 Enter still splits, Backspace still refuses.
+  const cold = createMarkdownDocument(doc.text)
+  const cindex = buildSyntaxIndex(cold.text)
+  const ce = routeStructuralKey('Enter', { doc: cold, index: cindex, offset: seedAt + 2, empty: false })
+  assert.equal(ce.ok && ce.transaction.intent, 'split-list-item',
+    'unledgered NBSPs are authored content \u2014 Enter splits')
+  const cb = routeStructuralKey('Backspace', { doc: cold, index: cindex, offset: seedAt + 2, empty: true })
+  assert.equal(cb.ok, false, 'unledgered NBSPs are authored content \u2014 Backspace keeps the refusal')
+  // CONTROL: a PARTIAL ledger (one vouched byte next to an authored one) is
+  // not claimed either \u2014 the partition never rounds up.
+  const partial = createMarkdownDocument(doc.text)
+  partial.whitespaceMarks.push({ from: seedAt, to: seedAt + 1, ascii: '' })
+  const pindex = buildSyntaxIndex(partial.text)
+  const pe = routeStructuralKey('Enter', { doc: partial, index: pindex, offset: seedAt + 2, empty: false })
+  assert.equal(pe.ok && pe.transaction.intent, 'split-list-item',
+    'a half-vouched label stays content \u2014 Enter splits')
+}
+
+// ---------------------------------------------------------------------------
 // deleteEmptyCodeBlock (2026-08-22): an EMPTY fence — especially as a quote's
 // LAST block — was an unremovable island (no line below to stand on, the
 // block handle hidden in kernel mode). Backspace inside the empty CM editor
