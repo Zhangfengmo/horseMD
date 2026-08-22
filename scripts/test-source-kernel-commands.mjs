@@ -4,7 +4,7 @@ import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-i
 import { buildCharacterMap } from '../src/renderer/src/lib/source-kernel/character-map.js'
 import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/commands/replace-text.js'
 import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands/task-toggle.js'
-import { splitTextBlock, splitListItem, exitEmptyListItem } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
+import { splitTextBlock, splitListItem, exitEmptyListItem, shrinkBlankRun } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
 import { setImageAttrs } from '../src/renderer/src/lib/source-kernel/commands/image-attrs.js'
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
@@ -203,6 +203,94 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
   assert.equal(r.ok, true, 'quoted blank-line Enter must extend with the prefix: ' + (r.code || ''))
   assert.equal(apply(c.doc, r), '> 甲\n>\n>\n> 乙\n',
     'the inserted line carries the quote prefix so the blockquote stays ONE block')
+}
+
+// ---- shrinkBlankRun: the exact INVERSE of the gap branch (2026-08-23 user
+// report — Backspace on a fresh mid-document/quoted placeholder paragraph was
+// refused with `unsupported-input-type`). Two modes:
+//   * span given (the session recorded what its own Enter wrote): delete that
+//     span verbatim — a byte-exact restore of the pre-Enter document;
+//   * no span (emptied-paragraph / exit vouchers ride a pre-existing line):
+//     delete the previous line's ending + this line's prefix — one line off
+//     the run.
+// Both are reparse-PROVEN structure-neutral, same signature the insert proof
+// uses (negative shift).
+{
+  // Span inverse, root level: Enter at end of 甲乙 wrote '\n\n' at 2
+  // ('甲乙\n\n丙\n' became '甲乙\n\n\n\n丙\n', caret at 4).
+  const src = '甲乙\n\n\n\n丙\n'
+  const c = ctx(src)
+  const r = shrinkBlankRun({ ...c, offset: 4, span: { from: 2, to: 4 } })
+  assert.equal(r.ok, true, 'span shrink must commit: ' + (r.code || ''))
+  assert.equal(r.transaction.intent, 'shrink-blank-run')
+  assert.equal(apply(c.doc, r), '甲乙\n\n丙\n', 'span inverse restores the pre-Enter bytes exactly')
+  assert.equal(r.transaction.selection.anchor, 2, 'caret returns to the split origin')
+}
+{
+  // Span inverse, gap-extend spelling: Enter on the blank line wrote one '\n' at 3.
+  const src = '甲乙\n\n\n丙\n'
+  const c = ctx(src)
+  const r = shrinkBlankRun({ ...c, offset: 4, span: { from: 3, to: 4 } })
+  assert.equal(r.ok, true, 'gap-extend span shrink must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '甲乙\n\n丙\n')
+}
+{
+  // Span inverse inside a quote: the quoted split wrote '\n>\n> ' at 3.
+  const src = '> 甲\n>\n> \n>\n> 乙\n'
+  const c = ctx(src)
+  const r = shrinkBlankRun({ ...c, offset: 8, span: { from: 3, to: 8 } })
+  assert.equal(r.ok, true, 'quoted span shrink must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '> 甲\n>\n> 乙\n', 'the quote stays ONE quote and the bytes match pre-Enter')
+}
+{
+  // Line fallback (no span), root level: one ending off the blank run.
+  const src = '甲乙\n\n\n丙\n'
+  const c = ctx(src)
+  const r = shrinkBlankRun({ ...c, offset: 4, span: null })
+  assert.equal(r.ok, true, 'line-fallback shrink must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '甲乙\n\n丙\n')
+  assert.equal(r.transaction.selection.anchor, 3)
+}
+{
+  // Line fallback inside a quote: delete '\n>' — the quote must stay ONE block.
+  const src = '> 甲\n>\n>\n> 乙\n'
+  const c = ctx(src)
+  const offset = src.indexOf('>\n> 乙') + 1   // caret after the second bare '>' prefix
+  const r = shrinkBlankRun({ ...c, offset, span: null })
+  assert.equal(r.ok, true, 'quoted line-fallback shrink must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '> 甲\n>\n> 乙\n')
+}
+{
+  // CRLF: the fallback swallows the WHOLE '\r\n' pair, never half of it.
+  const src = '甲乙\r\n\r\n\r\n丙\r\n'
+  const c = ctx(src)
+  const r = shrinkBlankRun({ ...c, offset: 6, span: null })
+  assert.equal(r.ok, true, 'CRLF shrink must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '甲乙\r\n\r\n丙\r\n')
+}
+{
+  // Refusal: removing the ONLY separator would merge the neighbors (the
+  // paragraph would become a lazy continuation of the list item) — the
+  // reparse proof rejects, no bytes move.
+  const src = '1. 甲\n\n乙丙\n'
+  const c = ctx(src)
+  assert.deepEqual(shrinkBlankRun({ ...c, offset: 5, span: null }),
+    { ok: false, code: 'unsupported-structure' })
+}
+{
+  // Refusal: the caret line is NOT blank — this command owns blank runs only.
+  const src = '甲乙\n\n丙\n'
+  const c = ctx(src)
+  assert.deepEqual(shrinkBlankRun({ ...c, offset: 5, span: null }),
+    { ok: false, code: 'unsupported-structure' })
+}
+{
+  // Refusal: a span whose bytes include CONTENT (a stale session record) is
+  // refused before any parse — this command deletes whitespace/prefix bytes only.
+  const src = '甲乙\n\n\n丙\n'
+  const c = ctx(src)
+  assert.deepEqual(shrinkBlankRun({ ...c, offset: 4, span: { from: 1, to: 4 } }),
+    { ok: false, code: 'unsupported-structure' })
 }
 
 // splitTextBlock must fail-closed inside a heading's `#{n} ` marker/spacing

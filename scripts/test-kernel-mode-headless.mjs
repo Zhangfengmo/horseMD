@@ -221,6 +221,16 @@ const FIXTURE_DOCS = {
   '甲乙\n\n\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
   '甲乙\n\n丙\n\n\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  // Case 17b-17e fixtures (placeholder Backspace, 2026-08-23): every byte
+  // state the mid-document chain unwind + the quoted split + the emptied
+  // paragraph pass through. Blank-line runs collapse, blank `>`/`> ` quote
+  // lines produce no node — same parse either way.
+  '甲乙\n\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  '甲乙\n\n\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  '甲乙\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  '甲乙\n\nx\n\n丙\n': () => doc(p(text('甲乙')), p(text('x')), p(text('丙'))),
+  '> 甲\n>\n> 乙\n': () => doc(bq(p(text('甲')), p(text('乙')))),
+  '> 甲\n>\n> \n>\n> 乙\n': () => doc(bq(p(text('甲')), p(text('乙')))),
   // Plan 3 Task 4 fixtures: a code_block text commit (multi-line CM-style
   // insert) followed by a language switch, both on the same block.
   '```js\nab\n```\n': () => doc(cb('js', 'ab')),
@@ -1197,6 +1207,113 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n')
   assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
   assert.equal(h.controller.kernel.doc.text, '甲乙\n', 'four undos fully unwind back to the original bytes')
+}
+
+// Case 17b (2026-08-23 user report): Backspace INSIDE a vouched split
+// placeholder used to fall through to PM's joinBackward — a cross-parent
+// ReplaceStep the gateway can only refuse (`unsupported-input-type`). The
+// gesture is the exact INVERSE of the Enter that opened the placeholder, so
+// it must commit as bytes: the session records what its Enter wrote and
+// shrinkBlankRun deletes that span verbatim — a byte-exact restore.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('甲乙\n\n丙\n', doc(p(text('甲乙')), p(text('丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3))) // end of 甲乙
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n丙\n', 'mid-document Enter opened the placeholder')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p(text('丙')))))
+
+  const before = h.notifications.length
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n丙\n',
+    'Backspace restores the pre-Enter bytes exactly — no surplus blank line survives')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))), 'the placeholder is gone from the view')
+  assert.equal(h.view.state.selection.head, 3, 'caret lands back at the end of the previous block')
+  assert.equal(h.notifications.length, before, 'no refusal toast')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'unclassified-transaction').length,
+    0, 'the key never reaches PM joinBackward'
+  )
+
+  // Undo/redo still line up: undo brings the blank line (and placeholder era
+  // bytes) back, redo removes it again.
+  assert.equal(h.controller.historyHandlers.undo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n丙\n', 'undo restores the shrunk bytes')
+  assert.equal(h.controller.historyHandlers.redo(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n丙\n', 'redo shrinks again')
+}
+
+// Case 17c: the MID-DOCUMENT chain unwinds symmetrically — Enter x3 then
+// Backspace x3 returns to the original bytes step by step, each press
+// popping exactly the ending its Enter wrote. (At the DOCUMENT END the
+// trailing edge claims the key first and reclaims the whole tail in one
+// press — that long-pinned behavior is untouched; this case is mid-document
+// on purpose.)
+{
+  const h = makeHarness('甲乙\n\n丙\n', doc(p(text('甲乙')), p(text('丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3)))
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  }
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n\n\n丙\n')
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n\n丙\n', 'pop extend #2')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p(), p(text('丙')))),
+    'caret rides back into the previous placeholder')
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n丙\n', 'pop extend #1')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p(text('丙')))))
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n丙\n', 'pop the original split — byte-exact restore')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))))
+  assert.equal(h.view.state.selection.head, 3)
+}
+
+// Case 17d: the QUOTED placeholder (the user's screenshot shape — Enter at
+// the end of a quoted paragraph, then Backspace). The split wrote
+// `\n>\n> `; Backspace deletes it verbatim and the quote stays ONE quote.
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('> 甲\n>\n> 乙\n', doc(bq(p(text('甲')), p(text('乙')))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 3))) // end of quoted 甲
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> 甲\n>\n> \n>\n> 乙\n', 'quoted split spelled with the prefix')
+  // (the first kernel commit also appends the plugin-trailing mirror's empty
+  // doc-level paragraph — a quote-ending doc always carries one in the app)
+  assert.ok(h.view.state.doc.eq(doc(bq(p(text('甲')), p(), p(text('乙'))), p())), 'placeholder inside the quote')
+
+  const before = h.notifications.length
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '> 甲\n>\n> 乙\n', 'byte-exact restore inside the quote')
+  assert.ok(h.view.state.doc.eq(doc(bq(p(text('甲')), p(text('乙'))), p())))
+  assert.equal(h.view.state.selection.head, 3, 'caret back at the end of the quoted paragraph')
+  assert.equal(h.notifications.length, before, 'no refusal toast')
+  assert.equal(
+    globalThis.__hmKernelDiagnostics.filter((entry) => entry.type === 'unclassified-transaction').length,
+    0, 'the key never reaches PM joinBackward'
+  )
+}
+
+// Case 17e: the EMPTIED-paragraph voucher (no recorded span — the line
+// pre-existed): Backspace takes one line off the run via the line fallback.
+{
+  const h = makeHarness('甲乙\n\nx\n\n丙\n', doc(p(text('甲乙')), p(text('x')), p(text('丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const tr = h.view.state.tr.delete(5, 6) // the single character of the middle paragraph
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'the emptying delete commits (placeholder clause)')
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n\n丙\n')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(), p(text('丙')))), 'the emptied paragraph rides its voucher')
+
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5)))
+  assert.equal(h.controller.structuralHandlers.Backspace(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n丙\n', 'one line off the run — the emptied line is gone')
+  assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))))
+  assert.equal(h.view.state.selection.head, 3)
 }
 
 // Case 18 (review fix): extendTrailingPlaceholder's atomic rollback. Forces

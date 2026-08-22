@@ -109,6 +109,75 @@ const gapInsertPreservesStructure = (text, at, insert) => {
   return signature(before, null) === signature(after, at)
 }
 
+// 删除方向的同一份证明：删掉 [from,to) 后，除「删除点之后的偏移整体回移
+// delta」外全树逐节点等价。落在删除区间内部的任何偏移都映射为哨兵（必然失
+// 配）——一个块的边界若真的靠这些字节存在，删除就改变了结构,由解析器裁决。
+const gapRemovalPreservesStructure = (text, from, to) => {
+  let before
+  let after
+  try {
+    before = parseKernelMarkdown(text)
+    after = parseKernelMarkdown(text.slice(0, from) + text.slice(to))
+  } catch {
+    return false
+  }
+  const delta = to - from
+  const signature = (tree, shift) => {
+    const rows = []
+    const walk = (node) => {
+      const start = node.position?.start?.offset
+      const end = node.position?.end?.offset
+      if (Number.isInteger(start) && Number.isInteger(end)) {
+        const map = (o) => (!shift ? o : o <= from ? o : o >= to ? o - delta : NaN)
+        rows.push(`${node.type}:${map(start)}:${map(end)}:${typeof node.value === 'string' ? node.value : ''}:${node.checked ?? ''}:${node.ordered ?? ''}:${node.spread ?? ''}`)
+      }
+      for (const child of node.children || []) walk(child)
+    }
+    walk(tree)
+    return rows.join('')
+  }
+  return signature(before, true) === signature(after, false)
+}
+
+// shrinkBlankRun：GAP 分支的严格逆操作（2026-08-23 用户报告：占位符空段上按
+// Backspace 被 `unsupported-input-type` 拒绝）。caret 必须停在一条空白行的前
+// 缀末尾（正是占位符锚点的形状）。两种拼写：
+//   * `span`——会话记录的「本次 Enter 写入的原始区间」：整段删除＝字节级精确
+//     还原 Enter 之前的文档；
+//   * 无 span（emptied-paragraph / exit 占位骑在既有行上）：删除「上一行的行
+//     终止符 + 本行前缀」，游程收缩一行。
+// 两条路都只允许删空白/前缀字节（内容字节在预筛就拒绝），并且都要过
+// gapRemovalPreservesStructure 重解析证明——删掉唯一分隔行会并块（惰性续行、
+// 引用劈开），由证明当场拒绝，绝不盲写。
+export function shrinkBlankRun({ doc, index, offset, span = null }) {
+  const text = index.text
+  const line = index.lines[index.lineIndexAt(offset)]
+  if (!line) return { ok: false, code: 'unsupported-structure' }
+  const prefix = (line.text.match(/^[>\t ]*/) || [''])[0]
+  if (line.text.slice(prefix.length).trim() !== '' || offset !== line.start + prefix.length) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  let from
+  let to
+  if (span && Number.isFinite(span.from) && Number.isFinite(span.to) &&
+      span.from < span.to && span.to === offset) {
+    from = span.from
+    to = span.to
+  } else {
+    if (line.start === 0) return { ok: false, code: 'unsupported-structure' }
+    const endingLength = line.start >= 2 && text[line.start - 2] === '\r' ? 2 : 1
+    from = line.start - endingLength
+    to = offset
+  }
+  if (!/^[>\t \r\n]*$/.test(text.slice(from, to))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (!gapRemovalPreservesStructure(text, from, to)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  return txn(doc, from, to, '', 'shrink-blank-run', from)
+}
+
 // 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
 // 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
 export function splitTextBlock({ doc, index, offset }) {

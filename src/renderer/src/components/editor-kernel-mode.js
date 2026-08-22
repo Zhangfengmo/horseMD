@@ -56,6 +56,7 @@ import {
   spellMarkerRunGrowth,
   spellMarkerFollowingText,
   trimTrailingBlankLines,
+  shrinkBlankRun,
   looksLikeBlockLineStart,
   healableLineStartRun,
   replaceVisibleText,
@@ -1432,7 +1433,12 @@ export function createKernelMode({
   // `ensureSplitPlaceholder` (Enter's degenerate split, insert after the
   // ORIGIN textblock) and `runExitCode` (Mod-Enter code-block exit, insert
   // after the CODE BLOCK node).
-  const materializePlaceholder = (view, insertPos, rawOffset, insertPrefix = '') => {
+  // `written` (optional {from,to}): the RAW span the placeholder-opening
+  // command itself inserted. Recording it lets Backspace in the placeholder
+  // invert that command byte-for-byte (shrinkSplitPlaceholder); vouchers
+  // without a span (an emptied paragraph, an exit anchor on a pre-existing
+  // line) take shrinkBlankRun's one-line fallback instead.
+  const materializePlaceholder = (view, insertPos, rawOffset, insertPrefix = '', written = null) => {
     try {
       const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
       if (!paragraph) return false
@@ -1442,7 +1448,10 @@ export function createKernelMode({
       tr.setMeta('addToHistory', false)
       if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
       view.dispatch(tr)
-      if (bindMap(view.state.doc, { pmPos: insertPos, rawOffset, insertPrefix })) return true
+      const voucher = written
+        ? { pmPos: insertPos, rawOffset, insertPrefix, writtenFrom: written.from, writtenTo: written.to }
+        : { pmPos: insertPos, rawOffset, insertPrefix }
+      if (bindMap(view.state.doc, voucher)) return true
       // Could not prove the vouched pairing: remove the placeholder again
       // and rebind plain.
       pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset })
@@ -1485,7 +1494,16 @@ export function createKernelMode({
       let depth = $pos.depth
       while (depth > 0 && !$pos.node(depth).isTextblock) depth -= 1
       if (depth === 0 || !$pos.node(depth).isTextblock) return
-      materializePlaceholder(view, $pos.after(depth), rawOffset)
+      // The split txn is insert-only; when the caret anchor rides the END of
+      // that insert (the degenerate "Enter at block end" shape), record the
+      // span so Backspace can take exactly these bytes back.
+      const insertEnd = Number.isFinite(txn.from) && typeof txn.insert === 'string'
+        ? txn.from + txn.insert.length
+        : NaN
+      const written = txn.from === txn.to && insertEnd === rawOffset
+        ? { from: txn.from, to: insertEnd }
+        : null
+      materializePlaceholder(view, $pos.after(depth), rawOffset, '', written)
     } catch {
       pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
     }
@@ -1559,7 +1577,12 @@ export function createKernelMode({
       if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
       view.dispatch(tr)
       const newRawOffset = routed.transaction.selection.anchor
-      const nextChain = [...splitPlaceholders, { pmPos: insertPos, rawOffset: newRawOffset }]
+      const nextChain = [...splitPlaceholders, {
+        pmPos: insertPos,
+        rawOffset: newRawOffset,
+        writtenFrom: routed.transaction.from,
+        writtenTo: routed.transaction.from + routed.transaction.insert.length
+      }]
       if (bindMap(view.state.doc, nextChain)) {
         recordHistory(result, routed.transaction)
         onChange?.(kernel.doc.text, false)
@@ -1580,6 +1603,88 @@ export function createKernelMode({
     } catch {
       if (advanced) kernel.doc = previousDoc
       pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset })
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      return false
+    }
+  }
+
+  // Backspace/Delete INSIDE the last vouched split placeholder (2026-08-23
+  // user report: the key fell through to PM's joinBackward, whose
+  // cross-parent ReplaceStep the gateway can only refuse —
+  // `unsupported-input-type` on a gesture whose meaning is obvious). The
+  // inverse of extendTrailingPlaceholder, same session discipline: pop the
+  // LAST chain entry, delete the bytes its Enter wrote (`writtenFrom/To`,
+  // recorded at voucher time — a byte-exact restore), or one line off the
+  // blank run for span-less vouchers (emptied paragraph / exit anchors);
+  // shrinkBlankRun's reparse proof arbitrates either way. The placeholder
+  // node leaves the view in the same breath and the caret lands where the
+  // chain says it belongs: the previous placeholder, or — chain empty,
+  // session over — the end of the previous real block (Delete: the start of
+  // the next). Every failure path is a NAMED refusal with all state rolled
+  // back together; the key never falls through to PM.
+  const shrinkSplitPlaceholder = (view, key) => {
+    const last = splitPlaceholders[splitPlaceholders.length - 1]
+    if (!last) return false
+    const span = Number.isFinite(last.writtenFrom) && Number.isFinite(last.writtenTo)
+      ? { from: last.writtenFrom, to: last.writtenTo }
+      : null
+    const routed = shrinkBlankRun({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset: last.rawOffset,
+      span
+    })
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return false
+    }
+    const result = applySourceTransaction(kernel.doc, routed.transaction)
+    if (!result.ok) {
+      notifyBlocked(result.code)
+      return false
+    }
+    const previousDoc = kernel.doc
+    const previousChain = splitPlaceholders
+    let advanced = false
+    try {
+      const docNode = view.state.doc
+      const lastNode = docNode.nodeAt(last.pmPos)
+      if (!lastNode || !lastNode.isTextblock || lastNode.content.size !== 0) {
+        notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+        return false
+      }
+      kernel.doc = result.doc
+      advanced = true
+      const remaining = previousChain.slice(0, -1)
+      const tr = view.state.tr.delete(last.pmPos, last.pmPos + lastNode.nodeSize)
+      const landing = remaining.length
+        ? TextSelection.create(tr.doc, remaining[remaining.length - 1].pmPos + 1)
+        : TextSelection.near(tr.doc.resolve(Math.min(last.pmPos, tr.doc.content.size)), key === 'Delete' ? 1 : -1)
+      tr.setSelection(landing)
+      tr.setMeta('sourceProjection', true)
+      tr.setMeta('addToHistory', false)
+      if (typeof tr.scrollIntoView === 'function') tr.scrollIntoView()
+      view.dispatch(tr)
+      if (bindMap(view.state.doc, remaining.length ? remaining : null)) {
+        recordHistory(result, routed.transaction)
+        onChange?.(kernel.doc.text, false)
+        return true
+      }
+      // Could not prove the shortened chain: roll the kernel doc AND the view
+      // back together, restore the full chain's vouched map.
+      pushKernelDiagnostic({ type: 'split-placeholder-unprovable', rawOffset: last.rawOffset })
+      kernel.doc = previousDoc
+      advanced = false
+      const undoTr = view.state.tr.insert(last.pmPos, lastNode)
+      undoTr.setMeta('sourceProjection', true)
+      undoTr.setMeta('addToHistory', false)
+      view.dispatch(undoTr)
+      if (!bindMap(view.state.doc, previousChain)) bindMap(view.state.doc)
+      notifyBlocked(KERNEL_CODES.PROJECTION)
+      return false
+    } catch {
+      if (advanced) kernel.doc = previousDoc
+      pushKernelDiagnostic({ type: 'split-placeholder-failed', rawOffset: last.rawOffset })
       notifyBlocked(KERNEL_CODES.PROJECTION)
       return false
     }
@@ -2589,6 +2694,19 @@ export function createKernelMode({
         // routeStructuralKey's generic (and, for this exact raw offset,
         // wrong) split path.
         extendTrailingPlaceholder(view, offset)
+        return true
+      }
+    }
+    // Backspace/Delete in the LAST vouched placeholder: the inverse of the
+    // Enter above — shrink the blank run / restore the pre-Enter bytes and
+    // retire the placeholder (see shrinkSplitPlaceholder). Same session
+    // scope as Enter (last entry only), same swallow discipline: refusals
+    // are named inside, and the key never reaches PM's joinBackward (whose
+    // cross-parent step the gateway could only refuse generically).
+    if ((key === 'Backspace' || key === 'Delete') && splitPlaceholders.length && state.selection.empty) {
+      const last = splitPlaceholders[splitPlaceholders.length - 1]
+      if (offset === last.rawOffset && state.selection.head === last.pmPos + 1) {
+        shrinkSplitPlaceholder(view, key)
         return true
       }
     }
