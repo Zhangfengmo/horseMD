@@ -145,7 +145,10 @@ export function spellTaskSeedInsert({ doc, block, seed, offset, insert }) {
   // hand so the two are provably the same node's pair.
   const baseline = findTaskParagraph(baselineTree, block.type, blockStart, blockEnd)
   if (!baseline) return NOT_STRUCTURAL
-  if (typeof baseline.item.checked !== 'boolean') return NOT_STRUCTURAL
+  // Bullet/ordered seeds (the empty-item indent rescue) carry checked: null;
+  // the proof below is STATE-PRESERVING either way (null must stay null, a
+  // boolean must stay itself), so only an undefined/absent item is refused.
+  if (baseline.item.checked !== null && typeof baseline.item.checked !== 'boolean') return NOT_STRUCTURAL
   // "First content" is literal: the seed must still be the block's ENTIRE
   // decoded content. Any other shape means content already landed without
   // dissolving (unreachable today — every insert into a one-character block

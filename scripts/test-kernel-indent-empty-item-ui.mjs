@@ -188,26 +188,20 @@ async function run() {
     assert.ok(beforeTab.endsWith('- '), `the third item must be empty — got ${JSON.stringify(beforeTab)}`)
 
     // =====================================================================
-    // 2) THE REPORTED GESTURE: one Tab in the empty third item.
-    //    It must REFUSE — the bytes it would write reparse to a heading — and
-    //    say so in a way the user can act on.
+    // 2) THE REPORTED GESTURE: one Tab in the empty third item — SEED-RESCUED
+    //    since 2026-08-22 (this section used to pin the named refusal): the
+    //    indent writes `  - ` + a ledgered U+00A0, which parses as a REAL
+    //    nested empty item instead of the setext underline the refusal
+    //    protected against. No toast, no heading, still three items.
     // =====================================================================
     await resetToasts(evaluate)
     await pressTab(send)
+    assert.equal(await toasts(evaluate), '[]',
+      `the seed-rescued Tab must not refuse — got ${await toasts(evaluate)}`)
     {
-      const fired = JSON.parse(await toasts(evaluate))
-      assert.equal(fired.length, 1, `the Tab must be refused exactly once — got ${JSON.stringify(fired)}`)
-      assert.ok(/标题|heading/.test(fired[0]),
-        `the message must name what would have happened — got ${JSON.stringify(fired[0])}`)
-      assert.ok(!/unsupported-input-type|unsupported-structure/.test(fired[0]),
-        `and must not be the generic machine-code toast — got ${JSON.stringify(fired[0])}`)
-    }
-    // 2a) NOT ONE BYTE MOVED.
-    assert.equal(await readSource(evaluate, 'after tab'), beforeTab,
-      'a refused indent must write nothing at all')
-    // 2b) THE LIST IS STILL A LIST — this is the screenshot's actual complaint:
-    //     no heading anywhere, and all three items still items.
-    {
+      const source = await readSource(evaluate, 'after tab')
+      assert.ok(source.endsWith('  - ' + NBSP),
+        `the empty item must be nested with the seed — got ${JSON.stringify(source.slice(-14))}`)
       const tags = await renderedTags(evaluate)
       assert.ok(!tags.some((t) => /^H[1-6]$/.test(t)),
         `no heading may appear — got ${JSON.stringify(tags)}`)
@@ -216,19 +210,20 @@ async function run() {
     }
 
     // =====================================================================
-    // 3) THE REMEDY THE MESSAGE NAMES ACTUALLY WORKS: type something in the
-    //    item, and the same Tab nests it. A refusal that left the user with
-    //    no way forward would be a worse bug than the one being fixed.
+    // 3) THE SEED DISSOLVES UNDER THE FIRST TYPED CHARACTER (the same
+    //    pipeline the /task and split seeds use): the label lands where the
+    //    seed stood — already nested, no second Tab needed.
     // =====================================================================
     await resetToasts(evaluate)
     await typeText(send, 'x')
-    await pressTab(send)
     assert.equal(await toasts(evaluate), '[]',
-      `indenting a NON-empty item must not refuse — got ${await toasts(evaluate)}`)
+      `typing into the seeded item must not refuse — got ${await toasts(evaluate)}`)
     {
-      const source = await readSource(evaluate, 'after remedy')
+      const source = await readSource(evaluate, 'after dissolve')
       assert.ok(source.includes('\n  - x'),
-        `the item must now be nested — got ${JSON.stringify(source)}`)
+        `the seed must dissolve under the typed character — got ${JSON.stringify(source)}`)
+      assert.ok(!source.includes('x' + NBSP) && !source.includes(NBSP + 'x'),
+        `no stray seed byte may survive beside the label — got ${JSON.stringify(source)}`)
       const tags = await renderedTags(evaluate)
       assert.ok(!tags.some((t) => /^H[1-6]$/.test(t)), 'and still no heading')
     }
@@ -264,7 +259,7 @@ async function run() {
       assert.ok(!/[^\r]\n/.test(onDisk), 'no bare LF may be introduced into a CRLF document')
     }
 
-    console.log('PASS kernel indent empty item: Tab in an empty list item refuses with an actionable message and writes nothing; the list keeps its three items and grows no heading; typing text then indenting works, and outdent beside a U+00A0 sibling is untouched')
+    console.log('PASS kernel indent empty item: Tab in an empty item nests it with the ledgered U+00A0 seed (no toast, no heading, three items intact), the first typed character dissolves the seed in place, and outdent beside a U+00A0 sibling is untouched')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })

@@ -55,11 +55,12 @@ assert.equal(run('1) 甲\n2) 乙\n', 5, indentListItem), '1) 甲\n   1) 乙\n')
 // its bytes. Byte-minimal preference, locked so the rescue never widens.
 assert.equal(run('1. a\n   1. b\n2. c\n', '1. a\n   1. b\n2. c\n'.indexOf('c'), indentListItem),
   '1. a\n   1. b\n   2. c\n')
-// The EMPTY ordered item stays refused — even `1.` cannot interrupt a
-// paragraph when the item is empty — with the code whose toast says to type
-// first. After the renumber fix that advice is actually true.
-assert.equal(run('1. 甲\n2. 乙\n3. \n', 13, indentListItem).code,
-  'empty-item-would-become-heading')
+// The EMPTY ordered item indents via the SEED RESCUE since 2026-08-22 (this
+// pin used to assert the refusal; the seed spelling made the shape
+// representable — renumbered to 1. and seeded, it interrupts the paragraph
+// as a real nested item).
+assert.equal(run('1. 甲\n2. 乙\n3. \n', 13, indentListItem),
+  '1. 甲\n2. 乙\n   1. \u00A0\n')
 // 首项无前兄弟 → 拒绝
 assert.equal(run('- 甲\n', 2, indentListItem).code, 'unsupported-structure')
 // 子树整体随动（子行同加前缀），一个事务
@@ -261,13 +262,11 @@ console.log('PASS source-kernel delete + router')
 // look NBSP-specific. It is not, and the control below is the load-bearing
 // half of that claim: the identical corruption happens on plain text.
 {
-  // THE REPORTED SHAPE — refused now, with a code of its own so the toast can
-  // say what actually happened.
+  // THE REPORTED SHAPE — SEED-RESCUED since 2026-08-22 (this pin asserted the
+  // refusal from 2026-08-22's first report; the seed spelling made the shape
+  // representable, so the SAME gesture now indents with the ledgered U+00A0).
   const src = '- 12312\n- 123213\n- '
-  const refusal = run(src, src.length, indentListItem)
-  assert.equal(refusal.ok, false, 'indenting an empty item must not commit')
-  assert.equal(refusal.code, 'empty-item-would-become-heading',
-    'and must name the cause, so the toast can offer the remedy')
+  assert.equal(run(src, src.length, indentListItem), '- 12312\n- 123213\n  - \u00A0')
 
   // ...and the bytes it would have written really do reparse to a heading —
   // asserted here so the refusal is pinned to a real hazard rather than to a
@@ -281,16 +280,17 @@ console.log('PASS source-kernel delete + router')
     `the refused bytes must be the ones that produce a heading — got ${types.join(',')}`)
 }
 {
-  // THE NBSP CONTROL: same refusal, same reason, with the user's own U+00A0
-  // run present. The whitespace family is not implicated.
+  // THE NBSP CONTROL: the seed rescue is byte-family-agnostic — the previous
+  // sibling's own U+00A0 run changes nothing about the rescue.
   const NB = '\u00a0'
   const src = '- 12312\n- ' + NB + NB + '123213\n- '
-  assert.equal(run(src, src.length, indentListItem).code, 'empty-item-would-become-heading')
+  assert.equal(run(src, src.length, indentListItem), '- 12312\n- ' + NB + NB + '123213\n  - \u00A0')
 }
 {
-  // THE EMPTY ITEM IS NOT THE LAST ONE — same hazard, same refusal.
+  // THE EMPTY ITEM IS NOT THE LAST ONE — the same rescue mid-list.
   const src = '- 甲\n- 乙\n- \n- 丁\n'
-  assert.equal(run(src, src.indexOf('- \n- 丁') + 2, indentListItem).code, 'empty-item-would-become-heading')
+  assert.equal(run(src, src.indexOf('- \n- 丁') + 2, indentListItem),
+    '- 甲\n- 乙\n  - \u00A0\n- 丁\n')
 }
 
 // ===========================================================================
@@ -320,6 +320,56 @@ console.log('PASS source-kernel delete + router')
   assert.equal(run('- 甲\n  - 乙\n  - 丙\n', 12, outdentListItem), '- 甲\n  - 乙\n- 丙\n')
   // Subtree carry-along still moves as one transaction.
   assert.equal(run('- 甲\n- 乙\n  - 丙\n', 6, indentListItem), '- 甲\n  - 乙\n    - 丙\n')
+}
+
+// ---------------------------------------------------------------------------
+// EMPTY-ITEM SEED RESCUE (2026-08-22, user: 「这确实是一个已知问题但是能否寻求
+// 解决」). A bare empty item cannot open a sublist — its indented `- ` line is
+// a SETEXT underline (the item above becomes a heading), which is what the
+// named refusal honestly protected. The SEED spelling defeats the trap:
+// `  - ` + U+00A0 parses as a REAL nested empty item (measured), the byte is
+// session-ledgered exactly like the /task and split seeds, the first typed
+// character dissolves it through the existing pipeline, and Backspace/Enter
+// exit it through the visually-empty family. Task items keep the wall.
+{
+  const NB = '\u00A0'
+  const src = '- 甲\n- \n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Tab', { doc, index, offset: 6, empty: true })
+  assert.equal(r.ok, true, 'empty bullet Tab must indent with the seed: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '- 甲\n  - ' + NB + '\n')
+  assert.deepEqual(r.transaction.whitespaceMarks, [{ from: 8, to: 9, ascii: '' }],
+    'the seed must be ledgered as standing for no keystroke')
+  assert.equal(r.transaction.selection.anchor, 9, 'the caret lands AFTER the seed')
+}
+{
+  // Quoted variant — the same rescue through the quote prefix.
+  const NB = '\u00A0'
+  const src = '> - 甲\n> - \n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Tab', { doc, index, offset: 10, empty: true })
+  assert.equal(r.ok, true, 'quoted empty bullet Tab must indent with the seed: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '> - 甲\n>   - ' + NB + '\n')
+}
+{
+  // Ordered empty item: the renumber rescue and the seed compose.
+  const NB = '\u00A0'
+  const src = '1. 甲\n2. \n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Tab', { doc, index, offset: 8, empty: true })
+  assert.equal(r.ok, true, 'empty ordered Tab must renumber to 1 and seed: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '1. 甲\n   1. ' + NB + '\n')
+}
+{
+  // The task wall stands: an empty task item still refuses by name.
+  const src = '- [ ] 甲\n- [ ] \n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Tab', { doc, index, offset: 15, empty: true })
+  assert.equal(r.ok, false, 'empty task Tab keeps its refusal')
 }
 
 console.log('PASS source-kernel delete + router (list-boundary guard)')

@@ -295,8 +295,14 @@ const runSeed = (seed, starter) => {
         const a = stripPrefix(afterLines[i].text)
         const b = stripPrefix(beforeLines[i].text)
         if (a === b) continue
+        // Two rescues may rewrite the item's own line beyond its prefix:
+        // the ordered-marker renumber (`N.` -> `1.`), and — since 2026-08-22 —
+        // the EMPTY-ITEM SEED (one ledgered U+00A0 appended so the nested
+        // empty item is representable instead of a setext underline). They
+        // compose on an empty ordered item.
+        const renumberedText = b.replace(/^(\d+)([.)])/, '1$2')
         const isRescue = result.transaction.intent === 'indent-list-item' &&
-          b.replace(/^(\d+)([.)])/, '1$2') === a
+          (renumberedText === a || b + '\u00A0' === a || renumberedText + '\u00A0' === a)
         assert.ok(isRescue,
           `${action} changed line ${i} content beyond its leading prefix (seed ${seed} step ${step})`)
         renumbered += 1

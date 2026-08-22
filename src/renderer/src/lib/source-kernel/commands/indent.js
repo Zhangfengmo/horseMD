@@ -3,6 +3,7 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
 import { parseKernelMarkdown } from '../syntax-index.js'
+import { NO_BREAK_SPACE } from './trailing-whitespace.js'
 
 // Same idiom as syntax-index.js buildItem: QUOTE_PREFIX's leading `[ \t]*` is
 // unconditional, so it also matches pure indentation with zero '>' — only
@@ -206,6 +207,63 @@ const parentItem = (index, item) => {
   return itemContaining(index, item.listStart - 1)
 }
 
+
+// EMPTY-ITEM SEED PROOF (2026-08-22). The bare indent of an empty item is the
+// SETEXT trap the named refusal protects against; the SEED spelling —
+// `  - ` + U+00A0, the same one representable form /task and the split seeds
+// are built on — defeats it (U+00A0 is not ASCII whitespace, so the line is
+// no underline; measured: it parses as a REAL nested empty item). Proven,
+// never assumed: (a) the candidate's node at the seed offset is a paragraph
+// holding EXACTLY the seed, owned by a NESTED item (>= 2 listItem ancestors);
+// (b) no heading appeared (the trap's own signature); (c) the leaf VALUES are
+// the baseline's plus exactly the one seed — nothing else changed meaning.
+const countHeadings = (tree) => {
+  let n = 0
+  const walk = (node) => {
+    if (node?.type === 'heading') n += 1
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return n
+}
+const sortedLeafValues = (tree) => {
+  const out = []
+  const walk = (node) => {
+    if (typeof node?.value === 'string') out.push(node.value)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return out.sort()
+}
+const provenSeededEmptyIndent = (text, edits, seedAt) => {
+  const candidate = applyEdits(text, edits)
+  let before
+  let after
+  try {
+    before = parseKernelMarkdown(text)
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  let seeded = false
+  const walk = (node, ancestors) => {
+    if (seeded) return
+    if (node?.type === 'paragraph' && node.position?.start?.offset === seedAt &&
+        node.children?.length === 1 && node.children[0]?.type === 'text' &&
+        node.children[0].value === NO_BREAK_SPACE &&
+        ancestors.filter((a) => a?.type === 'listItem').length >= 2) {
+      seeded = true
+      return
+    }
+    for (const child of node?.children || []) walk(child, [...ancestors, node])
+  }
+  walk(after, [])
+  if (!seeded) return false
+  if (countHeadings(after) !== countHeadings(before)) return false
+  const expected = [...sortedLeafValues(before), NO_BREAK_SPACE].sort()
+  return JSON.stringify(sortedLeafValues(after)) === JSON.stringify(expected)
+}
+
 export function indentListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
   if (!item) return { ok: false, code: 'unsupported-structure' }
@@ -237,6 +295,41 @@ export function indentListItem({ doc, index, offset }) {
   // rewritten bytes; if they too restructure, the original refusal stands
   // (an EMPTY item still cannot interrupt a paragraph even as `1.`, so the
   // empty-item advice — type first, then indent — is now actually true).
+  // EMPTY-ITEM SEED RESCUE (2026-08-22, user: the known refusal deserves a
+  // solution). The seed spelling makes the nested empty item REPRESENTABLE,
+  // exactly as it does for /task and the split seeds: write the indent PLUS
+  // one U+00A0 at the item's content position, ledger it (`ascii: ''` — it
+  // stands for NO keystroke and dissolves under the first typed character via
+  // the existing seed pipeline; Backspace/Enter exit it through the
+  // visually-empty family). An empty ORDERED item composes with the renumber
+  // rescue below (as `1.` it may interrupt the paragraph once it has the
+  // seed). TASK items keep the empty-task wall untouched.
+  if (item.empty && !item.task) {
+    const markerLineForSeed = index.lines[item.markerLineIndex]
+    const seedPrefixEnd = markerLineForSeed.start + item.quotePrefix.length
+    const renumber = !!item.ordered && item.ordered.number !== 1
+    const base = !renumber ? edits : rows.map((i) => {
+      const at = index.lines[i].start + item.quotePrefix.length
+      if (i !== item.markerLineIndex) return { from: at, to: at, insert: pad }
+      return {
+        from: seedPrefixEnd,
+        to: seedPrefixEnd + item.indent.length + item.marker.length,
+        insert: pad + item.indent + '1' + item.ordered.delimiter
+      }
+    })
+    const delta = base
+      .filter((edit) => edit.from <= item.contentStart)
+      .reduce((total, edit) => total + String(edit.insert ?? '').length - (edit.to - edit.from), 0)
+    const seedAt = item.contentStart + delta
+    const seeded = [...base, { from: item.contentStart, to: item.contentStart, insert: NO_BREAK_SPACE }]
+    if (provenSeededEmptyIndent(index.text, seeded, seedAt)) {
+      const txn = multiTxn(doc, seeded, 'indent-list-item', offset)
+      txn.transaction.selection = { anchor: seedAt + 1, head: seedAt + 1 }
+      txn.transaction.whitespaceMarks = [{ from: seedAt, to: seedAt + 1, ascii: '' }]
+      return txn
+    }
+    return refused
+  }
   if (!item.ordered || item.ordered.number === 1) return refused
   const markerLine = index.lines[item.markerLineIndex]
   const prefixEnd = markerLine.start + item.quotePrefix.length

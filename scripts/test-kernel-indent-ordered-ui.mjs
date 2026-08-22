@@ -26,6 +26,7 @@ import { pressKey } from './lib/human-input.mjs'
 const root = `/tmp/horsemd-kernel-indent-ordered-${process.pid}`
 const file = join(root, 'ordered.md')
 const port = Number(process.env.CDP_PORT || 10079)
+const NBSP = '\u00A0'
 const EOL = process.env.KERNEL_INDENT_CRLF ? '\r\n' : '\n'
 
 const FIXTURE = ['1. 23123', '2. 委屈委屈', '3. ewqeqw'].join(EOL)
@@ -163,32 +164,25 @@ async function run() {
     assert.ok(beforeTab.endsWith('4. '), `the fourth item must be empty — got ${JSON.stringify(beforeTab)}`)
 
     // =====================================================================
-    // 2) SCREENSHOT 1: Tab in the empty item refuses once, with the message
-    //    that names the remedy, and writes nothing.
+    // 2) SCREENSHOT 1 — SEED-RESCUED since 2026-08-22 (this section used to
+    //    pin the refusal): Tab in the empty `4. ` renumbers it to `1.`, nests
+    //    it, and writes the ledgered U+00A0 seed — no toast at all.
     // =====================================================================
     await resetToasts(evaluate)
     await pressTab(send)
-    {
-      const fired = JSON.parse(await toasts(evaluate))
-      assert.equal(fired.length, 1, `the empty-item Tab must be refused exactly once — got ${JSON.stringify(fired)}`)
-      assert.ok(/输入文字|Type some text/.test(fired[0]),
-        `the message must name the remedy — got ${JSON.stringify(fired[0])}`)
-      assert.ok(!/unsupported-input-type|unsupported-structure/.test(fired[0]),
-        `and must not be the generic machine-code toast — got ${JSON.stringify(fired[0])}`)
-    }
-    assert.equal(await readSource(evaluate, 'after empty tab'), beforeTab,
-      'a refused indent must write nothing at all')
+    assert.equal(await toasts(evaluate), '[]',
+      `the seed-rescued empty ordered Tab must not refuse — got ${await toasts(evaluate)}`)
+    assert.ok((await readSource(evaluate, 'after empty tab')).endsWith('   1. ' + NBSP),
+      'the empty item must be nested, renumbered to 1., and seeded')
 
     // =====================================================================
-    // 3) SCREENSHOT 2 — THE BUG: follow the remedy. Type text, Tab again.
-    //    This used to refuse with "would restructure the document"; it must
-    //    now nest the item, renumbered to `1.`, with no toast at all.
+    // 3) The seed DISSOLVES under the typed label — already nested, no
+    //    second Tab needed (the same pipeline the /task seed uses).
     // =====================================================================
     await resetToasts(evaluate)
     await typeText(send, '2313')
-    await pressTab(send)
     assert.equal(await toasts(evaluate), '[]',
-      `indenting the typed ordered item must not refuse — got ${await toasts(evaluate)}`)
+      `typing into the seeded item must not refuse — got ${await toasts(evaluate)}`)
     {
       // NB: the source textarea displays LF regardless of the document's
       // authored EOL — the CRLF fact is asserted against DISK bytes in step 5.
@@ -233,7 +227,7 @@ async function run() {
       assert.ok(!/[^\r]\n/.test(onDisk), 'no bare LF may be introduced into a CRLF document')
     }
 
-    console.log('PASS kernel indent ordered: the empty-item Tab refuses with the type-first remedy; following it, Tab nests the item renumbered to 1. (no restructure refusal), Shift-Tab returns it, and the renumbered bytes reach disk')
+    console.log('PASS kernel indent ordered: the empty-item Tab nests it renumbered to 1. with the ledgered U+00A0 seed, the typed label dissolves the seed in place, Shift-Tab returns it, and the renumbered bytes reach disk')
   } finally {
     if (app) await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })
