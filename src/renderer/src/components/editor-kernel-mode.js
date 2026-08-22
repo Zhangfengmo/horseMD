@@ -30,7 +30,13 @@ import { Plugin, TextSelection } from '@milkdown/prose/state'
 // behaviour rather than shadowing it. Both are SELECTION-only commands (they
 // dispatch nothing but `tr.setSelection(...).scrollIntoView()`), so they write
 // no bytes and the gateway classifies their transaction as `selection-only`.
-import { goToNextCell, isInTable } from '@milkdown/prose/tables'
+// `selectedRect` / `CellSelection` (table-ops, 2026-08-22): the routed table
+// buttons (add/delete row & column, alignment) resolve WHICH table and WHICH
+// row/column from the live CellSelection the table block-handle UI has just
+// set — the same facts prosemirror-tables' own commands would have consumed —
+// and then rewrite the table's SOURCE bytes instead of dispatching the
+// structural PM transaction the gateway vetoes.
+import { CellSelection, goToNextCell, isInTable, selectedRect } from '@milkdown/prose/tables'
 import {
   KERNEL_CODES,
   applySourceTransaction,
@@ -58,6 +64,12 @@ import {
   demoteHeadingAtCaret,
   looksLikeAtxContentStart,
   insertBlockFromQuery,
+  insertTableRow,
+  insertTableColumn,
+  deleteTableRow,
+  deleteTableColumn,
+  setTableColumnAlignment,
+  TABLE_OP_CODES,
   toggleInlineMark
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
@@ -2981,6 +2993,147 @@ export function createKernelMode({
     return true
   }
 
+  // -------------------------------------------------------------------------
+  // Table structural operations (2026-08-22): the entry points the table
+  // block-handle UI actually offers — add row (above/below), add column
+  // (left/right), delete row, delete column, column alignment — routed to the
+  // pure byte commands in lib/source-kernel/commands/table-ops.js.
+  //
+  // WIRING. The gestures live in @milkdown/components' table-block Vue
+  // component, which dispatches through Milkdown COMMANDS
+  // (addRowBeforeCommand & friends). editor-crepe-setup.js re-registers those
+  // six commands with kernel-aware wrappers (routeTableCommandsThroughKernel)
+  // that call this entry point while the kernel is active and fall through to
+  // the original implementation otherwise — the same "swap the run, keep the
+  // UI" pattern the slash menu uses. The gateway's veto for UNROUTED table
+  // structural transactions stays untouched as the fail-closed net (row/col
+  // DRAG-reorder still dispatches moveRow/moveCol and is vetoed).
+  //
+  // WHICH table and WHICH row/column come from the live state exactly as the
+  // legacy commands would read them: `selectedRect` over the CellSelection the
+  // handle click just set (rect.top/bottom/left/right are PM row/column
+  // indexes, header row = 0). The kernel side then needs the table's RAW
+  // location, found through the current projection map's own tableCell pairs
+  // — which doubles as the gate that the table ZIPPED (mdast rows === PM
+  // rows, so the PM indexes mean the same thing in the source). A degraded
+  // table (ragged, header-only, unrecoverable delimiter) has no cell pairs
+  // and refuses here with the named code, bytes untouched.
+  //
+  // The command proves the BYTES (reparse: predicted shape, untouched cells
+  // identical, outside signature); `requireMap: true` proves the PROJECTION
+  // (the result document still maps AND the caret anchor — the target cell's
+  // own content anchor — resolves through the rebuilt map). Both halves are
+  // pre-commit; a failure leaves bytes, history and view exactly as they
+  // were, plus a toast.
+  const tableRawOffsetForRect = (rect) => {
+    const tablePos = rect.tableStart - 1
+    const tableEnd = tablePos + rect.table.nodeSize
+    for (const pair of kernel.map?.blockPairs || []) {
+      if (!pair.tableCell) continue
+      if (pair.pmPos <= tablePos || pair.pmPos >= tableEnd) continue
+      const start = pair.mdBlock?.position?.start?.offset
+      if (Number.isInteger(start)) return start
+    }
+    return null
+  }
+
+  const runTableOperation = (request, viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view) return false
+    if (!kernel.map) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    let rect = null
+    try {
+      rect = isInTable(view.state) ? selectedRect(view.state) : null
+    } catch {
+      rect = null
+    }
+    if (!rect) {
+      notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+      return true
+    }
+    const rawOffset = tableRawOffsetForRect(rect)
+    if (rawOffset === null) {
+      notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+      return true
+    }
+    const doc = kernel.doc
+    const kind = request?.kind
+    let routed = null
+    if (kind === 'add-row-before' || kind === 'add-row-after') {
+      routed = insertTableRow({
+        doc,
+        offset: rawOffset,
+        rowIndex: kind === 'add-row-before' ? rect.top : rect.bottom
+      })
+    } else if (kind === 'add-col-before' || kind === 'add-col-after') {
+      routed = insertTableColumn({
+        doc,
+        offset: rawOffset,
+        columnIndex: kind === 'add-col-before' ? rect.left : rect.right
+      })
+    } else if (kind === 'align') {
+      // The UI aligns ONE column (the col handle's button group); a wider
+      // CellSelection is not that gesture.
+      if (rect.right - rect.left !== 1) {
+        notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+        return true
+      }
+      routed = setTableColumnAlignment({
+        doc,
+        offset: rawOffset,
+        columnIndex: rect.left,
+        alignment: request?.payload
+      })
+    } else if (kind === 'delete-selected') {
+      const sel = view.state.selection
+      if (!(sel instanceof CellSelection)) {
+        notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+        return true
+      }
+      const isRow = sel.isRowSelection()
+      const isCol = sel.isColSelection()
+      if (isRow && isCol) {
+        // The WHOLE table is selected. From this UI that is the col handle's
+        // delete on a single-column table — name the real reason; anything
+        // else (a hand-made whole-table selection) is out of scope.
+        notifyBlocked(rect.map.width === 1 ? TABLE_OP_CODES.LAST_COLUMN : TABLE_OP_CODES.UNSUPPORTED)
+        return true
+      }
+      if (isCol) {
+        if (rect.right - rect.left !== 1) {
+          notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+          return true
+        }
+        routed = deleteTableColumn({ doc, offset: rawOffset, columnIndex: rect.left })
+      } else if (isRow) {
+        if (rect.bottom - rect.top !== 1) {
+          notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+          return true
+        }
+        routed = deleteTableRow({ doc, offset: rawOffset, rowIndex: rect.top })
+      } else {
+        notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+        return true
+      }
+    } else {
+      notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
+      return true
+    }
+    if (!routed.ok) {
+      notifyBlocked(routed.code)
+      return true
+    }
+    // Setting the alignment a column already has: nothing to write, nothing
+    // to toast — the view already shows it.
+    if (routed.noop) return true
+    applyKernelTransaction(routed.transaction, view, { requireMap: true })
+    return true
+  }
+
   // Backspace/Delete at a TOP-LEVEL ATX heading's content start is the
   // demote gesture (Milkdown's DowngradeHeading binds BOTH keys there; the
   // gateway's extractHeadingDemotion documents the transaction it would
@@ -3300,6 +3453,10 @@ export function createKernelMode({
     runQuoteToggleFromQuery,
     runBlockTypeFromQuery,
     runInsertBlockFromQuery,
+    // Table structural ops (2026-08-22): consumed by editor-crepe-setup.js's
+    // routeTableCommandsThroughKernel, which swaps the six table commands the
+    // block-handle UI dispatches for kernel-aware wrappers.
+    runTableOperation,
     // CM bridge degraded-fallback gate (editor-kernel-cm-bridge.js): before
     // attach / while degraded / after dispose, the kernel is not the source
     // of truth, so a CM-focused Mod-z must fall through to the nodeview's
