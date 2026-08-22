@@ -44,6 +44,8 @@ export function useAppLifecycle({
   openPaths,
   isMobile,
   tabsRef,
+  kernelModeIds,
+  setKernelModeIds,
   setActiveId,
   setTabs,
   setSidebarMode,
@@ -57,6 +59,11 @@ export function useAppLifecycle({
   // Latest session snapshot, kept in a ref so the close/flush path can persist it
   // synchronously without waiting on the debounced write.
   const sessionRef = useRef(null)
+  // Live mirror of the per-tab kernel flags for the close-time flush (same
+  // reason tabsRef exists: flushSession must see a toggle still inside the
+  // persistence debounce window).
+  const kernelModeIdsRef = useRef(kernelModeIds)
+  kernelModeIdsRef.current = kernelModeIds
   // Write the latest snapshot now (close / pagehide / debounce all funnel here,
   // so the persisted shape lives in exactly one place).
   const flushSession = useCallback(() => {
@@ -65,10 +72,18 @@ export function useAppLifecycle({
       // Patch unsaved-scratch content from the live mirror so a close-time write
       // captures edits still inside a tab's debounce window. (commitAllLive, run
       // before this on the close path, already synced tabsRef.current.)
+      const kernelIds = kernelModeIdsRef.current || new Set()
       const untitled = tabsRef.current
         .filter((t) => t.kind !== 'settings' && !t.path && isTabDirty(t) && (t.content || '').trim())
-        .map((t) => ({ title: t.title, content: t.content }))
-      localStorage.setItem(LS, JSON.stringify({ ...sessionRef.current, untitled }))
+        .map((t) => ({ title: t.title, content: t.content, kernel: kernelIds.has(t.id) }))
+      // The kernel flag is per-tab state the session must carry (2026-08-22):
+      // dropping it across a restart used to silently reattach the tab in
+      // LEGACY mode, whose save boundary demotes a kernel-written seeded task
+      // item (`- [ ] ` + U+00A0) to the bare literal-"[ ]" spelling.
+      const kernelPaths = tabsRef.current
+        .filter((t) => t.path && kernelIds.has(t.id))
+        .map((t) => t.path)
+      localStorage.setItem(LS, JSON.stringify({ ...sessionRef.current, untitled, kernelPaths }))
     } catch {
       /* quota / serialization failure — skip this snapshot */
     }
@@ -106,11 +121,41 @@ export function useAppLifecycle({
       setTabs((prev) => [...prev, ...created])
       return created
     }
+    // Re-arm the per-tab kernel flags the last session carried (2026-08-22):
+    // without this a kernel tab silently reattached in LEGACY mode after a
+    // restart, and legacy's save boundary demotes kernel-written seeded task
+    // items to the literal-"[ ]" spelling. Path tabs are keyed by path;
+    // scratch tabs by their session-entry order. The reloadNonce bump is the
+    // kernel toggle's own remount mechanism — any editor that already mounted
+    // without the flag re-creates onto the same clean bytes; EditorArea's own
+    // eligibility gate (plain-text / heavy-as-source) still applies, so an
+    // ineligible tab ignores the flag exactly as it ignores the menu toggle.
+    const kernelPaths = restoreSession === false
+      ? new Set()
+      : new Set((session.kernelPaths || []).filter(Boolean))
+    const restoreKernelFlags = (createdUntitled) => {
+      const ids = []
+      for (const t of tabsRef.current) {
+        if (t.path && kernelPaths.has(t.path)) ids.push(t.id)
+      }
+      ;(createdUntitled || []).forEach((t, i) => {
+        if (untitled[i]?.kernel) ids.push(t.id)
+      })
+      if (!ids.length) return
+      const idSet = new Set(ids)
+      setKernelModeIds(idSet)
+      const bump = (list) => list.map((t) => (
+        idSet.has(t.id) ? { ...t, reloadNonce: t.reloadNonce + 1 } : t
+      ))
+      tabsRef.current = bump(tabsRef.current)
+      setTabs(bump)
+    }
     // Restore silently: skip files that were deleted/moved since last session
     // without popping an error for each one.
     if (paths.length) {
       openPaths(paths, true).then(() => {
-        addUntitled()
+        const created = addUntitled()
+        restoreKernelFlags(created)
         if (session.activePath) {
           setTabs((prev) => {
             const t = prev.find((x) => x.path === session.activePath)
@@ -125,6 +170,7 @@ export function useAppLifecycle({
       })
     } else {
       const created = addUntitled()
+      restoreKernelFlags(created)
       if (created && created.length) setActiveId(created[0].id)
       window.api.appReady?.()
     }
@@ -149,7 +195,10 @@ export function useAppLifecycle({
       // don't keep coming back. Saved files are reopened from disk instead.
       untitled: tabs
         .filter((t) => t.kind !== 'settings' && !t.path && isTabDirty(t) && (t.content || '').trim())
-        .map((t) => ({ title: t.title, content: t.content })),
+        .map((t) => ({ title: t.title, content: t.content, kernel: kernelModeIds.has(t.id) })),
+      // Per-tab kernel flags, keyed by path (scratch tabs carry theirs on the
+      // untitled entries above) — see the restore effect for why.
+      kernelPaths: tabs.filter((t) => t.path && kernelModeIds.has(t.id)).map((t) => t.path),
       activePath
     }
     sessionRef.current = data
@@ -160,7 +209,7 @@ export function useAppLifecycle({
     // for a brief pause, then write once. The close path flushes the last edit.
     const id = setTimeout(flushSession, 400)
     return () => clearTimeout(id)
-  }, [folderRoots, theme, customTheme, lang, recents, sidebarOpen, sidebarMode, paneWidth, tabs, activePath, flushSession])
+  }, [folderRoots, theme, customTheme, lang, recents, sidebarOpen, sidebarMode, paneWidth, tabs, activePath, kernelModeIds, flushSession])
 
   // Flush the pending session snapshot immediately when the window is closing,
   // so the debounce above never drops the user's last few keystrokes.

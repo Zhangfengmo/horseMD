@@ -1090,6 +1090,8 @@ export default function App() {
     openPaths,
     isMobile,
     tabsRef,
+    kernelModeIds,
+    setKernelModeIds,
     setActiveId,
     setTabs,
     setSidebarMode,
