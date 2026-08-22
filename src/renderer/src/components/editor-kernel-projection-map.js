@@ -45,8 +45,14 @@
 // Every known way the two sides can differ in block count today, and why each
 // is still caught document-wide (verified 2026-08-17):
 //   1. `remarkMergeInlineHtml` merging ROOT-LEVEL html siblings (editor side
-//      loses a block; Case H9) -> mdast has an unconsumed block ->
-//      `mdIndex !== mdBlocks.length`.
+//      loses a block; Case H9). Since 2026-08-22 this one has an EXPLICIT
+//      pairing instead of a rejection: the html-wrapper branch consumes the
+//      whole run as ONE read-only pair, gated on the PM atom's value being
+//      byte-identical to the run's own concatenation (computed by the SAME
+//      shared `inlineHtmlRunAt` the editor's coalescer calls) — so a merge
+//      the editor did NOT perform, or performed differently, still leaves an
+//      unconsumed mdast block -> `mdIndex !== mdBlocks.length` -> whole-map
+//      reject, exactly as before.
 //   2. ProseMirror `createAndFill` inserting the schema-required filler
 //      paragraph in a list item holding a leading block (PM gains a block;
 //      Case M6) -> the surplus/type guards.
@@ -81,7 +87,12 @@
 // only removes, a fill/split/promotion only adds, and NOTHING in either chain
 // REORDERS blocks. A future plugin that removes one block and adds another in
 // the same pass WOULD break this invariant — it must either be given an
-// explicit pairing here or be kept out of the parse chain.
+// explicit pairing here or be kept out of the parse chain. Two such explicit
+// pairings exist now, both read-only and both byte-gated: the merged
+// root-html run (case 1 above) and the standalone-line `$$x$$` paragraph
+// paired against `normalizeDisplayMath`'s code_block (see
+// `isNormalizedDisplayMathPair` — a 1:1 TYPE exception, so it cannot shift
+// counts at all).
 //
 // Second line of defence (not a substitute): `blockEndpointsAgree` below
 // cross-checks each SERVED pair's first/last decoded character against the PM
@@ -114,6 +125,7 @@
 // entities).
 import { buildSyntaxIndex, buildCharacterMap, buildCodeMap } from '../lib/source-kernel/index.js'
 import { buildTableCellMaps } from '../lib/source-kernel/table-map.js'
+import { inlineHtmlRunAt, BREAK_REWRITE_PARENTS } from '../lib/source-kernel/inline-html.js'
 
 // PM block-level node name -> the mdast block type(s) it may structurally
 // pair with. Both sides are walked in document order (pre-order, containers
@@ -489,6 +501,49 @@ const emptyAtxHeadingContentStart = (markdown, md) => {
   return end
 }
 
+// A STANDALONE-LINE `$$x$$` paragraph paired against the code_block the
+// editor chain shows for it (2026-08-22 — the first of the three documented
+// whole-tab attach degradations).
+//
+// The two chains genuinely see DIFFERENT BYTES for this one shape:
+// `editor-parse-adapter.js` runs `normalizeDisplayMath` (editor-math.js)
+// BEFORE the PM parse, rewriting a line that is exactly `$$…$$` into the
+// three-line block form remark-math recognizes — so PM holds a `code_block`
+// with `attrs.language === 'LaTeX'` (Crepe's latex feature rewrite) while the
+// kernel deliberately holds the ORIGINAL bytes, whose mdast is a `paragraph`
+// (remark-math reads single-line `$$x$$` as INLINE math with a 2-dollar
+// fence). A type mismatch at that slot used to reject the WHOLE map, i.e.
+// every document containing one such line ran entirely in legacy.
+//
+// The pairing below is a byte-proven derivation, not a tolerance:
+//   * the mdast paragraph's ENTIRE raw span must match
+//     `/^\$\$[^\n]*\$\$[ \t]*$/` — the same line shape `normalizeDisplayMath`
+//     rewrites (its own regex is `^[ \t]*\$\$([^\n]+?)\$\$[ \t]*$` per line).
+//     Leading indentation needs no allowance because remark EXCLUDES it from
+//     the paragraph span (measured: `'  $$x$$'` → paragraph [2,7)); trailing
+//     `[ \t]*` IS needed because remark keeps trailing spaces inside the span
+//     (measured: `'$$x$$  '` → paragraph [0,7)) and the rewrite tolerates
+//     them. A span with any other content (trailing text, a second line via
+//     lazy continuation) does not match and keeps the whole-map rejection.
+//   * the PM node must be a `code_block` whose language is LaTeX — the exact
+//     node Crepe's latex feature produces from the rewritten bytes. Any other
+//     language stays a plain type mismatch.
+//
+// The pair is NEVER editable (`charMap: null`, decided by the caller): the
+// raw side is one line and the PM side three, so no character-level decode
+// contract exists — editing must keep refusing, which the read-only-leaf
+// posture (tables / block HTML) already implements. Everything around the
+// slot keeps its map, which is the entire point.
+const STANDALONE_DOLLAR_MATH_RE = /^\$\$[^\n]*\$\$[ \t]*$/
+const isNormalizedDisplayMathPair = (markdown, md, pmNode) => {
+  if (md?.type !== 'paragraph') return false
+  if (String(pmNode?.attrs?.language ?? '').toLowerCase() !== 'latex') return false
+  const start = md.position?.start?.offset
+  const end = md.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return false
+  return STANDALONE_DOLLAR_MATH_RE.test(markdown.slice(start, end))
+}
+
 // The separator bytes a plain-text insert at the very end of the document
 // needs BEFORE the typed text so the reparse yields a new paragraph instead
 // of a lazy continuation line of the final list/blockquote ('- item\n' +
@@ -748,6 +803,19 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       continue
     }
 
+    // Standalone-line `$$x$$` (see `isNormalizedDisplayMathPair`): the ONE
+    // type pair that is legal OUTSIDE PM_TO_MD, because the editor chain
+    // rewrote the bytes before parsing (`normalizeDisplayMath`) while the
+    // kernel holds the original line. Byte-proven from the paragraph's own
+    // span + the PM block's LaTeX language; read-only by construction (the
+    // two sides disagree in line structure, so no offset in either direction
+    // may ever be served — same contract as block HTML).
+    if (pmType === 'code_block' && md.type === 'paragraph' &&
+        isNormalizedDisplayMathPair(markdown, md, pm.node)) {
+      blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap: null })
+      continue
+    }
+
     const allowed = PM_TO_MD[pmType] || []
     if (!allowed.includes(md.type)) return null
 
@@ -771,6 +839,76 @@ export function buildProjectionMap(markdown, pmDoc, options = {}) {
       const content = pm.node.content
       const only = content.childCount === 1 ? content.firstChild : null
       if (!only || only.type.name !== 'html') return null
+      // MERGED ROOT-LEVEL SIBLINGS (2026-08-22 — the third of the three
+      // documented whole-tab attach degradations). `remarkMergeInlineHtml`'s
+      // `coalesceChildren` runs on the mdast ROOT too, so N consecutive
+      // root-level html blocks that balance (`<div>` … `</div>` split by
+      // blank lines — the everyday HTML-wrapper spelling) become ONE html
+      // node on the editor side, wrapped in ONE paragraph, while the kernel
+      // keeps N positioned blocks. That count mismatch used to reject the
+      // WHOLE map.
+      //
+      // The consumption below is gated on a byte proof, not a tolerance:
+      //  * the run is detected by `inlineHtmlRunAt` — the SAME shared
+      //    implementation the editor's coalescer calls, invoked with the
+      //    identical arguments (`BREAK_REWRITE_PARENTS.has(tree.type)` is
+      //    exactly `coalesceChildren`'s own `breakHtmlCuts` for the root,
+      //    i.e. false: a root-level `<br/>` stays html and balances across);
+      //  * the PM atom's `attrs.value` must equal the run's `value`
+      //    byte-for-byte. That value IS what the editor's merged node
+      //    carries (the concatenation of the member values, the same
+      //    function's same return), so equality proves the editor merged
+      //    exactly these blocks — no whitespace guessing is needed because
+      //    both sides compute the spelling from the same code. Inequality
+      //    means the trees aligned differently → fall through, and the
+      //    leftover mdast blocks reject the whole map exactly as before.
+      //  * each consumed block must be the NEXT entry in `mdBlocks` by
+      //    IDENTITY — the run members are consecutive root children and
+      //    html has no walkable children, so this always holds for a real
+      //    parse; checking it makes the count bookkeeping self-verifying.
+      // The attempt only runs when the single-block pairing CANNOT be what
+      // the editor did (`atomValue !== md.value` — a merged value is the
+      // concatenation of 2+ non-empty values, so it never equals the first
+      // member's own value), which keeps every previously-working 1:1
+      // pairing byte-identical, including the value-divergent ones the old
+      // branch deliberately never inspected.
+      //
+      // Root-level ONLY, deliberately: the same merge inside a blockquote /
+      // list item still rejects the whole map (the run proof has not been
+      // argued through container prefixes) — pinned as a residual in
+      // scripts/test-kernel-projection-map.mjs Case H9.
+      const atomValue = String(only.attrs?.value ?? '')
+      if (atomValue !== String(md.value ?? '')) {
+        const rootChildren = index.tree?.children || []
+        const runStart = rootChildren.indexOf(md)
+        const run = runStart >= 0
+          ? inlineHtmlRunAt(rootChildren, runStart, BREAK_REWRITE_PARENTS.has(index.tree.type))
+          : null
+        if (run && run.value === atomValue) {
+          const rest = rootChildren.slice(runStart + 1, run.end)
+          const first = rootChildren[runStart]
+          const last = rootChildren[run.end - 1]
+          const startPoint = first.position?.start
+          const endPoint = last.position?.end
+          const aligned = rest.length > 0 &&
+            Number.isInteger(startPoint?.offset) && Number.isInteger(endPoint?.offset) &&
+            rest.every((node, k) => mdBlocks[mdIndex + k] === node)
+          if (aligned) {
+            mdIndex += rest.length
+            blockPairs.push({
+              // A synthetic html block spanning the WHOLE run (real point
+              // objects from the member nodes), so every position-reading
+              // consumer (read-only reporting, content-end floors) sees the
+              // run's true extent rather than its first member's.
+              mdBlock: { type: 'html', value: run.value, mergedRootHtml: true, position: { start: startPoint, end: endPoint } },
+              pmNode: pm.node,
+              pmPos: pm.pos,
+              charMap: null
+            })
+            continue
+          }
+        }
+      }
       blockPairs.push({ mdBlock: md, pmNode: pm.node, pmPos: pm.pos, charMap: null })
       continue
     }

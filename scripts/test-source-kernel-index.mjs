@@ -208,7 +208,7 @@ const shape = (node) => {
     [{ type: 'inlineMath', value: 'x\n_y_\n', pos: [0, 8] }])
 }
 
-// ---- 已知残留限制：**独占一行**的 `$$…$$` 两侧仍不对齐（文档整篇降级）----
+// ---- **独占一行**的 `$$…$$`：两条链看到的字节确实不一样（2026-08-22 起不再整篇降级）----
 //
 // 这不是"跟随编辑器"能解决的：两条链**看到的字节就不一样**。
 //   - 编辑器链在 parse 之前先跑 `prepareEditorMarkdown`
@@ -218,15 +218,18 @@ const shape = (node) => {
 //   - 内核 `kernel.doc` 刻意持有**原始未 prepare 的字节**
 //     （`editor-kernel-mode.js` 的 `createMarkdownDocument(source)`），
 //     所以内核侧看到的仍是 `$$E=mc^2$$` 一行 → `paragraph > inlineMath`。
-// 结果：块序 `code_block` vs `paragraph` 无法配对 → buildProjectionMap 返回 null
-// → 该文档整篇降级到 legacy 路径（fail-closed，无字节风险，但**不是**已治好）。
 //
-// 下面钉住的是**内核侧的真相**（内核就该按它拿到的字节解析），同时把"这一形状
-// 仍降级"这件事显式记录下来，免得阶段 3 的验收误以为数学域已经全治。
-// 两条原则性修法（留给后续任务，二选一）：
-//   (a) 让内核也持有 PREPARED 字节（则保存/导出的字节语义随之改变，需单独论证）；
-//   (b) 内核模式下不跑 `normalizeDisplayMath`（则单行 `$$…$$` 在内核模式下按
-//       remark-math 的原义渲染成行内数学，与 legacy 模式的观感不同）。
+// 从前的结局：块序 `code_block` vs `paragraph` 无法配对 → buildProjectionMap
+// 返回 null → 该文档整篇降级到 legacy。**2026-08-22 起配对环节承认这对形状**
+// （`editor-kernel-projection-map.js` 的 `isNormalizedDisplayMathPair`：段落
+// 整个 raw span 匹配 `/^\$\$[^\n]*\$\$[ \t]*$/` 且 PM 是 LaTeX code_block 时，
+// 该槽配成**只读叶**，charMap null）——不承诺可编辑（一行 raw 对三行 PM，
+// 字符级映射不存在，编辑必须继续拒绝），但文档其余块照常可编辑。钉子在
+// scripts/test-kernel-projection-map.mjs Case P6（含负控：带尾随文字/多行/
+// 非 LaTeX 语言仍整图拒绝）。
+//
+// 下面钉住的仍是**内核侧的真相**（内核就该按它拿到的字节解析）——这半边
+// 没有变，也不该变。
 {
   assert.deepEqual(childrenOf('$$E=mc^2$$\n')[0].children.map((c) => c.type), ['inlineMath'])
   assert.equal(childrenOf('$$E=mc^2$$\n')[0].type, 'paragraph')

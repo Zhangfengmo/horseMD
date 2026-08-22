@@ -1397,6 +1397,16 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
   assert.deepEqual(mapCode.blockPairs.map((pair) => pair.pmNode.type.name),
     ['bullet_list', 'list_item', 'paragraph', 'code_block'])
   assert.equal(mapCode.blockPairs[2].charMap, null)
+  // The fence ITSELF goes through buildCodeMap like any code pair, and today
+  // that proof fails for the LIST-INDENTED form (the per-line '  ' prefix is
+  // not a shape code-map.js proves) — so the fence pairs READ-ONLY. Pinned
+  // honestly so nobody assumes it is editable; if buildCodeMap ever learns
+  // the list prefix, flip this to `assert.ok(...charMap)`.
+  assert.equal(mapCode.blockPairs[3].pmNode.type.name, 'code_block')
+  assert.equal(mapCode.blockPairs[3].charMap, null,
+    'the list-indented fence is read-only today (buildCodeMap cannot prove the indent prefix)')
+  assert.equal(mapMath.blockPairs[3].charMap, null,
+    'the list-indented $$ block is read-only for the same reason')
 
   // A NESTED LIST WRITTEN ON THE SAME LINE — the shape the marker-completing
   // Space produces when a user types `- ` at a bullet item's text start. The
@@ -1437,8 +1447,8 @@ const cbl = (language, s) => schema.node('code_block', { language }, s ? [text(s
 // non-editable leaf instead of nulling the whole map. Fail-closed is intact
 // where it counts: the block carries `charMap: null`, so no offset inside it
 // resolves in either direction and every write into it is refused. The
-// STRUCTURAL disagreements (Case M6's block-count mismatch, Case 4's type
-// mismatch, Case H6/H9's shape/count guards) still reject the whole map.
+// STRUCTURAL disagreements (Case 4's type mismatch, Case H6's shape guard,
+// Case P5's count/flag guards) still reject the whole map.
 {
   const md = 'a $x$ b\n'
   const map = buildProjectionMap(md, doc(p(text('a $x$ b'))))
@@ -1577,7 +1587,8 @@ const br = () => schema.node('hard_break')
 // P5-2.5 **有意翻转**：这是**内容级**分歧（配对本身没错：一个 paragraph 对一个
 // paragraph），因此只把该 pair 降级成不可编辑叶，整图仍然可用。fail-closed 没有
 // 削弱——该块 charMap 为 null，任何方向的偏移都解析不出来，写入一律被拒。真正说明
-// 「两棵树对不齐」的结构性检查（Case H6 的形状守卫、Case H9 的块数不符）依旧整图拒绝。
+// 「两棵树对不齐」的结构性检查（Case H6 的形状守卫、Case H9 负控的 value 不符、
+// Case P5 的块数/类型守卫）依旧整图拒绝。
 {
   const md = 'a <span>x</span> b\n'
   const map = buildProjectionMap(md, doc(p(text('a <span>x</span> b'))))
@@ -1611,23 +1622,84 @@ const br = () => schema.node('hard_break')
   assert.equal(map.pmPosToRaw(14), 41) // 右边界
 }
 
-// Case H9（已知残留，钉住当前行为）：`remarkMergeInlineHtml` 也会合并 **根级**
-// 的 html 兄弟。`<div>\n\n</div>\n` 在内核侧是两个根级 `html` 块（[0,5) 与
-// [7,13)），在编辑器侧被合成一个 html 节点 → `remarkHtmlTransformer` 包成 **一个**
-// paragraph → pmBlocks 1 vs mdBlocks 2 → 整图 null。
+// Case H9（已治，2026-08-22 —— 三种整篇降级形状之三）：`remarkMergeInlineHtml`
+// 也会合并 **根级** 的 html 兄弟。`<div>\n\n</div>\n` 在内核侧是两个根级 `html`
+// 块（[0,5) 与 [7,13)），在编辑器侧被合成一个 html 节点（value = 各块 value 的
+// **拼接**，`'<div></div>'`，实测自真实编辑器链）→ `remarkHtmlTransformer` 包成
+// **一个** paragraph → pmBlocks 1 vs mdBlocks 2，从前整图 null、整个标签页降级。
 //
-// 这是「HTML 包裹层」的真实写法，本任务 **未** 治理：治它需要在 flattenMd 侧同样
-// 合并根级 html 兄弟，而合并跨越了块边界（两块之间的空行属于谁没有定义），与
-// 「块级 HTML 是不可编辑叶」的现有契约冲突。此处钉住 null，防止将来有人以为它已
-// 经工作；若日后治理，本用例应翻转为 map 非 null。
-// P5-2.5 复核后 **未** 翻转：这里的失败是 **块数不符**（pmBlocks 1 vs mdBlocks 2），
-// 属于「两棵树对不齐」的结构性失败，必须继续整图拒绝；逐块降级只处理内容级分歧。
+// 现在配对环节允许 N 个连续的**根级** mdast html 块被 ONE 个 PM html 原子消费，
+// 作为单个只读叶——条件是逐字节证明：run 的判定用的是编辑器自己的合并规则
+// `inlineHtmlRunAt`（lib/source-kernel/inline-html.js，两条链共享的同一份实现，
+// `breakHtmlCuts = BREAK_REWRITE_PARENTS.has('root') = false`，与
+// `coalesceChildren` 对根节点的调用逐参数相同），且 PM 原子的 `attrs.value`
+// 必须与 run 自己的拼接值**逐字节相等**。拼接值就是编辑器合并节点携带的 value
+// （同一个函数的同一个返回值），所以相等即证明「编辑器正是这样合并的」；不等
+// 说明两棵树对不齐 → 整图仍拒绝（下方负控钉住）。块级 HTML 本就是只读叶家族，
+// 合并后的 run 也一样：不含 charMap，任何方向的偏移都解析不出。
 {
   const md = '<div>\n\n</div>\n'
-  assert.equal(
-    buildProjectionMap(md, doc(p(inlineHtml('<div></div>')))), null,
-    'a merged ROOT-LEVEL block-HTML wrapper still degrades the whole map (known residual)'
-  )
+  const map = buildProjectionMap(md, doc(p(inlineHtml('<div></div>'))))
+  assert.ok(map, 'a merged ROOT-LEVEL block-HTML wrapper must map instead of degrading the tab')
+  assert.equal(map.blockPairs.length, 1)
+  const pair = map.blockPairs[0]
+  assert.equal(pair.charMap, null, 'the merged run is one read-only leaf')
+  assert.equal(pair.mdBlock.type, 'html')
+  assert.equal(pair.mdBlock.position.start.offset, 0, 'the pair spans the whole run')
+  assert.equal(pair.mdBlock.position.end.offset, 13)
+  assert.equal(map.pmPosToRaw(1), null, 'no PM position inside it resolves')
+  for (const raw of [0, 4, 6, 8, 12]) {
+    assert.equal(map.rawToPmPos(raw), null, `raw ${raw} inside the run must not resolve`)
+  }
+
+  // The block AFTER the wrapper keeps byte-correct offsets — the whole point.
+  // '<div>\n\n</div>\n\nafter\n': after=[15,20). PM p1 nodeSize 3 → p2 pos 3.
+  const withAfter = buildProjectionMap('<div>\n\n</div>\n\nafter\n',
+    doc(p(inlineHtml('<div></div>')), p(text('after'))))
+  assert.ok(withAfter, 'the merged run plus an ordinary paragraph must map')
+  assert.equal(withAfter.blockPairs.length, 2)
+  assert.equal(withAfter.blockPairs[0].charMap, null)
+  assert.ok(withAfter.blockPairs[1].charMap, 'the paragraph after the run stays editable')
+  assert.equal(withAfter.pmPosToRaw(4), 15)
+  assert.equal(withAfter.pmPosToRaw(9), 20)
+  assert.deepEqual(withAfter.rawToPmPos(15), { pos: 4, atom: false })
+
+  // THREE consecutive siblings merge into one atom too (measured PM value:
+  // the concatenation '<div><p>x</p></div>'), consuming all three md blocks.
+  // '<div>\n\n<p>x</p>\n\n</div>\n\nafter\n': after=[25,30).
+  const triple = buildProjectionMap('<div>\n\n<p>x</p>\n\n</div>\n\nafter\n',
+    doc(p(inlineHtml('<div><p>x</p></div>')), p(text('after'))))
+  assert.ok(triple, 'a three-sibling run must map')
+  assert.equal(triple.blockPairs.length, 2)
+  assert.equal(triple.blockPairs[0].charMap, null)
+  assert.equal(triple.blockPairs[0].mdBlock.position.end.offset, 23)
+  assert.equal(triple.pmPosToRaw(4), 25)
+
+  // NEGATIVE CONTROL — the PM value does NOT correspond to the run's own
+  // concatenation: the trees aligned differently, whole map rejected.
+  assert.equal(buildProjectionMap('<div>\n\n</div>\n', doc(p(inlineHtml('<div>x</div>')))), null,
+    'a PM value that is not the run concatenation must reject the whole map')
+
+  // CONTROLS — the rule follows the editor's own NON-merge decisions, so the
+  // 1:1 pairings that already worked keep working unchanged:
+  // (a) an unbalanced run ('<div>' + '<div>') is not merged by either side;
+  const unbalanced = buildProjectionMap('<div>\n\n<div>\n',
+    doc(p(inlineHtml('<div>')), p(inlineHtml('<div>'))))
+  assert.ok(unbalanced, 'an unbalanced sibling pair still maps 1:1')
+  assert.equal(unbalanced.blockPairs.length, 2)
+  // (b) a first block that is not a pure opening tag ('<div>\nfoo') starts no
+  //     run on either side (isOpeningInlineTag is the shared predicate).
+  const multiline = buildProjectionMap('<div>\nfoo\n\n</div>\n',
+    doc(p(inlineHtml('<div>\nfoo')), p(inlineHtml('</div>'))))
+  assert.ok(multiline, 'a non-tag first block still maps 1:1')
+  assert.equal(multiline.blockPairs.length, 2)
+
+  // RESIDUAL, deliberately kept (root-level rule only): the SAME merge inside
+  // a blockquote/list item still rejects the whole map — the run proof has
+  // not been argued through container prefixes, so it stays fail-closed.
+  assert.equal(buildProjectionMap('> <div>\n>\n> </div>\n',
+    doc(schema.node('blockquote', null, [p(inlineHtml('<div></div>'))]))), null,
+    'a merged run inside a blockquote still degrades (documented residual)')
 }
 
 // Case H10（对照）：中间夹一个段落时，合并被段落打断 —— 两侧都是
@@ -1891,18 +1963,73 @@ console.log('PASS kernel projection map (inline html)')
     'block-HTML shape guard must reject the whole map')
 }
 
-// Case P6 (residual, NOT healed — pinned so nobody assumes otherwise): a
-// standalone-line `$$x$$`. `editor-parse-adapter.js`'s `normalizeDisplayMath`
-// rewrites the line to the multi-line block form BEFORE the PM parse, so PM
-// holds a `code_block` (language 'LaTeX') while the kernel holds the RAW
-// bytes, whose mdast is a `paragraph` containing one inline-math atom. That
-// is a TYPE-pair mismatch (`PM_TO_MD.code_block` has no 'paragraph' entry),
-// i.e. a structural failure — deliberately still whole-map. Healing it means
-// teaching the pairing about the pre-normalization, not relaxing fail-closed.
+// Case P6 (HEALED 2026-08-22 — the standalone-line `$$x$$` no longer degrades
+// the whole tab): `editor-parse-adapter.js`'s `normalizeDisplayMath` rewrites
+// the line to the multi-line block form BEFORE the PM parse, so PM holds a
+// `code_block` (language 'LaTeX') while the kernel deliberately holds the RAW
+// bytes, whose mdast is a `paragraph` containing one inline-math atom. The two
+// sides GENUINELY disagree in line structure (1 raw line vs 3 PM lines), so
+// the pair can never be editable — but the disagreement is byte-provable from
+// the paragraph's own span (`/^\$\$[^\n]*\$\$[ \t]*$/` — exactly the line shape
+// `normalizeDisplayMath` rewrites; the `[ \t]*` tail is measured, remark keeps
+// trailing spaces inside the paragraph span) plus the PM block's LaTeX
+// language, so the slot pairs as a READ-ONLY leaf and every other block keeps
+// its map. Fail-closed is preserved where the rule does not prove the shape:
+// the negative controls below still reject the WHOLE map.
 {
   const md = '$$x$$\n\nafter\n'
-  assert.equal(buildProjectionMap(md, doc(cbl('LaTeX', 'x'), p(text('after')))), null,
-    'standalone $$x$$ still degrades the whole map (type-pair mismatch, not a size one)')
+  const map = buildProjectionMap(md, doc(cbl('LaTeX', 'x'), p(text('after'))))
+  assert.ok(map, 'a standalone $$x$$ document must map instead of degrading whole-tab')
+  assert.equal(map.blockPairs.length, 2)
+  const mathPair = map.blockPairs[0]
+  assert.equal(mathPair.pmNode.type.name, 'code_block')
+  assert.equal(mathPair.mdBlock.type, 'paragraph', 'paired against the kernel\'s own paragraph')
+  assert.equal(mathPair.charMap, null, 'the pair is a read-only leaf — the two sides disagree in line structure')
+  assert.notEqual(mathPair.virtual, true, 'and it never claims an insert anchor')
+  // No position resolves inside it, in either direction — every write refuses.
+  // PM: code_block pos 0 (content [1,2]); paragraph pos 3 (content start 4).
+  assert.equal(map.pmPosToRaw(1), null)
+  assert.equal(map.pmPosToRaw(2), null)
+  assert.equal(map.pairAt(1), null)
+  assert.equal(map.virtualBlockAt(1), null)
+  for (const raw of [0, 2, 3, 5]) {
+    assert.equal(map.rawToPmPos(raw), null, `raw ${raw} inside $$x$$ must not resolve`)
+  }
+  // The rest of the document is editable with byte-correct offsets.
+  assert.ok(map.blockPairs[1].charMap, 'the paragraph after the math stays editable')
+  assert.equal(map.pmPosToRaw(4), 7)
+  assert.equal(map.pmPosToRaw(9), 12)
+  assert.deepEqual(map.rawToPmPos(7), { pos: 4, atom: false })
+
+  // The other spellings normalizeDisplayMath rewrites pair the same way:
+  // trailing [ \t] (measured: the kernel paragraph span INCLUDES them) and
+  // leading indentation (measured: the span EXCLUDES it), and the greedy
+  // `$$a$$ $$b$$` line (rewritten wholesale, PM code text 'a$$ $$b').
+  const trailing = buildProjectionMap('$$x$$  \n\nafter\n', doc(cbl('LaTeX', 'x'), p(text('after'))))
+  assert.ok(trailing, 'the trailing-space spelling must map too')
+  assert.equal(trailing.blockPairs[0].charMap, null)
+  assert.equal(trailing.pmPosToRaw(4), 9)
+  const indented = buildProjectionMap('  $$x$$\n\nafter\n', doc(cbl('LaTeX', 'x'), p(text('after'))))
+  assert.ok(indented, 'the indented spelling must map too')
+  assert.equal(indented.blockPairs[0].charMap, null)
+  assert.equal(indented.pmPosToRaw(4), 9)
+  const double = buildProjectionMap('$$a$$ $$b$$\n', doc(cbl('LaTeX', 'a$$ $$b')))
+  assert.ok(double, 'the double-$$ line normalizeDisplayMath swallows whole must map')
+  assert.equal(double.blockPairs[0].charMap, null)
+
+  // NEGATIVE CONTROLS — everything outside the narrow byte-proven rule keeps
+  // rejecting the WHOLE map (type-pair mismatch, exactly as before):
+  // (a) trailing text on the line — normalizeDisplayMath never rewrites it, so
+  //     a code_block there means the trees diverged some other way;
+  assert.equal(buildProjectionMap('$$x$$ tail\n', doc(cbl('LaTeX', 'x'))), null,
+    '$$x$$ with trailing text must still reject the whole map')
+  // (b) a non-LaTeX code_block against a paragraph is not this shape;
+  assert.equal(buildProjectionMap('$$x$$\n', doc(cbl('js', 'x'))), null,
+    'the language guard holds: only a LaTeX code_block pairs')
+  // (c) a multi-line paragraph whose FIRST line is $$x$$ — the span contains a
+  //     newline, the rule does not match, and the block counts diverge anyway.
+  assert.equal(buildProjectionMap('$$x$$\nmore\n', doc(cbl('LaTeX', 'x'), p(text('more')))), null,
+    'a lazy-continuation paragraph must still reject the whole map')
 }
 
 // ---- The mis-zip canary (P5-2.5 review finding) ----
