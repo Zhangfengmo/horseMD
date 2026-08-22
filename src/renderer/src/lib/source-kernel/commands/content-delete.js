@@ -74,9 +74,9 @@
 // is answered at the bottom of this file (`batchDeleteRefusal`) — as a refusal,
 // not as a proof, because the one-contiguous-replacement sentence this file
 // proves is not true of a composition of several.
-import { parseKernelMarkdown } from '../syntax-index.js'
+import { parseKernelMarkdown, buildSyntaxIndex } from '../syntax-index.js'
 import {
-  blockEditIsObservable, blockText, isOneContiguousReplacement, literalTailIsStripped
+  NO_BREAK_SPACE, blockEditIsObservable, blockText, isOneContiguousReplacement, literalTailIsStripped
 } from './trailing-whitespace.js'
 
 const UNSUPPORTED = { ok: false, code: 'unsupported-structure' }
@@ -315,11 +315,258 @@ export function editsStrandBlockTail({ text, charMap, block, edits }) {
 // Returns `{ ok: true }`, or `{ ok: false, code }` the caller must refuse with,
 // or `{ ok: false, code: 'not-structural' }` meaning nothing here applies and
 // the caller keeps its pre-existing behaviour.
+// THE SINGLE-LINE EXEMPTION'S MISSING HALF (2026-08-23, user screenshots: a
+// Backspace inside a quoted nested item teleported the caret into the NEXT
+// blockquote). `editsClearBlockLine` deliberately leaves single-line blocks
+// alone — "emptying a paragraph produces an empty block, not a restructured
+// document" — and that sentence is FALSE for a LIST ITEM's own single-line
+// paragraph:
+//
+//   '- 你是谁' LF '  - 2'      minus '2'  ->  '  - ' is a SETEXT UNDERLINE:
+//                                            listItem > h2 「你是谁」 (measured
+//                                            root and quoted alike);
+//   '- [ ] 丁'                minus '丁' ->  '- [ ] ' DEMOTES the checkbox to
+//                                            checked:null + literal "[ ]".
+//
+// Both committed unproven, the map refresh then failed against the
+// restructured parse, and the caret-unmappable fallback landed the caret
+// blocks away — the reported teleport.
+//
+// The claim, and only this: ONE removal (`insert === ''`) that leaves the
+// item's single-line paragraph with no surviving content bytes, on an item
+// that owns nothing beyond that paragraph. Three answers:
+//   * not-structural — the BARE bytes are reparse-PROVEN a real empty item at
+//     the same position with nothing else changed (a top-level `- `): the
+//     literal, byte-minimal commit stays exactly as it always was;
+//   * ok + edit — the bare bytes are proven trapped, and delete + SEED
+//     (U+00A0, ledgered `ascii: ''` — the SAME one-representable-spelling the
+//     indent rescue and /task write, dissolved by the same pipeline, exited by
+//     the same visually-empty family) is proven to leave a REAL empty item
+//     with the SAME `checked` state;
+//   * unsupported-structure — neither spelling could be proven.
+//
+// A U+00A0 surviving the deletion is CONTENT to the parser, so such a delete
+// is not "emptying" and is not claimed — which keeps every authored-byte
+// doctrine intact: this command only ever runs when the user's own deletion
+// consumed the last parser-visible character.
+const emptiedItemAt = (text, blockStart, blockEnd) => {
+  const index = buildSyntaxIndex(text)
+  const item = index.listItemAt(blockStart)
+  if (!item) return null
+  // The paragraph must be the item's own content on its MARKER line, and the
+  // item must own nothing beyond it (a continuation line or sublist makes the
+  // emptied line only part of the story — those stay with the multi-line
+  // machinery / the ordinary path).
+  if (item.contentStart !== blockStart || item.end !== blockEnd) return null
+  if (index.lineIndexAt(blockStart) !== item.markerLineIndex) return null
+  return item
+}
+
+// Reparse proof shared by the bare and seeded candidates: at the item's own
+// start offset the candidate must hold a listItem with the SAME checked state
+// whose content is exactly `expected` (null = zero children; a string = one
+// paragraph decoding to exactly it), no heading may appear or disappear (the
+// setext trap's own signature), and the document's leaf VALUES must be the
+// baseline's minus the emptied paragraph's own text (plus the seed, when one
+// is written) — nothing else changed meaning.
+const provenEmptyItemResult = (baselineTree, baselineItemStart, baselineChecked, removedValues, candidate, expected) => {
+  let after
+  try {
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  const countHeadings = (tree) => {
+    let n = 0
+    const walk = (node) => {
+      if (node?.type === 'heading') n += 1
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return n
+  }
+  if (countHeadings(after) !== countHeadings(baselineTree)) return false
+  let item = null
+  const walkAll = (node) => {
+    if (item) return
+    if (node?.type === 'listItem' && node.position?.start?.offset === baselineItemStart) {
+      item = node
+      return
+    }
+    for (const child of node?.children || []) walkAll(child)
+  }
+  walkAll(after)
+  if (!item) return false
+  if (item.checked !== baselineChecked) return false
+  if (expected === null) {
+    if ((item.children || []).length !== 0) return false
+  } else {
+    const children = item.children || []
+    if (children.length !== 1 || children[0].type !== 'paragraph') return false
+    if (blockText(children[0]) !== expected) return false
+  }
+  const leafValues = (tree) => {
+    const out = []
+    const walk = (node) => {
+      if (typeof node?.value === 'string') out.push(node.value)
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return out.sort()
+  }
+  const expectedLeaves = leafValues(baselineTree)
+  for (const value of removedValues) {
+    const at = expectedLeaves.indexOf(value)
+    if (at === -1) return false
+    expectedLeaves.splice(at, 1)
+  }
+  if (expected !== null) expectedLeaves.push(expected)
+  expectedLeaves.sort()
+  return JSON.stringify(leafValues(after)) === JSON.stringify(expectedLeaves)
+}
+
+export function spellEmptyListItemDelete({ doc, block, charMap, from, to, insert = '' }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
+  if (insert !== '') return NOT_STRUCTURAL
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from >= to) return NOT_STRUCTURAL
+  if (from < 0 || to > text.length) return NOT_STRUCTURAL
+  if (block?.type !== 'paragraph') return NOT_STRUCTURAL
+  const blockStart = block.position?.start?.offset
+  const blockEnd = block.position?.end?.offset
+  if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return NOT_STRUCTURAL
+  if (from < blockStart || to > blockEnd) return NOT_STRUCTURAL
+  // Single-line block only — the multi-line case is deleteClearsBlockLine's.
+  if (blockStart < lineStartAt(text, blockStart) || blockEnd > lineEndAt(text, blockEnd)) {
+    return NOT_STRUCTURAL
+  }
+  // The delete must consume every surviving content byte of the block —
+  // byte-level over the character map's units, same posture as
+  // editsClearBlockLine: ASCII space/tab are syntax here, everything else
+  // (U+00A0 included — it is content to the parser) keeps the block occupied.
+  const units = charMap?.units
+  if (!Array.isArray(units)) return NOT_STRUCTURAL
+  for (const unit of units) {
+    if (!Number.isInteger(unit?.rawStart) || !Number.isInteger(unit?.rawEnd)) continue
+    for (let index = unit.rawStart; index < unit.rawEnd; index += 1) {
+      if (index >= from && index < to) continue
+      const ch = text[index]
+      if (ch !== ' ' && ch !== '\t') return NOT_STRUCTURAL
+    }
+  }
+  const item = emptiedItemAt(text, blockStart, blockEnd)
+  if (!item) return NOT_STRUCTURAL
+
+  let baselineTree
+  try {
+    baselineTree = parseKernelMarkdown(text)
+  } catch {
+    return NOT_STRUCTURAL
+  }
+  // The emptied paragraph's own leaf values, read from THIS parse (the
+  // caller's block may carry injectHighlightNodes' split text nodes).
+  let baselinePara = null
+  const findPara = (node) => {
+    if (baselinePara) return
+    if (node?.type === 'paragraph' && node.position?.start?.offset === blockStart &&
+        node.position?.end?.offset === blockEnd) {
+      baselinePara = node
+      return
+    }
+    for (const child of node?.children || []) findPara(child)
+  }
+  findPara(baselineTree)
+  if (!baselinePara) return NOT_STRUCTURAL
+  const removedValues = []
+  const collect = (node) => {
+    if (typeof node?.value === 'string') removedValues.push(node.value)
+    for (const child of node?.children || []) collect(child)
+  }
+  collect(baselinePara)
+  const baselineChecked = item.task ? item.task.checked : null
+
+  // Attempt 0 — THE BARE BYTES, tried first and on every call: when the
+  // literal empty item is representable (top level, or continuing an existing
+  // list), nothing about this delete changes and the commit stays
+  // byte-minimal.
+  const bare = text.slice(0, from) + text.slice(to)
+  if (provenEmptyItemResult(baselineTree, item.start, baselineChecked, removedValues, bare, null)) {
+    return NOT_STRUCTURAL
+  }
+  // Attempt 1 — the SEED spelling: delete + one U+00A0 at the deletion point,
+  // ledgered as standing for no keystroke.
+  const seeded = text.slice(0, from) + NO_BREAK_SPACE + text.slice(to)
+  if (provenEmptyItemResult(baselineTree, item.start, baselineChecked, removedValues, seeded, NO_BREAK_SPACE)) {
+    return {
+      ok: true,
+      edit: { from, to, insert: NO_BREAK_SPACE },
+      whitespaceMarks: [{ from, to: from + 1, ascii: '' }]
+    }
+  }
+  return UNSUPPORTED
+}
+
 export function proveBatchDelete({ doc, block, charMap, edits }) {
   const text = doc?.text
   if (typeof text !== 'string' || !Array.isArray(edits) || !edits.length) return NOT_STRUCTURAL
   if (!edits.some((edit) => edit.to > edit.from)) return NOT_STRUCTURAL
   if (editsStrandBlockTail({ text, charMap, block, edits })) return UNSUPPORTED
+  // The batch spelling of the single-line emptying claim above: prove the
+  // composed BARE result is a real empty item, else refuse — a batch has no
+  // edit-rewriting channel to seed through, and committing the trapped bytes
+  // is the corruption the single-step path just closed.
+  const batchEmpties = (() => {
+    const blockStart = block?.position?.start?.offset
+    const blockEnd = block?.position?.end?.offset
+    if (!Number.isInteger(blockStart) || !Number.isInteger(blockEnd)) return false
+    if (blockStart < lineStartAt(text, blockStart) || blockEnd > lineEndAt(text, blockEnd)) return false
+    const units = charMap?.units
+    if (!Array.isArray(units)) return false
+    if (edits.some((edit) => /\S/.test(edit.insert ?? ''))) return false
+    const removed = (index) => edits.some((edit) => index >= edit.from && index < edit.to)
+    for (const unit of units) {
+      if (!Number.isInteger(unit?.rawStart) || !Number.isInteger(unit?.rawEnd)) continue
+      for (let index = unit.rawStart; index < unit.rawEnd; index += 1) {
+        if (removed(index)) continue
+        const ch = text[index]
+        if (ch !== ' ' && ch !== '\t') return false
+      }
+    }
+    return !!emptiedItemAt(text, blockStart, blockEnd)
+  })()
+  if (batchEmpties) {
+    const item = emptiedItemAt(text, block.position.start.offset, block.position.end.offset)
+    let baselineTree
+    try {
+      baselineTree = parseKernelMarkdown(text)
+    } catch {
+      return UNSUPPORTED
+    }
+    let baselinePara = null
+    const findPara = (node) => {
+      if (baselinePara) return
+      if (node?.type === 'paragraph' &&
+          node.position?.start?.offset === block.position.start.offset &&
+          node.position?.end?.offset === block.position.end.offset) {
+        baselinePara = node
+        return
+      }
+      for (const child of node?.children || []) findPara(child)
+    }
+    findPara(baselineTree)
+    if (!baselinePara) return UNSUPPORTED
+    const removedValues = []
+    const collect = (node) => {
+      if (typeof node?.value === 'string') removedValues.push(node.value)
+      for (const child of node?.children || []) collect(child)
+    }
+    collect(baselinePara)
+    const bare = composeEdits(text, edits)
+    return provenEmptyItemResult(
+      baselineTree, item.start, item.task ? item.task.checked : null, removedValues, bare, null)
+      ? { ok: true }
+      : UNSUPPORTED
+  }
   if (!editsClearBlockLine({ text, charMap, block, edits })) return NOT_STRUCTURAL
   // From here the batch IS the at-risk shape, so every remaining exit is a
   // refusal — there is no "leave it alone" left.

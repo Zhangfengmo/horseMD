@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -2123,7 +2123,41 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
       if (!seedRefusal.ok && seedRefusal.code !== KERNEL_CODES.NOT_STRUCTURAL) {
         return { ok: false, code: seedRefusal.code }
       }
-      if (deleteClearsBlockLine({
+      // THE SINGLE-LINE EXEMPTION'S MISSING HALF (2026-08-23, user report:
+      // Backspace in a quoted nested item teleported the caret into the NEXT
+      // blockquote). `deleteClearsBlockLine` below deliberately skips
+      // single-line blocks, but emptying a LIST ITEM's own single-line
+      // paragraph is NOT the harmless "empty this block" case: the bare
+      // emptied marker line is a setext underline for the sibling above
+      // (`  - ` -> the parent's text becomes an H2), and a task's `- [ ] `
+      // demotes its checkbox to literal text. `spellEmptyListItemDelete`
+      // reparse-proves the bare bytes first (a representable empty item
+      // commits byte-minimal exactly as before, answered not-structural);
+      // when they are proven trapped it rewrites the commit to delete + SEED
+      // — the same ledgered U+00A0 the indent rescue and /task write,
+      // dissolved and exited by the same machinery.
+      const emptiedItem = spellEmptyListItemDelete({
+        doc: kernel.doc,
+        block: stepPair.mdBlock,
+        charMap: stepPair.charMap,
+        from: editFrom,
+        to: editTo,
+        insert: insertText
+      })
+      if (emptiedItem.ok) {
+        editFrom = emptiedItem.edit.from
+        editTo = emptiedItem.edit.to
+        insertText = emptiedItem.edit.insert
+        pendingMarks = emptiedItem.whitespaceMarks
+        // The block's visible content after this commit is exactly the one
+        // seed character — PM's own step left the paragraph empty, and the
+        // `rewrote` verify repairs the view to show the seed, same as the
+        // whitespace heals.
+        respelledVisibleDelta = 1 - stepPair.charMap.visibleLength
+      } else if (emptiedItem.code !== KERNEL_CODES.NOT_STRUCTURAL) {
+        return { ok: false, code: emptiedItem.code }
+      }
+      if (!emptiedItem.ok && deleteClearsBlockLine({
         text: kernel.doc.text,
         charMap: stepPair.charMap,
         block: stepPair.mdBlock,

@@ -56,7 +56,8 @@ export {
   deleteClearsBlockLine,
   editsClearBlockLine,
   editsStrandBlockTail,
-  proveBatchDelete
+  proveBatchDelete,
+  spellEmptyListItemDelete
 } from './commands/content-delete.js'
 export { spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES } from './commands/empty-code-insert.js'
 export { routeStructuralKey } from './router.js'

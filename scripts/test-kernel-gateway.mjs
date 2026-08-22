@@ -3524,13 +3524,23 @@ console.log('PASS kernel gateway (block-trailing whitespace: real no-break space
       'and the refusal carries its own code so the toast can name the exits')
   }
   // The unledgered byte (reopened file / user-authored U+00A0) and the
-  // heal-provenance byte are NOT claimed: the literal delete commits, exactly
-  // as before this wall existed.
+  // heal-provenance byte are NOT walled — the delete commits. This pin used
+  // to assert the literal `- [ ] ` result and call it "pre-existing
+  // behaviour"; that literal was itself the corruption (it reparses to
+  // checked:null + literal "[ ]" — measured in the app, 2026-08-23, as the
+  // caret-teleport family's task half). `spellEmptyListItemDelete` now
+  // claims the emptying delete: the USER's own deletion consumes their byte
+  // (ordinary editing — no authored byte is deleted uninvited), and the
+  // commit is rewritten to delete + a FRESH kernel seed with honest
+  // `ascii:''` provenance, keeping the item a real task.
   for (const marks of [[], [{ from: 6, to: 7, ascii: ' ' }]]) {
     const committed = del(md, seedDoc(), 3, 4, marks)
     assert.equal(committed.ok, true,
-      `a non-seed U+00A0 delete keeps its pre-existing behaviour (marks ${JSON.stringify(marks)})`)
-    assert.equal(committed.applied.doc.text, '- [ ] \n')
+      `a non-seed U+00A0 delete still commits (marks ${JSON.stringify(marks)})`)
+    assert.equal(committed.applied.doc.text, '- [ ]  \n',
+      'the emptying delete is seeded — never the bare demoting spelling')
+    assert.deepEqual(committed.applied.doc.whitespaceMarks, [{ from: 6, to: 7, ascii: '' }],
+      'the rescue seed carries the stands-for-no-keystroke provenance')
   }
 }
 
