@@ -862,6 +862,43 @@ export function createKernelMode({
     })
   }
 
+  // NATIVE SELF-HEAL AT THE REFUSAL EDGE (2026-08-22). The architecture's own
+  // invariant — bytes are the sole authority, every view/map artifact is
+  // DERIVABLE from them — means a refusal caused by live-state divergence (a
+  // projection producer misbehaving, a session that crossed builds) must not
+  // become permanent: the native repair chain (the same safeParse →
+  // diffReplaceRange → reconcileProjection → bindMap the verify's repair
+  // uses, proven by its own suites) can always re-derive the projection.
+  // This runs it SYNCHRONOUSLY (the structural keymap is not mid-dispatch,
+  // unlike the verify's microtask context) and reports whether a divergence
+  // was actually repaired — the caller retries its route exactly ONCE on
+  // `true`. A coherent state returns `false` untouched, so a legitimate
+  // fail-closed refusal is never overridden; the only rebuild it performs on
+  // an AGREEING view is a missing map (bindMap is idempotent there).
+  const repairProjectionNow = (view) => {
+    if (!view || disposed) return false
+    const parsed = safeParse(kernel.doc.text)
+    if (!parsed) return false
+    let diff
+    try {
+      diff = diffReplaceRange(view.state.doc, parsed)
+    } catch {
+      diff = { unknown: true }
+    }
+    if (!diff) {
+      if (!kernel.map) return !!bindMap(view.state.doc)
+      return false
+    }
+    pushKernelDiagnostic({ type: 'refusal-self-heal', revision: kernel.doc.revision })
+    try {
+      reconcileProjection({ view, newDoc: parsed })
+    } catch {
+      pushKernelDiagnostic({ type: 'projection-repair-failed' })
+      return false
+    }
+    return !!bindMap(view.state.doc)
+  }
+
   // ===========================================================================
   // Debounced verify (perf assessment §9 #5, 2026-08-21)
   // ===========================================================================
@@ -2477,14 +2514,21 @@ export function createKernelMode({
       }
     }
     if (commitTrailingPlaceholderEdge(key, state, view) === 'handled') return true
-    const offset = kernel.map.pmPosToRaw(state.selection.head)
+    let offset = kernel.map.pmPosToRaw(state.selection.head)
+    // An unmappable caret is FIRST given the native self-heal: if the view
+    // had drifted from the bytes, the repair re-derives the projection and
+    // the caret's position resolves against the healed map (read from
+    // view.state — the repair may have moved both).
+    if (!Number.isFinite(offset) && repairProjectionNow(view)) {
+      offset = kernel.map?.pmPosToRaw?.(view.state.selection.head)
+    }
     if (!Number.isFinite(offset)) {
       // Fail-closed: an unprovable caret must not reach PM's structural
       // commands (their output would be an unowned structural transaction).
       // A caret sitting in a DEGRADED block gets the block-scoped message —
       // "this paragraph is read-only" is the true and actionable statement
       // there, not "this operation isn't supported yet".
-      notifyRefusal(KERNEL_CODES.UNMAPPED, state.selection.head)
+      notifyRefusal(KERNEL_CODES.UNMAPPED, view.state.selection.head)
       return true
     }
     // 块尾连续 Enter (Task 2, plan 3): the caret sits exactly at the LAST
@@ -2504,12 +2548,28 @@ export function createKernelMode({
         return true
       }
     }
-    const routed = routeStructuralKey(key, {
+    let routed = routeStructuralKey(key, {
       doc: kernel.doc,
       index: buildSyntaxIndex(kernel.doc.text),
       offset,
       empty: state.selection.empty
     })
+    // A NAMED refusal gets the same native self-heal, once: if the view/map
+    // had drifted, the route just judged the WRONG document. Repair, resolve
+    // the caret against the healed state, and re-route. A coherent state
+    // repairs nothing and the refusal stands unchanged.
+    if (!routed.ok && routed.code !== KERNEL_CODES.NOT_STRUCTURAL && repairProjectionNow(view)) {
+      const healed = kernel.map?.pmPosToRaw?.(view.state.selection.head)
+      if (Number.isFinite(healed)) {
+        offset = healed
+        routed = routeStructuralKey(key, {
+          doc: kernel.doc,
+          index: buildSyntaxIndex(kernel.doc.text),
+          offset,
+          empty: view.state.selection.empty
+        })
+      }
+    }
     if (routed.ok) {
       applyKernelTransaction(routed.transaction, view)
       return true

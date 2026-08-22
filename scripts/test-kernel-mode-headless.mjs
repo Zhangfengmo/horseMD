@@ -220,6 +220,7 @@ const FIXTURE_DOCS = {
   '甲乙\n\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n\n\n\n': () => doc(p(text('甲乙'))),
   '甲乙\n\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
+  '甲乙\n\n丙\n\n\n': () => doc(p(text('甲乙')), p(text('丙'))),
   // Plan 3 Task 4 fixtures: a code_block text commit (multi-line CM-style
   // insert) followed by a language switch, both on the same block.
   '```js\nab\n```\n': () => doc(cb('js', 'ab')),
@@ -4547,6 +4548,55 @@ const toggleVia = (h, markType, from, to) => {
   )
   await flushMicrotasks()
   assert.equal(h.controller.kernel.doc.text, 'x goal y\n')
+}
+
+// Case SH: NATIVE SELF-HEAL AT THE REFUSAL EDGE (2026-08-22). Bytes are the
+// sole authority and every view/map artifact is DERIVABLE from them, so a
+// structural key refused only because the live view/map drifted from the
+// bytes (a projection producer misbehaving, a session that crossed builds)
+// must not stay refused: the handler runs the native repair chain — the same
+// safeParse → diffReplaceRange → reconcileProjection → bindMap the verify
+// uses — exactly once, then retries the route. A coherent state never
+// triggers it (control below), so a legitimate fail-closed refusal stands.
+{
+  const h = makeHarness('甲乙\n\n丙\n', doc(p(text('甲乙')), p(text('丙'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  globalThis.__hmKernelDiagnostics = []
+  // Drift the view through the projection channel (its native pass-through):
+  // an extra paragraph the bytes do not have, appended at the end. The map
+  // stays bound to the pre-drift doc — the wedge class exactly.
+  {
+    const tr = h.view.state.tr.insert(
+      h.view.state.doc.content.size,
+      schema.nodes.paragraph.create(null, schema.text('X'))
+    )
+    tr.setMeta('sourceProjection', true)
+    h.view.dispatch(tr)
+  }
+  // Caret inside the drifted paragraph — a position the STALE map cannot
+  // resolve, so pre-heal this Enter died as an UNMAPPED refusal.
+  const inX = h.view.state.doc.content.size - 2
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, inX)))
+  const handled = h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view)
+  await flushMicrotasks()
+  assert.equal(handled, true, 'the Enter is consumed either way (refusals swallow too)')
+  const diag = globalThis.__hmKernelDiagnostics.map((d) => d.type)
+  assert.ok(diag.includes('refusal-self-heal'), `the heal must leave its breadcrumb, got ${JSON.stringify(diag)}`)
+  // The drifted X is gone (the parse never contained it), the healed caret
+  // landed at the end of 丙, and the RETRIED Enter wrote its split bytes.
+  assert.equal(h.controller.kernel.doc.text, '甲乙\n\n丙\n\n\n', 'the retried Enter must write the split')
+  assert.ok(!h.view.state.doc.textContent.includes('X'), 'the drifted paragraph is repaired away')
+
+  // CONTROL: a coherent document never self-heals — the breadcrumb must not
+  // appear on an ordinary split.
+  const c = makeHarness('甲乙\n', doc(p(text('甲乙'))))
+  assert.equal(c.controller.attachAfterCreate(), true)
+  globalThis.__hmKernelDiagnostics = []
+  c.view.dispatch(c.view.state.tr.setSelection(TextSelection.create(c.view.state.doc, 2)))
+  assert.equal(c.controller.structuralHandlers.Enter(c.view.state, c.view.dispatch, c.view), true)
+  await flushMicrotasks()
+  assert.ok(!globalThis.__hmKernelDiagnostics.some((d) => d.type === 'refusal-self-heal'),
+    'a coherent split must not trigger the self-heal')
 }
 
 console.log('PASS kernel mode headless')
