@@ -1971,4 +1971,51 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
   }
 }
 
+// ---------------------------------------------------------------------------
+// Visually-empty list items (2026-08-22): a plain bullet/ordered item whose
+// decoded content is ONLY invisible whitespace (authored U+00A0 from older
+// builds' undissolved seeds, stray spaces/tabs) LOOKS empty but is byte-non-
+// empty, so every deletion path refused it — the user-reported "无法删除"
+// wedge. The structural gestures now treat it as empty (the task-seed
+// precedent, extended to AUTHORED whitespace for the explicit whole-item
+// gesture): Backspace/Enter exit deletes the whole marker line, whitespace
+// included. TASK items keep their pinned authored-seed doctrine untouched,
+// and any real content keeps the previous not-structural answer.
+{
+  const src = '- 你好啊\n- \u00A0\n\n3132312\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const offset = src.indexOf('- \u00A0') + 2
+  for (const key of ['Backspace', 'Enter']) {
+    const r = routeStructuralKey(key, { doc, index, offset, empty: true })
+    assert.equal(r.ok, true, key + ' must route the visually-empty item to the exit: ' + (r.code || ''))
+    assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+      '- 你好啊\n\n\n3132312\n', key + ' must delete the whole marker line, NBSP included (the surplus blank collapses on reparse — the established exit spelling)')
+  }
+}
+{
+  // Trailing-run variant deletes its whole line too.
+  const src = '- \u00A0  \n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Backspace', { doc, index, offset: 2, empty: true })
+  assert.equal(r.ok, true, 'whitespace-run item must exit: ' + (r.code || ''))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '\n')
+}
+{
+  // CONTROLS. Real content keeps the text path; an authored-NBSP TASK item
+  // keeps the pinned doctrine (never deleted by the structural gesture).
+  const src = '- \u00A0甲\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = routeStructuralKey('Backspace', { doc, index, offset: 2, empty: true })
+  assert.equal(r.ok, false, 'NBSP followed by real text is CONTENT')
+  assert.equal(r.code, 'not-structural')
+  const tsrc = '- [ ] \u00A0\n'
+  const tdoc = createMarkdownDocument(tsrc)
+  const tindex = buildSyntaxIndex(tsrc)
+  const rt = routeStructuralKey('Backspace', { doc: tdoc, index: tindex, offset: 6, empty: true })
+  assert.equal(rt.ok, false, 'an authored task seed keeps its own doctrine (no ledger entry -> content)')
+}
+
 console.log('PASS source-kernel commands (whole-branch review: link-boundary wraps + CRLF bisection chokepoint)')

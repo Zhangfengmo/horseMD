@@ -260,10 +260,26 @@ export function splitListItem({ doc, index, offset }) {
 // U+00A0 记着 `ascii:''`）走同一出口：种子"不代表任何按键"，对 Enter 而言该
 // 项与空项等价（2026-08-21 task-Enter matrix cell 3，Typora 的 lift-out）。
 // 重开文件后的 U+00A0 是作者的字节（账本为空），仍走普通分裂，绝不删除。
+
+// 视觉空项（2026-08-22，用户报告「无法删除」）：普通（非任务）列表项的解码
+// 内容若只剩不可见空白（旧构建未溶解种子存盘后的作者化 U+00A0、游离空格/
+// Tab），对用户就是空项，但 item.empty 为假，结构手势全部按内容项拒绝——
+// 无路可删。对显式的整项手势（Backspace/Enter），按任务种子先例把它判空：
+// exitEmptyListItem 删除整个 marker 行，空白随行而去，重解析可证（内容与
+// marker 同在一行——[\u00A0 \t] 不含换行，多行项由构造排除）。任务项刻意
+// 排除：作者化任务种子的「绝不结构删除」doctrine 由 task-seed 套件钉死。
+export const isVisuallyEmptyListItem = (text, item) => {
+  if (!item || item.task || item.empty) return false
+  if (!Number.isInteger(item.contentStart) || !Number.isInteger(item.end)) return false
+  const content = text.slice(item.contentStart, item.end)
+  return content.length > 0 && /^[\u00A0 \t]+$/.test(content)
+}
+
 export function exitEmptyListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
   if (!item) return { ok: false, code: 'unsupported-structure' }
-  if (!item.empty && !isLedgeredSeedOnlyItem(doc, index.text, item)) {
+  if (!item.empty && !isLedgeredSeedOnlyItem(doc, index.text, item) &&
+      !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
   }
   const line = index.lines[item.markerLineIndex]

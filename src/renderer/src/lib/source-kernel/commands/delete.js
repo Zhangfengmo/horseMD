@@ -1,7 +1,7 @@
 // Backspace 命令族：空列表项提升（反缩进一级 / 退出列表）、段落回删合并。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
-import { exitEmptyListItem } from './enter.js'
+import { exitEmptyListItem, isVisuallyEmptyListItem } from './enter.js'
 import { outdentListItem } from './indent.js'
 import { isLedgeredSeedOnlyItem } from './task-seed.js'
 
@@ -24,7 +24,8 @@ const quotePrefixOfLine = (line) => {
 // 作者的字节（账本为空），仍拒绝——字符级删除走文本路径。
 export function liftEmptyListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
-  if (!item?.empty && !isLedgeredSeedOnlyItem(doc, index.text, item)) {
+  if (!item?.empty && !isLedgeredSeedOnlyItem(doc, index.text, item) &&
+      !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
   }
   return item.depth > 0

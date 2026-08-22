@@ -3,7 +3,7 @@
 // 方应改走 replace-text 的字符级路径——not-structural 不是错误，是"用文本
 // 路径"的信号）。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
-import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock } from './commands/enter.js'
+import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock, isVisuallyEmptyListItem } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
 import { isLedgeredSeedOnlyItem } from './commands/task-seed.js'
@@ -65,7 +65,8 @@ export function routeStructuralKey(key, ctx) {
       // to `- [ ] ` and is the empty-task wall's refusal), not about routing
       // the key structurally, which deletes the whole representable line.
       if (item) {
-        return item.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item)
+        return item.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item) ||
+          isVisuallyEmptyListItem(index.text, item)
           ? exitEmptyListItem(ctx)
           : splitListItem(ctx)
       }
@@ -83,7 +84,8 @@ export function routeStructuralKey(key, ctx) {
       // key structurally deletes/outdents the whole marker LINE, which is
       // representable, and stays ledger-gated: a reopened file's U+00A0 is
       // the author's content and keeps the text-path answer.
-      if (item?.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item)) {
+      if (item?.empty || isLedgeredSeedOnlyItem(ctx.doc, index.text, item) ||
+          isVisuallyEmptyListItem(index.text, item)) {
         return liftEmptyListItem(ctx)
       }
       const block = index.blockAt(offset)
