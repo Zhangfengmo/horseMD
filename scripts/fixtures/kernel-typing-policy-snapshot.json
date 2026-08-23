@@ -1,0 +1,29 @@
+{
+  "note": "Literal single-character inserts that change the block skeleton — the typing-policy HOLE MAP. Target state: empty (respelled or refused at the chokepoint). Regenerate deliberately with UPDATE_KERNEL_TYPING_POLICY_SNAPSHOT=1.",
+  "restructures": [
+    "bullet-item#crlf@block0:start+\">\"",
+    "bullet-item#crlf@block1:start+\">\"",
+    "bullet-item@block0:start+\">\"",
+    "bullet-item@block1:start+\">\"",
+    "nested-item#crlf@block0:start+\">\"",
+    "nested-item#crlf@block1:start+\">\"",
+    "nested-item@block0:start+\">\"",
+    "nested-item@block1:start+\">\"",
+    "ordered-after-digit#crlf@block0:start+\">\"",
+    "ordered-after-digit#crlf@block1:end+\")\"",
+    "ordered-after-digit#crlf@block1:end+\".\"",
+    "ordered-after-digit#crlf@block1:start+\">\"",
+    "ordered-after-digit@block0:start+\">\"",
+    "ordered-after-digit@block1:end+\")\"",
+    "ordered-after-digit@block1:end+\".\"",
+    "ordered-after-digit@block1:start+\">\"",
+    "ordered-item#crlf@block0:start+\">\"",
+    "ordered-item#crlf@block1:start+\">\"",
+    "ordered-item@block0:start+\">\"",
+    "ordered-item@block1:start+\">\"",
+    "paragraph#crlf@block0:start+\">\"",
+    "paragraph@block0:start+\">\"",
+    "quote-paragraph#crlf@block0:start+\">\"",
+    "quote-paragraph@block0:start+\">\""
+  ]
+}
