@@ -175,7 +175,23 @@ assert.equal(
   run('> 甲\n>\n> 乙\n', 8, joinParagraphBackward),
   '> 甲\n> 乙\n'
 )
-assert.equal(run('# 头\n\n乙\n', 5, joinParagraphBackward).code, 'unsupported-structure')
+// FLIPPED 2026-08-23 (user report「有数据的头部按删除则自动将这一行合并到上一
+// 行」— the old pin refused the heading boundary outright): Backspace at the
+// start of a SINGLE-LINE paragraph directly below an ATX heading now JOINS
+// the paragraph's text into the heading, reparse-proven — the gap bytes
+// vanish and the heading's line absorbs the text (Typora's join).
+assert.equal(run('# 头\n\n乙\n', 5, joinParagraphBackward), '# 头乙\n')
+assert.equal(run('###### 3412321\n\n121312\n', 16, joinParagraphBackward),
+  '###### 3412321121312\n', 'the reported H6 shape joins')
+assert.equal(run('> # 甲\n>\n> 乙\n', 10, joinParagraphBackward), '> # 甲乙\n',
+  'the quoted heading joins with the gap (blank > line included) removed')
+assert.equal(run('# 头\r\n\r\n乙\r\n', 7, joinParagraphBackward), '# 头乙\r\n',
+  'CRLF joins without inventing a lone LF')
+// Refusals stay fail-closed: a MULTI-LINE paragraph would strand its
+// continuation line (a heading is single-line), and a SETEXT heading's span
+// runs through its underline — neither is claimed.
+assert.equal(run('# 头\n\n乙\n丙\n', 5, joinParagraphBackward).code, 'unsupported-structure')
+assert.equal(run('头\n===\n\n乙\n', 8, joinParagraphBackward).code, 'unsupported-structure')
 
 // 路由决策表
 {

@@ -2,6 +2,7 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
 import { parseKernelMarkdown } from '../syntax-index.js'
+import { buildCharacterMap } from '../character-map.js'
 import { NO_BREAK_SPACE, blockText } from './trailing-whitespace.js'
 import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
 
@@ -178,9 +179,37 @@ export function shrinkBlankRun({ doc, index, offset, span = null }) {
   return txn(doc, from, to, '', 'shrink-blank-run', from)
 }
 
+// MARK-TAIL SNAP (2026-08-23 user report — measured corruption: Enter at the
+// end of `- \`npm run test:source-map\`` wrote '…source-map\n- `', silently
+// un-closing the old item's inline code). The PM caret at the visible end of
+// a marked run maps to the raw boundary BEFORE the mark's closing delimiter
+// bytes; a split there tears the mark in two. The block's own character map
+// is the oracle: when every visible unit ends at or before `offset` and the
+// block's raw span still continues (only syntax bytes remain — gaps carry no
+// units by construction), the visible caret IS the block end and the split
+// belongs after the delimiters. A caret with visible content after it is
+// untouched.
+const snapPastMarkTail = (index, offset) => {
+  const block = resolveBlock(index, offset)
+  if (!block?.node) return offset
+  const end = block.node.position?.end?.offset
+  if (!Number.isInteger(end) || offset >= end) return offset
+  let map = null
+  try {
+    map = buildCharacterMap(index.text, block.node)
+  } catch {
+    return offset
+  }
+  if (!map || !Array.isArray(map.units)) return offset
+  const lastVisible = map.units.length ? map.units[map.units.length - 1].rawEnd : null
+  if (lastVisible === null || offset < lastVisible) return offset
+  return end
+}
+
 // 段落/标题内 Enter：插入 `ending + [引用空行] + 引用前缀`；caret 后文本自然成为
 // 新块。标题分裂时新块没有 `#` marker，天然成为段落（source-first）。
-export function splitTextBlock({ doc, index, offset }) {
+export function splitTextBlock({ doc, index, offset: rawOffset }) {
+  const offset = snapPastMarkTail(index, rawOffset)
   const block = resolveBlock(index, offset)
   if (!block) {
     // 块尾连续 Enter：见 isTrailingGap 注释。这里没有「块」可分，只有空白
@@ -315,7 +344,12 @@ const seedProven = (candidate, seedOffset, expectedChecked) => {
 // 任务项的空侧带种子（见 seedProven 的 ADR）：分裂后没有内容的那一侧写成
 // `[ ]` + taskSpacing + U+00A0 并入账（provenance `ascii:''`），第一个正文字
 // 符在同一笔编辑里溶解它——与 `/task` 完全同一套机制。
-export function splitListItem({ doc, index, offset }) {
+export function splitListItem({ doc, index, offset: rawOffset }) {
+  // Same mark-tail snap as splitTextBlock — the reported corruption's exact
+  // home (the list item ending in inline code). Snapped BEFORE the item
+  // resolution so a snapped-to-end offset still resolves through
+  // listItemAt's own containment (the paragraph end is inside the item).
+  const offset = snapPastMarkTail(index, rawOffset)
   const item = index.listItemAt(offset)
   // Fail-closed: offset must sit at-or-after the item's content start. A
   // caret still inside the indent/marker/spacing (or task-checkbox) region

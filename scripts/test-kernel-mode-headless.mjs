@@ -230,6 +230,15 @@ const FIXTURE_DOCS = {
   '甲乙\n\n\n丙\n': () => doc(p(text('甲乙')), p(text('丙'))),
   '甲乙\n\nx\n\n丙\n': () => doc(p(text('甲乙')), p(text('x')), p(text('丙'))),
   '> 甲\n>\n> 乙\n': () => doc(bq(p(text('甲')), p(text('乙')))),
+  // Case 17f fixtures (root list exit + typing, 2026-08-23): every byte state
+  // the exit-then-type flow passes through. '- 甲乙\n丙\n' is the ABSORBED
+  // (buggy) spelling — registered so a regression parses instead of throwing,
+  // and the byte assertion is what fails.
+  '- 甲乙\n': () => doc(bl(li(null, p(text('甲乙'))))),
+  '- 甲乙\n- \n': () => doc(bl(li(null, p(text('甲乙'))), li(null, p()))),
+  '- 甲乙\n\n': () => doc(bl(li(null, p(text('甲乙'))))),
+  '- 甲乙\n\n丙\n': () => doc(bl(li(null, p(text('甲乙')))), p(text('丙'))),
+  '- 甲乙\n丙\n': () => doc(bl(li(null, p(text('甲乙\n丙'))))),
   '> 甲\n>\n> \n>\n> 乙\n': () => doc(bq(p(text('甲')), p(text('乙')))),
   // Plan 3 Task 4 fixtures: a code_block text commit (multi-line CM-style
   // insert) followed by a language switch, both on the same block.
@@ -1314,6 +1323,32 @@ assert.ok(session.controller.kernel.map, 'kernel.map set after attach')
   assert.equal(h.controller.kernel.doc.text, '甲乙\n\n\n丙\n', 'one line off the run — the emptied line is gone')
   assert.ok(h.view.state.doc.eq(doc(p(text('甲乙')), p(text('丙')))))
   assert.equal(h.view.state.selection.head, 3)
+}
+
+// Case 17f (2026-08-23 user report「已经尝试退出正文序列」): exiting a list at
+// the document end and TYPING must yield a SEPARATED paragraph. The exit's
+// anchor sits on the blank line directly after the item's content line, so
+// the vouched placeholder's insertPrefix must carry one ending — a bare
+// commit there is a lazy continuation CommonMark absorbs into the item
+// (measured: '- 11312312\n2313' — one item, the typed "body text" swallowed).
+{
+  globalThis.__hmKernelDiagnostics = []
+  const h = makeHarness('- 甲乙\n', doc(bl(li(null, p(text('甲乙'))))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  h.view.dispatch(h.view.state.tr.setSelection(TextSelection.create(h.view.state.doc, 5))) // end of 甲乙
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- 甲乙\n- \n', 'Enter #1 writes the new empty item')
+  assert.equal(h.controller.structuralHandlers.Enter(h.view.state, h.view.dispatch, h.view), true)
+  assert.equal(h.controller.kernel.doc.text, '- 甲乙\n\n', 'Enter #2 exits: the marker line is cleared')
+
+  const tr = h.view.state.tr.insertText('丙', h.view.state.selection.head)
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'typing after the exit commits')
+  assert.equal(h.controller.kernel.doc.text, '- 甲乙\n\n丙\n',
+    'the typed text is a SEPARATED paragraph — never a lazy continuation of the item')
+  assert.ok(h.view.state.doc.eq(doc(bl(li(null, p(text('甲乙')))), p(text('丙')))),
+    'the view shows [list, paragraph]')
 }
 
 // Case 18 (review fix): extendTrailingPlaceholder's atomic rollback. Forces

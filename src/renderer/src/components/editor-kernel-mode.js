@@ -2593,9 +2593,20 @@ export function createKernelMode({
       const lineStart = text.lastIndexOf('\n', anchor - 1) + 1
       const linePrefix = text.slice(lineStart, anchor)
       const ending = lineStart >= 2 && text[lineStart - 2] === '\r' ? '\r\n' : '\n'
+      // The commit at this anchor must never be LINE-ADJACENT to a content
+      // line above it — '- item\n' + '2313' is a lazy continuation CommonMark
+      // absorbs into the item (2026-08-23 user report, the root-level twin of
+      // the quoted `\n> ` prefix below). When the line right above the
+      // anchor's line carries content, the prefix opens a separating blank
+      // line first; a blank line above needs nothing.
+      const prevLineStart = lineStart > 0 ? text.lastIndexOf('\n', lineStart - 2) + 1 : 0
+      const prevLineText = lineStart > 0
+        ? text.slice(prevLineStart, lineStart - (text[lineStart - 2] === '\r' ? 2 : 1))
+        : ''
+      const prevLineHasContent = prevLineText.replace(/[>\t ]+/g, '') !== ''
       const insertPrefix = /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
         ? ending + linePrefix
-        : ''
+        : prevLineHasContent ? ending : ''
       materializePlaceholder(view, insertPos, anchor, insertPrefix)
     } catch {
       pushKernelDiagnostic({ type: 'exit-placeholder-failed', rawOffset: anchor })

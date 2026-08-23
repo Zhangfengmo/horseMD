@@ -1,6 +1,7 @@
 // Backspace 命令族：空列表项提升（反缩进一级 / 退出列表）、段落回删合并。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
+import { parseKernelMarkdown } from '../syntax-index.js'
 import { exitEmptyListItem, isVisuallyEmptyListItem } from './enter.js'
 import { outdentListItem } from './indent.js'
 import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
@@ -52,7 +53,7 @@ export function joinParagraphBackward({ doc, index, offset }) {
     const candidate = index.blockAt(at)
     if (candidate) { previous = candidate; break }
   }
-  if (!previous || previous.type !== 'paragraph') {
+  if (!previous || (previous.type !== 'paragraph' && previous.type !== 'heading')) {
     return { ok: false, code: 'unsupported-structure' }
   }
   // Neither side may be a paragraph nested inside a list item. blockAt does
@@ -83,6 +84,81 @@ export function joinParagraphBackward({ doc, index, offset }) {
   const prevLine = index.lineAt(previous.end - 1)
   const prevPrefix = quotePrefixOfLine(prevLine)
   if (prefix !== prevPrefix) return { ok: false, code: 'unsupported-structure' }
+  // 前块是 ATX 标题（2026-08-23 用户报告「有数据的头部按删除则自动将这一行
+  // 合并到上一行」）：把整个块间隙删除，本段文本原地续接到标题行——标题是
+  // 单行块，没有惰性延续，所以这里的唯一合法拼写是直接并行。约束：本段自身
+  // 必须是单行（多行段落并入会把续行孤儿化）、前块必须是 ATX（setext 的 span
+  // 穿过下划线，永远不满足 caret==end，双保险再查一次拼写）。重解析证明把
+  // 关：合并后 previous.start 处必须是同深度的标题、其 end 恰为平移后的本段
+  // 末尾，且被并区域之外的每个节点逐字存活（偏移平移归一）。
+  if (previous.type === 'heading') {
+    const text = index.text
+    if (!/^ {0,3}#{1,6}[ \t]/.test(text.slice(previous.start, previous.end))) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+    if (block.end > line.end) return { ok: false, code: 'unsupported-structure' }
+    const gap = block.start - previous.end
+    const candidate = text.slice(0, previous.end) + text.slice(block.start)
+    let baseTree
+    let candTree
+    try {
+      baseTree = parseKernelMarkdown(text)
+      candTree = parseKernelMarkdown(candidate)
+    } catch {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+    const headingAt = (tree, start) => {
+      let hit = null
+      const walk = (node) => {
+        if (hit) return
+        if (node.type === 'heading' && node.position?.start?.offset === start) { hit = node; return }
+        for (const child of node.children || []) walk(child)
+      }
+      walk(tree)
+      return hit
+    }
+    const baseHeading = headingAt(baseTree, previous.start)
+    const joined = headingAt(candTree, previous.start)
+    if (!baseHeading || !joined) return { ok: false, code: 'unsupported-structure' }
+    if (joined.depth !== baseHeading.depth) return { ok: false, code: 'unsupported-structure' }
+    if (joined.position?.end?.offset !== block.end - gap) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+    const sig = (tree, regionStart, regionEnd, delta) => {
+      const rows = []
+      let ok = true
+      const walk = (node) => {
+        if (!ok) return
+        const s = node.position?.start?.offset
+        const e = node.position?.end?.offset
+        if (!Number.isInteger(s) || !Number.isInteger(e)) { ok = false; return }
+        if (s < regionEnd && e > regionStart) {
+          for (const child of node.children || []) walk(child)
+          return
+        }
+        rows.push(`${node.type}:${s <= regionStart ? s : s - delta}:${e <= regionStart ? e : e - delta}`)
+        for (const child of node.children || []) walk(child)
+      }
+      for (const child of tree.children || []) walk(child)
+      return ok ? rows.join('\n') : null
+    }
+    const before = sig(baseTree, previous.start, block.end, 0)
+    const after = sig(candTree, previous.start, block.end - gap, -gap)
+    if (before === null || after === null || before !== after) {
+      return { ok: false, code: 'unsupported-structure' }
+    }
+    return {
+      ok: true,
+      transaction: {
+        baseRevision: doc.revision,
+        from: previous.end,
+        to: block.start,
+        insert: '',
+        intent: 'join-block-backward',
+        selection: { anchor: previous.end, head: previous.end }
+      }
+    }
+  }
   const ending = prevLine.ending || index.dominantEnding
   return {
     ok: true,

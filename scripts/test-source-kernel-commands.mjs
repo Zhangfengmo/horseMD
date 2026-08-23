@@ -293,6 +293,55 @@ const ctx = (text) => ({ doc: createMarkdownDocument(text), index: buildSyntaxIn
     { ok: false, code: 'unsupported-structure' })
 }
 
+// ---- MARK-TAIL SNAP (2026-08-23 user report: Enter at the end of a list
+// item ending in inline code split INSIDE the closing backtick — measured
+// bytes '- `npm run test:source-map\n- `', the old item's code silently
+// un-closed). The PM caret at the visible end of a marked run maps to the
+// raw boundary BEFORE the closing delimiters; a split there tears the mark.
+// When the bytes after `offset` up to the block's end carry ZERO visible
+// characters (the block's own character map is the oracle), the split's only
+// honest reading is "at the end of the block" — the offset snaps forward and
+// the mark's bytes stay whole.
+{
+  // List item ending in inline code: '- `甲`' — caret raw offset 4 (after 甲,
+  // before the closing backtick).
+  const src = '- `甲`\n'
+  const c = ctx(src)
+  const r = splitListItem({ ...c, offset: 4 })
+  assert.equal(r.ok, true, 'mark-tail split must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '- `甲`\n- \n',
+    'the closing backtick stays with its item — the split lands after it')
+}
+{
+  // Paragraph ending in strong: '甲**乙**' — caret raw offset 4 or 5 (inside
+  // the closing `**` run).
+  const src = '甲**乙**\n'
+  for (const offset of [4, 5]) {
+    const c = ctx(src)
+    const r = splitTextBlock({ ...c, offset })
+    assert.equal(r.ok, true, `strong-tail split (offset ${offset}) must commit: ` + (r.code || ''))
+    assert.equal(apply(c.doc, r), '甲**乙**\n\n\n',
+      'the closing ** stays with its paragraph — the split opens the placeholder after it')
+  }
+}
+{
+  // CRLF list item: the snap crosses the delimiter, the ending stays CRLF.
+  const src = '- `甲`\r\n- 乙\r\n'
+  const c = ctx(src)
+  const r = splitListItem({ ...c, offset: 4 })
+  assert.equal(r.ok, true, 'CRLF mark-tail split must commit: ' + (r.code || ''))
+  assert.equal(apply(c.doc, r), '- `甲`\r\n- \r\n- 乙\r\n')
+}
+{
+  // Negative control: a caret genuinely MID-content (visible characters
+  // follow) keeps the ordinary mid-split reading.
+  const src = '- `甲乙`\n'
+  const c = ctx(src)
+  const r = splitListItem({ ...c, offset: 4 }) // between 甲 and 乙, inside the code span
+  assert.equal(r.ok, true)
+  assert.equal(apply(c.doc, r), '- `甲\n- 乙`\n', 'mid-content split is untouched by the snap')
+}
+
 // splitTextBlock must fail-closed inside a heading's `#{n} ` marker/spacing
 // region — inserting the block-separator there tears the marker in two
 // (offset 1 in '# 头\n' previously produced the mangled '#\n\n 头\n').
