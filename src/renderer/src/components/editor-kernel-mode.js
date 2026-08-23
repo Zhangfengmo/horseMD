@@ -2063,6 +2063,29 @@ export function createKernelMode({
         }
       }
     }
+    // THE MARKER-ESCAPING DELIMITER, ON THIS PATH TOO (2026-08-24 — the same
+    // route-blindness family as the heal and the task-seed dissolve above:
+    // the escape was consulted only in the markerInputPlugin's
+    // handleTextInput, which a COMPOSITION commit never passes through, so an
+    // IME-committed `4.` still spelled the restructuring literal bytes and
+    // split the item — for a user typing through a Chinese IME, the normal
+    // input path). Same pure command, same double reparse proof, same
+    // fall-through contract: the probe runs against the text as it stands
+    // with everything but the final delimiter already applied, and a
+    // not-structural answer commits the literal bytes exactly as before.
+    if (typeof healInsert === 'string' && healInsert.length && !/[\r\n]/.test(healInsert)) {
+      const lastChar = healInsert[healInsert.length - 1]
+      if (lastChar === '.' || lastChar === ')') {
+        const headText = kernel.doc.text.slice(0, healFrom) +
+          healInsert.slice(0, -1) + kernel.doc.text.slice(healTo)
+        const probe = spellMarkerEscapingDelimiter({
+          doc: { text: headText, revision: kernel.doc.revision },
+          offset: healFrom + healInsert.length - 1,
+          character: lastChar
+        })
+        if (probe.ok) healInsert = healInsert.slice(0, -1) + probe.edit.insert
+      }
+    }
     kernel.history.breakGroup()
     const applied = applyKernelTransaction({
       baseRevision: kernel.doc.revision,
