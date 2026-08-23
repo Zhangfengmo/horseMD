@@ -55,7 +55,7 @@ import {
   spellMarkerCompletingSpace,
   spellMarkerRunGrowth,
   spellMarkerFollowingText,
-  spellMarkerEscapingDelimiter,
+  escapePolicyForInsert,
   trimTrailingBlankLines,
   shrinkBlankRun,
   looksLikeBlockLineStart,
@@ -2063,28 +2063,17 @@ export function createKernelMode({
         }
       }
     }
-    // THE MARKER-ESCAPING DELIMITER, ON THIS PATH TOO (2026-08-24 — the same
-    // route-blindness family as the heal and the task-seed dissolve above:
-    // the escape was consulted only in the markerInputPlugin's
-    // handleTextInput, which a COMPOSITION commit never passes through, so an
-    // IME-committed `4.` still spelled the restructuring literal bytes and
-    // split the item — for a user typing through a Chinese IME, the normal
-    // input path). Same pure command, same double reparse proof, same
-    // fall-through contract: the probe runs against the text as it stands
-    // with everything but the final delimiter already applied, and a
-    // not-structural answer commits the literal bytes exactly as before.
-    if (typeof healInsert === 'string' && healInsert.length && !/[\r\n]/.test(healInsert)) {
-      const lastChar = healInsert[healInsert.length - 1]
-      if (lastChar === '.' || lastChar === ')') {
-        const headText = kernel.doc.text.slice(0, healFrom) +
-          healInsert.slice(0, -1) + kernel.doc.text.slice(healTo)
-        const probe = spellMarkerEscapingDelimiter({
-          doc: { text: headText, revision: kernel.doc.revision },
-          offset: healFrom + healInsert.length - 1,
-          character: lastChar
-        })
-        if (probe.ok) healInsert = healInsert.slice(0, -1) + probe.edit.insert
-      }
+    // THE TYPING-SPELLING POLICY, on the IME path (text-escape.js; the
+    // chokepoint ADR): the SAME single policy function the gateway core
+    // consults — no bespoke copy, so this call site cannot drift from the
+    // keyboard path (pinned by test:kernel-channel-equivalence-ui).
+    if (typeof healInsert === 'string' && healInsert.length) {
+      const respelled = escapePolicyForInsert({
+        text: kernel.doc.text.slice(0, healFrom) + kernel.doc.text.slice(healTo),
+        offset: healFrom,
+        insert: healInsert
+      })
+      if (respelled) healInsert = respelled.insert
     }
     kernel.history.breakGroup()
     const applied = applyKernelTransaction({
@@ -2511,28 +2500,6 @@ export function createKernelMode({
   // is set because the demoted result is an ORDINARY paragraph — the map must
   // rebuild and the caret's own offset must resolve in it, or nothing is
   // written.
-  // MARKER-ESCAPING DELIMITER (marker-space.js `spellMarkerEscapingDelimiter`,
-  // 2026-08-24): a typed `.`/`)` whose literal byte would RESTRUCTURE (the
-  // `3. 4.` origin — "4" + '.' minting a nested empty item mid-word) commits
-  // as the escaped spelling `4\.` instead; the completing Space still creates
-  // the real nested list through its escaped-marker arm. Same fail-closed
-  // wrapper discipline as the growth handler below: any throw answers "not
-  // mine" so a keystroke can never be lost to this branch.
-  const handleMarkerEscapingDelimiter = (view, from, to, character) => {
-    try {
-      if (inactive() || (character !== '.' && character !== ')')) return false
-      if (from !== to || view.composing) return false
-      if (!kernel.map) return false
-      const offset = markerRawOffsetAt(from)
-      if (!Number.isFinite(offset)) return false
-      const routed = spellMarkerEscapingDelimiter({ doc: kernel.doc, offset, character })
-      if (!routed.ok) return false
-      return applyMarkerTransaction(routed, view, { requireMap: true }) === 'handled'
-    } catch {
-      return false
-    }
-  }
-
   const handleMarkerFollowingText = (view, from, to, character) => {
     try {
       if (inactive()) return false
@@ -3745,7 +3712,6 @@ export function createKernelMode({
     props: {
       handleTextInput: (view, from, to, character) =>
         handleMarkerRunGrowth(view, from, to, character) ||
-        handleMarkerEscapingDelimiter(view, from, to, character) ||
         handleMarkerFollowingText(view, from, to, character)
     }
   })

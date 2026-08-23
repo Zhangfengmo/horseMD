@@ -1,6 +1,6 @@
 # ADR: 打字策略收敛到单一字节提交咽喉(typing-policy chokepoint)
 
-日期:2026-08-24 · 状态:**已裁决,待执行**(仪器已就位)· 起因:用户评审
+日期:2026-08-24 · 状态:**第一阶段已执行**(2026-08-24:策略函数落地、三调用点统一、快照 restructures 归零;剩余=IME commitReplace 的 step 级路由收编)· 起因:用户评审
 「填鸭式修复——结合成熟案例思考实现与测试,而非臆想和频繁试错」。
 
 ## 问题(结构性,不是某个 bug)
@@ -64,6 +64,26 @@ commitReplace / 粘贴…各一份),而不是在所有通道共用的提交层�
   语义编辑(marker 转义、块尾空格 heal、对照 CJK)分别经 键盘 keyDown /
   insertText / IME composition 三通道执行,**存盘字节必须逐字相同**。任何
   未来只挂到一条通道的策略在此当场现形并点名通道。
+
+## 执行记录(2026-08-24 第一阶段)
+
+- `commands/text-escape.js` `escapePolicyForInsert`:unsafe 表 gate(含
+  before/after/atBreak 语境匹配)+ 对照候选双重解析证明(参照系=同 offset
+  插入惰性 'x' 的骨架——空块合法获得宿主段落;块级白名单签名——行内
+  emphasis 形成不算重构,否则 `*斜*` 闭合星被误转义,mode-headless IR1 抓获)。
+- **TRANSIENT_SINGLE 例外**(`- + * > # \` ~ _` 单字符):裁决内裸 marker
+  中间态(completing-space/run-growth/demote 机器领地 + 行内开启符),永不
+  转义——缺此例外时实测 `\*斜*` 级联毁掉整条 mark 线、`\-` 杀死打字建列表。
+  sweep 单列 `transients` 钉(20 条),与 restructures 分开,双向变化都需
+  显式重基线。
+- 三调用点:`replaceVisibleText`(原语)、`commitPlainTextSteps`(gateway
+  单步纯插入)、IME `commitReplace`(healInsert 整串)——同一个函数,零
+  bespoke 副本;`spellMarkerEscapingDelimiter` 与 markerInputPlugin 的
+  escape handler 删除。
+- 快照:restructures **24 → 0**;transients 20(pinned)。
+- 教训存档:kernel-mode 的多行 import 使单行字符串替换静默不匹配
+  (escapePolicyForInsert 未导入 → commitReplace 吞 ReferenceError →
+  composition 提交全灭,Case 10 抓获)——大文件接线后必跑无头门禁再进 UI。
 
 ## 不做
 

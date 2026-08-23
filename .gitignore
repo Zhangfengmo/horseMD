@@ -45,3 +45,4 @@ ios/App/build-device/
 
 # IDE
 .idea/
+.claude/

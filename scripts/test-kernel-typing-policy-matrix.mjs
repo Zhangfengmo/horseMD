@@ -91,7 +91,14 @@ const blockSignature = (tree) => {
 // the same resolution the combination matrix's P3 uses.
 const editablePairs = (map) => map.blockPairs.filter((pair) => pair.charMap && pair.pmNode?.isTextblock)
 
-const results = { preserved: 0, refused: 0, restructures: {} }
+// The adjudicated bare-marker transients (text-escape.js TRANSIENT_SINGLE):
+// single marker characters owned by the completing-space / run-growth /
+// following-text machinery and the inline-mark openers. Their literal
+// restructure at a line start is the DESIGNED intermediate state, classified
+// and pinned separately from genuine holes.
+const TRANSIENT_SINGLE = new Set(['-', '+', '*', '>', '#', '`', '~', '_'])
+
+const results = { preserved: 0, refused: 0, restructures: {}, transients: {} }
 let cases = 0
 
 for (const base of BASES) {
@@ -129,6 +136,10 @@ for (const base of BASES) {
           assert.ok(!CONTROL_CHARS.includes(ch),
             `control character ${JSON.stringify(ch)} restructured ${base.id}@${at} (${ending === '\n' ? 'LF' : 'CRLF'}): ${JSON.stringify(applied.doc.text)}`)
           const key = `${base.id}${ending === '\n' ? '' : '#crlf'}@block${pairIndex}:${at === 0 ? 'start' : 'end'}+${JSON.stringify(ch)}`
+          if (TRANSIENT_SINGLE.has(ch)) {
+            results.transients[key] = true
+            continue
+          }
           results.restructures[key] = { after: applied.doc.text }
         }
       }
@@ -137,11 +148,12 @@ for (const base of BASES) {
 }
 
 const restructureKeys = Object.keys(results.restructures).sort()
+const transientKeys = Object.keys(results.transients).sort()
 console.log('--- kernel typing-policy matrix ---')
 console.log(`cases: ${cases} (${BASES.length} bases x LF/CRLF x block starts+ends x ${ALPHABET.length} chars [${UNSAFE_CHARS.length} unsafe from mdast-util-to-markdown + ${CONTROL_CHARS.length} controls])`)
-console.log(`text-preserved ${results.preserved}; refused ${results.refused}; RESTRUCTURES ${restructureKeys.length}`)
+console.log(`text-preserved ${results.preserved}; refused ${results.refused}; marker-transients ${transientKeys.length} (adjudicated); RESTRUCTURES ${restructureKeys.length}`)
 
-const snapshot = { note: 'Literal single-character inserts that change the block skeleton — the typing-policy HOLE MAP. Target state: empty (respelled or refused at the chokepoint). Regenerate deliberately with UPDATE_KERNEL_TYPING_POLICY_SNAPSHOT=1.', restructures: restructureKeys }
+const snapshot = { note: 'Typing-policy map. `restructures` are genuine HOLES (target: empty — respelled or refused at the chokepoint). `transients` are the ADJUDICATED bare-marker intermediates (single marker chars owned by completing-space/run-growth/following-text and the inline-mark openers) — pinned so a change in either direction is a conscious decision. Regenerate with UPDATE_KERNEL_TYPING_POLICY_SNAPSHOT=1.', restructures: restructureKeys, transients: transientKeys }
 if (UPDATE) {
   writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2) + '\n')
   console.log(`snapshot UPDATED (${restructureKeys.length} holes)`)
@@ -160,5 +172,7 @@ if (UPDATE) {
   if (narrowed.length) {
     assert.fail(`typing-policy narrowed by ${narrowed.length} (reality improved) — regenerate the snapshot deliberately: ${JSON.stringify(narrowed.slice(0, 10))}`)
   }
+  assert.deepEqual(transientKeys, recorded.transients || [],
+    'the adjudicated marker-transient set changed — a machinery change (completing-space/run-growth/demote) must regenerate this deliberately')
 }
 console.log('kernel typing-policy matrix OK')

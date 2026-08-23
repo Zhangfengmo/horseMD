@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert } from '../lib/source-kernel/index.js'
 
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
@@ -2317,6 +2317,22 @@ function commitPlainTextSteps({ kernel, map, steps }) {
         // (an ambiguous run, a tab): refuse rather than strand it.
         return { ok: false, code: stranded.code }
       }
+    }
+    // THE TYPING-SPELLING POLICY (lib/source-kernel/commands/text-escape.js;
+    // docs/typing-policy-chokepoint-adr.md): a literal insert whose bytes
+    // would restructure the document is respelled with CommonMark escapes —
+    // gated by remark's own unsafe table, proven by the double reparse, and
+    // answering null (literal, unchanged) for everything else. Consulted at
+    // THIS single point so every channel that flows through the gateway core
+    // gets it; the per-channel copies (markerInputPlugin's escape handler,
+    // commitReplace's bespoke block) are deleted. Claimed only for the
+    // overwhelmingly common shape — one pure-insert step into a real
+    // non-code block — everything else keeps its bytes and stays visible to
+    // the typing-policy sweep.
+    if (steps.length === 1 && editFrom === editTo && virtualPrefix === '' &&
+        insertText && stepPair?.mdBlock?.type !== 'code') {
+      const respelled = escapePolicyForInsert({ text: kernel.doc.text, offset: editFrom, insert: insertText })
+      if (respelled) insertText = respelled.insert
     }
     // Single-point rewrite detection (see `rewrote` above): the step's own
     // mapping was (rawFrom, rawTo, step.insertText); anything else means the
