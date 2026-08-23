@@ -77,7 +77,7 @@ import {
   resolveReviewMarker
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitMarkInputRule, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
@@ -1178,6 +1178,63 @@ export function createKernelMode({
         } else {
           requestVerify(newState?.doc, caretRide)
         }
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'mark-input-rule': {
+        // A typed mark-completing delimiter (gateway `extractMarkInputRule`):
+        // the PM transaction holds the RULE's result (opening delimiter
+        // deleted, mark applied, typed char never inserted), and the byte
+        // edit is the literal typed character at the caret's raw offset —
+        // the delimiters are the mark's own markdown spelling. Shape (b)
+        // like `code-language`: commit the bytes, then allow the original
+        // transaction through unchanged — but with a PRE-proof unique to
+        // this case: the candidate bytes must REPARSE (editor chain, via
+        // safeParse) to a document value-equal to the transaction's own
+        // result. That single equality subsumes the per-shape byte proofs —
+        // if remark would read the spelling differently (escapes, flanking
+        // rules, an adjacent construct), the parse diverges and the
+        // keystroke is refused with bytes AND view untouched: a swallowed
+        // keystroke, never a wrong byte, exactly as before this case
+        // existed — only now named instead of `unclassified-transaction`.
+        const committed = commitMarkInputRule({
+          kernel,
+          map: kernel.map,
+          pmFrom: classified.pmFrom,
+          text: classified.text
+        })
+        if (!committed.ok) {
+          notifyRefusal(committed.code, classified.pmFrom)
+          return { veto: true }
+        }
+        const parsed = safeParse(committed.applied.doc.text)
+        if (!parsed || !newState?.doc || !parsed.eq(newState.doc)) {
+          // LITERAL FALLBACK — source-authoritative to the end. The typed
+          // byte STILL lands (its insert was already proven by the plain-text
+          // pipeline); only the RULE's marked result is vetoed, and the view
+          // is reconciled from the parse of the committed bytes — the shared
+          // `applyKernelTransaction` publish path, same as mark-toggle. The
+          // user keeps their character with whatever the parse says it means,
+          // never the unprovable mark. This is what makes `~~删~~` typable:
+          // milkdown's eager `~{1,2}` strike rule fires on the FIRST closing
+          // `~` with a spelling GFM reads differently (`~~删~` — mismatched
+          // runs, literal); the fallback lands that `~` as text, and the
+          // SECOND `~` completes the real strike through the parse itself.
+          pushKernelDiagnostic({
+            type: 'mark-input-rule-literal-fallback',
+            text: classified.text
+          })
+          if (!view) return { veto: true }
+          applyKernelTransaction(committed.transaction, view, { requireMap: true })
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
+        // The parse WAS just proven value-equal to the view doc the allowed
+        // transaction produces, so the ordinary rebind + debounced verify
+        // suffice (nothing is known to differ — the §9 #5 healthy path).
+        bindMap(newState.doc)
+        requestVerify(newState.doc, committed.applied?.selection?.anchor)
         onChange?.(kernel.doc.text, false)
         return undefined
       }

@@ -158,6 +158,8 @@ const schema = new Schema({
 const p = (...c) => schema.node('paragraph', null, c)
 const doc = (...c) => schema.node('doc', null, c)
 const text = (s) => schema.text(s)
+const em = (s) => schema.text(s, [schema.marks.emphasis.create()])
+const code = (s) => schema.text(s, [schema.marks.inlineCode.create()])
 const li = (checked, ...c) => schema.node('list_item', { checked }, c)
 const bl = (...c) => schema.node('bullet_list', null, c)
 const ol = (...c) => schema.node('ordered_list', null, c)
@@ -189,6 +191,16 @@ const SEED_NBSP = '\u00A0'
 // Stub parse: kernel markdown bytes -> a freshly built PM doc. Unknown bytes
 // throw, exactly like a parser failure would.
 const FIXTURE_DOCS = {
+  // Case IR fixtures (mark input rules): the pre-rule literal docs and the
+  // candidate bytes the typed delimiter produces. `=高=\n` deliberately
+  // parses LITERAL (the stub's stand-in for a spelling the editor chain
+  // would not read back as the rule's mark) — the refusal control.
+  '*斜\n': () => doc(p(text('*斜'))),
+  '*斜*\n': () => doc(p(em('斜'))),
+  '`码\n': () => doc(p(text('`码'))),
+  '`码`\n': () => doc(p(code('码'))),
+  '=高\n': () => doc(p(text('=高'))),
+  '=高=\n': () => doc(p(text('=高='))),
   '甲乙\n': () => doc(p(text('甲乙'))),
   '甲丙乙\n': () => doc(p(text('甲丙乙'))),
   '甲\n\n乙\n': () => doc(p(text('甲')), p(text('乙'))),
@@ -4794,6 +4806,100 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(!verdict?.veto, 'typing in the placeholder must commit')
   assert.equal(h.controller.kernel.doc.text, '> - 牛\n> \n> x\n',
     'the typed character becomes a SEPARATED quote body line (the blank-quote line keeps it out of the list)')
+}
+
+// ==========================================================================
+// Case IR — MARK INPUT RULES (2026-08-23). Typing the closing delimiter of
+// `*斜*` / `**粗**` / `` `码` `` fires Milkdown's markRule, whose transaction
+// DELETES the opening delimiter, adds the mark, and never inserts the typed
+// character (node_modules/@milkdown/prose markRule + run(): the tr carries
+// `setMeta(customInputRulesKey, { transform, from, to, text })`). Before this
+// round the gateway classified it `blocked` and the WHOLE keystroke was
+// swallowed (the computer-use exploratory session's 9-veto trace). The
+// kernel's answer is source-authoritative and byte-minimal: commit the typed
+// character as a LITERAL byte at the caret's raw offset — the delimiters are
+// the mark's own markdown spelling — and allow the PM transaction through
+// only after proving parse(candidate bytes) equals the transaction's result
+// document. A divergent spelling refuses with everything untouched.
+// ==========================================================================
+
+// The input-rule transaction builder, spelled exactly like markRule does for
+// a closing-delimiter completion: delete the opening delimiter run, mark the
+// group, stamp the inputrules meta (the PluginKey's storage name).
+const INPUT_RULE_META = 'MILKDOWN_CUSTOM_INPUTRULES$'
+const markRuleTr = (oldState, { deleteFrom, deleteTo, markFrom, markTo, mark, caret, text: typed }) => {
+  const tr = oldState.tr.delete(deleteFrom, deleteTo)
+  tr.addMark(markFrom, markTo, mark)
+  tr.setStoredMarks([])
+  tr.setMeta(INPUT_RULE_META, { transform: tr, from: caret, to: caret, text: typed })
+  return tr
+}
+
+// Case IR1: `*斜` + typed `*` -> bytes gain the literal `*`, the view keeps
+// the rule's marked result, kernel and view agree byte-for-byte.
+{
+  const h = makeHarness('*斜\n', doc(p(text('*斜'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // doc p(text('*斜')): pos 1 = `*`, pos 2 = 斜, caret at 3.
+  const oldState = h.view.state
+  const tr = markRuleTr(oldState, {
+    deleteFrom: 1, deleteTo: 2, markFrom: 1, markTo: 2,
+    mark: schema.marks.emphasis.create(), caret: 3, text: '*'
+  })
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'a proven mark input rule is allowed through (no veto)')
+  assert.equal(h.controller.kernel.doc.text, '*斜*\n',
+    'the typed delimiter lands as a literal byte')
+  assert.ok(h.view.state.doc.eq(doc(p(em('斜')))),
+    'the view keeps the rule\'s marked result')
+  assert.deepEqual(h.changes.at(-1), ['*斜*\n', false])
+  assert.ok(h.controller.kernel.map, 'map rebound after the commit')
+}
+
+// Case IR2: `` `码 `` + typed closing backtick. An UNCLOSED backtick is
+// literal on both chains (unlike `**粗*`, which CommonMark reads as
+// `*` + em(粗) — that intermediate never pairs literally and is exercised
+// in the real app by the UI suite instead).
+{
+  const h = makeHarness('`码\n', doc(p(text('`码'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  // p(text('`码')): backtick@1 码@2, caret at 3.
+  const oldState = h.view.state
+  const tr = markRuleTr(oldState, {
+    deleteFrom: 1, deleteTo: 2, markFrom: 1, markTo: 2,
+    mark: schema.marks.inlineCode.create(), caret: 3, text: '`'
+  })
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.equal(verdict, undefined, 'the inline-code completion is allowed through')
+  assert.equal(h.controller.kernel.doc.text, '`码`\n')
+  assert.ok(h.view.state.doc.eq(doc(p(code('码')))), 'view holds code(码)')
+}
+
+// Case IR3: LITERAL FALLBACK when the candidate bytes do not reparse to the
+// rule's result (`=高` + typed `=`: the stub parse reads `=高=` as literal
+// text, so the rule's highlight mark is unprovable). Source-authoritative to
+// the end: the typed byte STILL lands, the rule's PM transaction is vetoed,
+// and the view is reconciled from the parse — the user keeps their
+// character, never the unprovable mark. (This is the shape that makes
+// `~~删~~` typable: milkdown's eager `~{1,2}` rule fires on the FIRST
+// closing `~` with a spelling GFM reads differently; the literal fallback
+// lands that `~`, and the SECOND `~` completes the real strike via parse.)
+{
+  const h = makeHarness('=高\n', doc(p(text('=高'))))
+  assert.equal(h.controller.attachAfterCreate(), true)
+  const oldState = h.view.state
+  const tr = markRuleTr(oldState, {
+    deleteFrom: 1, deleteTo: 2, markFrom: 1, markTo: 2,
+    mark: schema.marks.highlight.create(), caret: 3, text: '='
+  })
+  const verdict = dispatchThrough(h, tr)
+  await flushMicrotasks()
+  assert.deepEqual(verdict, { veto: true }, 'the unprovable rule transaction itself is vetoed')
+  assert.equal(h.controller.kernel.doc.text, '=高=\n', 'the typed byte lands literally')
+  assert.equal(h.view.state.doc.textContent, '=高=', 'the view follows the parse (literal, no mark)')
+  assert.deepEqual(h.changes.at(-1), ['=高=\n', false])
 }
 
 console.log('PASS kernel mode headless')

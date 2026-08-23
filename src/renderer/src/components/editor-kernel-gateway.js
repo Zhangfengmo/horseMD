@@ -1193,6 +1193,83 @@ export function routeTrailingAtomTyping({ kernel, map, transactions, oldState })
 //      code per the brief — this gateway does not attempt finer-grained
 //      block reasons for the plain-text path; ProjectionReconciler/dispatch
 //      veto own retry/fallback semantics upstream of this function).
+// ==========================================================================
+// MARK INPUT RULES (2026-08-23). Typing the closing delimiter of `*斜*`,
+// `**粗**`, `` `码` ``, `~~删~~` or `==高==` fires Milkdown's markRule
+// (node_modules/@milkdown/prose `markRule` + `run()`): the dispatched
+// transaction DELETES the opening delimiter run, applies the mark, and never
+// inserts the typed character — so `extractPlainTextSteps` sees no insert and
+// the whole keystroke used to be swallowed as `unclassified-transaction`
+// (the 2026-08-23 real-input exploratory session's 9-veto trace; one dangling
+// opening delimiter then turned every LATER delimiter keystroke into a rule
+// match, cascading the swallow).
+//
+// Detection is META-KEYED, not shape-guessed: `run()` stamps every undoable
+// rule's transaction with `setMeta(customInputRulesKey, { transform, from,
+// to, text })`, and the PluginKey's storage name is stable
+// (`MILKDOWN_CUSTOM_INPUTRULES` + prosemirror-state's `$` suffix). This
+// module imports nothing from @milkdown, so the meta is read by scanning
+// `tr.meta` for that name prefix — a plain data read, no plugin reference.
+//
+// Two structural gates keep NODE rules (fence/heading/hr/list wraps, which
+// restructure blocks) out of this classification: the payload must be a
+// caret-typing shape (`from === to`, non-empty text), and the transaction
+// must leave the document's BLOCK skeleton unchanged — a mark rule is
+// inline-only by construction. Everything else falls through to the existing
+// paths untouched.
+const INPUT_RULE_META_PREFIX = 'MILKDOWN_CUSTOM_INPUTRULES'
+// The app's own mark-completion plugins (editor-inline-code.js owns the
+// inline-code closing backtick instead of Crepe's rule) stamp the same
+// payload under this key — one classification for both provenances.
+const APP_INPUT_RULE_META = 'horsemd-mark-input-rule'
+
+function inputRuleMetaOf(tr) {
+  const meta = tr?.meta
+  if (!meta || typeof meta !== 'object') return null
+  for (const key of Object.keys(meta)) {
+    if (key.startsWith(INPUT_RULE_META_PREFIX) || key === APP_INPUT_RULE_META) return meta[key]
+  }
+  return null
+}
+
+// The document's block skeleton: block node type names in depth-first order,
+// with textblock content ignored (a mark rule only rearranges inline
+// material). Used as "unchanged?" — a node rule always fails this.
+function blockSkeleton(docNode) {
+  const out = []
+  const walk = (node) => {
+    node.forEach((child) => {
+      if (!child.isBlock) return
+      out.push(child.type.name)
+      if (!child.isTextblock) walk(child)
+    })
+  }
+  walk(docNode)
+  return out.join('|')
+}
+
+function extractMarkInputRule(transactions, oldState) {
+  const trs = Array.isArray(transactions) ? transactions : [transactions]
+  let payload = null
+  for (const tr of trs) {
+    if (!tr?.docChanged) continue
+    const meta = inputRuleMetaOf(tr)
+    // Exactly ONE doc-changing transaction, and it must be the rule's own.
+    if (!meta || payload) return null
+    if (typeof meta.text !== 'string' || !meta.text.length) return null
+    if (!Number.isFinite(meta.from) || meta.from !== meta.to) return null
+    if (!tr.before || !tr.doc) return null
+    if (blockSkeleton(tr.before) !== blockSkeleton(tr.doc)) return null
+    payload = { pmFrom: meta.from, text: meta.text }
+  }
+  if (!payload) return null
+  if (oldState?.doc && Number.isFinite(payload.pmFrom) &&
+      (payload.pmFrom < 0 || payload.pmFrom > oldState.doc.content.size)) {
+    return null
+  }
+  return payload
+}
+
 export function classifyTransactions(transactions, oldState, { isComposing = false } = {}) {
   const trs = Array.isArray(transactions) ? transactions : [transactions]
 
@@ -1224,6 +1301,9 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const markToggle = extractMarkToggle(trs, oldState)
   if (markToggle) return { kind: 'mark-toggle', ...markToggle }
+
+  const markInputRule = extractMarkInputRule(trs, oldState)
+  if (markInputRule) return { kind: 'mark-input-rule', ...markInputRule }
 
   const linkEdit = extractLinkEdit(trs, oldState)
   if (linkEdit) return { kind: 'link-edit', ...linkEdit }
@@ -1554,7 +1634,31 @@ export function commitPlainText({ kernel, map, transactions, oldState }) {
   const trs = Array.isArray(transactions) ? transactions : [transactions]
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  return commitPlainTextSteps({ kernel, map, steps })
+}
 
+// commitMarkInputRule: the byte half of a `mark-input-rule` classification
+// (see `extractMarkInputRule` above). A mark input rule's PM transaction
+// never inserts the typed delimiter — it deletes the OPENING delimiter and
+// applies the mark — so the byte edit is exactly the character the user
+// typed, inserted literally at the caret: the delimiters ARE the mark's own
+// markdown spelling. Routed through the same step pipeline as ordinary
+// typing so every guard (atom units, CRLF pairs, virtual blocks, table
+// structure) applies verbatim. The caller (editor-kernel-mode.js) holds the
+// stronger proof — parse(candidate bytes) must equal the transaction's
+// result document — before anything is published.
+export function commitMarkInputRule({ kernel, map, pmFrom, text }) {
+  if (!kernel?.doc || !map || typeof map.pmPosToRaw !== 'function' ||
+      typeof map.pmPosToRawStart !== 'function') {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  if (!Number.isFinite(pmFrom) || typeof text !== 'string' || !text.length) {
+    return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  }
+  return commitPlainTextSteps({ kernel, map, steps: [{ from: pmFrom, to: pmFrom, insertText: text }] })
+}
+
+function commitPlainTextSteps({ kernel, map, steps }) {
   const edits = []
   // Per-step bookkeeping for the MULTI-STEP delete gate below: each entry pairs
   // the raw edit this step resolved to with the block pair it targeted, all in

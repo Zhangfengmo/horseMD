@@ -215,6 +215,14 @@ export function createInlineCodeEditingPlugin({ onEdit, onValueChange } = {}) {
             tr.addMark(closing.from, markedTo, mark)
             tr.setSelection(TextSelection.create(tr.doc, markedTo))
             tr.setStoredMarks(baseMarks.filter((item) => item.type !== type))
+            // The source kernel classifies mark input-rule completions by a
+            // `{ from, to, text }` meta (editor-kernel-gateway.js
+            // `extractMarkInputRule`). Milkdown's own markRules get it from
+            // `customInputRules`; this plugin owns the inline-code completion
+            // itself, so it stamps the same payload under the app's own key —
+            // the typed closing backtick then commits as a LITERAL byte with
+            // the same reparse proof. Inert outside kernel mode.
+            tr.setMeta('horsemd-mark-input-rule', { from, to: from, text })
             dispatchInlineCodeEdit(view, tr, inactiveEditingState, onEdit, onValueChange)
             placeDomSelectionOnInlineCodeBoundarySide(view, markedTo, 1)
             return true

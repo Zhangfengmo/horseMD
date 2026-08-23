@@ -110,6 +110,12 @@ export const KERNEL_CODES = Object.freeze({
   // 2026-08-19 write-path pass deferred it as "needs the app instrumented to
   // dump tr.steps".
   HEADING_DEMOTE: 'heading-demote-unsupported',
+  // A mark input rule (typed closing delimiter — `*斜*`, `**粗**`, `` `码` ``…)
+  // whose literal typed byte does NOT reparse to the transaction's marked
+  // result (editor-kernel-mode.js `mark-input-rule` case). The keystroke is
+  // swallowed with everything untouched — never a wrong byte — and the code
+  // is named so the refusal is legible in diagnostics and toasts.
+  MARK_INPUT_RULE: 'mark-input-rule-unprovable',
   // A caption edit whose source slots are claimed by the ratio-in-alt scheme
   // (commands/image-attrs.js CAPTION ADR): either the image-block is
   // genuinely resized (raw alt = numeric ratio, raw title = caption), or the
