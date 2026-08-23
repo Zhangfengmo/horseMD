@@ -107,6 +107,29 @@ const FIXTURE = [
   '| --- | --- | --- |',
   '| **粗体格** | 一<br>二 | 普通格 |',
   '',
+  // 2026-08-23 extension round — the post-slash feature landings, mirrored
+  // from the headless matrix's new elements so the harness-fidelity
+  // cross-check (step 2) warrants THEM too:
+  //   an ALIGNED table with a marked cell   (table-ops alignment bytes x marks)
+  //   a footnote REFERENCE                  (the fourth typable inline atom)
+  //   an image with a TITLE slot            (the caption's byte home)
+  //   BLOCK-level raw HTML                  (family D4 — read-only, counted)
+  //   a quote holding a list THEN a sibling (the provenSpanEnd/clampedNodeEnd
+  //                                          fourth-batch shape)
+  '| 子 | 丑 |',
+  '| :--- | ---: |',
+  '| **寅** | 卯 |',
+  '',
+  '脚注引用[^1] 之后',
+  '',
+  '![带题图](t.png "题注文字")',
+  '',
+  '<div>块级内容</div>',
+  '',
+  '> 1. 引列一',
+  '>',
+  '> 引尾段',
+  '',
   '$$',
   'E=mc^2',
   '$$',
@@ -115,6 +138,10 @@ const FIXTURE = [
   'graph TD',
   'A-->B',
   '```',
+  '',
+  // The footnote DEFINITION the reference above needs — without it GFM parses
+  // `[^1]` as literal text and the atom silently stops being exercised.
+  '[^1]: 脚注说明',
   ''
 ].join('\n')
 

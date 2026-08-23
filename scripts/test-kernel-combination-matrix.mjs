@@ -283,6 +283,39 @@ const ELEMENTS = [
   { id: 'task-seed', md: `${TASK_SEED_BYTES}\n` },
   // …and the dissolved form the first label character leaves behind.
   { id: 'task-dissolved', md: TASK_DISSOLVED_DOC },
+  // --- post-2026-08-20 feature landings (2026-08-23 extension round) ---
+  // The markdown TITLE slot — the byte home the kernel/image-caption round
+  // gave the image-block caption (an UNSCALED image's caption commits here).
+  // Its compositions prove the title bytes survive pairing next to every
+  // neighbour, which is the static half of the caption contract.
+  { id: 'image-title', md: '![替代](img.png "题注")\n' },
+  // A LINKED image — the marked atom the SDD ledger records as refused for
+  // whole-atom deletion (its `[`/`](url)` bytes belong to no unit). The
+  // PARAGRAPH itself is editable; what its compositions exercise is that the
+  // marked-atom neighbourhood pairs and accepts edits AROUND the atom.
+  { id: 'para-linked-image', md: '段落 [![图](a.png)](https://e.com) 尾\n' },
+  // A footnote REFERENCE and its definition — the fourth inline-atom kind the
+  // typing-around-atoms relaxation names (image / inline math / inline HTML /
+  // footnote ref). The definition block is required: GFM parses a ref without
+  // one as literal text, which would silently stop exercising the atom.
+  { id: 'para-footnote', md: '段落[^1] 尾\n\n[^1]: 脚注说明\n' },
+  // A table WITH an alignment row — the bytes the kernel's own column-align
+  // structural op (commands/table-ops.js, 2026-08-22) writes. Compositions
+  // prove aligned delimiter cells pair and edit like plain `---` ones.
+  { id: 'table-aligned', md: '| 甲 | 乙 | 丙 |\n| :--- | :---: | ---: |\n| 一 | 二 | 三 |\n' },
+  // H1 — the heading-demote round's subject (Backspace at content start eats
+  // one `#`; an H1's opening needs a reparse proof). The matrix exercises its
+  // PAIRING next to every neighbour; the gesture itself is UI-suite property.
+  { id: 'heading-h1', md: '# 一级标题\n' },
+  // BLOCK-level raw HTML — rendered by the app's html node view, held by the
+  // kernel as one atom vs PM's per-character text run, so its paragraph pairs
+  // READ-ONLY (family D4 below). In the matrix since 2026-08-23 so that the
+  // fail-closed posture is pinned instead of merely believed.
+  { id: 'html-block', md: '<div>块级内容</div>\n' },
+  // An ordered list nested under a bullet on the CONTINUATION line — the
+  // same-line nested item record family (syntax-index.js, 2026-08-23: a
+  // nested item names its OWN marker, not its parent's).
+  { id: 'list-ordered-in-bullet', md: '- 甲\n  1. 乙\n' },
   // --- front matter (document head only) ---
   { id: 'frontmatter', md: '---\ntitle: 示例\ntags: [a, b]\n---\n', leadingOnly: true }
 ]
@@ -329,7 +362,7 @@ for (const inner of ['quote-plain', 'fence-js', 'fence-empty', 'math-block', 'ta
 }
 // quote > everything it can hold (task-seed and the empty image card joined
 // 2026-08-20 — the slash-insert results one container deep)
-for (const inner of ['list-bullet', 'list-task', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'heading-plain', 'para-highlight', 'para-hardbreak-spaces', 'thematic-break', 'task-seed', 'image-block-empty']) {
+for (const inner of ['list-bullet', 'list-task', 'fence-js', 'fence-empty', 'math-block', 'table-marks', 'heading-plain', 'para-highlight', 'para-hardbreak-spaces', 'thematic-break', 'task-seed', 'image-block-empty', 'list-ordered', 'image-title', 'table-aligned']) {
   CONTAINMENT.push({ id: `contain:quote>${inner}`, md: quotePrefix(el(inner).md) })
 }
 // nested list holding a fence / a quote
@@ -366,7 +399,19 @@ const TRIPLES = [
   // static-bytes neighbourhood of "toggle between insert and first keystroke"
   // (the dissolve preserves `checked`; here the matrix proves the seed item
   // and a marked, checked item pair and edit side by side in ONE list)
-  { id: 'triple:task-list>seed+marks', md: `- [ ] ${NBSP}\n- [x] **粗** 乙\n` }
+  { id: 'triple:task-list>seed+marks', md: `- [ ] ${NBSP}\n- [x] **粗** 乙\n` },
+  // The 2026-08-23 fourth-batch shapes: a list INSIDE a quote followed by a
+  // later sibling in the SAME quote. remark's list-span bookkeeping records
+  // the list's `position.end` differently depending on what follows (a
+  // paragraph stops it after the blank quote line; a second list extends it
+  // to the new marker) — the `provenSpanEnd`/`clampedNodeEnd` fixes live
+  // exactly here, so both spellings are pinned as pairing + editing shapes.
+  { id: 'triple:quote>list+para', md: '> 1. 甲\n>\n> 乙\n' },
+  { id: 'triple:quote>list+list', md: '> 1. 甲\n>\n> - 乙\n' },
+  // An ALIGNED table whose body cells carry marks — alignment row x marked
+  // cell, the intersection of the table-ops alignment bytes with the cell
+  // zip's mark handling.
+  { id: 'triple:table-aligned>marks', md: '| 甲 | 乙 |\n| :--- | ---: |\n| **粗** | `码` |\n' }
 ]
 
 // ==========================================================================
@@ -563,6 +608,17 @@ const KNOWN_UNEDITABLE = new Map([])
 //   fix-scheduled status promised. Entries that also carried a D1 cell keep
 //   the cell (`table-br` compositions: the paragraph left the read-only
 //   list, the `<br>` cell stays). No entry widened; no new family.
+//   2026-08-23 (post-slash feature landings): +208 entries, 0 removed, 0
+//   changed. 184 are family D4 — the NEW html-block element's own paragraph,
+//   read-only by construction in every composition (one kernel atom vs PM's
+//   per-character run; the fail-closed posture now pinned instead of
+//   believed). The remaining 24 are D1: each NEW element (image-title,
+//   para-linked-image, para-footnote, table-aligned, heading-h1,
+//   list-ordered-in-bullet) next to `table-br`, whose `<br>` cell stays the
+//   only read-only block — verified pure-additive by key-level diff (no old
+//   entry changed). Every other new construct — footnote ref+definition,
+//   linked image, aligned table, image title slot, quote>list+para/list
+//   triples — is fully editable in every composition.
 //
 // Each family carries a STATUS, and the snapshot stores the family alongside
 // every entry, because these are not all the same kind of fact:
@@ -582,6 +638,10 @@ const KNOWN_DEGRADED_FAMILIES = {
   D3: {
     status: 'known-degraded',
     summary: 'paragraph whose soft-break continuation line starts with "> " -> paragraph read-only'
+  },
+  D4: {
+    status: 'known-degraded',
+    summary: 'paragraph holding BLOCK-level raw HTML -> paragraph read-only'
   }
 }
 
@@ -590,6 +650,11 @@ const KNOWN_DEGRADED_FAMILIES = {
 // through to D3, and D3 entries are printed by name on every run.
 function classifyReadOnly(compositionId, entry) {
   if (entry.endsWith('(cell)')) return 'D1'
+  // D4 (2026-08-23): the html-block element's OWN paragraph. The rule is
+  // mechanical on the composition id — only compositions that include the
+  // element can classify here, and only for a paragraph entry; a read-only
+  // paragraph in any OTHER composition still falls through to D3 and prints.
+  if (/(^|[:+>])html-block($|[+#])/.test(compositionId) && /:paragraph$/.test(entry)) return 'D4'
   // (`#crlf` used to classify as D2; that family's fix landed 2026-08-21, so
   // any residual CRLF read-only block falls through to D3 and is printed by
   // name — never quietly absorbed into a fixed family.)
