@@ -128,7 +128,13 @@ async function runScenario({ ending, port }) {
     await sleep(600)
     await save(app)
     const saved1 = await readFile(file, 'utf8')
-    const expected1 = ['# 头', '', '甲段', '', '1. 2.312', '   1. 2131', '3. 4.', ''].join(ending)
+    // 2026-08-24 (marker-escaping delimiter): a typed restructuring '.' now
+    // commits as its ESCAPED spelling (`2\.312`, `4\.`) — renders the same
+    // text, keeps the item literal (no same-line nested bare item), and the
+    // completing Space still creates real nested lists. Flipped deliberately
+    // with that landing; the Tab-at-item-head nesting this loop pins is
+    // unchanged.
+    const expected1 = ['# 头', '', '甲段', '', '1. 2\\.312', '   1. 2131', '3. 4\\.', ''].join(ending)
     if (saved1 !== expected1) {
       console.error('  actual  :', JSON.stringify(saved1))
       console.error('  expected:', JSON.stringify(expected1))
@@ -143,7 +149,7 @@ async function runScenario({ ending, port }) {
   app = await launch(root, file, port + 1)
   try {
     const skeleton = await app.evaluate(SKELETON_JS)
-    const expectedSkeleton = ['h1:头', 'p:甲段', 'ol[li:2.312 ol[li:2131] li: ol[li:]]'].join('\n')
+    const expectedSkeleton = ['h1:头', 'p:甲段', 'ol[li:2.312 ol[li:2131] li:4.]'].join('\n')
     if (skeleton !== expectedSkeleton) {
       console.error('  actual  :\n' + skeleton)
       console.error('  expected:\n' + expectedSkeleton)
@@ -160,7 +166,7 @@ async function runScenario({ ending, port }) {
     await sleep(500)
     await save(app)
     const saved2 = await readFile(file, 'utf8')
-    const expected2 = ['# 头甲段', '', '1. 2.312', '   1. 21319', '3. 4.', ''].join(ending)
+    const expected2 = ['# 头甲段', '', '1. 2\\.312', '   1. 21319', '3. 4\\.', ''].join(ending)
     if (saved2 !== expected2) {
       console.error('  actual  :', JSON.stringify(saved2))
       console.error('  expected:', JSON.stringify(expected2))
@@ -175,7 +181,7 @@ async function runScenario({ ending, port }) {
   app = await launch(root, file, port + 2)
   try {
     const skeleton = await app.evaluate(SKELETON_JS)
-    const expectedSkeleton = ['h1:头甲段', 'ol[li:2.312 ol[li:21319] li: ol[li:]]'].join('\n')
+    const expectedSkeleton = ['h1:头甲段', 'ol[li:2.312 ol[li:21319] li:4.]'].join('\n')
     assert.equal(skeleton, expectedSkeleton, `${label} reopen2: final render matches (got ${JSON.stringify(skeleton)})`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })

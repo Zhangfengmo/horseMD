@@ -197,7 +197,10 @@ async function run() {
     {
       assert.equal(await toasts(evaluate), '[]', 'the ordered demotion must not refuse')
       const source = await readSource(evaluate, 'ordered demotion')
-      assert.ok(source.includes('1.x'), `got ${JSON.stringify(source)}`)
+      // 2026-08-24 (marker-escaping delimiter): the restructuring '.' now
+      // commits as `1\.` — the paragraph never transits through a bare
+      // ordered item at all; the render below is unchanged ("1.x").
+      assert.ok(source.includes('1\\.x'), `got ${JSON.stringify(source)}`)
       const blocks = await blockTexts(evaluate)
       assert.ok(blocks.includes('P:1.x'),
         `the ordered marker must demote to a paragraph — got ${JSON.stringify(blocks)}`)
@@ -265,7 +268,7 @@ async function run() {
       return text.includes('*ab') ? text : null
     }, 'the edits must reach disk')
     assert.ok(onDisk.includes('*ab'), 'the demoted star paragraph survives the save')
-    assert.ok(onDisk.includes('1.x'), 'the demoted ordered paragraph survives the save')
+    assert.ok(onDisk.includes('1\\.x'), 'the demoted ordered paragraph survives the save (escaped spelling since 2026-08-24)')
     assert.ok(onDisk.includes('#x'), 'the demoted heading paragraph survives the save')
     assert.ok(onDisk.includes('* x'), 'the completed list survives the save')
     assert.ok(onDisk.includes('*甲一'), 'the mid-text * survives the save')

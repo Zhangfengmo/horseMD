@@ -49,7 +49,7 @@ export {
   healableLineStartRun
 } from './commands/line-start-whitespace.js'
 export { dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal } from './commands/task-seed.js'
-export { spellMarkerCompletingSpace, spellMarkerRunGrowth, spellMarkerFollowingText } from './commands/marker-space.js'
+export { spellMarkerCompletingSpace, spellMarkerRunGrowth, spellMarkerFollowingText, spellMarkerEscapingDelimiter } from './commands/marker-space.js'
 export { trimTrailingBlankLines } from './commands/trailing-placeholder.js'
 export {
   proveContentDelete,

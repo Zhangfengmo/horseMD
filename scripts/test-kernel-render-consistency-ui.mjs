@@ -219,7 +219,10 @@ async function runScenario({ ending, port }) {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), `${label} save settle`)
     const saved = await readFile(file, 'utf8')
-    assert.ok(saved.includes(`1. 2.9876543`), `${label}: the burst lands as ONE item: ${JSON.stringify(saved.slice(-60))}`)
+    // 2026-08-24 (marker-escaping delimiter): the restructuring '.' commits
+    // escaped, so the burst spells `2\.9876543` — same rendered text, and
+    // the item never transits through a bare nested marker.
+    assert.ok(saved.includes(`1. 2\\.9876543`), `${label}: the burst lands as ONE item: ${JSON.stringify(saved.slice(-60))}`)
     assert.ok(!saved.includes(`1. 2.${ending}`), `${label}: no severed bare-marker line survives`)
 
     const diag = await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).map((d) => d.type))`)

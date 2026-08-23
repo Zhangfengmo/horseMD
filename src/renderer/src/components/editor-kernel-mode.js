@@ -55,6 +55,7 @@ import {
   spellMarkerCompletingSpace,
   spellMarkerRunGrowth,
   spellMarkerFollowingText,
+  spellMarkerEscapingDelimiter,
   trimTrailingBlankLines,
   shrinkBlankRun,
   looksLikeBlockLineStart,
@@ -2487,6 +2488,28 @@ export function createKernelMode({
   // is set because the demoted result is an ORDINARY paragraph — the map must
   // rebuild and the caret's own offset must resolve in it, or nothing is
   // written.
+  // MARKER-ESCAPING DELIMITER (marker-space.js `spellMarkerEscapingDelimiter`,
+  // 2026-08-24): a typed `.`/`)` whose literal byte would RESTRUCTURE (the
+  // `3. 4.` origin — "4" + '.' minting a nested empty item mid-word) commits
+  // as the escaped spelling `4\.` instead; the completing Space still creates
+  // the real nested list through its escaped-marker arm. Same fail-closed
+  // wrapper discipline as the growth handler below: any throw answers "not
+  // mine" so a keystroke can never be lost to this branch.
+  const handleMarkerEscapingDelimiter = (view, from, to, character) => {
+    try {
+      if (inactive() || (character !== '.' && character !== ')')) return false
+      if (from !== to || view.composing) return false
+      if (!kernel.map) return false
+      const offset = markerRawOffsetAt(from)
+      if (!Number.isFinite(offset)) return false
+      const routed = spellMarkerEscapingDelimiter({ doc: kernel.doc, offset, character })
+      if (!routed.ok) return false
+      return applyMarkerTransaction(routed, view, { requireMap: true }) === 'handled'
+    } catch {
+      return false
+    }
+  }
+
   const handleMarkerFollowingText = (view, from, to, character) => {
     try {
       if (inactive()) return false
@@ -3699,6 +3722,7 @@ export function createKernelMode({
     props: {
       handleTextInput: (view, from, to, character) =>
         handleMarkerRunGrowth(view, from, to, character) ||
+        handleMarkerEscapingDelimiter(view, from, to, character) ||
         handleMarkerFollowingText(view, from, to, character)
     }
   })

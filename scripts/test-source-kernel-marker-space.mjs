@@ -192,4 +192,64 @@ for (const [label, text, needle, character] of [
   assert.equal(routed.code, 'not-structural')
 }
 
+// ==========================================================================
+// MARKER-ESCAPING DELIMITER (2026-08-24, the `3. 4.` origin report: typing
+// `4` then `.` at an item's content start spelled `3. 4.`, which CommonMark
+// reads as item 3 + nested empty item 4 — the view split mid-word). Typora's
+// answer, mirrored: the typed `.`/`)` commits as the ESCAPED byte (`4\.`),
+// which renders "4." literally everywhere, and the SPACE that follows still
+// creates the nested list (spellMarkerCompletingSpace learns the escaped
+// spelling below). Both proofs are reparse-based: the unescaped candidate
+// must genuinely restructure and the escaped one must not.
+// ==========================================================================
+import { spellMarkerEscapingDelimiter } from '../src/renderer/src/lib/source-kernel/commands/marker-space.js'
+{
+  // The reported shape: item text "4", typed '.' -> `4\.`.
+  const text = '1. 甲\n2. 乙\n3. 4\n'
+  const offset = text.indexOf('4\n') + 1
+  const routed = spellMarkerEscapingDelimiter({ doc: doc(text), offset, character: '.' })
+  assert.ok(routed.ok, `escaping dot must claim the restructuring '.' (got ${routed.code})`)
+  assert.deepEqual(routed.edit, { from: offset, to: offset, insert: '\\.' })
+  assert.equal(text.slice(0, offset) + routed.edit.insert + text.slice(offset),
+    '1. 甲\n2. 乙\n3. 4\\.\n')
+  assert.deepEqual(routed.transaction.selection, { anchor: offset + 2, head: offset + 2 },
+    'the caret lands after the escaped delimiter (visibly after the dot)')
+  assert.equal(routed.transaction.intent, 'marker-escaping-delimiter')
+
+  // `)` delimiter family.
+  const paren = spellMarkerEscapingDelimiter({ doc: doc(text), offset, character: ')' })
+  assert.ok(paren.ok, `escaping ')' too (got ${paren.code})`)
+  assert.equal(paren.edit.insert, '\\)')
+
+  // CRLF.
+  const crlf = '1. 甲\r\n2. 乙\r\n3. 4\r\n'
+  const rCrlf = spellMarkerEscapingDelimiter({ doc: doc(crlf), offset: crlf.indexOf('4\r') + 1, character: '.' })
+  assert.ok(rCrlf.ok, `CRLF escapes too (got ${rCrlf.code})`)
+
+  // NEGATIVES — everything that must fall through to the plain-text path:
+  // a dot MID-TEXT does not restructure ('4x' + '.'),
+  const midText = '1. 甲\n2. 4x\n'
+  assert.equal(spellMarkerEscapingDelimiter({ doc: doc(midText), offset: midText.indexOf('x') + 1, character: '.' }).ok, false)
+  // a dot after non-digit content,
+  const nonDigit = '1. 甲\n2. 乙\n'
+  assert.equal(spellMarkerEscapingDelimiter({ doc: doc(nonDigit), offset: nonDigit.indexOf('乙') + 1, character: '.' }).ok, false)
+  // a dot inside a code fence,
+  const fence = '```\n4\n```\n'
+  assert.equal(spellMarkerEscapingDelimiter({ doc: doc(fence), offset: fence.indexOf('4') + 1, character: '.' }).ok, false)
+  // an ordinary character is never claimed.
+  assert.equal(spellMarkerEscapingDelimiter({ doc: doc(text), offset, character: 'x' }).ok, false)
+}
+
+// The completing SPACE recognizes the ESCAPED marker: `4\.` + Space becomes
+// the REAL nested marker `4. ` — type-to-create-a-list survives the escape.
+{
+  const text = '1. 甲\n2. 乙\n3. 4\\.\n'
+  const offset = text.indexOf('\\.') + 2
+  const routed = spellMarkerCompletingSpace({ doc: doc(text), offset })
+  assert.ok(routed.ok, `the escaped marker must complete under Space (got ${routed.code})`)
+  assert.equal(routed.marker, '4.')
+  const written = text.slice(0, routed.edit.from) + routed.edit.insert + text.slice(routed.edit.to)
+  assert.equal(written, '1. 甲\n2. 乙\n3. 4. \n', 'the escape unwinds and the space completes the marker')
+}
+
 console.log('PASS source kernel marker-completing space: every marker family completes at an empty block, at a paragraph start, inside a list item and under (nested) quote prefixes; LF and CRLF; padding, verbatim blocks and non-markers keep their previous behaviour')

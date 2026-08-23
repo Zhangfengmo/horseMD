@@ -191,6 +191,38 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
   const baseline = index.blockAt(offset) || index.blockAt(Math.max(0, offset - 1))
   if (baseline && VERBATIM.has(baseline.type)) return NOT_STRUCTURAL
 
+  // ESCAPED ORDERED MARKER (2026-08-24): `spellMarkerEscapingDelimiter` below
+  // spells a typed restructuring `.`/`)` as `4\.` so the item text stays
+  // literal — this arm is its other half: the SPACE that follows still
+  // creates the real nested list. The escape unwinds (`4\.` -> `4.`) and the
+  // completing space rides the same proof as an unescaped marker, so
+  // type-to-create-a-list survives the escape byte exactly.
+  const escaped = /(\d{1,9})\\([.)])$/.exec(text.slice(line.start, offset))
+  if (escaped) {
+    const token = escaped[1] + escaped[2]
+    const escStart = offset - escaped[0].length
+    if (looksLikeBlockLineStart(text, escStart)) {
+      const candidate = text.slice(0, escStart) + token + ' ' + text.slice(offset)
+      if (provenMarker(candidate, escStart, escStart + token.length, token)) {
+        const caret = escStart + token.length + 1
+        return {
+          ok: true,
+          marker: token,
+          edit: { from: escStart, to: offset, insert: token + ' ' },
+          transaction: {
+            baseRevision: doc.revision,
+            from: escStart,
+            to: offset,
+            insert: token + ' ',
+            intent: 'marker-completing-space',
+            selection: { anchor: caret, head: caret }
+          }
+        }
+      }
+    }
+    return NOT_STRUCTURAL
+  }
+
   const match = MARKER_TOKEN.exec(text.slice(line.start, offset))
   if (!match) return NOT_STRUCTURAL
   const token = match[0]
@@ -215,6 +247,110 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
       to: offset,
       insert: ' ',
       intent: 'marker-completing-space',
+      selection: { anchor: caret, head: caret }
+    }
+  }
+}
+
+// MARKER-ESCAPING DELIMITER (2026-08-24, the `3. 4.` origin report). Typing
+// `4` then `.` at an item's content start used to commit the literal bytes
+// `3. 4.` — which CommonMark reads as item 3 holding a NESTED EMPTY ordered
+// item, so the view split the user's "4." into structure mid-word (and until
+// the same-day Backspace work, the two bare items were undeletable islands).
+// Typora's behaviour, mirrored byte-first: the delimiter that would
+// RESTRUCTURE commits as its ESCAPED spelling (`4\.` — standard CommonMark,
+// renders "4." literally in every renderer; the same escape family the
+// autolink unwrapper already writes for `www\.`). The completing-Space arm in
+// `spellMarkerCompletingSpace` recognizes the escaped marker, so typing
+// `4` `.` `Space` still creates the nested list the user may genuinely want.
+//
+// Both halves of the claim are REPARSED, never argued from the grammar:
+//   * the unescaped candidate must genuinely change the document's block
+//     skeleton (otherwise the character is ordinary text and this command
+//     answers not-structural — a mid-word `4.` never reaches the escape);
+//   * the escaped candidate must keep the skeleton identical AND change
+//     exactly one text leaf, from `L` to `L + character`.
+const BLOCK_TYPES = new Set(['paragraph', 'heading', 'list', 'listItem',
+  'blockquote', 'code', 'thematicBreak', 'table', 'tableRow', 'tableCell',
+  'html', 'math'])
+const blockSignatureOf = (tree) => {
+  const out = []
+  const walk = (node) => {
+    if (BLOCK_TYPES.has(node?.type)) out.push(node.type)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return out.join('|')
+}
+const textLeavesOf = (tree) => {
+  const out = []
+  const walk = (node) => {
+    if (node?.type === 'text' && node.value !== undefined) out.push(node.value)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return out
+}
+
+export function spellMarkerEscapingDelimiter({ doc, offset, character }) {
+  if (character !== '.' && character !== ')') return NOT_STRUCTURAL
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return NOT_STRUCTURAL
+  if (!Number.isInteger(offset) || offset < 0 || offset > text.length) return NOT_STRUCTURAL
+
+  const index = buildSyntaxIndex(text)
+  const line = index.lineAt(offset)
+  if (!line || offset < line.start) return NOT_STRUCTURAL
+  const baseline = index.blockAt(offset) || index.blockAt(Math.max(0, offset - 1))
+  if (baseline && VERBATIM.has(baseline.type)) return NOT_STRUCTURAL
+
+  // Cheap prefilter before any candidate parse: the bytes between the line's
+  // structural prefix and the caret must be 1-9 digits — the only shape whose
+  // trailing `.`/`)` can mint a marker.
+  const digits = /(\d{1,9})$/.exec(text.slice(line.start, offset))
+  if (!digits) return NOT_STRUCTURAL
+  const digitStart = offset - digits[1].length
+  if (!looksLikeBlockLineStart(text, digitStart)) return NOT_STRUCTURAL
+
+  let baseTree
+  let unescapedTree
+  let escapedTree
+  const escapedInsert = '\\' + character
+  const unescaped = text.slice(0, offset) + character + text.slice(offset)
+  const escapedCandidate = text.slice(0, offset) + escapedInsert + text.slice(offset)
+  try {
+    baseTree = buildSyntaxIndex(text).tree
+    unescapedTree = buildSyntaxIndex(unescaped).tree
+    escapedTree = buildSyntaxIndex(escapedCandidate).tree
+  } catch {
+    return NOT_STRUCTURAL
+  }
+  const baseSignature = blockSignatureOf(baseTree)
+  // Not restructuring -> the character is ordinary content; the plain-text
+  // path owns it (mid-word `4.`, `4.5` decimals, table cells…).
+  if (blockSignatureOf(unescapedTree) === baseSignature) return NOT_STRUCTURAL
+  if (blockSignatureOf(escapedTree) !== baseSignature) return NOT_STRUCTURAL
+  const baseLeaves = textLeavesOf(baseTree)
+  const escapedLeaves = textLeavesOf(escapedTree)
+  if (escapedLeaves.length !== baseLeaves.length) return NOT_STRUCTURAL
+  let changed = 0
+  for (let i = 0; i < baseLeaves.length; i += 1) {
+    if (escapedLeaves[i] === baseLeaves[i]) continue
+    changed += 1
+    if (escapedLeaves[i] !== baseLeaves[i] + character) return NOT_STRUCTURAL
+  }
+  if (changed !== 1) return NOT_STRUCTURAL
+
+  const caret = offset + escapedInsert.length
+  return {
+    ok: true,
+    edit: { from: offset, to: offset, insert: escapedInsert },
+    transaction: {
+      baseRevision: doc.revision,
+      from: offset,
+      to: offset,
+      insert: escapedInsert,
+      intent: 'marker-escaping-delimiter',
       selection: { anchor: caret, head: caret }
     }
   }
