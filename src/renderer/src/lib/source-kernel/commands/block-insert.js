@@ -738,17 +738,42 @@ function quoteSpelling(bytes, ending, prefix, anchor) {
 // region themselves, so for every top-level region the two functions agree —
 // which is why the shared helper (whose merge-proof account is written
 // against its skip semantics) stays untouched.
-function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta) {
+// Duplicated from block-type.js with a note (the same way this module
+// duplicates `topLevelNodeAt`): a container's recorded END is remark
+// bookkeeping wherever it runs past the last positioned descendant over
+// quote-prefix/whitespace bytes only — measured 2026-08-23, a quoted list's
+// end depends on what its NEXT SIBLING is, so an insert next to it silently
+// re-records the untouched list's end.
+const clampedNodeEnd = (node, text) => {
+  const end = node.position.end.offset
+  if (!node.children?.length || typeof text !== 'string') return end
+  let last = null
+  const walk = (n) => {
+    for (const child of n.children || []) {
+      const e = child.position?.end?.offset
+      if (Number.isInteger(e) && (last === null || e > last)) last = e
+      walk(child)
+    }
+  }
+  walk(node)
+  if (last === null || last >= end) return end
+  return /^[>\t \r\n]*$/.test(text.slice(last, end)) ? last : end
+}
+
+function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta, text) {
   const parts = []
   let ok = true
   const walk = (node) => {
     if (!ok) return
     const start = node.position?.start?.offset
-    const end = node.position?.end?.offset
-    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+    const rawEnd = node.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(rawEnd)) {
       ok = false
       return
     }
+    // Clamped BEFORE both the overlap test and the signature — see
+    // clampedNodeEnd's note.
+    const end = clampedNodeEnd(node, text)
     if (start < regionEnd && end > regionStart) {
       for (const child of node.children || []) walk(child)
       return
@@ -850,7 +875,7 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   // THROUGH overlapping containers (see outsideSignatureThroughContainers);
   // top-level regions keep the shared helper, byte-identically.
   const signatureOf = quoteDepth > 0 ? outsideSignatureThroughContainers : outsideSignature
-  const before = signatureOf(baselineTree, start, end, 0)
+  const before = signatureOf(baselineTree, start, end, 0, text)
 
   // Every spelling runs the FULL two-axis proof; the first that passes wins
   // (single-spelling targets just have a one-entry list). A spelling that
@@ -882,6 +907,38 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     // through the SAME quote chain the query lived in (root children when
     // quoteDepth is 0), at the same depth — and it ends exactly where our
     // bytes end (nothing after it was absorbed).
+    //
+    // ONE proven relaxation of that end check (2026-08-23 user report: a
+    // quoted /task refused whenever ANY quote line followed): remark extends
+    // a QUOTED list's mdast end across the following blank quote lines
+    // (measured: '> - [ ] x\n>\n' spans the bare '>' line, while a root
+    // list ends at its item — the '>' byte makes the blank line belong to
+    // the container's accounting). Those tail bytes carry no content, so
+    // "nothing was absorbed" is restated instead of assumed: every
+    // POSITIONED DESCENDANT of the inserted node must end at our bytes' end,
+    // and every byte of the span tail beyond them must be
+    // quote-prefix/whitespace. A lazy continuation (real content absorbed
+    // into the item) fails the descendant check; a sibling merged in fails
+    // shapeAgrees' own item count.
+    const provenSpanEnd = (nodeArg) => {
+      const nodeEnd = nodeArg.position?.end?.offset
+      if (nodeEnd === insertedEnd) return true
+      if (quoteDepth === 0) return false
+      if (!Number.isInteger(nodeEnd) || nodeEnd < insertedEnd) return false
+      if (!/^[>\t \r\n]*$/.test(candidate.slice(insertedEnd, nodeEnd))) return false
+      let maxDescendantEnd = null
+      const walk = (n) => {
+        for (const child of n.children || []) {
+          const e = child.position?.end?.offset
+          if (!Number.isInteger(e)) return false
+          if (maxDescendantEnd === null || e > maxDescendantEnd) maxDescendantEnd = e
+          if (walk(child) === false) return false
+        }
+        return true
+      }
+      if (walk(nodeArg) === false) return false
+      return maxDescendantEnd === insertedEnd
+    }
     // Axis (b): nothing outside the rewritten region changed meaning.
     const chainHit = quoteChainNodeAt(candidateTree, start)
     const inserted = chainHit &&
@@ -889,9 +946,9 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
       chainHit.node.position?.start?.offset === start
       ? chainHit.node
       : undefined
-    if (inserted && inserted.position?.end?.offset === insertedEnd &&
+    if (inserted && provenSpanEnd(inserted) &&
         shapeAgrees(target, inserted, candidate, info)) {
-      const after = signatureOf(candidateTree, start, insertedEnd, delta)
+      const after = signatureOf(candidateTree, start, insertedEnd, delta, candidate)
       if (before !== null && after !== null && before === after) {
         accepted = { bytes, candidate, candidateTree, inserted, anchorOffset: spelled.anchor }
         break

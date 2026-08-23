@@ -47,6 +47,10 @@ const LINES = [
   '',
   '> 引用甲',
   '',
+  '> 引用乙',
+  '>',
+  '> 引用丙',
+  '',
   '尾段落。',
   ''
 ]
@@ -440,14 +444,42 @@ async function run() {
       const quotes = [...((${VISIBLE_EDITOR})?.querySelectorAll('blockquote') || [])]
       return quotes.map((q) => !!q.querySelector('.cm-editor, .milkdown-code-block'))
     })()`)
-    assert.deepEqual(quotedShape, [true],
-      `the fence must PROJECT inside the surviving blockquote, got ${JSON.stringify(quotedShape)}`)
+    assert.deepEqual(quotedShape, [true, false],
+      `the fence must PROJECT inside the surviving first blockquote (the second quote has none yet), got ${JSON.stringify(quotedShape)}`)
 
     await typeTextLikeUser(send, 'ab', { delayMs: delay })
     await sleep(500)
     const afterQuoted = afterMath.replace('> 引用甲', () => QUOTED_CODE)
     await assertSource(evaluate, afterQuoted,
       `/js inside a blockquote must commit a fully prefixed fence and the first keystroke must fill after the line's own prefix (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
+
+    // ============================================================
+    // 2e) `/task` INSIDE A BLOCKQUOTE WITH FOLLOWING QUOTE LINES (2026-08-23
+    //     user report: 待办列表 refused inside the big quote whose tail
+    //     carried blank `>` lines — remark extends a quoted list's mdast end
+    //     across them, and the old end===insertedEnd reading refused). The
+    //     query paragraph 引用乙 is followed by a bare `>` line AND a sibling
+    //     paragraph inside the SAME quote; the insert must commit, render a
+    //     real checkbox in the quote, and the label must dissolve the seed.
+    // ============================================================
+    await selectBlock(evaluate, send, '引用乙')
+    await runSlashItem(evaluate, send, 'task', 'task')
+    const quotedTask = await evaluate(`(() => {
+      const quotes = [...((${VISIBLE_EDITOR})?.querySelectorAll('blockquote') || [])]
+      const q = quotes.find((node) => node.textContent.includes('引用丙'))
+      if (!q) return null
+      const item = q.querySelector('.milkdown-list-item-block')
+      const box = item && (item.querySelector('.label.unchecked') || item.querySelector('.label.checked'))
+      return { checkbox: !!box, paragraphs: q.textContent.includes('引用丙') }
+    })()`)
+    console.log('  [/task in quote] ->', JSON.stringify(quotedTask))
+    assert.ok(quotedTask?.checkbox,
+      `the quoted /task must render a real checkbox next to its surviving siblings, got ${JSON.stringify(quotedTask)}`)
+    await typeTextLikeUser(send, '买菜', { delayMs: delay })
+    await sleep(500)
+    const afterQuotedTask = afterQuoted.replace('> 引用乙', () => '> - [ ] 买菜')
+    await assertSource(evaluate, afterQuotedTask,
+      `/task inside a blockquote with following quote lines must commit and the label must dissolve the seed (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
     // ============================================================
     // 3) `/image` (2026-08-20, caret-after family): the query becomes the
@@ -474,7 +506,7 @@ async function run() {
     // The replaced tail block keeps its own line ending ('![]()\n'); typing
     // in the trailing placeholder appends the separator plus the text and
     // never invents a NEW trailing ending.
-    const afterImage = afterQuoted.replace('尾段落。\n', '![]()\n\n图后段')
+    const afterImage = afterQuotedTask.replace('尾段落。\n', '![]()\n\n图后段')
     await assertSource(evaluate, afterImage,
       `/image must commit the literal ![]() and the follow-up keystroke must land below the card (diagnostics: ${await evaluate(`JSON.stringify((window.__hmKernelDiagnostics || []).slice(-8))`)})`)
 
@@ -493,6 +525,7 @@ async function run() {
       .replace('壬癸子丑', () => eol(['```mermaid', 'graph TD', '```'].join('\n')))
       .replace('寅卯辰巳', () => eol(['$$', 'E=mc^2', '$$'].join('\n')))
       .replace('> 引用甲', () => eol(QUOTED_CODE))
+      .replace('> 引用乙', () => '> - [ ] 买菜')
       .replace('尾段落。' + EOL, () => eol('![]()\n\n图后段'))
     assert.equal(disk, expectedDisk, 'disk bytes must match the kernel-derived expectation exactly')
     if (crlf) {
@@ -500,7 +533,7 @@ async function run() {
     }
     assert.equal(app.dialogs.length, 0,
       `no dialog may appear: ${JSON.stringify(app.dialogs.map((d) => d.message))}`)
-    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js (top-level AND quoted), /mermaid, /math and /image commit their block bytes, project, and land a typable caret`)
+    console.log(`PASS kernel-mode block-insert slash items UI regression (${crlf ? 'CRLF' : 'LF'}): /table, /js (top-level AND quoted), /mermaid, /math, /image and the mid-quote /task commit their block bytes, project, and land a typable caret`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }

@@ -406,6 +406,49 @@ demoteSkips('space-less bare marker (a valid empty heading, but read-only)', '#\
   {
     convert('> /h2\r\n', 5, 'heading2', '> ## \r\n', 5, 'CRLF quote /h2')
   }
+  // (h) QUOTE-MID queries — following quote lines (bare `>`, `> `, content)
+  //     survive byte-identical (2026-08-23, the「接续列表」report's
+  //     conversion half; the insert half lives in the blockinsert suite's
+  //     provenSpanEnd cases). These conversions never had the list-span
+  //     swallow (this command proves the ITEM, not the list end), and these
+  //     pins keep it that way.
+  {
+    const tree = convert('> 甲\n>\n> /ol\n>\n> 乙\n', 11, 'ordered',
+      '> 甲\n>\n> 1. \n>\n> 乙\n', 11, 'quote-mid /ol with following sibling')
+    assert.deepEqual(tree.children[0].children.map((n) => n.type),
+      ['paragraph', 'list', 'paragraph'], 'quote-mid /ol: nothing merged')
+  }
+  convert('> 甲\n>\n> /ul\n>\n', 11, 'bullet',
+    '> 甲\n>\n> - \n>\n', 10, 'quote-mid /ul with a bare > line after')
+  convert('> 甲\n>\n> /h2\n> \n> \n', 11, 'heading2',
+    '> 甲\n>\n> ## \n> \n> \n', 11, 'quote-mid /h2 with "> " blank lines after')
+  {
+    const tree = convert('> 甲\r\n>\r\n> /ol\r\n>\r\n> 乙\r\n', 13, 'ordered',
+      '> 甲\r\n>\r\n> 1. \r\n>\r\n> 乙\r\n', 13, 'CRLF quote-mid /ol with following sibling')
+    assert.deepEqual(tree.children[0].children.map((n) => n.type),
+      ['paragraph', 'list', 'paragraph'])
+  }
+  // (i) the query FOLLOWS a quoted list (2026-08-23 combo sweep): remark
+  //     re-records the PRECEDING list's end when the next sibling changes
+  //     kind (a paragraph neighbour stops it early, a list neighbour pulls
+  //     it right up to the new marker) — pure span bookkeeping over the
+  //     blank `>` line, no byte of the list changed. The outside signature
+  //     clamps container ends to their last CONTENT byte (prefix-only span
+  //     tails ignored), so the conversion is provable again.
+  {
+    const tree = convert('> 1. 甲1\n>\n> /ul\n>\n> 乙\n', 15, 'bullet',
+      '> 1. 甲1\n>\n> - \n>\n> 乙\n', 14, 'quote /ul right after a quoted ordered list')
+    assert.deepEqual(tree.children[0].children.map((n) => n.type),
+      ['list', 'list', 'paragraph'],
+      'ordered list + new bullet list + paragraph — never merged')
+  }
+  {
+    const tree = convert('> - 甲\n>\n> /ol\n>\n> 乙\n', 13, 'ordered',
+      '> - 甲\n>\n> 1. \n>\n> 乙\n', 13, 'quote /ol right after a quoted bullet list')
+    assert.equal(tree.children[0].children[1].ordered, true)
+  }
+  convert('> 1. 甲1\r\n>\r\n> /ul\r\n>\r\n> 乙\r\n', 17, 'bullet',
+    '> 1. 甲1\r\n>\r\n> - \r\n>\r\n> 乙\r\n', 16, 'CRLF quote /ul after a quoted ordered list')
 }
 
 console.log('ok - source kernel block-type')

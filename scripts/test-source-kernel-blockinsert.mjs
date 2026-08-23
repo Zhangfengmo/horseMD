@@ -979,6 +979,71 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     const item = parseKernelMarkdown(out).children[0].children[0].children[0]
     assert.equal(item.checked, false, 'quoted /task: a real GFM task item')
   }
+  // (d2) /task in a quote with FOLLOWING quote lines (2026-08-23 user report:
+  //      待办列表 refused inside the big blockquote whose tail carried blank
+  //      `>` / `> ` lines). remark extends a QUOTED list's mdast end across
+  //      the following blank quote lines (measured: '> - [ ] x\n>\n' spans
+  //      the bare '>' line; at root the list ends at its item), so the old
+  //      end === insertedEnd reading refused a document that is exactly what
+  //      the bytes mean. The restated proof: the node's positioned
+  //      descendants all end at OUR bytes' end, and every byte of the span
+  //      tail beyond them is quote-prefix/whitespace — no content absorbed.
+  {
+    const { out } = insertQuoted('> 甲\n>\n> /task\n>\n> 乙\n', 13, 'task', undefined,
+      '> 甲\n>\n> - [ ] \u00A0\n>\n> 乙\n', 15, 'quoted /task with a following sibling')
+    const q = parseKernelMarkdown(out).children[0]
+    assert.equal(q.children.length, 3, 'paragraph + task list + paragraph — nothing merged')
+    assert.equal(q.children[1].children[0].checked, false)
+  }
+  insertQuoted('> 甲\n>\n> /task\n>\n', 13, 'task', undefined,
+    '> 甲\n>\n> - [ ] \u00A0\n>\n', 15, 'quoted /task with a bare > line after')
+  insertQuoted('> 甲\n>\n> /task\n> \n> \n', 13, 'task', undefined,
+    '> 甲\n>\n> - [ ] \u00A0\n> \n> \n', 15, 'quoted /task with "> " blank lines after')
+  {
+    const { out } = insertQuoted('> 甲\r\n>\r\n> /task\r\n>\r\n> 乙\r\n', 15, 'task', undefined,
+      '> 甲\r\n>\r\n> - [ ] \u00A0\r\n>\r\n> 乙\r\n', 17, 'CRLF quoted /task with a following sibling')
+    assert.equal(/(?<!\r)\n/.test(out), false, 'no lone LF was introduced')
+  }
+  // Negative control: a LAZY continuation line would become the item's own
+  // content (real absorption) — still refused.
+  refuses('quoted /task with a lazy continuation after', '> 甲\n>\n> /task\n> 哈\n', 13, 'task')
+  // Negative control: a same-marker list on the NEXT quote line would merge
+  // into the written item's list (two items) — shapeAgrees' single-item
+  // check refuses; the span-tail relaxation must not have opened this.
+  refuses('quoted /task merging a following quoted list', '> 甲\n>\n> /task\n> - 乙\n', 13, 'task')
+  // (d3) NESTED quote chain with following lines: the same span-tail proof
+  //      holds at depth 2.
+  {
+    const { out } = insertQuoted('> > 甲\n> >\n> > /task\n> >\n> > 乙\n', 19, 'task', undefined,
+      '> > 甲\n> >\n> > - [ ]  \n> >\n> > 乙\n', 21, 'nested-quoted /task with a following sibling')
+    const inner = parseKernelMarkdown(out).children[0].children[0]
+    assert.equal(inner.type, 'blockquote')
+    assert.equal(inner.children.length, 3, 'nested quote keeps paragraph + list + paragraph')
+  }
+  // (d3b) /task right AFTER a quoted list (2026-08-23 combo sweep): the
+  //       PRECEDING list's mdast end is re-recorded when its next sibling
+  //       becomes a list (span bookkeeping over the blank `>` line, zero
+  //       bytes changed) — the clamped outside signature must not read that
+  //       as a meaning change.
+  {
+    const { out } = insertQuoted('> 1. 甲1\n>\n> /task\n>\n> 乙\n', 17, 'task', undefined,
+      '> 1. 甲1\n>\n> - [ ]  \n>\n> 乙\n', 19, 'quoted /task right after a quoted ordered list')
+    const q = parseKernelMarkdown(out).children[0]
+    assert.deepEqual(q.children.map((n) => n.type), ['list', 'list', 'paragraph'],
+      'ordered list + new task list + paragraph — never merged')
+    assert.equal(q.children[1].children[0].checked, false)
+  }
+  // (d4) quote-mid /table, /js and /math with following quote lines — these
+  //      targets never had the list-span swallow (their nodes end at their
+  //      own bytes); pinned so the whole quoted insert family stays usable
+  //      MID-quote, not only on the quote's last line.
+  insertQuoted('> 甲\n>\n> /table\n>\n> 乙\n', 14, 'table', undefined,
+    '> 甲\n>\n> ' + QUOTED_TABLE + '\n>\n> 乙\n', 10, 'quote-mid /table with following sibling')
+  insertQuoted('> 甲\n>\n> /js\n>\n> 乙\n', 11, 'code', 'javascript',
+    '> 甲\n>\n> ```javascript\n> \n> ```\n>\n> 乙\n', 22, 'quote-mid /js with following sibling')
+  insertQuoted('> 甲\n>\n> /math\n>\n> 乙\n', 13, 'math', undefined,
+    '> 甲\n>\n> $$\n> \n> $$\n>\n> 乙\n', 11, 'quote-mid /math with following sibling')
+
   // (e) a NESTED quote chain: the prefix is the whole `> > `.
   insertQuoted('> > /table\n', 10, 'table', undefined,
     '> > ' + TABLE_LF.split('\n').join('\n> > ') + '\n', 6, 'nested-quoted /table')

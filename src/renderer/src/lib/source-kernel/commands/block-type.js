@@ -409,9 +409,34 @@ function provenQuoteConversion({ text, start, end, marker, target, quoteDepth })
   // ancestors overlap the region on both sides and are skipped symmetrically;
   // every sibling — inside the quote or after it — must survive.
   const delta = marker.length - (end - start)
-  const before = outsideSignatureThroughContainers(baselineTree, start, end, 0)
-  const after = outsideSignatureThroughContainers(candidateTree, start, start + marker.length, delta)
+  const before = outsideSignatureThroughContainers(baselineTree, start, end, 0, text)
+  const after = outsideSignatureThroughContainers(candidateTree, start, start + marker.length, delta, candidate)
   return before !== null && after !== null && before === after
+}
+
+// A container's recorded END is remark BOOKKEEPING, not content, wherever it
+// runs past the last positioned descendant over quote-prefix/whitespace bytes
+// only. Measured (2026-08-23): a QUOTED list's end swallows the following
+// blank `>` lines, and HOW FAR depends on what the next sibling is — a list
+// neighbour pulls it right up to the new marker, a paragraph stops it a line
+// earlier — so an edit that changes a NEIGHBOUR silently re-records the
+// untouched list's end and a raw end-to-end signature misreads that as a
+// meaning change. Clamping to the last content byte (only when the tail is
+// provably prefix-only) signs what the node actually SAYS.
+const clampedNodeEnd = (node, text) => {
+  const end = node.position.end.offset
+  if (!node.children?.length || typeof text !== 'string') return end
+  let last = null
+  const walk = (n) => {
+    for (const child of n.children || []) {
+      const e = child.position?.end?.offset
+      if (Number.isInteger(e) && (last === null || e > last)) last = e
+      walk(child)
+    }
+  }
+  walk(node)
+  if (last === null || last >= end) return end
+  return /^[>\t \r\n]*$/.test(text.slice(last, end)) ? last : end
 }
 
 // Byte-identity signature of every node OUTSIDE [regionStart, regionEnd),
@@ -421,17 +446,20 @@ function provenQuoteConversion({ text, start, end, marker, target, quoteDepth })
 // blockquote ancestors, and pruning their whole subtree would leave the
 // quote's own sibling paragraphs unsigned (i.e. unprotected). block-insert's
 // regions are top-level, so it never meets this case.
-function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta) {
+function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta, text) {
   const parts = []
   let ok = true
   const walk = (node) => {
     if (!ok) return
     const start = node.position?.start?.offset
-    const end = node.position?.end?.offset
-    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+    const rawEnd = node.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(rawEnd)) {
       ok = false
       return
     }
+    // Clamp the container-end bookkeeping BEFORE both the overlap test and
+    // the signature — see clampedNodeEnd's note.
+    const end = clampedNodeEnd(node, text)
     if (start < regionEnd && end > regionStart) {
       for (const child of node.children || []) walk(child)
       return
