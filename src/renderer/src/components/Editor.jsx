@@ -1792,7 +1792,19 @@ export default function Editor({
           cleanups,
           markUserEdit,
           onRichEditPending: (delayMs) => {
-            onRichEditPending?.()
+            // The pending-rich-edit hint exists for LEGACY's 200ms serializer
+            // debounce (the tab must look dirty before markdownUpdated lands).
+            // The kernel publishes synchronously on every ACCEPTED commit, so
+            // there is no debounce window to bridge — and the hint actively
+            // lies there: a REFUSED keystroke (read-only block) still fires
+            // the DOM `input` event, which lit 已修改 + the save FAB on a tab
+            // whose bytes never changed (the 2026-08-24 "21.md 无法保存"
+            // report — every retry into the read-only paragraph re-lit it).
+            // Checked AT CALL TIME because degradation is decided after
+            // mount; a degraded tab is legacy and needs the hint again.
+            if (!(kernelController && !kernelController.isDegraded?.())) {
+              onRichEditPending?.()
+            }
             scheduleRichDirtyReconcile(delayMs)
           },
           insertUploadedImage,
