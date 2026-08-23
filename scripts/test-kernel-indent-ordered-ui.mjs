@@ -200,14 +200,18 @@ async function run() {
 
     // =====================================================================
     // 4) Shift-Tab back out must not refuse either; the item rejoins the
-    //    outer list (its literal number no longer matters mid-list).
+    //    outer list. Since the outdent-side ORDERED-MARKER RENUMBER
+    //    (2026-08-23, commands/indent.js) it continues the destination
+    //    list's count — parent `3.` + 1 = `4.`, which here is exactly the
+    //    author's original marker. (This pin used to accept the stale `1.`;
+    //    flipped deliberately with the renumber landing.)
     // =====================================================================
     await resetToasts(evaluate)
     await pressTab(send, true)
     assert.equal(await toasts(evaluate), '[]',
       `outdent must not refuse — got ${await toasts(evaluate)}`)
-    assert.ok((await readSource(evaluate, 'after outdent')).includes('\n1. 2313'),
-      'the item must be back at the top level')
+    assert.ok((await readSource(evaluate, 'after outdent')).includes('\n4. 2313'),
+      'the item must be back at the top level, renumbered to continue the outer list')
 
     // =====================================================================
     // 5) Re-nest and SAVE — the renumbered bytes reach disk, CRLF stays CRLF.

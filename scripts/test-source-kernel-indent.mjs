@@ -414,4 +414,55 @@ console.log('PASS source-kernel delete + router')
   assert.equal(r.ok, false, 'empty task Tab keeps its refusal')
 }
 
+// ==========================================================================
+// OUTDENT ORDERED-MARKER RENUMBER (2026-08-23, from the computer-use round's
+// real-keyboard repro: 1. one / Enter two / Enter Tab nested / Enter
+// Shift+Tab out saved `2. out` — the nested item's own number carried back
+// to the root). The Typora gesture continues the DESTINATION list's count:
+// an ordered item outdenting under an ordered parent takes parent.number+1
+// and the parent list's delimiter. Semantically the stale number was already
+// fine for CommonMark (ordinals follow sequence), so every case here is a
+// SOURCE-SPELLING pin, gated by the same reparse proof as the indent rescue.
+// ==========================================================================
+{
+  // The repro shape: nested `1.` outdents after parent number 2 -> `3.`.
+  assert.equal(run('1. 甲\n2. 乙\n   1. 丙\n', '1. 甲\n2. 乙\n   1. 丙\n'.indexOf('丙'), outdentListItem),
+    '1. 甲\n2. 乙\n3. 丙\n')
+  // The `)` delimiter family: destination list's delimiter wins.
+  assert.equal(run('1) 甲\n   1) 乙\n', '1) 甲\n   1) 乙\n'.indexOf('乙'), outdentListItem),
+    '1) 甲\n2) 乙\n')
+  // Already-correct number stays byte-identical (byte-minimal preference,
+  // mirroring the indent side's "no renumber when joining an existing list").
+  // (`1. 甲\n   2. 乙` would NOT be this shape — a nested list can only
+  // interrupt the paragraph when its number is 1, so `   2.` is a lazy
+  // continuation there; the real shape needs a leading nested `1.`.)
+  assert.equal(run('1. 甲\n   1. 丙\n   2. 乙\n', '1. 甲\n   1. 丙\n   2. 乙\n'.indexOf('乙'), outdentListItem),
+    '1. 甲\n   1. 丙\n2. 乙\n')
+  // Subtree rides along; only the outdented item's own marker is rewritten.
+  assert.equal(run('1. 甲\n2. 乙\n   1. 丙\n      - 丁\n',
+    '1. 甲\n2. 乙\n   1. 丙\n      - 丁\n'.indexOf('丙'), outdentListItem),
+    '1. 甲\n2. 乙\n3. 丙\n   - 丁\n')
+  // Multi-digit growth: parent 9 -> the outdented item spells 10.
+  assert.equal(run('9. 甲\n   1. 乙\n', '9. 甲\n   1. 乙\n'.indexOf('乙'), outdentListItem),
+    '9. 甲\n10. 乙\n')
+  // A BULLET parent gives the ordered child no count to continue — the
+  // child's own marker keeps its bytes (current behavior, pinned).
+  assert.equal(run('- 甲\n  1. 乙\n', '- 甲\n  1. 乙\n'.indexOf('乙'), outdentListItem),
+    '- 甲\n1. 乙\n')
+  // Bullet items never renumber.
+  assert.equal(run('- 甲\n  - 乙\n', 8, outdentListItem), '- 甲\n- 乙\n')
+  // CRLF spelling of the repro shape.
+  assert.equal(run('1. 甲\r\n2. 乙\r\n   1. 丙\r\n', '1. 甲\r\n2. 乙\r\n   1. 丙\r\n'.indexOf('丙'), outdentListItem),
+    '1. 甲\r\n2. 乙\r\n3. 丙\r\n')
+  // Caret stays on the item's own text across the marker rewrite.
+  const src = '1. 甲\n2. 乙\n   1. 丙丁\n'
+  const doc = createMarkdownDocument(src)
+  const index = buildSyntaxIndex(src)
+  const r = outdentListItem({ doc, index, offset: src.indexOf('丁') })
+  assert.equal(r.ok, true)
+  const applied = applySourceTransaction(doc, r.transaction)
+  assert.equal(applied.doc.text, '1. 甲\n2. 乙\n3. 丙丁\n')
+  assert.equal(applied.selection.anchor, applied.doc.text.indexOf('丁'))
+}
+
 console.log('PASS source-kernel delete + router (list-boundary guard)')

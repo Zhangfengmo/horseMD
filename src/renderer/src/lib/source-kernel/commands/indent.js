@@ -376,6 +376,36 @@ export function outdentListItem({ doc, index, offset }) {
     }
     edits.push({ from: at, to: at + width, insert: '' })
   }
+  // ORDERED-MARKER RENUMBER (outdent side, 2026-08-23 — the mirror of the
+  // indent rescue above, found by the computer-use round's real-keyboard
+  // repro: `1. one / 2. two / [Tab] 1. nested / [Shift+Tab] out` saved
+  // `2. out`, the nested item's own number carried back to the root). The
+  // stale number is already CommonMark-correct (ordinals follow sequence),
+  // so this is a SOURCE-SPELLING gesture, not a semantics fix: an ordered
+  // item landing under an ORDERED parent continues that list's count
+  // (parent.number + 1) in the parent list's delimiter. A bullet parent has
+  // no count to continue and an already-correct marker keeps its bytes —
+  // byte-minimal, mirroring the indent side's no-renumber-when-joining. The
+  // same reparse proof gates the rewritten bytes; if it refuses, the plain
+  // strip below still runs (renumber never makes an outdent fail).
+  if (item.ordered && parent.ordered) {
+    const marker = String(parent.ordered.number + 1) + parent.ordered.delimiter
+    if (marker !== item.marker) {
+      const markerLineAt = index.lines[item.markerLineIndex].start + item.quotePrefix.length
+      const renumbered = rows.map((i) => {
+        const at = index.lines[i].start + item.quotePrefix.length
+        if (i !== item.markerLineIndex) return { from: at, to: at + width, insert: '' }
+        return {
+          from: markerLineAt,
+          to: markerLineAt + item.indent.length + item.marker.length,
+          insert: index.text.slice(markerLineAt + width, markerLineAt + item.indent.length) + marker
+        }
+      })
+      if (!provenNestingOnly(index.text, renumbered, item)) {
+        return multiTxn(doc, renumbered, 'outdent-list-item', offset)
+      }
+    }
+  }
   const refused = provenNestingOnly(index.text, edits, item)
   if (refused) return refused
   return multiTxn(doc, edits, 'outdent-list-item', offset)
