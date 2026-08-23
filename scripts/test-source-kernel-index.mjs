@@ -519,3 +519,38 @@ console.log('PASS source-kernel syntax index (parse memo)')
     'flag off: a newly stored entry is not frozen (production path unchanged)')
 }
 console.log('PASS source-kernel syntax index (memo mutation canary)')
+
+// SAME-LINE NESTED ITEM RECORDS (2026-08-23 user report: typing '2.' inside
+// an ordered item mid-burst broke the document). '1. 2.' is ONE line holding
+// TWO item records: the outer '1.' and a nested bare '2.' (CommonMark reads
+// the bare marker as an empty nested item). buildItem used to parse the
+// marker from the LINE start, so the nested record carried the OUTER
+// marker's geometry (marker '1.', contentStart == its own start) — which
+// broke rawToPmCaret's span and the marker demote route in a chain. The
+// nested record must describe ITS OWN marker.
+{
+  const src = '前段\n\n1. 2.\n'
+  const idx = buildSyntaxIndex(src)
+  const inner = idx.listItemAt(src.indexOf('2.'))
+  assert.ok(inner, 'the nested bare item resolves')
+  assert.equal(inner.marker, '2.', 'the nested record carries ITS OWN marker')
+  assert.equal(inner.start, src.indexOf('2.'))
+  assert.equal(inner.contentStart, src.indexOf('2.') + 2, 'contentStart is the bare marker end')
+  assert.equal(inner.spacing, '', 'a bare marker has no spacing')
+  assert.equal(inner.empty, true, 'the nested bare item is empty')
+  assert.equal(inner.depth, 1)
+  // The OUTER item's record is untouched by the fix.
+  const outer = idx.listItemAt(src.indexOf('1.') + 1)
+  assert.equal(outer.marker, '1.')
+  assert.equal(outer.contentStart, src.indexOf('2.'))
+}
+{
+  // The bullet flavour ('- 1. 甲' — the nested-number-list family's shape).
+  const src = '- 1. 甲\n'
+  const idx = buildSyntaxIndex(src)
+  const inner = idx.listItemAt(src.indexOf('甲'))
+  assert.equal(inner.marker, '1.', 'the same-line nested ordered item names its own marker')
+  assert.equal(inner.contentStart, src.indexOf('甲'))
+  assert.equal(inner.depth, 1)
+}
+console.log('PASS source-kernel syntax index (same-line nested item records)')

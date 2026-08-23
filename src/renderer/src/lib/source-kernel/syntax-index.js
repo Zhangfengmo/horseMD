@@ -272,12 +272,29 @@ function buildSyntaxIndexUncached(text) {
     const rawPrefix = (line.text.match(QUOTE_PREFIX) || [''])[0]
     const quotePrefix = rawPrefix.includes('>') ? rawPrefix : ''
     const rest = line.text.slice(quotePrefix.length)
-    const m = rest.match(MARKER_RE)
+    let m = rest.match(MARKER_RE)
     if (!m) return null
-    const indent = m[1]
-    const marker = m[2]
-    const spacing = m[3]
-    const markerEnd = line.start + quotePrefix.length + indent.length + marker.length + spacing.length
+    let indent = m[1]
+    let marker = m[2]
+    let spacing = m[3]
+    // SAME-LINE NESTED ITEM (2026-08-23): '1. 2.' is one line with TWO item
+    // records, and the line-start match above describes the OUTER marker.
+    // When this node's own start does not sit at the matched marker, the
+    // marker must be re-derived AT the node's start — otherwise the nested
+    // record carries the outer marker's geometry (measured: marker '1.',
+    // contentStart === its own start), which broke the caret resolver's span
+    // and the bare-marker demote route in a chain. The `indent` of such an
+    // item is deliberately '' — its "indentation" is the ancestor's marker
+    // run, not whitespace, and the indent-driven commands' own proofs refuse
+    // what they cannot spell.
+    if (line.start + quotePrefix.length + indent.length !== start) {
+      const own = text.slice(start, line.start + line.text.length).match(/^(\d{1,9}[.)]|[-+*])([ \t]*)/)
+      if (!own) return null
+      indent = ''
+      marker = own[1]
+      spacing = own[2]
+    }
+    const markerEnd = start + marker.length + spacing.length
     let task = null
     let taskSpacing = ''
     let contentStart = markerEnd
