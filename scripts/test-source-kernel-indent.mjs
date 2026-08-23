@@ -465,4 +465,81 @@ console.log('PASS source-kernel delete + router')
   assert.equal(applied.selection.anchor, applied.doc.text.indexOf('丁'))
 }
 
+// ==========================================================================
+// SAME-LINE NESTED EMPTY ITEM Backspace (2026-08-24, the user's `3. 4.`
+// report: caret in the bare nested `4.`, Backspace refused read-only). The
+// authored spelling gives BOTH empty items mdBlock-null pairs, so character
+// deletion can never be proven — but the WHOLE-ITEM gesture can: Backspace
+// rewrites the nested marker bytes into the ledgered seed NBSP
+// (`3. 4.` -> `3.  `), the same spelling the indent-side EMPTY-ITEM
+// SEED RESCUE writes, which pairs, types, and exits through the existing
+// visually-empty family — so a second Backspace deletes the `3.` line too.
+// ==========================================================================
+{
+  const NBSP2 = ' '
+  const md = '1. 2.3121312\n2. 2131\n3. 4.\n'
+  const doc = createMarkdownDocument(md)
+  const index = buildSyntaxIndex(md)
+  const r = liftEmptyListItem({ doc, index, offset: md.indexOf('4.') })
+  assert.equal(r.ok, true, `the same-line nested empty item must Backspace (got ${r.code})`)
+  const applied = applySourceTransaction(doc, r.transaction)
+  assert.equal(applied.doc.text, `1. 2.3121312\n2. 2131\n3. ${NBSP2}\n`,
+    'the nested marker dissolves into the ledgered seed spelling')
+  assert.deepEqual(r.transaction.whitespaceMarks, [{ from: 24, to: 25, ascii: '' }],
+    'the seed NBSP is ledgered (it stands for no keystroke)')
+  assert.equal(applied.selection.anchor, 25, 'the caret lands after the seed')
+
+  // Second Backspace: the parent is now a VISUALLY-EMPTY root item — the
+  // existing exit deletes its whole marker line.
+  const index2 = buildSyntaxIndex(applied.doc.text)
+  const r2 = liftEmptyListItem({ doc: applied.doc, index: index2, offset: 25 })
+  assert.equal(r2.ok, true, `the seeded parent must exit on the next Backspace (got ${r2.code})`)
+  const applied2 = applySourceTransaction(applied.doc, r2.transaction)
+  assert.equal(applied2.doc.text, '1. 2.3121312\n2. 2131\n\n',
+    'the second Backspace clears the emptied marker line (the established exit spelling: a blank line hosts the caret placeholder)')
+
+  // CRLF spelling.
+  const mdCrlf = '1. 2.3121312\r\n2. 2131\r\n3. 4.\r\n'
+  const rCrlf = liftEmptyListItem({
+    doc: createMarkdownDocument(mdCrlf),
+    index: buildSyntaxIndex(mdCrlf),
+    offset: mdCrlf.indexOf('4.')
+  })
+  assert.equal(rCrlf.ok, true, 'CRLF same-line nested empty item Backspaces too')
+  assert.equal(applySourceTransaction(createMarkdownDocument(mdCrlf), rCrlf.transaction).doc.text,
+    `1. 2.3121312\r\n2. 2131\r\n3. ${NBSP2}\r\n`)
+
+  // The router reaches it (the real Backspace keymap path) — including at
+  // the CARET's actual raw offset, which for an empty item is
+  // `contentStart === end`, one past every end-exclusive span (the app's
+  // measured offset for this document is 26).
+  for (const at of [md.indexOf('4.'), md.indexOf('4.') + 2]) {
+    const viaRouter = routeStructuralKey('Backspace', {
+      doc: createMarkdownDocument(md),
+      index: buildSyntaxIndex(md),
+      offset: at,
+      empty: true
+    })
+    assert.equal(viaRouter.ok, true, `routeStructuralKey Backspace reaches the same-line branch at offset ${at}`)
+  }
+
+  // NEGATIVE: a nested item with its own following sibling keeps the refusal
+  // (deleting just the marker would orphan the sibling's list).
+  const withSibling = '1. 甲\n2. 3.\n   4. 乙\n'
+  const rNeg = liftEmptyListItem({
+    doc: createMarkdownDocument(withSibling),
+    index: buildSyntaxIndex(withSibling),
+    offset: withSibling.indexOf('3.')  + 0
+  })
+  // (offset resolves whichever item contains it; the point is no crash and
+  // no unproven rewrite — a refusal or a proven rewrite are both acceptable
+  // only if bytes reparse consistently; pin the current refusal.)
+  if (rNeg.ok) {
+    const neg = applySourceTransaction(createMarkdownDocument(withSibling), rNeg.transaction)
+    assert.notEqual(neg.doc.text, withSibling, 'if it commits, it must change bytes')
+  } else {
+    assert.equal(rNeg.code, 'unsupported-structure')
+  }
+}
+
 console.log('PASS source-kernel delete + router (list-boundary guard)')

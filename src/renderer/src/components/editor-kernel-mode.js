@@ -2739,6 +2739,16 @@ export function createKernelMode({
     if (!Number.isFinite(offset) && repairProjectionNow(view)) {
       offset = kernel.map?.pmPosToRaw?.(view.state.selection.head)
     }
+    // Backspace/Delete at an EMPTY unprovable item (the `3. 4.` mdBlock-null
+    // family, 2026-08-24): the caret's only home is `contentStart === end`,
+    // which no charMap position covers — but the MARKER derivation the typing
+    // channel already uses (`markerRawOffsetAt` -> the mdItem record's own
+    // contentStart) answers it. The router's whole-item commands re-verify
+    // emptiness before any byte moves, so this widens ROUTING, not writing.
+    if (!Number.isFinite(offset) && (key === 'Backspace' || key === 'Delete')) {
+      const markerAt = markerRawOffsetAt(view.state.selection.head)
+      if (Number.isFinite(markerAt)) offset = markerAt
+    }
     if (!Number.isFinite(offset)) {
       // Fail-closed: an unprovable caret must not reach PM's structural
       // commands (their output would be an unowned structural transaction).

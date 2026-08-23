@@ -5,6 +5,7 @@ import { parseKernelMarkdown } from '../syntax-index.js'
 import { exitEmptyListItem, isVisuallyEmptyListItem } from './enter.js'
 import { outdentListItem } from './indent.js'
 import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
+import { NO_BREAK_SPACE } from './trailing-whitespace.js'
 
 // QUOTE_PREFIX's leading `[ \t]*` is unconditional, so it also matches pure
 // leading whitespace with zero '>' — treat a match as a real quote prefix
@@ -24,14 +25,107 @@ const quotePrefixOfLine = (line) => {
 // empty-task 墙拒绝，形成只能 Enter 或撤销的死角）。重开文件后的 U+00A0 是
 // 作者的字节（账本为空），仍拒绝——字符级删除走文本路径。
 export function liftEmptyListItem({ doc, index, offset }) {
-  const item = index.listItemAt(offset)
+  // `listItemAt` spans are end-EXCLUSIVE, and an EMPTY item's caret sits at
+  // `contentStart === end` (the `3. 4.` shape: the bare nested item's only
+  // caret home is the offset right AFTER its marker, which no span
+  // contains). Fall back one byte so the whole-item gesture still resolves
+  // its item; the emptiness guard below re-verifies, so a content item's
+  // end-of-text caret cannot borrow this path.
+  const item = index.listItemAt(offset) ??
+    (offset > 0 ? index.listItemAt(offset - 1) : null)
   if (!item?.empty && !isLedgeredWhitespaceTaskItem(doc, index.text, item) &&
       !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // SAME-LINE NESTED EMPTY ITEM (2026-08-24, the `3. 4.` user report). The
+  // authored spelling parses as item 3 holding a nested empty ordered item —
+  // BOTH items have no paragraph node in mdast, so their PM paragraphs pair
+  // mdBlock-null and every character-level edit is refused read-only. The
+  // WHOLE-ITEM Backspace, though, is provable: rewrite the nested marker
+  // bytes into the ledgered seed NBSP (`3. 4.` -> `3.  `) — exactly the
+  // spelling the indent-side EMPTY-ITEM SEED RESCUE writes — which pairs,
+  // accepts typing (the seed dissolves under the first character), and exits
+  // through the visually-empty family on the next Backspace. Geometric
+  // preconditions keep it surgical: the nested item must sit on its PARENT's
+  // own marker line, be truly empty, and end exactly where the parent ends
+  // (a nested sibling below would be orphaned by the rewrite — refused, and
+  // outdent's width<=0 refusal below stays its net).
+  if (item.depth > 0 && item.empty && item.contentStart === item.end) {
+    const parent = index.listItemAt(item.start - 1)
+    if (parent && parent.depth === item.depth - 1 &&
+        parent.markerLineIndex === item.markerLineIndex &&
+        parent.end === item.end) {
+      const candidate = index.text.slice(0, item.start) + NO_BREAK_SPACE + index.text.slice(item.end)
+      if (provenSeededSameLineDelete(index.text, candidate, item.start)) {
+        return {
+          ok: true,
+          transaction: {
+            baseRevision: doc.revision,
+            from: item.start,
+            to: item.end,
+            insert: NO_BREAK_SPACE,
+            intent: 'lift-empty-list-item',
+            selection: { anchor: item.start + 1, head: item.start + 1 },
+            whitespaceMarks: [{ from: item.start, to: item.start + 1, ascii: '' }]
+          }
+        }
+      }
+      return { ok: false, code: 'unsupported-structure' }
+    }
+  }
   return item.depth > 0
     ? outdentListItem({ doc, index, offset })
     : exitEmptyListItem({ doc, index, offset })
+}
+
+// The reparse proof for the same-line rewrite above, modeled on indent.js's
+// provenSeededEmptyIndent: the candidate must parse with a paragraph at
+// exactly the seed offset whose sole content is the NBSP, sitting inside a
+// listItem, with the nested list GONE (one fewer listItem overall) and every
+// other text leaf byte-identical.
+function provenSeededSameLineDelete(text, candidate, seedAt) {
+  let before
+  let after
+  try {
+    before = parseKernelMarkdown(text)
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  const collect = (node, out, counter) => {
+    if (node?.type === 'listItem') counter.items += 1
+    if (node?.type === 'heading') counter.headings += 1
+    if (node?.value !== undefined && node?.type === 'text') out.push(node.value)
+    for (const child of node?.children || []) collect(child, out, counter)
+  }
+  const beforeLeaves = []
+  const afterLeaves = []
+  const beforeCount = { items: 0, headings: 0 }
+  const afterCount = { items: 0, headings: 0 }
+  collect(before, beforeLeaves, beforeCount)
+  collect(after, afterLeaves, afterCount)
+  if (afterCount.items !== beforeCount.items - 1) return false
+  if (afterCount.headings !== beforeCount.headings) return false
+  const seedIndex = afterLeaves.indexOf(NO_BREAK_SPACE)
+  if (seedIndex === -1) return false
+  const rest = afterLeaves.slice(0, seedIndex).concat(afterLeaves.slice(seedIndex + 1))
+  if (JSON.stringify(rest) !== JSON.stringify(beforeLeaves)) return false
+  // The seed paragraph must sit at exactly the rewritten offset, inside a
+  // listItem ancestor.
+  let seeded = false
+  const walk = (node, ancestors) => {
+    if (seeded) return
+    if (node?.type === 'paragraph' && node.position?.start?.offset === seedAt &&
+        node.children?.length === 1 && node.children[0]?.type === 'text' &&
+        node.children[0].value === NO_BREAK_SPACE &&
+        ancestors.some((ancestor) => ancestor?.type === 'listItem')) {
+      seeded = true
+      return
+    }
+    for (const child of node?.children || []) walk(child, [...ancestors, node])
+  }
+  walk(after, [])
+  return seeded
 }
 
 // 段落首 Backspace：caret 必须落在段落的可见起点（offset === block.start），
