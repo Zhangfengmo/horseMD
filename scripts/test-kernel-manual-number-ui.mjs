@@ -63,6 +63,11 @@ async function runScenario({ ending, port }) {
     }
     for (const k of ['Enter', '4', '.', ' ', 'x', 'Enter', '5', '.', ' ', 'y']) await step(k)
     await sleep(500)
+    // ENTER adoption (the user's actual continuation key — the reported
+    // sequence): typed `N.` + Enter folds the number into the marker and
+    // continues from N+1, converging even when every item is hand-numbered.
+    for (const k of ['Enter', '7', '.', 'Enter', '8', '.', 'Enter', 'z']) await step(k)
+    await sleep(500)
 
     // ONE number per item in the view — the typed number was adopted, never
     // doubled next to the auto ordinal.
@@ -70,8 +75,10 @@ async function runScenario({ ending, port }) {
     // doubled failure shape would be "3.4.x" / "4.5.y": ordinal + retained
     // typed number + content.)
     const lis = await evaluate(`[...(${VISIBLE}).querySelectorAll('li')].map((n) => (n.textContent || '').trim()).join('|')`)
-    assert.ok(!lis.includes('4.x') && !lis.includes('5.y'),
+    assert.ok(!lis.includes('4.x') && !lis.includes('5.y') && !lis.includes('7.') === false,
       `${label}: the typed number must be ADOPTED, not remain as item text (lis: ${JSON.stringify(lis)})`)
+    assert.ok(!/\d\.\d+\.(\||$)/.test(lis),
+      `${label}: no item may show a doubled ordinal (lis: ${JSON.stringify(lis)})`)
     assert.ok(lis.includes('x') && lis.includes('y'), `${label}: the typed content landed (lis: ${JSON.stringify(lis)})`)
 
     await evaluate(`(window.confirm = () => true, 1)`)
@@ -79,7 +86,7 @@ async function runScenario({ ending, port }) {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save settle')
     const disk = await readFile(file, 'utf8')
-    const expected = ['# 你好啊', '', '1. 2.3121312', '2. 2131', '4. x', '5. y', ''].join(ending)
+    const expected = ['# 你好啊', '', '1. 2.3121312', '2. 2131', '4. x', '5. y', '7. ', '8. ', '9. z', ''].join(ending)
     if (disk !== expected) {
       console.error('  actual  :', JSON.stringify(disk))
       console.error('  expected:', JSON.stringify(expected))

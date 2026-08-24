@@ -1,7 +1,7 @@
 // Enter 命令族：段落/标题分裂、列表续项、空项退出。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_PREFIX } from '../../markdown-preservation/block-prefix.js'
-import { parseKernelMarkdown } from '../syntax-index.js'
+import { parseKernelMarkdown, buildSyntaxIndex } from '../syntax-index.js'
 import { buildCharacterMap } from '../character-map.js'
 import { NO_BREAK_SPACE, blockText } from './trailing-whitespace.js'
 import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
@@ -362,6 +362,63 @@ export function splitListItem({ doc, index, offset: rawOffset }) {
   // Same fragment-bisection guard as splitTextBlock: a list item's content is
   // phrasing too, so `- a <span>x</span> b` must refuse a split at the `x`.
   if (index.bisectsInlineHtml(offset)) return { ok: false, code: 'unsupported-structure' }
+  // NUMBER-ADOPTING ENTER (2026-08-24「回车出现两个序列号」终局). The manual
+  // numberer types their own `3.` into the item Enter just created; the
+  // typing policy (text-escape.js) keeps it literal (`2. 3\.`), which
+  // doubled the view: auto ordinal + typed number. Their continuation key is
+  // ENTER — so when the item's ENTIRE content is that escaped typed number,
+  // Enter ADOPTS it as the item's own marker and continues the list from
+  // N+1: `2. 3\.` + Enter -> `3. ` + `4. ` with the caret in the new item.
+  // The workflow converges even if they keep typing numbers — every Enter
+  // folds the typed number into the marker. Space adoption (the marker-space
+  // RENUMBER arm) is this gesture's sibling. Reparse-proven: both resulting
+  // items must carry the expected numbers as REAL empty ordered items, and
+  // the document's text leaves must lose exactly the typed `N.` and nothing
+  // else.
+  if (item.ordered && !item.task && offset === item.end) {
+    const adopted = /^(\d{1,9})\\([.)])$/.exec(index.text.slice(item.contentStart, item.end))
+    if (adopted) {
+      const markerStart = index.lines[item.markerLineIndex].start +
+        item.quotePrefix.length + item.indent.length
+      const lineEnding = endingAt(index, offset)
+      const nextMarker = String(Number(adopted[1]) + 1) + adopted[2]
+      const insert = `${adopted[1]}${adopted[2]} ${lineEnding}${item.quotePrefix}${item.indent}${nextMarker} `
+      const candidate = index.text.slice(0, markerStart) + insert + index.text.slice(item.end)
+      const proven = (() => {
+        let before
+        let after
+        try {
+          before = buildSyntaxIndex(index.text)
+          after = buildSyntaxIndex(candidate)
+        } catch {
+          return false
+        }
+        const first = after.listItemAt(markerStart)
+        const second = after.listItemAt(markerStart + insert.length - 1)
+        if (!first?.ordered || String(first.ordered.number) !== adopted[1]) return false
+        if (!second?.ordered || String(second.ordered.number) !== String(Number(adopted[1]) + 1)) return false
+        if (first.task || second.task || first === second) return false
+        const leaves = (idx) => {
+          const out = []
+          const walk = (node) => {
+            if (node?.type === 'text') out.push(node.value)
+            for (const child of node?.children || []) walk(child)
+          }
+          walk(idx.tree)
+          return out
+        }
+        const beforeLeaves = leaves(before)
+        const afterLeaves = leaves(after)
+        return afterLeaves.length === beforeLeaves.length - 1 &&
+          afterLeaves.every((leaf) => beforeLeaves.includes(leaf)) &&
+          beforeLeaves.filter((leaf) => !afterLeaves.includes(leaf))
+            .join('') === adopted[1] + adopted[2]
+      })()
+      if (proven) {
+        return txn(doc, markerStart, item.end, insert, 'split-list-item', markerStart + insert.length)
+      }
+    }
+  }
   const ending = endingAt(index, offset)
   const marker = item.ordered
     ? String(item.ordered.number + 1) + item.ordered.delimiter

@@ -463,6 +463,13 @@ bullet 项保持既有嵌套补全。钉:marker-space 纯套件 RENUMBER 节(LF+
 族)、**新 `test:kernel-manual-number-ui`**(LF+CRLF 全流程+字节落盘,已入
 `test:kernel-ui`)。注意:不按空格直接回车,手打号仍留为字面文本(text is
 text,诚实双号)——收编的键是**空格**。
+**→ 同日终局(用户源码贴出 `2. 3\.`/`3. 4\.`,续行键是回车)**:splitListItem
+新增 **NUMBER-ADOPTING ENTER** 分支(enter.js):项的全部内容恰为转义手打编号
+`N\.` 且光标在项尾时,回车=收编 N 为本项 marker + 续 `N+1. ` 新项
+(`2. 3\.`+回车 → `3. \n4. `,重解析证明两项各携期望编号、叶子恰失 `N.`);
+中段回车/尾随内容照旧普通分裂。实测用户键序 `回车→3.→回车→4.→回车` 收敛为
+`3. \n4. \n5. \n` 单号链。钉:commands 纯套件 NUMBER-ADOPTING 节
+(LF+CRLF+`)` 族+两负控)、manual-number-ui 扩 Enter 流。
 
 (2) **「回车后 3,4 一起出来」实为旧行还魂**:用户文件里老的 `3. 4.` 行仍在,`2131` 尾回车插入新 `3. ` 后,老行按 CommonMark 序数在视图顺延显示为 `4.`/嵌套 `5.`——字节实测 `3. 1\n3. 4.`(分裂**不给后继根项改号**,留重复 `3.` marker——CommonMark 序数语义下视图编号正确,记为**已知拼写疣**:后继改号是 ordered-marker renumber 家族的第三面〔indent rescue/outdent renumber 之后〕,做时注意同行嵌套 marker 绝不能跟着改)。（CriticMarkup review）接通内核**：CriticMarkup 是**纯文本语法**——编辑器自己的高亮规则就是为它让路的（`HIGHLIGHT_RE` 的 `(?<![={])`/`(?!\})` 使 `{==a==}{>>c<<}` 在两条链上都保持字面文本），所以在源码权威内核里每个审阅命令都是一次可证明偏移处的字节插入/替换。纯命令 `lib/source-kernel/commands/review-markup.js`（拼写与 legacy 共用同一份 `reviewMarkup.js` 的 `wrapReviewSelection`/`makeHighlightCommentMarkup`/`scanReviewMarkup`，两模式字节永不漂移）：`wrapReviewMarkup`（选区包裹）+ `resolveReviewMarker`（既有 `{==文==}{>>注<<}` 的 Done/Delete=去标记留文字、Edit→Save=整段重拼写；标记位置**由源码重扫描定位**且内容须与卡片所见逐字相符，否则具名 stale 拒绝 `review-marker-not-found`）。证明是本目录的家族式两轴：选区须为字符图里**连续的字面 `char` 单元**（碰到 mark 定界 gap/原子/实体/转义即 `review-plain-selection`，跨行即 `review-multiline`→沿用 `review.inlineOnly` 文案），候选重解析后**该文本节点的解码值恰为预测拼接**、块内其余后代按分段平移逐字相等、祖先链类型不变、块外 `outsideSignature` 恒等；提交走 `applyKernelTransaction({ requireMap: true })`。入口三条：状态栏工具条审阅四键与菜单经 `apiOverrides.applyReviewMarkup`→`runReviewWrap`；审阅卡片动作经装饰插件新 `kernelReview` 选项（editor-crepe-setup.js）→`runReviewResolve`，kernel 非属主时答 `null` 回落 legacy 派发（与斜杠项同一委托约定）；**全部接受/拒绝不需要内核入口**——它是 `tab.content` 的整文档字符串改写 + reloadNonce 重挂载（onChange 在每次内核提交后同步 content），重挂载后内核按 per-tab 旗标重新 attach，连**替换标记**也一并结算。gateway 对未路由审阅事务的兜底拒绝**原样保留**（卡片在派发前分流，PM 端不再产生这类事务）。**仍具名拒绝**：替换标记的插入（`review-substitution`，机制见上方 veto 清单——内核链没有 `remarkReconstructSubstitution` 的镜像，做镜像是让替换段落脱离只读的正道，本轮明确不做）、非纯文本/跨行选区、空段落处的空选区包裹（virtual pair 不经 `editablePairForRange`）。锁定：`test:source-kernel-review`（纯命令字节预言机，LF+CRLF+具名拒绝+no-mutation+stale-revision）、`test-kernel-mode-headless` Case R1-R3（控制器：wrap 提交+选区保持+撤销一组、substitution 具名、resolve 的 stale/replace/remove）、`test:kernel-review-ui`（真实拖选+工具条+卡片+命令面板 Accept-All+只读替换段落 toast+保存冷重开，端口 13100）；legacy 平价由 `test:review` + `test:review-ui` 继续钉。
 

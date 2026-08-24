@@ -2273,4 +2273,43 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
   assert.equal(r.ok, false, 'a fence with content must refuse')
 }
 
+// ==========================================================================
+// NUMBER-ADOPTING ENTER (2026-08-24「回车出现两个序列号」终局). The manual
+// numberer types `3.` into the item Enter just made — the typing policy
+// keeps it literal (`2. 3\.`), so the view doubled (auto ordinal + typed
+// number). Their continuation key is ENTER, not Space: when the item's
+// ENTIRE content is the escaped typed number, Enter ADOPTS it as the item's
+// own marker AND continues the list from N+1 — `2. 3\.` + Enter ->
+// `3. \n4. ` (caret in the new item). The workflow converges: even if they
+// keep typing the next number, every Enter folds it into the marker.
+// ==========================================================================
+{
+  const c = ctx('1. 甲\n2. 3\\.\n')
+  const out = apply(c.doc, splitListItem({ ...c, offset: '1. 甲\n2. 3\\.'.length }))
+  assert.equal(out, '1. 甲\n3. \n4. \n',
+    'Enter adopts the typed number as the marker and continues from N+1')
+  // CRLF
+  const cCrlf = ctx('1. 甲\r\n2. 3\\.\r\n')
+  assert.equal(apply(cCrlf.doc, splitListItem({ ...cCrlf, offset: '1. 甲\r\n2. 3\\.'.length })),
+    '1. 甲\r\n3. \r\n4. \r\n')
+  // `)` family
+  const cParen = ctx('1. 甲\n2. 5\\)\n')
+  assert.equal(apply(cParen.doc, splitListItem({ ...cParen, offset: '1. 甲\n2. 5\\)'.length })),
+    '1. 甲\n5) \n6) \n')
+  // caret lands in the NEW item's content
+  const c2 = ctx('1. 甲\n2. 3\\.\n')
+  const routed = splitListItem({ ...c2, offset: '1. 甲\n2. 3\\.'.length })
+  const applied = applySourceTransaction(c2.doc, routed.transaction)
+  assert.equal(applied.selection.anchor, '1. 甲\n3. \n4. '.length,
+    'the caret sits in the continued item')
+  // NEGATIVE: content beyond the escaped number keeps the ordinary split
+  const cText = ctx('1. 甲\n2. 3\\.x\n')
+  assert.equal(apply(cText.doc, splitListItem({ ...cText, offset: '1. 甲\n2. 3\\.x'.length })),
+    '1. 甲\n2. 3\\.x\n3. \n', 'trailing content keeps the plain split')
+  // NEGATIVE: mid-content Enter keeps the plain split
+  const cMid = ctx('1. 甲\n2. 3\\.\n')
+  assert.equal(apply(cMid.doc, splitListItem({ ...cMid, offset: '1. 甲\n2. 3'.length })),
+    '1. 甲\n2. 3\n3. \\.\n', 'a mid-content split is untouched')
+}
+
 console.log('PASS source-kernel commands (whole-branch review: link-boundary wraps + CRLF bisection chokepoint)')
