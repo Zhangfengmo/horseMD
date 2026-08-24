@@ -2292,10 +2292,11 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
   const cCrlf = ctx('1. 甲\r\n2. 3\\.\r\n')
   assert.equal(apply(cCrlf.doc, splitListItem({ ...cCrlf, offset: '1. 甲\r\n2. 3\\.'.length })),
     '1. 甲\r\n3. \r\n4. \r\n')
-  // `)` family
+  // `)` typed delimiter: the NUMBER is adopted, the LIST's own delimiter
+  // wins (undecided-edges finding #1 — the typed `)` would split a `.` list).
   const cParen = ctx('1. 甲\n2. 5\\)\n')
   assert.equal(apply(cParen.doc, splitListItem({ ...cParen, offset: '1. 甲\n2. 5\\)'.length })),
-    '1. 甲\n5) \n6) \n')
+    '1. 甲\n5. \n6. \n')
   // caret lands in the NEW item's content
   const c2 = ctx('1. 甲\n2. 3\\.\n')
   const routed = splitListItem({ ...c2, offset: '1. 甲\n2. 3\\.'.length })

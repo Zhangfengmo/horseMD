@@ -567,7 +567,10 @@ export function createConfiguredCrepe({
             kernelPlugins.structuralKeymap(),
             kernelPlugins.historyKeymap(),
             ...(typeof kernelPlugins.markerInputPlugin === 'function' ? [kernelPlugins.markerInputPlugin()] : []),
-            ...(typeof kernelPlugins.marksKeymap === 'function' ? [kernelPlugins.marksKeymap()] : [])
+            ...(typeof kernelPlugins.marksKeymap === 'function' ? [kernelPlugins.marksKeymap()] : []),
+            // Undecided-ordinal graying (typing-policy ADR 第二阶段 ②): pure
+            // view decoration, kernel mode only — legacy never escapes `4.`.
+            ...(typeof kernelPlugins.undecidedOrdinalPlugin === 'function' ? [kernelPlugins.undecidedOrdinalPlugin()] : [])
           ]
         : []),
       // Markdown, not a rich-only list boundary, is the durable authority.

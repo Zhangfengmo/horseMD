@@ -6019,6 +6019,14 @@ body.hm-preserve-soft-breaks
 .milkdown .ProseMirror .milkdown-list-item-block li .label-wrapper .label.bullet {
   justify-content: center;
 }
+/* Undecided-ordinal graying (docs/typing-policy-chokepoint-adr.md 第二阶段 ②):
+   while an ordered item's entire content is a hand-typed escaped number
+   (`N\.`/`N\)`), the kernel decoration class lands on the list_item's
+   node-view root (div.milkdown-list-item-block) and the AUTO ordinal — never
+   the typed number — is dimmed until the next keystroke adjudicates it. */
+.milkdown .ProseMirror .milkdown-list-item-block.hm-undecided-ordinal li .label-wrapper .label.ordered {
+  opacity: 0.35;
+}
 .milkdown .ProseMirror li {
   margin: calc(var(--editor-para-spacing, 0.8em) * 0.625) 0;
   line-height: inherit;

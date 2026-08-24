@@ -471,6 +471,31 @@ text,诚实双号)——收编的键是**空格**。
 `3. \n4. \n5. \n` 单号链。钉:commands 纯套件 NUMBER-ADOPTING 节
 (LF+CRLF+`)` 族+两负控)、manual-number-ui 扩 Enter 流。
 
+**2026-08-24(架构轮)三方评审 + 第二阶段落地**。用户问「是否架构出了问题」,
+三个并行子代理评审(模型优先系逐行考据〔Milkdown ordered_list 带 order 属性,
+wrapInOrderedListInputRule 以空格为提交手势收编数字——与我们同构〕、源码优先
+系考据〔CM6/Obsidian/Vditor/Typora:字节权威不是问题,缝在「对光标块进行中
+字节做全强度结构投影」,成熟系一律由下一击键/settle 裁决终局读法〕、本仓库
+架构评审)一致裁决:**架构成立不换**——缺陷族两个发生器:①策略住通道上
+(真架构错,已由咽喉统一+双仪器结构性关闭)②字节权威+即时投影固有缝
+(补偿=转义↔收编对偶,即现行设计)。模型优先迁移与光标字面区均逐条否决,
+详见 ADR 第二阶段裁决节。落地三件:(1) **未决态自动序号灰显**(纯装饰:
+editor-kernel-undecided-ordinal.js 的 Decoration.node,类落在 Crepe list-item
+node view 外层 `.milkdown-list-item-block`〔PM 对自定义 node view 的 node
+decoration 应用在外层 dom——测试/CSS 都按此层级〕;CSS 灰 `.label.ordered`
+自动号,绝不灰用户打的号;仅 kernel 模式挂载;钉
+`test:kernel-undecided-ordinal-ui` 入 kernel-ui)。(2) **未决态×下一键演绎
+完备表** `test:kernel-undecided-edges`(3 底座×LF/CRLF×7 出边=42 行,纯命令
+逐格执行+快照双向钉,入 kernel-headless 链尾)——它当场抓出真缺陷:
+**收编用了所打定界符,`4)` 在 `.` 列表裂成两个列表**(CommonMark 异定界符=
+异列表);修复=**定界符跟随列表**(收编取编号、定界符用 item 自己的,
+marker-space RENUMBER 臂与 enter NUMBER-ADOPTING 同步),两纯套件 `)` 用例
+按新裁决翻转,42 行快照重基线。(3) ADR 增第二阶段裁决节(含 TRANSIENT_SINGLE
+与数字 marker 默认不对称的显式条款)。**剩余(下会话)**:IME commitReplace
+的 step 级路由收编——三项策略逻辑本体已全共享(咨询块非副本),通道等价钉
+在岗,风险受控。出边表另记两条待裁决:U3 E-tab 的 `1.  ` 双空格拼写疣;
+U2/U1 表已成为该域的权威行为文档。
+
 (2) **「回车后 3,4 一起出来」实为旧行还魂**:用户文件里老的 `3. 4.` 行仍在,`2131` 尾回车插入新 `3. ` 后,老行按 CommonMark 序数在视图顺延显示为 `4.`/嵌套 `5.`——字节实测 `3. 1\n3. 4.`(分裂**不给后继根项改号**,留重复 `3.` marker——CommonMark 序数语义下视图编号正确,记为**已知拼写疣**:后继改号是 ordered-marker renumber 家族的第三面〔indent rescue/outdent renumber 之后〕,做时注意同行嵌套 marker 绝不能跟着改)。（CriticMarkup review）接通内核**：CriticMarkup 是**纯文本语法**——编辑器自己的高亮规则就是为它让路的（`HIGHLIGHT_RE` 的 `(?<![={])`/`(?!\})` 使 `{==a==}{>>c<<}` 在两条链上都保持字面文本），所以在源码权威内核里每个审阅命令都是一次可证明偏移处的字节插入/替换。纯命令 `lib/source-kernel/commands/review-markup.js`（拼写与 legacy 共用同一份 `reviewMarkup.js` 的 `wrapReviewSelection`/`makeHighlightCommentMarkup`/`scanReviewMarkup`，两模式字节永不漂移）：`wrapReviewMarkup`（选区包裹）+ `resolveReviewMarker`（既有 `{==文==}{>>注<<}` 的 Done/Delete=去标记留文字、Edit→Save=整段重拼写；标记位置**由源码重扫描定位**且内容须与卡片所见逐字相符，否则具名 stale 拒绝 `review-marker-not-found`）。证明是本目录的家族式两轴：选区须为字符图里**连续的字面 `char` 单元**（碰到 mark 定界 gap/原子/实体/转义即 `review-plain-selection`，跨行即 `review-multiline`→沿用 `review.inlineOnly` 文案），候选重解析后**该文本节点的解码值恰为预测拼接**、块内其余后代按分段平移逐字相等、祖先链类型不变、块外 `outsideSignature` 恒等；提交走 `applyKernelTransaction({ requireMap: true })`。入口三条：状态栏工具条审阅四键与菜单经 `apiOverrides.applyReviewMarkup`→`runReviewWrap`；审阅卡片动作经装饰插件新 `kernelReview` 选项（editor-crepe-setup.js）→`runReviewResolve`，kernel 非属主时答 `null` 回落 legacy 派发（与斜杠项同一委托约定）；**全部接受/拒绝不需要内核入口**——它是 `tab.content` 的整文档字符串改写 + reloadNonce 重挂载（onChange 在每次内核提交后同步 content），重挂载后内核按 per-tab 旗标重新 attach，连**替换标记**也一并结算。gateway 对未路由审阅事务的兜底拒绝**原样保留**（卡片在派发前分流，PM 端不再产生这类事务）。**仍具名拒绝**：替换标记的插入（`review-substitution`，机制见上方 veto 清单——内核链没有 `remarkReconstructSubstitution` 的镜像，做镜像是让替换段落脱离只读的正道，本轮明确不做）、非纯文本/跨行选区、空段落处的空选区包裹（virtual pair 不经 `editablePairForRange`）。锁定：`test:source-kernel-review`（纯命令字节预言机，LF+CRLF+具名拒绝+no-mutation+stale-revision）、`test-kernel-mode-headless` Case R1-R3（控制器：wrap 提交+选区保持+撤销一组、substitution 具名、resolve 的 stale/replace/remove）、`test:kernel-review-ui`（真实拖选+工具条+卡片+命令面板 Accept-All+只读替换段落 toast+保存冷重开，端口 13100）；legacy 平价由 `test:review` + `test:review-ui` 继续钉。
 
 ### 5.3 PDF 导出

@@ -82,6 +82,7 @@ import { classifyTransactions, commitPlainText, commitMarkInputRule, commitTaskT
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
+import { createUndecidedOrdinalPlugin } from './editor-kernel-undecided-ordinal.js'
 
 // Bounded diagnostics ring buffer (<=100 entries). Shared by this module and
 // Editor.jsx's kernel-mode markdownUpdated gate. Entries carry structural
@@ -3959,6 +3960,11 @@ export function createKernelMode({
     structuralKeymap,
     historyKeymap,
     markerInputPlugin,
+    // Undecided-ordinal graying (typing-policy ADR 第二阶段 item ②): a pure
+    // view decoration — grays the AUTO ordinal while an ordered item's entire
+    // content is the escaped `N\.`/`N\)`. Registered by editor-crepe-setup.js
+    // alongside the other kernel plugins (kernel mode only; zero byte impact).
+    undecidedOrdinalPlugin: createUndecidedOrdinalPlugin,
     handleMarkerRunGrowth,
     // Empty-selection mark-shortcut guard (Plan 4 Task 3): registered by
     // editor-crepe-setup.js alongside the structural/history keymaps;

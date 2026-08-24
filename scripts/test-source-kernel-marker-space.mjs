@@ -218,12 +218,15 @@ for (const [label, text, needle, character] of [
   assert.ok(rCrlf.ok, 'CRLF renumber works')
   assert.equal(crlf.slice(0, rCrlf.edit.from) + rCrlf.edit.insert + crlf.slice(rCrlf.edit.to),
     '1. 甲\r\n2. 乙\r\n4. \r\n')
-  // The `)` delimiter family adopts too.
+  // The `)` typed delimiter adopts the NUMBER but keeps the LIST's own
+  // delimiter (undecided-edges finding #1: `5)` in a `.` list would split
+  // the list — CommonMark reads `.`/`)` as different lists).
   const paren = '1. 甲\n2. 5\\)\n'
   const rParen = spellMarkerCompletingSpace({ doc: doc(paren), offset: paren.indexOf('\\)') + 2 })
   assert.ok(rParen.ok, `the ) family adopts (got ${rParen.code})`)
+  assert.equal(rParen.marker, '5.')
   assert.equal(paren.slice(0, rParen.edit.from) + rParen.edit.insert + paren.slice(rParen.edit.to),
-    '1. 甲\n5) \n')
+    '1. 甲\n5. \n')
 }
 
 console.log('PASS source kernel marker-completing space: every marker family completes at an empty block, at a paragraph start, inside a list item and under (nested) quote prefixes; LF and CRLF; padding, verbatim blocks and non-markers keep their previous behaviour')

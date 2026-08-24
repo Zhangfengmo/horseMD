@@ -381,8 +381,13 @@ export function splitListItem({ doc, index, offset: rawOffset }) {
       const markerStart = index.lines[item.markerLineIndex].start +
         item.quotePrefix.length + item.indent.length
       const lineEnding = endingAt(index, offset)
-      const nextMarker = String(Number(adopted[1]) + 1) + adopted[2]
-      const insert = `${adopted[1]}${adopted[2]} ${lineEnding}${item.quotePrefix}${item.indent}${nextMarker} `
+      // DELIMITER FOLLOWS THE LIST (undecided-edges finding #1): the typed
+      // delimiter may differ from the list's (`4)` in a `.` list) and
+      // CommonMark would split the list on it — adopt the NUMBER, keep the
+      // item's own delimiter.
+      const adoptedDelimiter = item.ordered.delimiter || adopted[2]
+      const nextMarker = String(Number(adopted[1]) + 1) + adoptedDelimiter
+      const insert = `${adopted[1]}${adoptedDelimiter} ${lineEnding}${item.quotePrefix}${item.indent}${nextMarker} `
       const candidate = index.text.slice(0, markerStart) + insert + index.text.slice(item.end)
       const proven = (() => {
         let before

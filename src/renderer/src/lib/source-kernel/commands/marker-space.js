@@ -211,6 +211,11 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
     const escStart = offset - escaped[0].length
     const item = index.listItemAt(escStart)
     if (item && item.ordered && escStart === item.contentStart && offset === item.end) {
+      // DELIMITER FOLLOWS THE LIST (2026-08-24, undecided-edges finding #1):
+      // adopting the TYPED delimiter (`4)` inside a `.` list) splits the list
+      // — CommonMark reads `.` and `)` as different lists. The number is the
+      // author's; the delimiter is the LIST's property, so the adopted marker
+      // keeps the item's own delimiter.
       // Renumber: rewrite the item's own marker span + the typed bytes into
       // `N<delim> ` — marker, spacing, empty content, caret on the content
       // side. Proven by reparse: the item at the same start must carry the
@@ -218,7 +223,8 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
       // the document must lose exactly the `N.` text leaf and nothing else.
       const markerStart = index.lines[item.markerLineIndex].start +
         item.quotePrefix.length + item.indent.length
-      const insert = token + ' '
+      const adoptedDelimiter = item.ordered.delimiter || escaped[2]
+      const insert = escaped[1] + adoptedDelimiter + ' '
       const candidate = text.slice(0, markerStart) + insert + text.slice(offset)
       const proven = (() => {
         let before
@@ -254,7 +260,7 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
         const caret = markerStart + insert.length
         return {
           ok: true,
-          marker: token,
+          marker: escaped[1] + adoptedDelimiter,
           edit: { from: markerStart, to: offset, insert },
           transaction: {
             baseRevision: doc.revision,
