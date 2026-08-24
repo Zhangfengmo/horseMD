@@ -23,6 +23,7 @@
 //    legacy behavior (pass everything through, intercept no keys).
 import { keymap } from '@milkdown/prose/keymap'
 import { Plugin, TextSelection } from '@milkdown/prose/state'
+import { Decoration, DecorationSet } from '@milkdown/prose/view'
 // Table-cell navigation (Plan 5 Task 4 review fix): the SAME two commands
 // @milkdown/preset-gfm's own `tableKeymap` binds Tab / Shift-Tab to
 // (preset-gfm/lib/index.js:415-420 + :652-667 — `goToNextTableCellCommand` IS
@@ -3596,6 +3597,47 @@ export function createKernelMode({
     return 'handled'
   }
 
+
+  // SOURCE-FAITHFUL ORDERED NUMBERS (2026-08-24 user report「这个源码都不对
+  // 照」: the view showed CommonMark's sequential ordinals 1,2,3 while the
+  // authored bytes said 1,3,4). For a byte-authoritative kernel the EDITOR
+  // shows the AUTHOR's numbers — the Obsidian/VSCode reading — while export
+  // targets (GitHub etc.) keep their own sequential convention. Pure view
+  // decoration: each ordered list_item pair's SOURCE number is read from the
+  // syntax index at the pair's own mdast offset (mdast discards per-item
+  // numbers; the kernel index keeps them) and painted over the auto ordinal
+  // via a CSS variable + ::before swap (app.css `.hm-source-ordinal`). The
+  // stale-map guard re-resolves each pair's node from the CURRENT doc and
+  // skips on any disagreement — a decoration may be momentarily absent,
+  // never wrong.
+  const sourceOrdinalPlugin = () => new Plugin({
+    props: {
+      decorations: (state) => {
+        try {
+          if (inactive() || !kernel.map) return null
+          const index = buildSyntaxIndex(kernel.doc.text)
+          const decos = []
+          for (const pair of kernel.map.blockPairs) {
+            if (pair.pmNode?.type?.name !== 'list_item') continue
+            const start = pair.mdBlock?.position?.start?.offset
+            if (!Number.isInteger(start)) continue
+            const item = index.listItemAt(start)
+            if (!item?.ordered || !Number.isFinite(item.ordered.number)) continue
+            const node = state.doc.nodeAt(pair.pmPos)
+            if (!node || node.type.name !== 'list_item') continue
+            decos.push(Decoration.node(pair.pmPos, pair.pmPos + node.nodeSize, {
+              class: 'hm-source-ordinal',
+              style: `--hm-source-ordinal: "${item.ordered.number}${item.ordered.delimiter}"`
+            }))
+          }
+          return decos.length ? DecorationSet.create(state.doc, decos) : null
+        } catch {
+          return null
+        }
+      }
+    }
+  })
+
   const structuralHandlers = Object.fromEntries(
     STRUCTURAL_KEYS.map((key) => [key, structuralHandler(key)])
   )
@@ -3875,6 +3917,7 @@ export function createKernelMode({
     // content is the escaped `N\.`/`N\)`. Registered by editor-crepe-setup.js
     // alongside the other kernel plugins (kernel mode only; zero byte impact).
     undecidedOrdinalPlugin: createUndecidedOrdinalPlugin,
+    sourceOrdinalPlugin,
     handleMarkerRunGrowth,
     // Empty-selection mark-shortcut guard (Plan 4 Task 3): registered by
     // editor-crepe-setup.js alongside the structural/history keymaps;

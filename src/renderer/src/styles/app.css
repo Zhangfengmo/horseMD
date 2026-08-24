@@ -7039,3 +7039,20 @@ body.dark .milkdown .ProseMirror .hm-review-card-text {
   background: var(--accent);
   margin-left: auto;
 }
+
+/* SOURCE-FAITHFUL ORDERED NUMBERS (kernel tabs; docs/typing-policy-chokepoint-adr.md
+   + 2026-08-24「源码都不对照」): the editor shows the AUTHOR's own list numbers
+   from the bytes (Obsidian/VSCode reading), painted over the auto ordinal via
+   the --hm-source-ordinal var the kernel decoration sets per item. */
+.milkdown .milkdown-list-item-block.hm-source-ordinal li > .label-wrapper .label.ordered {
+  visibility: hidden;
+  position: relative;
+}
+.milkdown .milkdown-list-item-block.hm-source-ordinal li > .label-wrapper .label.ordered::before {
+  content: var(--hm-source-ordinal);
+  visibility: visible;
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+}
