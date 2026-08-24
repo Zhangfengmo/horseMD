@@ -191,16 +191,83 @@ export function spellMarkerCompletingSpace({ doc, offset }) {
   const baseline = index.blockAt(offset) || index.blockAt(Math.max(0, offset - 1))
   if (baseline && VERBATIM.has(baseline.type)) return NOT_STRUCTURAL
 
-  // ESCAPED ORDERED MARKER (2026-08-24): `spellMarkerEscapingDelimiter` below
+  // ESCAPED ORDERED MARKER (2026-08-24): the typing policy (text-escape.js)
   // spells a typed restructuring `.`/`)` as `4\.` so the item text stays
-  // literal — this arm is its other half: the SPACE that follows still
-  // creates the real nested list. The escape unwinds (`4\.` -> `4.`) and the
-  // completing space rides the same proof as an unescaped marker, so
-  // type-to-create-a-list survives the escape byte exactly.
+  // literal — this arm is its other half: the SPACE that follows turns the
+  // typed number into REAL structure. Two shapes, decided by what the number
+  // is to its block:
+  //   * THE WHOLE CONTENT OF AN ORDERED ITEM (the manual-numberer's gesture,
+  //     2026-08-24 user report「回车出现两个序列号」— Enter's auto ordinal
+  //     plus the hand-typed `4.` doubled up): the Space ADOPTS the typed
+  //     number as the item's own marker (`3. 4\.` + Space -> `4. `) — the
+  //     Typora/Word renumber gesture. One number in the view, the author's
+  //     number in the source, and the next Enter continues from N+1.
+  //   * ANYTHING ELSE (content follows, or a bullet item): the nested-list
+  //     completion, exactly as before — the escape unwinds and the same
+  //     provenMarker proof gates the minted structure.
   const escaped = /(\d{1,9})\\([.)])$/.exec(text.slice(line.start, offset))
   if (escaped) {
     const token = escaped[1] + escaped[2]
     const escStart = offset - escaped[0].length
+    const item = index.listItemAt(escStart)
+    if (item && item.ordered && escStart === item.contentStart && offset === item.end) {
+      // Renumber: rewrite the item's own marker span + the typed bytes into
+      // `N<delim> ` — marker, spacing, empty content, caret on the content
+      // side. Proven by reparse: the item at the same start must carry the
+      // typed number, stay a single non-task item with NO nested list, and
+      // the document must lose exactly the `N.` text leaf and nothing else.
+      const markerStart = index.lines[item.markerLineIndex].start +
+        item.quotePrefix.length + item.indent.length
+      const insert = token + ' '
+      const candidate = text.slice(0, markerStart) + insert + text.slice(offset)
+      const proven = (() => {
+        let before
+        let after
+        try {
+          before = buildSyntaxIndex(text)
+          after = buildSyntaxIndex(candidate)
+        } catch {
+          return false
+        }
+        const renumbered = after.listItemAt(markerStart)
+        if (!renumbered || !renumbered.ordered) return false
+        if (String(renumbered.ordered.number) !== escaped[1]) return false
+        if (renumbered.task) return false
+        // No nested list may have been minted inside it.
+        const asString = (tree) => {
+          const out = []
+          const walk = (node) => {
+            if (node?.type === 'text') out.push(node.value)
+            for (const child of node?.children || []) walk(child)
+          }
+          walk(tree)
+          return out
+        }
+        const beforeLeaves = asString(before.tree)
+        const afterLeaves = asString(after.tree)
+        if (afterLeaves.length !== beforeLeaves.length - 1) return false
+        const dropped = beforeLeaves.filter((leaf) => !afterLeaves.includes(leaf))
+        return afterLeaves.every((leaf) => beforeLeaves.includes(leaf)) &&
+          dropped.length === 1 && dropped[0] === escaped[1] + escaped[2]
+      })()
+      if (proven) {
+        const caret = markerStart + insert.length
+        return {
+          ok: true,
+          marker: token,
+          edit: { from: markerStart, to: offset, insert },
+          transaction: {
+            baseRevision: doc.revision,
+            from: markerStart,
+            to: offset,
+            insert,
+            intent: 'marker-completing-space',
+            selection: { anchor: caret, head: caret }
+          }
+        }
+      }
+      return NOT_STRUCTURAL
+    }
     if (looksLikeBlockLineStart(text, escStart)) {
       const candidate = text.slice(0, escStart) + token + ' ' + text.slice(offset)
       if (provenMarker(candidate, escStart, escStart + token.length, token)) {

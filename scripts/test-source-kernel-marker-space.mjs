@@ -192,21 +192,38 @@ for (const [label, text, needle, character] of [
   assert.equal(routed.code, 'not-structural')
 }
 
-// The MARKER-ESCAPING policy moved to the ONE typing-spelling chokepoint
-// (commands/text-escape.js, unsafe-table driven — see
-// docs/typing-policy-chokepoint-adr.md); its cases live in
-// scripts/test-source-kernel-text-escape.mjs. What stays HERE is this
-// command's own half of the contract:
-// The completing SPACE recognizes the ESCAPED marker: `4\.` + Space becomes
-// the REAL nested marker `4. ` — type-to-create-a-list survives the escape.
+// The MARKER-ESCAPING policy lives at the ONE typing-spelling chokepoint
+// (commands/text-escape.js — see docs/typing-policy-chokepoint-adr.md); its
+// cases live in scripts/test-source-kernel-text-escape.mjs. What stays HERE
+// is this command's own half of the contract: what the SPACE after an
+// escaped typed number does.
+//
+// RENUMBER (2026-08-24「回车出现两个序列号」): when the escaped number is an
+// ordered item's ENTIRE content — the manual-numberer typing `4.` into the
+// item Enter just created — the Space ADOPTS it as the item's own marker.
 {
   const text = '1. 甲\n2. 乙\n3. 4\\.\n'
   const offset = text.indexOf('\\.') + 2
   const routed = spellMarkerCompletingSpace({ doc: doc(text), offset })
-  assert.ok(routed.ok, `the escaped marker must complete under Space (got ${routed.code})`)
+  assert.ok(routed.ok, `the typed number must be adopted as the marker (got ${routed.code})`)
   assert.equal(routed.marker, '4.')
   const written = text.slice(0, routed.edit.from) + routed.edit.insert + text.slice(routed.edit.to)
-  assert.equal(written, '1. 甲\n2. 乙\n3. 4. \n', 'the escape unwinds and the space completes the marker')
+  assert.equal(written, '1. 甲\n2. 乙\n4. \n',
+    'the item RENUMBERS to the typed number — one number, the author\'s, in marker position')
+  assert.equal(routed.transaction.selection.anchor, written.indexOf('4. ') + 3,
+    'the caret lands on the content side of the adopted marker')
+  // CRLF
+  const crlf = '1. 甲\r\n2. 乙\r\n3. 4\\.\r\n'
+  const rCrlf = spellMarkerCompletingSpace({ doc: doc(crlf), offset: crlf.indexOf('\\.') + 2 })
+  assert.ok(rCrlf.ok, 'CRLF renumber works')
+  assert.equal(crlf.slice(0, rCrlf.edit.from) + rCrlf.edit.insert + crlf.slice(rCrlf.edit.to),
+    '1. 甲\r\n2. 乙\r\n4. \r\n')
+  // The `)` delimiter family adopts too.
+  const paren = '1. 甲\n2. 5\\)\n'
+  const rParen = spellMarkerCompletingSpace({ doc: doc(paren), offset: paren.indexOf('\\)') + 2 })
+  assert.ok(rParen.ok, `the ) family adopts (got ${rParen.code})`)
+  assert.equal(paren.slice(0, rParen.edit.from) + rParen.edit.insert + paren.slice(rParen.edit.to),
+    '1. 甲\n5) \n')
 }
 
 console.log('PASS source kernel marker-completing space: every marker family completes at an empty block, at a paragraph start, inside a list item and under (nested) quote prefixes; LF and CRLF; padding, verbatim blocks and non-markers keep their previous behaviour')
