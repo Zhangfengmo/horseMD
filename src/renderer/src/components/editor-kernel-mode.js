@@ -43,12 +43,10 @@ import {
   buildSyntaxIndex,
   createMarkdownDocument,
   createSourceHistory,
-  dissolvableTaskSeed,
   exitCodeBlock,
   deleteEmptyCodeBlock,
   insertHeadingLeadingWhitespace,
   spellBlockTailInsert,
-  spellTaskSeedInsert,
   literalTailIsStripped,
   healableTrailingSpace,
   spellLineStartWhitespace,
@@ -78,7 +76,7 @@ import {
   resolveReviewMarker
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
-import { classifyTransactions, commitPlainText, commitMarkInputRule, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitMarkInputRule, commitResolvedTextSteps, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
@@ -1951,140 +1949,52 @@ export function createKernelMode({
   const commitReplace = ({ rawFrom, rawTo, text, pmFrom }) => {
     const view = getView?.()
     if (!view || disposed) return false
-    // A composition that ran inside a VIRTUAL block (the trailing
-    // placeholder below a list/table/code ending, a split placeholder, or an
-    // empty list item) must carry the same separator prefix a plain-text
-    // commit there carries — otherwise the committed bytes land as a lazy
-    // continuation of the final block instead of a new paragraph. The
-    // decision is made by PM position (`pmFrom`, the diff start the
-    // composition session proved), never by raw offset, which can be
-    // ambiguous at the document end.
-    const virtualBlock = Number.isFinite(pmFrom) && rawFrom === rawTo
-      ? kernel.map?.virtualBlockAt?.(pmFrom)
-      : null
-    const insert = virtualBlock && virtualBlock.raw === rawFrom
-      ? virtualBlock.prefix + text
-      : text
-    // THE BLOCK-TRAILING SPACE HEAL, ON THIS PATH TOO (2026-08-19, audit
-    // finding). A space typed at a block end is committed as U+00A0
-    // (commands/trailing-whitespace.js: CommonMark strips a literal one there),
-    // and it is meant to be rewritten back to an ordinary space the moment a
-    // character displaces it. That heal used to fire from ONE place — the
-    // gateway's single-code-point plain-text branch — so an IME COMMIT, which
-    // is a whole composition committed here as one multi-character replace,
-    // never reached it. For a user who writes Chinese that is the normal input
-    // path, and the measured result was a U+00A0 stranded before EVERY CJK word
-    // typed after a space ('HorseMD<U+00A0>是一个编辑器'), permanently, on disk.
+    // STEP-LEVEL ROUTING THROUGH THE GATEWAY CORE (ADR stage-2 item ①,
+    // 2026-08-24): the composition's single committed replace is synthesized
+    // as a resolved text step and handed to the SAME core every other
+    // plain-text channel flows through (`commitResolvedTextSteps`) — the
+    // virtual-block separator prefix, the task-seed dissolve, the
+    // block-trailing space heal and the typing-spelling escape all apply
+    // THERE, from one implementation. The per-route consult copies this
+    // replaces were the route-blindness family's last side doors (the third
+    // 「同命令、此路径也要」 comment used to live right here; the
+    // channel-equivalence suite pins that this routing can never drift from
+    // the keyboard path again).
     //
-    // Same command, same reparse proof, same fall-through contract: a heal that
-    // cannot be proven answers `not-structural` and the composition commits its
-    // literal bytes exactly as before.
-    // The RE-SPELLING half rides along on the same call (2026-08-19, audit item
-    // 2): a commit that ENDS in whitespace at a block end wrote that trailing
-    // byte literally, and CommonMark strips it — the original dead byte,
-    // reached from the IME route instead of the keyboard one. `literalTailIsStripped`
-    // is the same parse-free predicate the gateway's own prefilter uses.
-    let healFrom = rawFrom
-    let healTo = rawTo
-    let healInsert = insert
-    let healMarks = null
-    if (!virtualBlock && rawFrom === rawTo && typeof kernel.map?.pairAt === 'function' &&
-        Number.isFinite(pmFrom)) {
-      const pair = kernel.map.pairAt(pmFrom)
-      if (pair && !pair.virtual && pair.charMap && pair.mdBlock) {
-        // THE TASK-SEED DISSOLVE, ON THIS PATH TOO (2026-08-20 adversarial
-        // panel, Important — the same route-blindness as the 2026-08-19 heal
-        // finding this comment block sits inside). The dissolve used to be
-        // consulted only in the gateway's plain-text branch, so an
-        // IME-committed first label character — the NORMAL way a Chinese
-        // user types the label — landed AFTER the seed and permanently
-        // embedded the kernel-authored U+00A0 at the label's start
-        // (`- [ ] <U+00A0>买菜` on disk where ASCII typing yields
-        // `- [ ] 买菜`), with the surviving `ascii:''` ledger entry vouching
-        // a byte that no longer had any exit.
-        //
-        // SAME commands, not a fork: `dissolvableTaskSeed` (the parse-free,
-        // ledger-gated prefilter) + `spellTaskSeedInsert` (delete seed +
-        // insert label as ONE edit, reparse-proven checked-state and exact
-        // label) — the identical consultation the gateway's plain-text
-        // branch performs. Its only non-ok answer is `not-structural` (the
-        // ruled fallback is the literal commit — seed + composed text is
-        // honest, observable bytes), so there is no refusal arm.
-        //
-        // ORDER: ahead of the trailing-whitespace heal, mirroring the
-        // gateway's branch order — the seed's block-end position can satisfy
-        // the heal's prefilter too, though its heal already refuses the
-        // empty-`ascii` entry, so the provenance partition is enforced twice.
-        let taskSeedDissolved = false
-        if (insert !== '' && !/[\r\n]/.test(insert)) {
-          const seed = dissolvableTaskSeed(
-            kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks, rawFrom
-          )
-          if (seed) {
-            const routed = spellTaskSeedInsert({
-              doc: kernel.doc,
-              block: pair.mdBlock,
-              seed,
-              offset: rawFrom,
-              insert
-            })
-            if (routed.ok) {
-              healFrom = routed.edit.from
-              healTo = routed.edit.to
-              healInsert = routed.edit.insert
-              healMarks = routed.whitespaceMarks
-              taskSeedDissolved = true
-            }
-          }
-        }
-        if (!taskSeedDissolved) {
-          const heal = healableTrailingSpace(kernel.doc.text, pair.charMap, kernel.doc.whitespaceMarks)
-          const stripped = literalTailIsStripped(kernel.doc.text, pair.mdBlock, rawFrom)
-          if ((heal && heal.rawEnd === rawFrom) || stripped) {
-            const routed = spellBlockTailInsert({
-              doc: kernel.doc,
-              block: pair.mdBlock,
-              offset: rawFrom,
-              insert,
-              heal
-            })
-            if (routed.ok) {
-              healFrom = routed.edit.from
-              healTo = routed.edit.to
-              healInsert = routed.edit.insert
-              healMarks = routed.whitespaceMarks
-            } else if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
-              // The trailing byte IS one CommonMark discards and no surviving
-              // spelling could be proven: refuse rather than commit it. The
-              // composition session reverts the view, so nothing diverges.
-              notifyBlocked(routed.code)
-              return false
-            }
-          }
-        }
+    // Coordinates: `pmFrom` is the diff start the composition session proved
+    // against the PRE-composition PM doc — the same doc the map is bound to
+    // (kernel bytes never move mid-composition). A REVISING commit's end is
+    // derived from `rawTo` through the same map; a shape the map cannot
+    // resolve refuses here, and the session reverts the view — the exact
+    // contract the old heal-refusal branch had.
+    if (!Number.isFinite(pmFrom)) {
+      notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return false
+    }
+    let pmTo = pmFrom
+    if (rawTo !== rawFrom) {
+      const target = kernel.map?.rawToPmPos?.(rawTo)
+      if (!target || !Number.isFinite(target.pos)) {
+        notifyBlocked(KERNEL_CODES.UNMAPPED)
+        return false
       }
+      pmTo = target.pos
     }
-    // THE TYPING-SPELLING POLICY, on the IME path (text-escape.js; the
-    // chokepoint ADR): the SAME single policy function the gateway core
-    // consults — no bespoke copy, so this call site cannot drift from the
-    // keyboard path (pinned by test:kernel-channel-equivalence-ui).
-    if (typeof healInsert === 'string' && healInsert.length) {
-      const respelled = escapePolicyForInsert({
-        text: kernel.doc.text.slice(0, healFrom) + kernel.doc.text.slice(healTo),
-        offset: healFrom,
-        insert: healInsert
-      })
-      if (respelled) healInsert = respelled.insert
+    const committed = commitResolvedTextSteps({
+      kernel,
+      map: kernel.map,
+      steps: [{ from: pmFrom, to: pmTo, insertText: text }]
+    })
+    if (!committed.ok) {
+      notifyBlocked(committed.code)
+      return false
     }
+    // `ime-commit` is the transaction's HISTORY identity: not
+    // insert-text-coalescable, bracketed as its own undo group (pinned by
+    // the ime suites) — preserved across the routing.
+    committed.transaction.intent = 'ime-commit'
     kernel.history.breakGroup()
-    const applied = applyKernelTransaction({
-      baseRevision: kernel.doc.revision,
-      from: healFrom,
-      to: healTo,
-      insert: healInsert,
-      intent: 'ime-commit',
-      ...(healMarks?.length ? { whitespaceMarks: healMarks } : {})
-    }, view)
+    const applied = applyKernelTransaction(committed.transaction, view)
     kernel.history.breakGroup()
     return applied
   }

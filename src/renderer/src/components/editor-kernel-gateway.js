@@ -1658,6 +1658,16 @@ export function commitMarkInputRule({ kernel, map, pmFrom, text }) {
   return commitPlainTextSteps({ kernel, map, steps: [{ from: pmFrom, to: pmFrom, insertText: text }] })
 }
 
+// Exported for the IME commit route (editor-kernel-mode.js commitReplace):
+// the composition's one replace is synthesized as a resolved step and flows
+// through THIS core — the same virtual-prefix/seed-dissolve/heal/escape
+// pipeline every other plain-text channel uses (the ADR's stage-2 item ①;
+// the per-route consult copies were the route-blindness family's last side
+// doors).
+export function commitResolvedTextSteps(args) {
+  return commitPlainTextSteps(args)
+}
+
 function commitPlainTextSteps({ kernel, map, steps }) {
   const edits = []
   // Per-step bookkeeping for the MULTI-STEP delete gate below: each entry pairs

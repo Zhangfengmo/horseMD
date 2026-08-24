@@ -1,6 +1,6 @@
 # ADR: 打字策略收敛到单一字节提交咽喉(typing-policy chokepoint)
 
-日期:2026-08-24 · 状态:**第一阶段已执行**(2026-08-24:策略函数落地、三调用点统一、快照 restructures 归零;剩余=IME commitReplace 的 step 级路由收编)· 起因:用户评审
+日期:2026-08-24 · 状态:**两阶段均已执行**(2026-08-24:策略函数落地、三调用点统一、快照 restructures 归零;同日晚 IME commitReplace 完成 step 级路由收编——commitResolvedTextSteps 出口,虚拟前缀/种子溶解/heal/转义只剩 gateway 核一份实现,intent `ime-commit` 保留撤销分组语义,IME 全套+通道等价+无头门禁复跑绿)· 起因:用户评审
 「填鸭式修复——结合成熟案例思考实现与测试,而非臆想和频繁试错」。
 
 ## 问题(结构性,不是某个 bug)
@@ -108,9 +108,10 @@ commitReplace / 粘贴…各一份),而不是在所有通道共用的提交层�
 - 残余「自动号+手打号双显直到下一键」= 诚实显示,按外观处理(自动序号
   灰显装饰,零字节),不动正确性层。
 
-第二阶段任务:① IME commitReplace 的 step 级路由收编(heal/种子溶解副本
-入咽喉——发生器①的最后侧门);②未决态自动序号灰显装饰;③「未决态×下一键」
-完备表进 typing-policy 矩阵(收编出边从归纳改演绎)。
+第二阶段任务(全部完成):① IME commitReplace 的 step 级路由收编 ✓
+(commitResolvedTextSteps;consult 副本删除,kernel-mode 不再 import
+seed/dissolve 机器);②未决态自动序号灰显装饰 ✓;③「未决态×下一键」42 行
+演绎完备表 ✓(当场抓出并修复定界符裂列表)。
 
 ## 不做
 
