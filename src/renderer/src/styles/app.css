@@ -7059,11 +7059,19 @@ body.dark .milkdown .ProseMirror .hm-review-card-text {
   visibility: hidden;
   position: relative;
 }
+/* Fills the label's box and copies its own flex alignment. The original
+   `top: 0; left: 0` pinned the number to a corner, dropping both: vertically it
+   rode above the item text (the label is `align-items: center` in a 38.4px
+   box), horizontally `1.` and `10.` stopped agreeing (the label is
+   `justify-content: flex-end`). Pinned by
+   scripts/test-kernel-source-ordinal-alignment-ui.mjs. */
 .milkdown .milkdown-list-item-block.hm-source-ordinal li > .label-wrapper .label.ordered::before {
   content: var(--hm-source-ordinal);
   visibility: visible;
   position: absolute;
-  left: 0;
-  top: 0;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   white-space: nowrap;
 }
