@@ -82,6 +82,14 @@ async function toggleSourceMode(evaluate) {
   assert.ok(clicked, 'no source-toggle trigger button')
 }
 
+// SOURCE MODE IS A PUBLICATION BOUNDARY (2026-08-26, correction A/B1): its
+// buffer becomes `tab.content` and is what a save in source mode writes to disk
+// VERBATIM, so it shows the PUBLISHED bytes. An outstanding block-trailing run
+// has no byte spelling at all (D5 `resolveWhitespaceForPublish` drops it, and
+// the FILE has held nothing there since), so it does not appear here — the
+// DOCUMENT's own state is asserted from the rich view instead, right next to
+// every reading below. Everything else (fenced-code content, healed ordinary
+// spaces, line-start runs) reads exactly as before.
 async function readSource(evaluate, label) {
   await toggleSourceMode(evaluate)
   const shown = await waitFor(() => visibleSource(evaluate), `source view did not appear (${label})`)
@@ -227,8 +235,9 @@ async function run() {
     //     and it is VISIBLE.
     assert.equal(
       await readSource(evaluate, 'space at a paragraph end'),
-      FIXTURE.replace('末段。', '末段。a' + NBSP),
-      'a space typed at a block end must be committed in a form the reparse keeps'
+      FIXTURE.replace('末段。', '末段。a'),
+      'the PUBLICATION of an outstanding block-trailing run is nothing (correction A/B1) — ' +
+      'the DOCUMENT keeps it, asserted next'
     )
     assert.ok(
       JSON.parse(await blockTexts(evaluate)).includes('P:末段。a' + NBSP),
@@ -281,10 +290,9 @@ async function run() {
     const settled = FIXTURE.replace('末段。', '末段。a b hello world here')
     await pressSpace(send)
     await sleep(400)
-    assert.equal(
-      await readSource(evaluate, 'trailing space before backspace'),
-      settled.replace('here', 'here' + NBSP),
-      'the trailing space must again take the surviving spelling'
+    assert.ok(
+      JSON.parse(await blockTexts(evaluate)).includes('P:末段。a b hello world here' + NBSP),
+      `the trailing space must again take the surviving spelling in the DOCUMENT — got ${await blockTexts(evaluate)}`
     )
     await pressKey(send, { key: 'Backspace', code: 'Backspace' })
     await sleep(400)
@@ -303,10 +311,10 @@ async function run() {
     // =====================================================================
     await pressKey(send, { key: 'Tab', code: 'Tab' })
     await sleep(400)
-    assert.equal(
-      await readSource(evaluate, 'tab at a paragraph end'),
-      settled.replace('here', 'here' + NBSP + NBSP),
-      'Tab at a paragraph end must write two real no-break spaces, never a literal tab'
+    assert.ok(
+      JSON.parse(await blockTexts(evaluate)).includes('P:末段。a b hello world here' + NBSP + NBSP),
+      `Tab at a paragraph end must write two real no-break spaces into the DOCUMENT, never a ` +
+      `literal tab — got ${await blockTexts(evaluate)}`
     )
     await pressKey(send, { key: 'Backspace', code: 'Backspace' })
     await sleep(300)
@@ -324,10 +332,9 @@ async function run() {
     await clickAt(evaluate, send, '乙', 1)
     await pressSpace(send)
     await sleep(400)
-    assert.equal(
-      await readSource(evaluate, 'space at a heading end'),
-      settled.replace('## 乙', '## 乙' + NBSP),
-      'a space at a heading end must survive too'
+    assert.ok(
+      JSON.parse(await blockTexts(evaluate)).includes('H2:乙' + NBSP),
+      `a space at a heading end must survive in the DOCUMENT too — got ${await blockTexts(evaluate)}`
     )
     await typeTextLikeUser(send, '丙', { delayMs: delay })
     await sleep(400)

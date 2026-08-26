@@ -97,21 +97,35 @@ function literalSelectionIssue(map, visFrom, visTo, rawFrom, rawTo) {
 }
 
 // The deepest mdast TEXT node of `blockNode` containing [rawFrom, rawTo]
-// (inclusive ends: a zero-width insert may sit exactly on the node's edge).
+// (inclusive ends: a zero-width insert may sit exactly on the node's edge),
+// WITH the sibling that follows it in its parent's children.
+//
+// The sibling is not decoration: `textUnits` needs it to prove where a
+// trailing soft break's continuation prefix ends (character-map.js
+// `continuationFoldEnd`). remark ends a text node AT the line terminator
+// whenever the wrapped line's first inline is not text, so in the everyday
+// '- a b\n  `c` d' / '> a b\n> **c** d' shapes the prefix bytes lie in the gap
+// after this node and only the sibling's own start offset can account for
+// them. Returning the node alone made the walk unprovable and every review
+// wrap in those paragraphs refuse 'unsupported-structure' — while plain typing
+// in the same paragraph worked, because the character map DOES pass it.
 function textNodeContaining(blockNode, rawFrom, rawTo) {
   let found = null
-  const visit = (node) => {
+  const visit = (node, nextSibling) => {
     if (found) return
     const start = node.position?.start?.offset
     const end = node.position?.end?.offset
     if (!Number.isInteger(start) || !Number.isInteger(end)) return
     if (node.type === 'text' && start <= rawFrom && rawTo <= end) {
-      found = node
+      found = { node, nextSibling }
       return
     }
-    for (const child of node.children || []) visit(child)
+    const children = node.children || []
+    for (let i = 0; i < children.length; i += 1) visit(children[i], children[i + 1] || null)
   }
-  visit(blockNode)
+  // The block node itself has no INLINE sibling — its neighbours are other
+  // blocks, which cannot be a continuation prefix's far edge — so null.
+  visit(blockNode, null)
   return found
 }
 
@@ -211,9 +225,10 @@ function proveInlineTextSplice({ text, block, rawFrom, rawTo, insert }) {
   const blockEnd = block.end
   const base = blockNodePath(baselineTree, blockStart, blockEnd, block.type)
   if (!base) return null
-  const target = textNodeContaining(base.node, rawFrom, rawTo)
-  if (!target) return null
-  const units = textUnits(text, target)
+  const located = textNodeContaining(base.node, rawFrom, rawTo)
+  if (!located) return null
+  const target = located.node
+  const units = textUnits(text, target, located.nextSibling)
   if (!units) return null
   const vFrom = valueIndexAtRaw(units, rawFrom)
   const vTo = valueIndexAtRaw(units, rawTo)

@@ -6023,7 +6023,11 @@ body.hm-preserve-soft-breaks
    while an ordered item's entire content is a hand-typed escaped number
    (`N\.`/`N\)`), the kernel decoration class lands on the list_item's
    node-view root (div.milkdown-list-item-block) and the AUTO ordinal — never
-   the typed number — is dimmed until the next keystroke adjudicates it. */
+   the typed number — is dimmed until the next keystroke adjudicates it.
+   NOTE this targets the SAME node as .hm-source-ordinal further down (68a0b38
+   hides that label and repaints it from the source bytes). Nothing discusses
+   or pins what the two look like when both classes are on one item — see the
+   ADR's 补记「源码忠实序号与 outdent 改号」, recorded as a known gap. */
 .milkdown .ProseMirror .milkdown-list-item-block.hm-undecided-ordinal li .label-wrapper .label.ordered {
   opacity: 0.35;
 }
@@ -7040,10 +7044,17 @@ body.dark .milkdown .ProseMirror .hm-review-card-text {
   margin-left: auto;
 }
 
-/* SOURCE-FAITHFUL ORDERED NUMBERS (kernel tabs; docs/typing-policy-chokepoint-adr.md
-   + 2026-08-24「源码都不对照」): the editor shows the AUTHOR's own list numbers
+/* SOURCE-FAITHFUL ORDERED NUMBERS (kernel tabs; 68a0b38, 2026-08-24「源码都不
+   对照」; ruling + erratum: docs/typing-policy-chokepoint-adr.md 补记「源码忠实
+   序号与 outdent 改号」 — that section did not exist until 2026-08-26, when the
+   citation was found dangling): the editor shows the AUTHOR's own list numbers
    from the bytes (Obsidian/VSCode reading), painted over the auto ordinal via
-   the --hm-source-ordinal var the kernel decoration sets per item. */
+   the --hm-source-ordinal var the kernel decoration sets per item. This is
+   EDITOR-ONLY — editor-pdf-content.js strips .label-wrapper from the export
+   snapshot, so PDF/HTML export renders sequential numbers instead.
+   It also lands on the SAME node as .hm-undecided-ordinal's graying (defined
+   earlier in this file: that rule dims this label, this one hides it and
+   repaints via ::before); their combination is undiscussed and unpinned. */
 .milkdown .milkdown-list-item-block.hm-source-ordinal li > .label-wrapper .label.ordered {
   visibility: hidden;
   position: relative;

@@ -686,7 +686,15 @@ const treesIdentical = (a, b) => {
   return true
 }
 
-const WHITESPACE_RUN_RE = /^[ \t ]+$/
+// U+00A0 is written as an ESCAPE, never as a literal: a raw NBSP inside a
+// character class is invisible in every diff and in every editor, and if it is
+// ever lost to copy/paste, an editor's "normalise whitespace" pass, or a lint
+// --fix, the class degrades to ASCII-only with NO error — every publish drop of
+// a placeholder run then fails closed and the U+00A0 reaches disk (measured:
+// 'a<NBSP>\n' publishes unchanged instead of as 'a\n'). The literal spelling of
+// `NO_BREAK_SPACE` at the top of this file is deliberate and documented (it is
+// the character itself, not a class member); inside a regex it must not be.
+const WHITESPACE_RUN_RE = /^[ \t\u00A0]+$/
 
 // Is `after` the same document as `before` except that ONE text value lost one
 // contiguous run of whitespace? Same node count, same shapes, exactly one

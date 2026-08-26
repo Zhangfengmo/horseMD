@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createMarkdownDocument, applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
-import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
-import { indentListItem, outdentListItem } from '../src/renderer/src/lib/source-kernel/commands/indent.js'
+import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import {
+  indentListItem, outdentListItem, provenNonFirstOrdinal
+} from '../src/renderer/src/lib/source-kernel/commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
 
@@ -466,46 +468,39 @@ console.log('PASS source-kernel delete + router')
 }
 
 // ==========================================================================
-// THE RENUMBER'S MISSING HALF (2026-08-26). Every pin above is a SOURCE-
-// SPELLING claim, and the claim only holds because of one CommonMark rule:
-// an ordered list's `start` is the number of its FIRST list item, and every
-// later item's number is ignored. So the digits the renumber writes are free
-// exactly when the rewritten item is NOT its list's first child — on a first
-// item those same digits silently become the list's `start`, a visible
-// renumbering of the whole list.
+// THE RENUMBER'S BLAST RADIUS (2026-08-26). Every pin above is a SOURCE-
+// SPELLING claim, and each rewrite is user-visible: `sourceOrdinalPlugin`
+// (68a0b38, editor-kernel-mode.js) paints each item's AUTHORED number over
+// ProseMirror's auto label, so the digits below are exactly what the reader
+// sees. The product ruling of 2026-08-26 is that this is correct — Shift-Tab
+// on `1. 甲 / 2. 乙 / ␣␣␣1. 丙` must read 1, 2, 3.
 //
-// `provenNestingOnly` cannot see this (its `leafSignature` records leaf blocks'
+// What still has to be PROVEN is that the rewrite stops at the item the user
+// acted on. CommonMark takes an ordered list's `start` from its FIRST item, so
+// a renumber that fired on a first item would silently move every SIBLING's
+// number too — here, in Pandoc export, on GitHub, in any downstream tooling.
+// `provenNestingOnly` cannot see that (its `leafSignature` records leaf blocks'
 // type + decoded text and never reads a list's `ordered`/`start`), so from
-// 96518af until now the neutrality was assumed. `provenIgnoredOrdinal` in
-// indent.js now proves it, and this block pins the property the proof asserts:
-// for every renumbering outdent, the rewritten marker reparses into a NON-FIRST
-// item of an ordered list. A renumber that ever fires on a first item fails
-// here, and in the command falls back to the plain indentation strip (which
-// keeps the author's own number, hence the author's own `start`).
+// 96518af until 2026-08-26 the containment was merely assumed.
+//
+// `provenNonFirstOrdinal` in indent.js now proves it, and this block pins the
+// property: for every renumbering outdent, the rewritten marker reparses into
+// a NON-FIRST item of an ordered list. IMPORTED, not re-derived — a local copy
+// is what let the (then false) "ordinals are ignored, so this is inert"
+// premise survive for days across three files. A renumber that ever fires on a
+// first item fails here, and in the command falls back to the plain
+// indentation strip (which keeps the author's own number, hence the author's
+// own `start`).
+//
+// NOTE this file is the BYTE oracle: every case below states the exact
+// expected bytes independently of the command, so a torn marker or a wrong
+// offset fails on the `assert.equal` before the predicate is ever consulted.
+// The fuzz harness (test-source-kernel-statemachine.mjs) has no expected bytes
+// and therefore has to derive that structural half itself — see its own note.
 {
   const markerOffsetOfLine = (text, lineText) => {
     const at = text.indexOf(lineText)
     return at + (lineText.match(/^[ \t>]*/) || [''])[0].length
-  }
-  const ordinalIsIgnored = (text, markerAt) => {
-    let found = false
-    let ignored = false
-    const walk = (node) => {
-      if (found) return
-      if (node?.type === 'list') {
-        const items = node.children || []
-        for (let i = 0; i < items.length; i += 1) {
-          if (items[i]?.position?.start?.offset === markerAt) {
-            found = true
-            ignored = !!node.ordered && i > 0
-            return
-          }
-        }
-      }
-      for (const child of node?.children || []) walk(child)
-    }
-    walk(parseKernelMarkdown(text))
-    return found && ignored
   }
   // [source, caret text, expected bytes, the rewritten marker's own line]
   const cases = [
@@ -517,15 +512,15 @@ console.log('PASS source-kernel delete + router')
   ]
   for (const [src, caret, expected, markerLine] of cases) {
     assert.equal(run(src, src.indexOf(caret), outdentListItem), expected)
-    assert.ok(ordinalIsIgnored(expected, markerOffsetOfLine(expected, markerLine)),
-      `renumbered marker must be a non-first ordered item (CommonMark ignores its ordinal): ${JSON.stringify(expected)}`)
+    assert.ok(provenNonFirstOrdinal(expected, markerOffsetOfLine(expected, markerLine)),
+      `renumbered marker must be a non-first ordered item (its digits must not become the list's start): ${JSON.stringify(expected)}`)
   }
   // The blockquoted spelling takes the same path (quotePrefix-relative offsets).
   assert.equal(run('> 1. 甲\n>    1. 乙\n', '> 1. 甲\n>    1. 乙\n'.indexOf('乙'), outdentListItem),
     '> 1. 甲\n> 2. 乙\n')
-  assert.ok(ordinalIsIgnored('> 1. 甲\n> 2. 乙\n',
+  assert.ok(provenNonFirstOrdinal('> 1. 甲\n> 2. 乙\n',
     markerOffsetOfLine('> 1. 甲\n> 2. 乙\n', '> 2. 乙')),
-  'blockquoted renumber is ordinal-inert too')
+  'the blockquoted renumber stays confined to its own item too')
 }
 
 // ==========================================================================

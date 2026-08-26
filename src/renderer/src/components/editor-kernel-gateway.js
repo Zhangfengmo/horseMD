@@ -184,16 +184,27 @@ const plainSliceText = (slice, { allowNewline = false } = {}) => {
 // all. The insert boundary just after the break then resolved to the PRE-gap
 // offset, so typing there committed '> a  \nX> b': the quote marker demoted to
 // paragraph text. The comment that stood here also named the fix it was not
-// taking: a SOFT break has no such hole because `consumeSoftBreak` folds the
-// continuation prefix into its `linebreak` unit.
+// taking — a SOFT break, it said, has no such hole because `consumeSoftBreak`
+// folds the continuation prefix into its `linebreak` unit.
 //
-// character-map.js's `hardBreakUnitEnd` now does exactly that for the hard
-// break, and PROVES the fold rather than consuming greedily — the unit may
-// only extend to the NEXT SIBLING's own start offset, and every byte in
-// between must be a continuation-prefix character. The units therefore tile
-// the block contiguously across a hard break, exactly as they do across a soft
-// one, and all three resolvers agree on ONE offset at each of the break's two
-// boundaries (pinned in scripts/test-source-kernel-charmap.mjs and, on real
+// THAT SECOND HALF WAS WRONG, and was corrected on 2026-08-26 (D3): the soft
+// break's greedy fold is safe only while it stays INSIDE its text node, where
+// the decoded value's next character re-verifies it. When remark ENDS the text
+// node at the line terminator — which it does whenever the wrapped line's
+// first inline sibling is not text ('a b\n  `c` d', the everyday wrapped list
+// item or quoted paragraph) — the greedy consume overshot the node's own end
+// offset and `buildCharacterMap` returned null for the WHOLE block. So both
+// break kinds had the same hole, and both now take the same exit.
+//
+// character-map.js's `continuationFoldEnd` (named `hardBreakUnitEnd` when it
+// was hard-break-only) is that exit, and it PROVES the fold rather than
+// consuming greedily — the unit may only extend to the NEXT SIBLING's own
+// start offset, and every byte in between must be a continuation-prefix
+// character. It is called for BOTH the hard break's span and the soft break's
+// line ending, so the two kinds cannot drift apart again. The units therefore
+// tile the block contiguously across a break of either kind, and all three
+// resolvers agree on ONE offset at each of the break's two boundaries (pinned
+// in scripts/test-source-kernel-charmap.mjs and, on real
 // bytes, in this module's own tests). The two shapes that cannot be proven
 // (a break at the very end of a container's children with prefix bytes after
 // it; a break whose span does not end at a line terminator) return `null` from

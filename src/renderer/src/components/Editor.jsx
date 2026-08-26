@@ -62,6 +62,7 @@ import {
   mapPlainTextTransactionsToSource
 } from '../lib/source-transaction-sync.js'
 import { getGfmTableSourceParser } from '../lib/markdown-preservation/table-source-model.js'
+import { registerScratchDraftPublisher } from '../lib/scratch-draft-publication.js'
 import {
   advanceTableInsertionCoordinateProof,
   isTableInsertionCoordinateProofComplete,
@@ -125,6 +126,12 @@ export default function Editor({
   // host re-creates this callback on every render.
   const onKernelStatusRef = useRef(onKernelStatus)
   onKernelStatusRef.current = onKernelStatus
+  // Live mirror of the tab's path. The create effect captures `docPath` once,
+  // but a scratch tab GAINS a path on Save As without re-creating the editor —
+  // and "does this editor back a session-persisted scratch draft?" must be
+  // answered at publication time, not at mount time.
+  const docPathRef = useRef(docPath)
+  docPathRef.current = docPath
   // Live mirror of the image-host upload command, read at upload time (the Crepe
   // onUpload callback is registered once at create but always uses the latest).
   const uploadCmdRef = useRef(imageUploadCommand)
@@ -393,6 +400,13 @@ export default function Editor({
     // create effect runs once): the Crepe feature set and keymap order below
     // are established at create() and cannot flip afterwards.
     const kernelModeEnabled = sourceKernelMode === true
+    // The last Markdown this editor handed to the host (`onChange`). The
+    // scratch-draft publisher below compares against it so a session write with
+    // nothing outstanding to publish is a genuine no-op: `updateContent` maps
+    // the tab array unconditionally, so an unconditional re-publish would give
+    // React a new array on every session flush, re-run the persistence effect,
+    // and schedule the next flush — an idle 400 ms loop.
+    let lastHostMarkdown = null
     // The Typora-style new-document init (below, "first line is an empty
     // Heading 1") rewrites an EMPTY doc's view into [empty H1, empty
     // paragraph] — view-only in legacy. The kernel's document must hold the
@@ -418,7 +432,10 @@ export default function Editor({
           prepareMarkdown: parseAdapter.prepare,
           notify: fireToast,
           getT: (key) => tRef.current(key),
-          onChange: (markdown, opts) => onChange?.(markdown, opts),
+          onChange: (markdown, opts) => {
+            lastHostMarkdown = markdown
+            onChange?.(markdown, opts)
+          },
           onStructureChange: () => onStructureChange?.(),
           onStatusChange: (status) => onKernelStatusRef.current?.(status),
           // The tab just fell back to legacy: restore Milkdown's
@@ -431,6 +448,34 @@ export default function Editor({
         })
       : null
     if (kernelController) cleanups.push(() => kernelController.dispose())
+
+    // THE SESSION IS A PUBLICATION BOUNDARY (2026-08-26, correction A/B3).
+    // `useAppLifecycle`'s `flushSession` — the single funnel for the debounced
+    // write, the pagehide write and the close-time write — drains this registry
+    // before it serializes, so an unsaved scratch draft reaches localStorage as
+    // PUBLISHED bytes. Without it the kernel's provisional U+00A0 whitespace
+    // placeholder was stored raw, and the restore (empty ledger) promoted it to
+    // an authored character for the rest of the document's life.
+    //
+    // Scope, deliberately narrow:
+    //   * KERNEL tabs only — legacy has no placeholder mechanism, so there is
+    //     nothing here for it to publish, and a legacy force-flush is a full
+    //     serializer round-trip with boundary-owned side effects (the empty-task
+    //     demotion) that must not fire on a timer.
+    //   * PATH-LESS tabs only (read live) — the session persists nothing else,
+    //     and a file-backed tab's `tab.content` must keep mirroring the live
+    //     document so its dirty indicator still lights for an outstanding run.
+    //   * `onChange` is the same channel the kernel already publishes on, so the
+    //     text lands on the right tab and updates `tabsRef` synchronously.
+    cleanups.push(registerScratchDraftPublisher(() => {
+      if (destroyed || docPathRef.current) return
+      if (!kernelController || kernelController.isDegraded?.()) return
+      const published = apiRef.current?.flushMarkdown?.({ force: true })
+      if (typeof published !== 'string' || published === lastHostMarkdown) return
+      lastHostMarkdown = published
+      onChange?.(published, false)
+    }))
+
     let scratchSpaciousMarkdown = null
     let latestVerifiedCapture = null
     let verifiedState = null
@@ -1802,10 +1847,22 @@ export default function Editor({
             // report — every retry into the read-only paragraph re-lit it).
             // Checked AT CALL TIME because degradation is decided after
             // mount; a degraded tab is legacy and needs the hint again.
+            //
+            // The RECONCILE follows the hint for the same reason, and one more
+            // (2026-08-26, correction A/B2): it publishes UN-forced text into
+            // `onChange`, i.e. into `tab.content` — the dirty comparison and
+            // the session mirror, both durable. In kernel mode nothing ever
+            // clears `richFlushPending` (`markdownUpdated` is deliberately not
+            // registered), so the timer fired after EVERY keystroke; save
+            // inside its ~260 ms window and it landed AFTER the save and
+            // re-dirtied the just-saved tab with U+00A0-bearing text, with no
+            // user action at all. There is nothing here for the kernel to
+            // reconcile either: it has no serializer debounce to bridge, and
+            // every ACCEPTED commit already publishes synchronously.
             if (!(kernelController && !kernelController.isDegraded?.())) {
               onRichEditPending?.()
+              scheduleRichDirtyReconcile(delayMs)
             }
-            scheduleRichDirtyReconcile(delayMs)
           },
           insertUploadedImage,
           parseMarkdown: parseAdapter.parse,

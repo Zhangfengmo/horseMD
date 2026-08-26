@@ -165,7 +165,9 @@ const x = 1
 
 两条通道、内核与 legacy 两种架构共四组,**均未复现** `2. 3.two / 3. 4.nested / 4. 5.out` 的编号拼接;结构与文字全部正确。结合本记录自己归档的驱动侧故障(`select_text` 模式错误后字符落入旧焦点写出 `!!;a`、表格元素 ID 失效、第一轮过期索引),该「已确认异常」**降级为疑似驱动伪影**——与 2026-08-22 验尸(`typeTextLikeUser` 无 keydown 使空格补全失效,损坏来自测试驱动器)同构。恢复 Computer Use 驱动后应以修正过的通道重测一次作最终裁决。
 
-复核过程中发现并修复了一个**真实的内核源码拼写缺陷**:`Shift+Tab` 反缩进后,有序项把自己的嵌套编号原样带回根级(实测 `2. out`,应为 `3. out`;CommonMark 语义不受影响,渲染仍为第 3 项)。根因:`commands/indent.js` 的 `outdentListItem` 只剥缩进、无 indent 侧 ORDERED-MARKER RESCUE 的对称改号。修复:outdent 侧新增 ORDERED-MARKER RENUMBER(有序项落到有序父项下时续父项计数、用父列表定界符;bullet 父项与编号已正确时字节不动;同一重解析证明把关,改号被拒时退回纯剥缩进)。修后同一真实键盘序列产出与本计划预期**逐字节一致**的 `1. one / 2. two / (嵌套)1. nested / 3. out`。钉:`test-source-kernel-indent.mjs` OUTDENT ORDERED-MARKER RENUMBER 节(LF+CRLF+定界符族+子树随动+多位数+光标)。
+复核过程中发现并修复了一个**真实的内核源码拼写缺陷**:`Shift+Tab` 反缩进后,有序项把自己的嵌套编号原样带回根级(实测 `2. out`,应为 `3. out`)。根因:`commands/indent.js` 的 `outdentListItem` 只剥缩进、无 indent 侧 ORDERED-MARKER RESCUE 的对称改号。修复:outdent 侧新增 ORDERED-MARKER RENUMBER(有序项落到有序父项下时续父项计数、用父列表定界符;bullet 父项与编号已正确时字节不动;同一重解析证明把关,改号被拒时退回纯剥缩进)。修后同一真实键盘序列产出与本计划预期**逐字节一致**的 `1. one / 2. two / (嵌套)1. nested / 3. out`。
+
+**勘误(2026-08-26)**:上段原写「CommonMark 语义不受影响,渲染仍为第 3 项」,以此把改号定性为零渲染后果的纯拼写修复。该说法对**本编辑器不成立**,且在写下时已被推翻一天:`68a0b38`(2026-08-24)的 `sourceOrdinalPlugin` 让编辑器显示**作者字节里的号**(实测字节 `1. a / 5. b / 9. c` 显示为 1、5、9),所以改号是**用户可见**的——这正是这个手势的目的。2026-08-26 用户裁决:**改号保留**,`Shift+Tab` 后必须读作 1、2、3;行为不变,变的是理由。改号真正要证明的是**爆炸半径**:改写项须为有序列表**非首项**,否则其数字成为列表 `start`、所有兄弟项一起改号(本编辑器、Pandoc 导出、GitHub 皆然)。`commands/indent.js` 的 `provenNonFirstOrdinal` 与 `provenNestingOnly` 两者都过才放行。完整裁决见 `docs/typing-policy-chokepoint-adr.md` 补记「源码忠实序号与 outdent 改号」。钉:`test-source-kernel-indent.mjs` OUTDENT ORDERED-MARKER RENUMBER 节(LF+CRLF+定界符族+子树随动+多位数+光标)。
 
 另:本记录原标记的两项 Computer Use 阻塞检查已由 CDP 真实输入会话覆盖——表格单元格真实点击编辑(对齐表 `卯`→`卯真`、普通格逐字节落盘)与冷重开(保存字节逐字节重现、任务勾选状态保留),均通过。
 

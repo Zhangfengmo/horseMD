@@ -17,8 +17,22 @@
 // editor: the question is whether the resulting DOCUMENT is provable, which is
 // what decides the block's fate regardless of which gesture produced it.
 //
-// Usage: node scripts/measure-kernel-typing-lockup.mjs [--docs N] [--blocks N] [paths...]
-import { readFile, readdir, stat } from 'node:fs/promises'
+// TWO MODES (2026-08-26), for the same reason as its two sibling instruments:
+// the default scan is `~/Downloads`, which exists on one machine, and the run
+// used to exit 0 whatever it found.
+//   EXPLORATORY (default)  docs/ + ~/Downloads, or any paths/directories you
+//                          pass. Reports, never asserts.
+//   ASSERTING (--assert)   the committed corpus
+//                          (scripts/fixtures/kernel-census/), every block, and
+//                          EXIT 1 on any lock-up at all. Zero is the right
+//                          bound here and not an aspiration: a lock-up IS the
+//                          user-reported symptom ("I type something and then it
+//                          won't take any more keystrokes"), so one is a bug.
+//
+// Usage:
+//   node scripts/measure-kernel-typing-lockup.mjs [--docs N] [--blocks N] [paths...]
+//   node scripts/measure-kernel-typing-lockup.mjs --assert
+import { readFile, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -26,10 +40,9 @@ import { parseEditorMarkdown } from './lib/kernel-parse-harness.mjs'
 import { buildProjectionMap } from '../src/renderer/src/components/editor-kernel-projection-map.js'
 import { pairIsReadOnlyToUser } from '../src/renderer/src/lib/kernel-status.js'
 import { isTypableTextblock } from '../src/renderer/src/components/editor-kernel-gateway.js'
+import { REPO, corpusTargets, walkMarkdown } from './lib/kernel-census-corpus.mjs'
 
-const REPO = resolve(import.meta.dirname, '..')
 const HOME = homedir()
-const IGNORED = new Set(['node_modules', '.git', 'dist', 'out', '.cache', 'coverage'])
 
 // The characters a writer actually types that carry Markdown meaning, plus the
 // two whitespace keys the user named. Each is typed as a LONE character — the
@@ -53,17 +66,17 @@ const PROBE_CHARS = [
   { key: '\t', name: 'tab' }
 ]
 
-async function walk(dir, depth = 6, acc = []) {
-  let entries
-  try { entries = await readdir(dir, { withFileTypes: true }) } catch { return acc }
-  for (const e of entries) {
-    const full = join(dir, e.name)
-    if (e.isDirectory()) {
-      if (depth <= 0 || IGNORED.has(e.name) || e.name.startsWith('.')) continue
-      await walk(full, depth - 1, acc)
-    } else if (/\.(md|markdown)$/i.test(e.name)) acc.push(full)
+// An explicit path may be a directory — pointing the instrument at a tree is
+// how exploration is done, so expand it rather than silently measuring nothing.
+async function expand(paths) {
+  const out = []
+  for (const path of paths) {
+    let info
+    try { info = await stat(path) } catch { continue }
+    if (info.isDirectory()) out.push(...(await walkMarkdown(path)))
+    else out.push(path)
   }
-  return acc
+  return out
 }
 
 // Is the block covering `mdStart` editable in this document?
@@ -87,21 +100,29 @@ function blockEditableAt(raw, mdStart) {
 
 const args = process.argv.slice(2)
 const num = (flag, dflt) => { const i = args.indexOf(flag); return i >= 0 ? Number(args[i + 1]) : dflt }
+const asserting = args.includes('--assert')
 const maxDocs = num('--docs', 10)
-const maxBlocks = num('--blocks', 10)
+// In asserting mode EVERY editable paragraph/heading of the corpus is probed:
+// the corpus is small, and a sampled assertion would pass or fail depending on
+// where the sampling stride happened to land.
+const maxBlocks = num('--blocks', asserting ? Number.MAX_SAFE_INTEGER : 10)
 const explicit = args.filter((a, i) => !a.startsWith('--') && args[i - 1] !== '--docs' && args[i - 1] !== '--blocks')
 
-let targets = explicit.length
-  ? explicit.map((p) => resolve(p))
-  : [...(await walk(join(REPO, 'docs'))), ...(await walk(join(HOME, 'Downloads'), 8))]
-
-// Prefer mid-sized documents: big enough to be real, small enough that N*M
-// full reparses finish in minutes.
-const sized = []
-for (const p of targets) {
-  try { const s = await stat(p); if (s.size > 1500 && s.size < 40000) sized.push({ p, size: s.size }) } catch { /* skip */ }
+let targets
+if (explicit.length) {
+  targets = await expand(explicit.map((p) => resolve(p)))
+} else if (asserting) {
+  targets = await corpusTargets()
+} else {
+  targets = [...(await walkMarkdown(join(REPO, 'docs'))), ...(await walkMarkdown(join(HOME, 'Downloads'), 8))]
+  // Prefer mid-sized documents: big enough to be real, small enough that N*M
+  // full reparses finish in minutes.
+  const sized = []
+  for (const p of targets) {
+    try { const s = await stat(p); if (s.size > 1500 && s.size < 40000) sized.push({ p, size: s.size }) } catch { /* skip */ }
+  }
+  targets = sized.sort((a, b) => b.size - a.size).slice(0, maxDocs).map((x) => x.p)
 }
-targets = explicit.length ? targets : sized.sort((a, b) => b.size - a.size).slice(0, maxDocs).map((x) => x.p)
 
 const lockups = {}
 let trials = 0
@@ -142,8 +163,8 @@ for (const path of targets) {
   process.stderr.write(`  scanned ${path.replace(HOME, '~')}\n`)
 }
 
-console.log(`\n=== TYPING LOCK-UP CENSUS — ${trials} trials across ${targets.length} documents ===\n`)
-console.log(`  keystrokes that turn an EDITABLE block READ-ONLY: ${flips} / ${trials} = ${((flips / trials) * 100).toFixed(1)}%\n`)
+console.log(`\n=== TYPING LOCK-UP CENSUS — ${trials} trials across ${targets.length} documents ${asserting ? '(committed corpus)' : '(exploratory)'} ===\n`)
+console.log(`  keystrokes that turn an EDITABLE block READ-ONLY: ${flips} / ${trials} = ${trials ? ((flips / trials) * 100).toFixed(1) : '0.0'}%\n`)
 if (!flips) {
   console.log('  No lock-ups found. Typing a lone Markdown character never costs a block its editability.')
 } else {
@@ -156,4 +177,24 @@ if (!flips) {
     console.log(`\n  ${ex.label}\n    ${ex.path}\n    ${JSON.stringify(ex.text)}`)
   }
 }
-console.log()
+
+if (!asserting) {
+  console.log(`\n  (exploratory run — no assertions, and the default target set includes ~/Downloads,`)
+  console.log(`   which exists on one machine. \`--assert\` measures the committed corpus and fails on breach.)\n`)
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------- assertions
+const failures = []
+if (!trials) failures.push('no trials run — the corpus is missing or holds no editable block')
+if (flips) failures.push(`${flips} keystroke(s) turn an editable block read-only (allowed 0)`)
+
+console.log(`\n=== ASSERTIONS (committed corpus) ===`)
+console.log(`  lock-ups: ${flips} / ${trials} trials, allowed 0`)
+if (failures.length) {
+  console.log(`\n  FAIL`)
+  for (const f of failures) console.log(`    - ${f}`)
+  console.log()
+  process.exit(1)
+}
+console.log(`\n  PASS\n`)

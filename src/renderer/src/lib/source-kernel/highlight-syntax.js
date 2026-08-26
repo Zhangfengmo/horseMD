@@ -133,8 +133,19 @@ export function wrapWouldHighlight(text, from, to) {
 // of "which raw bytes does decoded character N come from" (escapes, character
 // references, soft breaks with their continuation prefixes, astral pairs).
 // Returns null whenever `textUnits` itself cannot prove the alignment.
-function offsetTables(text, node) {
-  const units = textUnits(text, node)
+//
+// `nextSibling` is the mdast node FOLLOWING this text node in its parent's
+// children — `textUnits`' only evidence for where a trailing soft break's
+// continuation prefix ends (character-map.js `continuationFoldEnd`). Borrowing
+// the decode walk means borrowing its premises too: omitting the sibling here
+// made `textUnits` refuse every text node that ends at a line terminator with
+// a prefixed continuation line ('- ==x== a b\n  `c` d'), so no highlight node
+// was produced and the block degraded to read-only even though the character
+// map itself — which DOES pass the sibling — could prove it. The two callers
+// must ask the same question with the same evidence or they answer differently
+// about the same bytes.
+function offsetTables(text, node, nextSibling) {
+  const units = textUnits(text, node, nextSibling)
   if (!units) return null
   const starts = new Map()
   const ends = new Map()
@@ -185,14 +196,20 @@ function textNode(value, from, to, pointAt) {
 
 // Split one `text` node into `[text?, highlight, text?, …]`, or return null
 // when nothing applies. Every produced node carries a real, derived position.
-function splitTextNode(text, node, pointAt) {
+//
+// The produced nodes keep THIS node's own `position` boundaries — the last
+// fragment ends at `end`, never at a proven continuation fold's far edge. The
+// fold is re-derived downstream by `collectUnits`, which passes whatever now
+// follows the fragment (a later split node, or the original sibling), so the
+// span a unit claims is proven exactly once, where it is used.
+function splitTextNode(text, node, nextSibling, pointAt) {
   const value = String(node.value ?? '')
   const matches = highlightMatches(value)
   if (!matches.length) return null
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset
   if (!Number.isInteger(start) || !Number.isInteger(end)) return null
-  const tables = offsetTables(text, node)
+  const tables = offsetTables(text, node, nextSibling)
   if (!tables || tables.length !== value.length) return null
 
   const out = []
@@ -257,7 +274,10 @@ export function injectHighlightNodes(tree, text, pointAt) {
       const child = children[i]
       i += 1
       if (child.type === 'text') {
-        const split = splitTextNode(text, child, pointAt)
+        // `children[i]` is the following sibling (`i` was already advanced
+        // past `child`) — the same evidence `collectUnits` hands `textUnits`,
+        // so the two derive the same units from the same node.
+        const split = splitTextNode(text, child, children[i] || null, pointAt)
         if (split) {
           next.push(...split)
           changed = true

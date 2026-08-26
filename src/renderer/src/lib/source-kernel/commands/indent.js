@@ -248,35 +248,46 @@ const sortedLeafValues = (tree) => {
   walk(tree)
   return out.sort()
 }
-// THE PROOF THE OUTDENT RENUMBER DID NOT HAVE (2026-08-26).
+// THE PROOF THE OUTDENT RENUMBER DID NOT HAVE (2026-08-26, corrected same day).
 //
 // The ORDERED-MARKER RENUMBER below rewrites the outdented item's own marker
-// digits. Its whole defence is the claim that this is a SOURCE-SPELLING
-// gesture with no rendering consequence — and that claim rests entirely on one
-// CommonMark rule: an ordered list's `start` attribute is the number of its
-// FIRST list item, and every subsequent item's number is ignored. So digits on
-// a non-first item are free; digits on a FIRST item silently become the list's
-// `start`, i.e. a real, visible renumbering of the whole list.
+// digits, so that an item lifted out of a nested list continues its new
+// parent's count. That IS a user-visible change and is meant to be: product
+// ruling 2026-08-26, `1. 甲 / 2. 乙 / ␣␣␣1. 丙` + Shift-Tab must read 1, 2, 3.
 //
-// Nothing checked which of the two we were writing. `provenNestingOnly`'s
-// `leafSignature` records LEAF blocks' type + decoded text and never looks at a
-// list's `ordered`/`start` at all, so a `start` rewrite passes it unnoticed —
-// the neutrality was ASSUMED from 2026-08-23 (96518af) onward, not proven.
+// ERRATUM — the first version of this comment defended the rewrite as having
+// "no rendering consequence", on the CommonMark rule that a list's `start` is
+// its FIRST item's number and every later item's number is ignored. That rule
+// is real, but the defence was FALSE FOR THIS EDITOR and had been for two days
+// when it was written: `68a0b38` (2026-08-24) added `sourceOrdinalPlugin`
+// (editor-kernel-mode.js), which paints each item's AUTHORED number over
+// ProseMirror's own label. Measured in the running app: bytes `1. a / 5. b /
+// 9. c` display as 1, 5, 9 — where PM's auto-labels say 1, 2, 3 — so the
+// rewritten digit is exactly what the user sees. The premise held for about
+// 17 hours (96518af 08-23 22:45 → 68a0b38 08-24 16:08) and nothing noticed.
 //
-// Prove it instead: the rewritten marker must reparse into a listItem that is
-// a NON-FIRST child of an ordered list. Then, by the rule above, whatever
-// number we spelled is ignored by every conforming renderer, and the rewrite
-// provably cannot change the document. Unprovable → the caller falls back to
-// the plain indentation strip, which keeps the author's own number and
-// therefore the author's own `start` (the renumber can never make an outdent
-// fail — that contract is unchanged).
+// The CHECK below is unchanged, because it was always doing something true and
+// load-bearing; only its stated reason was wrong. What it actually proves:
 //
-// Reachability, measured rather than asserted: across 8 902 renumbering
-// outdents generated over a systematic corpus (8 marker spellings x 8, five
-// indentations, 14 document shapes incl. blockquoted and blank-line-separated
-// ones) the rewritten item was first-of-list 0 times. So this guard is a net,
-// not a behaviour change — which is exactly why it is cheap to hold.
-const provenIgnoredOrdinal = (candidate, markerAt) => {
+//   the rewritten marker reparses into a listItem that is a NON-FIRST child of
+//   an ordered list, so its digits can never become that list's `start`
+//
+// and therefore the blast radius is exactly the one item the user acted on:
+// no SIBLING's number moves, in this editor or in any external renderer
+// (Pandoc export, GitHub, downstream tooling), where a `start` rewrite WOULD
+// silently renumber the whole list. That is the guarantee worth holding, and
+// it is the one `provenNestingOnly` cannot give: its `leafSignature` records
+// leaf type + decoded text and never reads a list's `ordered`/`start` at all.
+//
+// Unprovable → the caller falls back to the plain indentation strip, which
+// keeps the author's own number and therefore the author's own `start`. The
+// renumber can never make an outdent fail; that contract is unchanged.
+//
+// (A "measured 8 902 renumbering outdents, first-of-list 0 times" reachability
+// claim also stood here. It is removed: no generating script for it exists in
+// the repo, so nobody can re-run it. Treat this guard as a net whose
+// reachability is unmeasured.)
+export const provenNonFirstOrdinal = (candidate, markerAt) => {
   let tree
   try {
     tree = parseKernelMarkdown(candidate)
@@ -446,8 +457,12 @@ export function outdentListItem({ doc, index, offset }) {
   //
   // SECOND proof since 2026-08-26: `provenNestingOnly` is blind to list
   // ordinals, so it can only show that no LEAF content moved — not that the
-  // digits we spell are inert. `provenIgnoredOrdinal` (above) supplies the
-  // missing half from CommonMark's start-attribute rule. Both must pass.
+  // digits we spell are confined to this item. `provenNonFirstOrdinal` (above)
+  // supplies the missing half: the rewritten item is not its list's first
+  // child, so the digits cannot become the list's `start` and no sibling's
+  // number moves anywhere downstream. Both must pass. (This renumber IS
+  // visible to the user — that is the point of the gesture — so read that
+  // function's ERRATUM before citing "inert" anywhere near it.)
   if (item.ordered && parent.ordered) {
     const marker = String(parent.ordered.number + 1) + parent.ordered.delimiter
     if (marker !== item.marker) {
@@ -472,7 +487,7 @@ export function outdentListItem({ doc, index, offset }) {
         .reduce((total, edit) => total + String(edit.insert ?? '').length - (edit.to - edit.from), 0)
       const markerAt = markerLineAt + shift + keptIndent.length
       if (!provenNestingOnly(index.text, renumbered, item) &&
-          provenIgnoredOrdinal(applyEdits(index.text, renumbered), markerAt)) {
+          provenNonFirstOrdinal(applyEdits(index.text, renumbered), markerAt)) {
         return multiTxn(doc, renumbered, 'outdent-list-item', offset)
       }
     }

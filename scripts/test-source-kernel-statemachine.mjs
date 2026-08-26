@@ -5,8 +5,11 @@ import { fileURLToPath } from 'node:url'
 import {
   createMarkdownDocument, applySourceTransaction, buildSyntaxIndex, scanLines,
   buildCharacterMap, replaceVisibleText, toggleTaskMarker, routeStructuralKey,
-  createSourceHistory, parseKernelMarkdown
+  createSourceHistory
 } from '../src/renderer/src/lib/source-kernel/index.js'
+// The renumber's blast-radius proof, IMPORTED from the command rather than
+// re-derived (see "THE ADMISSION HAS TWO HALVES" below).
+import { provenNonFirstOrdinal } from '../src/renderer/src/lib/source-kernel/commands/indent.js'
 import { markdownComparisonKey } from '../src/renderer/src/lib/markdown-preservation/roundtrip.js'
 
 // Division of labor (read this before trusting a green run to mean
@@ -141,41 +144,52 @@ const isUniform = (profile) =>
 // seed 2 step 54). It only became visible on 2026-08-24 because 1f2c5aa moved
 // the fuzz stream onto a shape that reaches it.
 //
-// `ordinalIsIgnored` is the teeth that keep the admission from being a mere
-// loosening. CommonMark takes an ordered list's `start` from its FIRST item and
-// ignores every later item's number, so a digit rewrite is render-inert exactly
-// when the rewritten item is NOT its list's first child. Re-derived here from
-// the AFTER text — independently of the command that produced it — so a
-// renumber that WOULD be rendered (a first item, whose digits silently become
-// the list's `start`) still fails the invariant, as does a torn marker, a
-// mid-word offset, or any change to the bytes after the marker.
+// THE ADMISSION HAS TWO HALVES, AND THEY MUST COME FROM DIFFERENT PLACES
+// (restructured 2026-08-26). Until then this file carried its own byte-for-byte
+// copy of the command's predicate under the name `ordinalIsIgnored`, which made
+// the "oracle" a duplicate of the implementation it was supposed to gate: it
+// could re-run the command's reasoning but never falsify it. That is precisely
+// how the predicate's original (and FALSE — see below) justification survived
+// unchallenged across three files.
+//
+//   (A) STRUCTURAL half — derived HERE, from the before/after bytes alone, with
+//       no reparse and no knowledge of what the command intended:
+//         S1 at most ONE line differs beyond its leading `[ \t>]*` prefix;
+//         S2 on that line both spellings open with an ordered marker and every
+//            byte AFTER the marker is identical;
+//         S3 every other line is byte-identical once its leading prefix is
+//            stripped (that prefix is the only thing indent/outdent exist to
+//            rewrite);
+//         S4 the line count is unchanged.
+//       This is the CORRUPTION net: a torn marker, an offset that lands
+//       mid-word, a second line quietly renumbered, a swallowed or duplicated
+//       line — all fail here. `provenNonFirstOrdinal` sees NONE of them (it
+//       only asks what kind of list child begins at one offset), so this half
+//       is not redundant with the import.
+//
+//   (B) BLAST-RADIUS half — `provenNonFirstOrdinal`, IMPORTED from the command
+//       (commands/indent.js) rather than copied. CommonMark takes an ordered
+//       list's `start` from its FIRST item, so a renumber that fires on a first
+//       item silently moves every SIBLING's number — here, in Pandoc export, on
+//       GitHub, downstream. That is a REPARSE fact; no amount of byte
+//       comparison in (A) can reach it. Sharing the one implementation is
+//       correct for this half: there is a single definition of "confined to its
+//       own item", and it belongs next to the command that relies on it.
+//
+// Why the split matters: importing (B) alone would swap one tautology for
+// another. (A) is what keeps this harness able to FAIL the command. Both must
+// hold; neither implies the other.
+//
+// ERRATUM (2026-08-26). The predicate used to be justified here as proving the
+// renumber "render-inert" — CommonMark ignores non-first ordinals, so nothing
+// visible changes. That was false for THIS editor and had been for two days
+// when it was written: `sourceOrdinalPlugin` (68a0b38, 2026-08-24,
+// editor-kernel-mode.js) paints each item's AUTHORED number over ProseMirror's
+// auto label, so bytes `1. a / 5. b / 9. c` display as 1, 5, 9. The renumber IS
+// visible, deliberately so — product ruling 2026-08-26, Shift-Tab must yield
+// 1, 2, 3. What the predicate really proves is containment, hence its name and
+// hence half (B) above. Do not reinstate the word "inert" near this code.
 const ORDERED_MARKER = /^\d+[.)]/
-const ordinalIsIgnored = (text, markerAt) => {
-  let tree
-  try {
-    tree = parseKernelMarkdown(text)
-  } catch {
-    return false
-  }
-  let found = false
-  let ignored = false
-  const walk = (node) => {
-    if (found) return
-    if (node?.type === 'list') {
-      const items = node.children || []
-      for (let i = 0; i < items.length; i += 1) {
-        if (items[i]?.position?.start?.offset === markerAt) {
-          found = true
-          ignored = !!node.ordered && i > 0
-          return
-        }
-      }
-    }
-    for (const child of node?.children || []) walk(child)
-  }
-  walk(tree)
-  return found && ignored
-}
 
 const stats = { attempted: {}, applied: {} }
 const bump = (bucket, action) => {
@@ -335,47 +349,79 @@ const runSeed = (seed, starter) => {
     // 剥离前导前缀后的剩余内容逐字相同。一个撕裂 marker 或落在词中间的
     // 错误偏移会在这里被发现（前缀之外多/少出的字符会让剥离后的内容不等）。
     // 例外只有两个，且都是"该项自己的有序 marker"——见本文件上方
-    // ORDERED_MARKER / ordinalIsIgnored 的长注释：
+    // 「THE ADMISSION HAS TWO HALVES」长注释：
     //   (1) 2026-08-22 indent rescue：打开新子列表时把该项 marker 数字改写为
     //       `1`（分隔符不变，至多一行）——CommonMark 只允许序号为 1 的有序
     //       列表打断段落，不改写就无法嵌套。
     //   (2) 2026-08-23 outdent renumber（96518af）：Shift+Tab 落到父列表时把该
     //       项 marker 改写为 parent.number + 1（可随目标列表换分隔符，至多一
-    //       行），且必须由 ordinalIsIgnored 从 AFTER 文本独立证明该序号被
-    //       CommonMark 忽略（非列表首项）——marker 之后的字节必须逐字不变。
+    //       行）。这一条由**两个互不包含的半边**共同放行，且刻意分开断言，
+    //       失败时能直接读出坏的是哪一半：
+    //         (A) 结构半边 S1-S4——只看 before/after 字节，本文件自行推导，
+    //             不重解析、也不复用命令的任何推理：至多一行超出前导前缀
+    //             发生变化；该行前后都以有序 marker 开头，且 marker 之后
+    //             逐字节相同；其余行剥离前缀后逐字相同；行数不变。撕裂
+    //             marker、落在词中间的偏移、被悄悄改号的第二行都栽在这里，
+    //             而 provenNonFirstOrdinal 对这些一律看不见。
+    //         (B) 爆炸半径半边——provenNonFirstOrdinal，从命令处 import 而
+    //             非再抄一份：改写后的 marker 必须重解析成有序列表的**非
+    //             首项**，否则这串数字会变成列表的 start，把所有兄弟项一起
+    //             改号（本编辑器、Pandoc 导出、GitHub 皆然）。这是重解析
+    //             事实，(A) 的字节比较永远够不到。
     if (result.transaction.intent === 'indent-list-item' || result.transaction.intent === 'outdent-list-item') {
       const beforeLines = scanLines(before)
       const afterLines = scanLines(applied.doc.text)
+      // S4: no line may appear or disappear.
       assert.equal(afterLines.length, beforeLines.length,
         `${action} changed line count (seed ${seed} step ${step})`)
       const stripPrefix = (s) => s.replace(/^[ \t>]*/, '')
+      const markerOffsetOf = (line) =>
+        line.start + (line.text.match(/^[ \t>]*/) || [''])[0].length
       let renumbered = 0
       for (let i = 0; i < beforeLines.length; i += 1) {
         const a = stripPrefix(afterLines[i].text)
         const b = stripPrefix(beforeLines[i].text)
+        // S3: a line whose content past the leading prefix is untouched is
+        // fine — that prefix is the only thing indent/outdent exist to rewrite.
         if (a === b) continue
         // Two rescues may rewrite the item's own line beyond its prefix:
         // the ordered-marker renumber (`N.` -> `1.`), and — since 2026-08-22 —
         // the EMPTY-ITEM SEED (one ledgered U+00A0 appended so the nested
         // empty item is representable instead of a setext underline). They
-        // compose on an empty ordered item.
+        // compose on an empty ordered item. `1.` is by construction the FIRST
+        // item of the sublist it opens, so half (B) does not apply on this
+        // side (and must not — it would refuse every indent rescue).
         const renumberedText = b.replace(/^(\d+)([.)])/, '1$2')
-        // (2) the outdent renumber: the leading ordered marker may be rewritten
-        // (nothing after it may move), and only when CommonMark provably
-        // ignores the number it now spells.
-        const markerAt = afterLines[i].start +
-          (afterLines[i].text.match(/^[ \t>]*/) || [''])[0].length
-        const isRescue = result.transaction.intent === 'indent-list-item'
-          ? (renumberedText === a || b + '\u00A0' === a || renumberedText + '\u00A0' === a)
-          : (ORDERED_MARKER.test(b) && ORDERED_MARKER.test(a) &&
-             b.replace(ORDERED_MARKER, '') === a.replace(ORDERED_MARKER, '') &&
-             ordinalIsIgnored(applied.doc.text, markerAt))
-        assert.ok(isRescue,
-          `${action} changed line ${i} content beyond its leading prefix (seed ${seed} step ${step})`)
+        if (result.transaction.intent === 'indent-list-item') {
+          assert.ok(
+            renumberedText === a || b + '\u00A0' === a || renumberedText + '\u00A0' === a,
+            `${action} changed line ${i} content beyond its leading prefix (seed ${seed} step ${step})`)
+          renumbered += 1
+          continue
+        }
+        // ---- outdent renumber, half (A): before/after BYTES only, no reparse,
+        // nothing borrowed from the command --------------------------------
+        // S2a: whatever changed past the prefix must BE a leading ordered
+        // marker, on both sides.
+        assert.ok(ORDERED_MARKER.test(b) && ORDERED_MARKER.test(a),
+          `outdent changed line ${i} beyond its leading prefix and the change is not an ordered-marker rewrite (seed ${seed} step ${step}): ${JSON.stringify(b)} -> ${JSON.stringify(a)}`)
+        // S2b: every byte AFTER that marker is identical. This is what a torn
+        // marker or a mid-word offset dies on, and exactly what the reparse
+        // proof below cannot see (it only asks what kind of list child begins
+        // at one offset, never what follows it).
+        assert.equal(a.replace(ORDERED_MARKER, ''), b.replace(ORDERED_MARKER, ''),
+          `outdent changed bytes AFTER line ${i}'s ordered marker (seed ${seed} step ${step}): ${JSON.stringify(b)} -> ${JSON.stringify(a)}`)
+        // ---- half (B): the imported blast-radius proof --------------------
+        // Shared with the command on purpose: there is ONE definition of
+        // "confined to its own item", and it lives next to the code that
+        // relies on it. It is not the whole gate; (A) above is.
+        assert.ok(provenNonFirstOrdinal(applied.doc.text, markerOffsetOf(afterLines[i])),
+          `outdent renumbered a FIRST ordered item: those digits become the list's start and move every sibling (seed ${seed} step ${step}): ${JSON.stringify(applied.doc.text)}`)
         renumbered += 1
       }
+      // S1: at most ONE line's marker may have been rewritten.
       assert.ok(renumbered <= 1,
-        `${action} renumbered more than the item's own marker (seed ${seed} step ${step})`)
+        `${action} rewrote more than the item's own marker (seed ${seed} step ${step})`)
     }
     // 不变式:不产生禁止实体/哨兵(除非编辑前已存在)
     if (!FORBIDDEN.test(before)) {

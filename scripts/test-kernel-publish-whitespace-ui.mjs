@@ -55,6 +55,8 @@ const FIXTURE = [
   '制表段。',
   '',
   '行首段。',
+  '',
+  '空首段。',
   ''
 ].join('\n')
 
@@ -91,9 +93,20 @@ async function toggleSourceMode(evaluate) {
   assert.ok(clicked, 'no source-toggle trigger button')
 }
 
-// The DOCUMENT's own bytes (an unforced flush — source mode is a reading
-// toggle, not a publication). Kept in the test on purpose: the placeholder must
-// remain visible and deletable where the user edits it.
+// SOURCE MODE IS A PUBLICATION (2026-08-26, correction A/B1 — this replaces
+// the original D5 reading "source mode is a reading toggle"). Everything
+// downstream of the toggle is durable: the snapshot becomes `tab.content` (the
+// dirty comparison AND the session mirror) and the source textarea's buffer,
+// which a save in source mode writes to disk VERBATIM — App.jsx
+// `getMarkdownForTab` short-circuits on the textarea before any flush runs. An
+// un-forced read here therefore put U+00A0 in the user's FILE:
+//   save (clean bytes) -> toggle to source -> the just-saved tab went DIRTY
+//   again with placeholder-bearing text -> the next save wrote U+00A0.
+// So this returns what a save WOULD write. An outstanding BLOCK-TRAILING run
+// (bytes CommonMark deletes, i.e. bytes with no spelling at all) is not shown;
+// a LINE-START run still is — `resolveWhitespaceForPublish` keeps those, and
+// that is where source mode still shows and can delete the whitespace.
+// Locked end-to-end by scripts/test-kernel-publish-boundary-ui.mjs.
 async function readSource(evaluate, label) {
   await toggleSourceMode(evaluate)
   const shown = await waitFor(() => visibleSource(evaluate), `source view did not appear (${label})`)
@@ -212,8 +225,10 @@ async function run() {
     assert.ok(JSON.parse(await blockTexts(evaluate)).includes('P:末段。a' + NBSP),
       `the typed space must be present and visible in the editor — got ${await blockTexts(evaluate)}`)
     assert.equal(await readSource(evaluate, 'placeholder in the document'),
-      FIXTURE.replace('末段。', '末段。a' + NBSP),
-      'the DOCUMENT keeps the placeholder (source mode is a reading toggle, not a publication)')
+      FIXTURE.replace('末段。', '末段。a'),
+      'SOURCE MODE SHOWS WHAT A SAVE WOULD WRITE (correction A/B1): its buffer IS the bytes ' +
+      'a save in source mode puts on disk, so an outstanding block-trailing run — which has no ' +
+      'byte spelling at all — must not appear there. The DOCUMENT still keeps it (asserted below).')
 
     const caretBefore = await caretInfo(evaluate)
     const savedA = await save(evaluate, 'space typed last')
@@ -250,8 +265,12 @@ async function run() {
       await pressKey(send, { key: 'Tab', code: 'Tab' })
       await sleep(400)
     }
-    assert.equal(await readSource(evaluate, 'three tabs at a paragraph end'),
-      savedAB.replace('制表段。', '制表段。\t\t' + NBSP + NBSP),
+    // Read the DOCUMENT here, not source mode: entering source mode publishes
+    // (correction A/B1), and the whole unsaved delta of this block IS the
+    // outstanding run — publishing it would make the tab clean and there would
+    // be no save left to measure. The paragraph's own text carries exactly the
+    // same fact.
+    assert.equal(JSON.parse(await caretInfo(evaluate)).text, '制表段。\t\t' + NBSP + NBSP,
       'the document must hold the bounded two-real-tabs + one outstanding run state')
 
     const savedTabs = await save(evaluate, 'three tabs typed last')
@@ -287,6 +306,40 @@ async function run() {
     assert.ok(savedLead.includes(NBSP + NBSP + '行首段。'),
       `a LINE-START run is durable indentation and must be KEPT: ${JSON.stringify(savedLead)}`)
     assert.ok(savedLead.includes(AUTHORED), 'the authored U+00A0 must still be untouched')
+
+    // =====================================================================
+    // D2) THE SAME DECISION FOR A SPACE — and the only shape in this file that
+    //     gates the BLOCK-END guard (correction M4, 2026-08-26).
+    //
+    //     `dropRunForPublish` refuses a line-start run through TWO independent
+    //     proofs: the block-end guard (only ASCII whitespace may sit between
+    //     the run and the block's end) and `treesIdentical` (the drop must mean
+    //     what the typed ASCII means). The TAB above trips BOTH — its literal
+    //     `\t行首段。` reparses as an INDENTED CODE BLOCK — so with only a TAB
+    //     fixture either guard could be deleted and this suite stayed green.
+    //     A SPACE trips only the first: ` 空首段。` and `空首段。` are the same
+    //     paragraph to CommonMark, so the tree proof passes and the block-end
+    //     guard alone stands between the user's indentation and its silent
+    //     deletion at the save boundary. Mutation-measured end-to-end against
+    //     an isolated build (scripts/test-source-kernel-publish-whitespace.mjs
+    //     §4a carries the same pin at the unit level).
+    // =====================================================================
+    await clickAt(evaluate, send, '空首段。', 0)
+    await sleep(150)
+    await pressKey(send, { key: 'Home', code: 'Home' })
+    await sleep(150)
+    await pressSpace(send)
+    await sleep(500)
+    assert.ok(JSON.parse(await blockTexts(evaluate)).includes('P:' + NBSP + '空首段。'),
+      `the line-start space must be visible in the editor — got ${await blockTexts(evaluate)}`)
+    const savedSpaceLead = await save(evaluate, 'line-start space')
+    assert.ok(savedSpaceLead.includes(NBSP + '空首段。'),
+      'a line-start SPACE is durable indentation and must reach the file — the tree ' +
+      'proof cannot see this one, so the block-end guard is the only thing holding it: ' +
+      JSON.stringify(savedSpaceLead))
+    assert.ok(savedSpaceLead.includes(NBSP + NBSP + '行首段。'),
+      'the earlier line-start TAB run must still be on disk')
+    assert.ok(savedSpaceLead.includes(AUTHORED), 'the authored U+00A0 must still be untouched')
 
     // =====================================================================
     // E) No refusal, no degradation, no unobservable edit anywhere above.

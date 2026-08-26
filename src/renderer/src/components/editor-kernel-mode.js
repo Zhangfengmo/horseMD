@@ -3822,14 +3822,40 @@ export function createKernelMode({
   // save, and typing on still heals it into an ordinary space ('hello', Space,
   // Cmd+S, 'world' -> 'hello world', not 'helloworld').
   //
-  // ONLY A DURABILITY BOUNDARY PUBLISHES (`{ force: true }` — save, export,
-  // pending-rich-draft; plus getRecoveryMarkdown, which has no options and is
-  // always one). A SOURCE-MODE toggle passes no options and therefore keeps
-  // reading the document itself: source mode is where the user sees and deletes
-  // the placeholder, and the standing ruling on this spelling is that source
-  // mode must show whitespace («源码模式里，不接受这个写法» / «就是空白，类似于在
-  // 源码中也是空格»). A caller that forgets `force` gets today's behaviour —
-  // the fail-safe direction.
+  // THE BOUNDARY SET, ENUMERATED (revised 2026-08-26, correction A/M3 — the
+  // original reading of this paragraph, "a SOURCE-MODE toggle is a reading
+  // toggle and therefore does not publish", was FALSE: it left three callers
+  // that DO reach durable storage on the un-forced path, and each of them put
+  // U+00A0 in the user's file). A boundary is any caller whose result can be
+  // WRITTEN — to disk, to an exported document, or to the session. There are
+  // exactly five, and all of them force:
+  //
+  //   1. save / export      — App.jsx `getMarkdownForTab` / `getSettledMarkdownForTab`
+  //   2. pending-rich-draft — lib/pending-rich-draft.js `resolvePendingRichDraft`
+  //   3. SOURCE-MODE ENTRY  — hooks/useSourceModeSwitch.js `flushRichSource`.
+  //      Its snapshot becomes `tab.content` AND the source textarea's buffer,
+  //      and a save in source mode writes that buffer VERBATIM (the save path
+  //      short-circuits on the textarea before any flush). So source mode shows
+  //      what a save would write.
+  //   4. SESSION PERSISTENCE — hooks/useAppLifecycle.js `flushSession`, via the
+  //      lib/scratch-draft-publication.js registry. The restore rebuilds an
+  //      unsaved scratch draft with an EMPTY ledger, so a placeholder stored
+  //      there becomes an authored character forever.
+  //   5. getRecoveryMarkdown — takes no options and is always a boundary.
+  //
+  // AND ONE STATED EXEMPTION: `Editor.jsx`'s ~260 ms rich-dirty reconcile
+  // (`scheduleRichDirtyReconcile`) also published un-forced text into
+  // `tab.content` — it is a bridge for LEGACY's serializer debounce and is now
+  // switched OFF in kernel mode entirely, so it is not a boundary because it no
+  // longer runs. Any OTHER un-forced reader is by definition a view-only reader
+  // and gets the document's own bytes; a caller that forgets `force` gets the
+  // fail-safe direction (the placeholder is kept, never silently written).
+  //
+  // What the user sees is unchanged where it can be represented: a LINE-START
+  // run is durable, visible indentation and `resolveWhitespaceForPublish` KEEPS
+  // it, so source mode still shows and can delete that whitespace («就是空白，
+  // 类似于在源码中也是空格»). Only a BLOCK-TRAILING run — bytes CommonMark
+  // deletes, which therefore have no spelling at all — is dropped.
   //
   // Memoised on the document OBJECT (not its revision: `replaceMarkdown`
   // installs a fresh document at revision 0), so repeated flush readers on one

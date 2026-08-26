@@ -669,6 +669,13 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   textarea live buffer, or `flushMarkdown()` in rich mode — never a stale React
   tab snapshot), and export must not change dirty/cursor/disk. See
   [`docs/document-export-architecture.md`](./docs/document-export-architecture.md).
+  **Known display split (recorded 2026-08-26, not a bug to "fix" blindly):**
+  `stripEditorOnlyForExport` drops `.label-wrapper`, so the snapshot pipelines
+  (PDF + HTML) render SEQUENTIAL list numbers — they do NOT carry the
+  source-faithful ordinals the kernel editor paints (`68a0b38`
+  `sourceOrdinalPlugin`; bytes `1. a / 5. b / 9. c` display as 1, 5, 9 in the
+  editor). Pandoc is unaffected (raw bytes). Full record: `docs/ai-handoff.md`
+  §5.2d「已知落差」.
 - **HTML export** (`html-export.js` + `html-document.js`): the main-process
   preview returns an opaque token; the saved file is the SAME bytes the token
   refers to (no re-render on save). Output is no-script: the snapshot strips
@@ -723,6 +730,17 @@ On macOS, scripting `osascript "tell application \"Electron\""` can launch the
 generic `node_modules` Electron bundle. Automated regression must use
 `scripts/lib/electron-test-app.mjs` in background mode; user handoff must rebuild,
 install and verify the current `/Applications/HorseMD.app`.
+
+A **second channel** exists: real Chrome driving the MINIFIED web build
+(`scripts/lib/chrome-test-app.mjs` + `npm run test:kernel-web-chrome-ui`). It
+exists because electron-vite leaves the renderer UNMINIFIED, so the whole
+Electron matrix is blind to minification defects — that gap is where defect D4
+lived (`step.constructor.name` vs esbuild's renamed classes → a silently
+read-only editor). It proves kernel behaviour, published bytes and reload
+round-trip; it CANNOT prove process-lifecycle cold reopen, watchers, PDF/HTML/
+Pandoc export, native menus (**including Save** — use `.hm-save-fab`), or the
+legacy-pinned suites. Second opinion, never a replacement. See
+[`docs/development.md`](./docs/development.md) §第二测试通道.
 
 ## When in doubt
 

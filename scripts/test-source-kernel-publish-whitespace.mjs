@@ -25,6 +25,7 @@
 // Nothing is decided by construction: every drop is proven by reparsing THREE
 // documents (see the function's own ADR).
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   resolveWhitespaceForPublish,
   spellBlockTailInsert,
@@ -138,7 +139,44 @@ const typeTail = (doc, { type, start }, offset, insert, heal = null) => {
 // ===========================================================================
 // 4) THE LINE-START DECISION. A run at a content line's start is durable,
 //    visible indentation; it is KEPT even though it is ledgered.
+//
+//    TWO SPELLINGS, DELIBERATELY (2026-08-26, correction M4). `dropRunForPublish`
+//    refuses a line-start run through TWO independent proofs, and a TAB fixture
+//    alone lets each one alibi the other:
+//      * the BLOCK-END guard (`text.slice(mark.to, blockEnd)` must be ASCII
+//        whitespace) — a run with content after it is not a trailing run;
+//      * `treesIdentical(candidateTree, literalTree)` — dropping the run must
+//        mean what the ASCII the user typed means.
+//    A line-start TAB is caught by BOTH (its literal `\t行首段。` reparses as an
+//    INDENTED CODE BLOCK, so the trees differ), so deleting either one on its
+//    own left this suite green. A line-start SPACE is caught by the block-end
+//    guard ALONE: ` 行首段。` and `行首段。` are the same paragraph to CommonMark,
+//    so the tree proof passes and only the block-end guard stands between the
+//    user's indentation and a silent deletion. Measured, both mutations run
+//    against this file:
+//      delete the block-end guard  -> 4a FAILS (` 行首段。` published as `行首段。`)
+//      delete `treesIdentical`     -> nothing fails; see 4c.
 // ===========================================================================
+// 4a) SPACE — the shape that gates the BLOCK-END guard, and nothing else does.
+{
+  const opened = createMarkdownDocument('行首段。\n')
+  const result = spellLineStartWhitespace({
+    doc: opened, block: blockAt(opened.text, 'paragraph', 0), offset: 0, insert: ' '
+  })
+  assert.ok(result.ok, `spellLineStartWhitespace refused: ${result.code}`)
+  const indented = applySourceTransaction(opened, result.transaction).doc
+  assert.equal(indented.text, NBSP + '行首段。\n')
+  assert.deepEqual(indented.whitespaceMarks, [{ from: 0, to: 1, ascii: ' ' }])
+
+  const published = resolveWhitespaceForPublish(indented)
+  assert.equal(published.text, NBSP + '行首段。\n',
+    'a line-start SPACE is durable indentation and must be KEPT — the tree proof ' +
+    'cannot see this one (` 行首段。` parses exactly like `行首段。`), so the ' +
+    'block-end guard is the only thing holding it')
+  assert.deepEqual(published.drops, [])
+}
+
+// 4b) TAB — the same decision, reached through the tree proof as well.
 {
   const opened = createMarkdownDocument('行首段。\n')
   const result = spellLineStartWhitespace({
@@ -226,6 +264,38 @@ const typeTail = (doc, { type, start }, offset, insert, heal = null) => {
   assert.equal(second.whitespaceMarks.length, 2)
   assert.equal(resolveWhitespaceForPublish(second).text, '甲段。\n\n乙段。\n',
     'every outstanding run resolves, right to left')
+}
+
+// ===========================================================================
+// 8) THE REDUNDANT PROOF, PINNED STRUCTURALLY — and why it can only be pinned
+//    that way. `treesIdentical` cannot be gated by any fixture: deleting it
+//    alone changes NO published output, measured over 146 shapes produced by
+//    driving the real commands over 20 documents AND 2 862 forged ledger
+//    shapes over 44 CommonMark-sensitive bodies (0 differences in both). That
+//    is not luck — given the block-end guard, the run's literal ASCII sits at
+//    a `paragraph`/`heading`/`tableCell` trailing edge, where CommonMark
+//    strips it, so the literal tree and the candidate tree are equal by
+//    construction. It is DEFENCE IN DEPTH, and it stops being redundant the
+//    moment either sibling weakens: with the block-end guard deleted it alone
+//    saves 712 of those shapes, with `differsByOneWhitespaceRemoval` deleted,
+//    9. So a behavioural fixture cannot notice its deletion and this check is
+//    the only thing that can. If a refactor renames it, re-derive the
+//    redundancy above before touching this assertion.
+{
+  const source = readFileSync(new URL(
+    '../src/renderer/src/lib/source-kernel/commands/trailing-whitespace.js', import.meta.url), 'utf8')
+  const from = source.indexOf('const dropRunForPublish')
+  const to = source.indexOf('export function resolveWhitespaceForPublish')
+  assert.ok(from > 0 && to > from, 'dropRunForPublish is no longer where this pin looks for it')
+  const body = source.slice(from, to)
+  for (const proof of [
+    ['the block-end guard', 'text.slice(mark.to, blockEnd)'],
+    ['the literal-equivalence proof', 'treesIdentical(candidateTree, literalTree)'],
+    ['the one-whitespace-removal proof', 'differsByOneWhitespaceRemoval(tree, candidateTree)']
+  ]) {
+    assert.ok(body.includes(proof[1]),
+      `${proof[0]} is gone from dropRunForPublish — a publish may drop bytes it has not proven dead`)
+  }
 }
 
 console.log('PASS source-kernel publish whitespace: an outstanding block-trailing run reaches the file as nothing, a line-start run is kept, an authored U+00A0 is never touched, and the document itself is left alone')

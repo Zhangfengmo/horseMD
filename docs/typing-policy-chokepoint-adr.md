@@ -1,6 +1,7 @@
 # ADR: 打字策略收敛到单一字节提交咽喉(typing-policy chokepoint)
 
-日期:2026-08-24 · 状态:**两阶段均已执行**(2026-08-24:策略函数落地、三调用点统一、快照 restructures 归零;同日晚 IME commitReplace 完成 step 级路由收编——commitResolvedTextSteps 出口,虚拟前缀/种子溶解/heal/转义只剩 gateway 核一份实现,intent `ime-commit` 保留撤销分组语义,IME 全套+通道等价+无头门禁复跑绿)· 起因:用户评审
+日期:2026-08-24(2026-08-26 补记「源码忠实序号与 outdent 改号」,见文末)·
+状态:**两阶段均已执行**(2026-08-24:策略函数落地、三调用点统一、快照 restructures 归零;同日晚 IME commitReplace 完成 step 级路由收编——commitResolvedTextSteps 出口,虚拟前缀/种子溶解/heal/转义只剩 gateway 核一份实现,intent `ime-commit` 保留撤销分组语义,IME 全套+通道等价+无头门禁复跑绿)· 起因:用户评审
 「填鸭式修复——结合成熟案例思考实现与测试,而非臆想和频繁试错」。
 
 ## 问题(结构性,不是某个 bug)
@@ -112,6 +113,67 @@ commitReplace / 粘贴…各一份),而不是在所有通道共用的提交层�
 (commitResolvedTextSteps;consult 副本删除,kernel-mode 不再 import
 seed/dissolve 机器);②未决态自动序号灰显装饰 ✓;③「未决态×下一键」42 行
 演绎完备表 ✓(当场抓出并修复定界符裂列表)。
+
+## 补记:源码忠实序号与 outdent 改号(2026-08-26 裁决 + 勘误)
+
+上节最后一条「自动序号灰显装饰,零字节」是本 ADR 当时**唯一**的显示裁决,
+而它只管未决态。此后同一族又落了两笔改动,彼此不知道对方存在;本节补记之
+——`app.css` 的 `.hm-source-ordinal` / `.hm-undecided-ordinal` 两处注释引用
+的就是这里(在此之前它们指向的章节并不存在)。
+
+**两笔改动,相隔约 17 小时,无人发现它们相干**:
+
+| 时间 | 提交 | 内容 |
+| --- | --- | --- |
+| 2026-08-23 22:45 | `96518af` | outdent ORDERED-MARKER RENUMBER:`Shift+Tab` 落到有序父项下时,把该项自己的 marker 改写为 `parent.number + 1` |
+| 2026-08-24 16:08 | `68a0b38` | `sourceOrdinalPlugin`(editor-kernel-mode.js):编辑器改为显示**作者字节里的号**(Obsidian/VSCode 读法),用 CSS 变量 + `::before` 盖住 ProseMirror 的自动序号 |
+
+`96518af` 的证明与注释都建立在一条 CommonMark 规则上:有序列表的 `start`
+取自**首项**,其后各项的号被忽略——所以改号「不产生渲染后果」,是纯拼写
+手势。`68a0b38` 恰恰**推翻了这个前提**:实测字节 `1. a / 5. b / 9. c` 在
+编辑器里显示为 **1、5、9**(ProseMirror 的自动号说 1、2、3)。改号从此
+**用户可见**。两者共存约 17 小时无人察觉,原因是那条「不可见」的理由被逐字
+抄进了三个文件(命令 + 两份测试),复制品互相印证,没有任何一份能证伪它
+——与本 ADR 开篇的发生器①同构:一份策略散在 N 处,漏一处即洞;这里是一份
+**理由**散在 N 处,错一处即三处同错。
+
+**裁决(2026-08-26,用户)**:**改号保留**。`1. 甲 / 2. 乙 / ␣␣␣1. 丙` 上
+`Shift+Tab` 后必须读作 **1、2、3**——这既是 Typora 手势,也正是源码忠实显示
+应当呈现的结果。行为不变、零字节预期变化;要改的只是**理由**。
+
+**改号真正需要证明的是爆炸半径**,而不是不可见性:改号若落在列表**首项**上,
+这串数字就成了列表的 `start`,所有兄弟项一起改号——在本编辑器、Pandoc 导出、
+GitHub 与下游工具里皆然。`commands/indent.js` 的 `provenNonFirstOrdinal`
+(原名 `provenIgnoredOrdinal`——那个名字断言的正是已死的前提)证明的是:
+改写后的 marker 重解析成有序列表的**非首项**,故爆炸半径恰为用户所动的那一项。
+`provenNestingOnly` 给不了这一条(它的 `leafSignature` 只记叶块类型 + 解码
+文本,从不读列表的 `ordered`/`start`)。判定不过时命令退回纯剥缩进,改号
+永不使 outdent 失败——该契约不变。
+
+**去重与门禁**:该谓词此前在三处独立存在(命令 + `test-source-kernel-indent.mjs`
++ `test-source-kernel-statemachine.mjs` 的 `ordinalIsIgnored`)。两份测试副本
+已改为 import 命令的导出;但**共享一份不等于有门禁**——那只是把重复换成
+同义反复。所以 statemachine 的不变式同时拆成互不包含的两半:
+- **结构半边**(本文件自推,只看 before/after 字节,不重解析、不复用命令的
+  任何推理):至多一行超出前导 `[ \t>]*` 前缀发生变化;该行前后都以有序
+  marker 开头且 marker 之后逐字节相同;其余行剥离前缀后逐字相同;行数不变。
+- **爆炸半径半边**:import 的 `provenNonFirstOrdinal` 重解析证明。
+
+两半的牙齿都用变异实测过(2026-08-26):①令命令在 marker 后多插一个空格
+→ 结构半边 `S2b` 当场失败(而爆炸半径谓词对同一份被污染文档仍返回 `true`
+——实测,故两半不冗余);②令命令去掉自己的非首项闸门、并保留整段缩进使改号
+落在子列表**首项** → 爆炸半径半边失败(而结构半边全过,因为它剥掉了前导
+缩进)。变异后 indent.js 已按校验和逐字节还原。
+
+**相邻限制(记录,本轮不修)**:
+- `editor-pdf-content.js` 的 `stripEditorOnlyForExport` 会剥掉 `.label-wrapper`,
+  所以 **PDF / HTML 导出不带源码序号**,渲染的是顺序号。源码忠实序号是
+  **编辑器内**的读法,与导出目标的约定(GitHub 式顺序号)有意分叉——但在此
+  之前没有任何文件写下这条分叉。
+- `.hm-undecided-ordinal`(未决态灰显,第二阶段任务②)与 `.hm-source-ordinal`
+  (源码号替换)**作用在同一个 DOM 节点**(`li > .label-wrapper > .label.ordered`):
+  前者调 `opacity`,后者把它 `visibility: hidden` 再用 `::before` 画。两者
+  叠加时的观感无人讨论过,也无钉。
 
 ## 不做
 

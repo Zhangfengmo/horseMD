@@ -138,10 +138,36 @@ function consumeSoftBreak(text, r) {
 // code/bold/a link was wholly read-only. The fix is this same function, called
 // for the soft break's line-ending span — the fold is proven against the next
 // sibling's own start offset, never consumed on faith — so the two break kinds
-// cannot drift apart again. Both refusals above carry over verbatim: a soft
-// break ending a container's last text node with prefix bytes after it
+// ask ONE question and get ONE proof. Both refusals above carry over verbatim:
+// a soft break ending a container's last text node with prefix bytes after it
 // ('> [a\n> ](u)b') still fails closed, and so does a gap holding any byte a
 // container prefix cannot be made of.
+//
+// CORRECTION (2026-08-26) — what this paragraph originally claimed, that "the
+// two break kinds cannot drift apart again", overstated the code. The fold is
+// a property of the CALL, not of this function: `nextSibling` is OPTIONAL, and
+// a caller that omits it gets the pre-D3 fail-closed answer with no diagnostic
+// — this function cannot tell "there is no sibling" from "the caller did not
+// look". When the claim was written, only ONE of three callers passed one:
+//   * `collectUnits` (below) — passed `children[i]`, which is why plain typing
+//     in those shapes started working;
+//   * `highlight-syntax.js` `offsetTables` — did NOT, so '- ==x== a b\n  `c` d'
+//     produced no `highlight` node at all and the block still held 4 visible
+//     characters more than ProseMirror: read-only, for the same bytes D3 had
+//     just made typable;
+//   * `commands/review-markup.js` `proveInlineTextSplice` — did NOT (its
+//     `textNodeContaining` returned the node without its sibling), so a review
+//     wrap in '- a b\n  `c` d' refused 'unsupported-structure' while ordinary
+//     typing in that very paragraph succeeded.
+// All three pass it now, each pinned by its own suite: the nested-continuation
+// section of scripts/test-source-kernel-highlight-consistency.mjs and case 4b
+// of scripts/test-source-kernel-review.mjs. The accurate invariant is the
+// narrower one — EVERY caller that wants a text node's units owes it the
+// following sibling — so a FOURTH caller would reintroduce the same silent
+// hole. The call-site census at the end of
+// scripts/test-source-kernel-highlight-consistency.mjs pins exactly that: it
+// enumerates every module importing `textUnits` and fails if any call site
+// omits the third argument.
 const isContinuationPrefixChar = (ch) => ch === ' ' || ch === '\t' || ch === '>'
 
 function continuationFoldEnd(text, breakStart, breakEnd, nextSibling) {

@@ -46,6 +46,8 @@
 //      node is produced there either — the two stay consistent by
 //      construction rather than by coincidence.
 import assert from 'node:assert/strict'
+import { readFile, readdir } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
@@ -183,6 +185,16 @@ const CORPUS = [
   ['    ==x==', 'indented code: never a highlight'],
   ['| ==x== | b |\n| --- | --- |\n| c | d |', 'table cell'],
   ['$$\n==x==\n$$', 'block math'],
+  // --- D3's continuation fold, reached THROUGH the highlight injector -------
+  // A soft-wrapped container whose continuation line opens with a NON-text
+  // inline sibling: remark ends the text node AT the line terminator, so the
+  // container prefix ('  ' / '> ') sits in the gap before that sibling and
+  // only `textUnits`' PROVEN fold can account for it — which needs the
+  // sibling. `offsetTables` did not pass one, so `textUnits` refused, no
+  // highlight node was produced, and the block held 4 visible characters more
+  // than ProseMirror (the `==` runs) and degraded to read-only.
+  ['- ==x== a b\n  `c` d\n', 'wrapped list item, continuation opens with inline code'],
+  ['> ==x== a b\n> **c** d\n', 'quoted paragraph, continuation opens with strong'],
   // --- content / encoding --------------------------------------------------
   ['==高亮==', 'CJK'],
   ['这是==高亮==的一句话', 'CJK without word boundaries'],
@@ -210,6 +222,7 @@ const CORPUS = [
 
 let checkedShapes = 0
 let divergences = 0
+let nestedChecked = 0
 let randomSummary = ''
 
 for (const [text, label, options = {}] of CORPUS) {
@@ -281,6 +294,54 @@ for (const [text, label, options = {}] of CORPUS) {
   }
 
   checkedShapes += 1
+}
+
+// ---------------------------------------------------------------------------
+// C, for NESTED textblocks. The corpus loop above zips only TOP-LEVEL
+// children, so a list item's or a blockquote's paragraph never reached the
+// pairing assertion — and those are exactly the containers a continuation
+// prefix exists in. This section walks to the textblock wherever it sits and
+// asserts the identity that decides editable-vs-read-only.
+// ---------------------------------------------------------------------------
+{
+  const textblocks = (tree) => {
+    const out = []
+    const visit = (node) => {
+      if (node.type === 'paragraph' || node.type === 'heading') {
+        out.push(node)
+        return
+      }
+      for (const child of node.children || []) visit(child)
+    }
+    visit(tree)
+    return out
+  }
+  const NESTED = [
+    ['- a b\n  `c` d\n', 'control: D3 itself — no highlight involved'],
+    ['> a b\n> **c** d\n', 'control: quoted, no highlight'],
+    ['- ==x== a b\n  `c` d\n', 'wrapped list item, continuation opens with inline code'],
+    ['> ==x== a b\n> **c** d\n', 'quoted paragraph, continuation opens with strong'],
+    ['- ==x== a b\n  [c](u) d\n', 'continuation opens with a link'],
+    ['- ==x== a b\n  ![c](u) d\n', 'continuation opens with an image atom'],
+    ['> - ==x== a b\n>   `c` d\n', 'list inside a quote: two prefix layers'],
+    ['- ==x== a b\r\n  `c` d\r\n', 'CRLF spelling of the same shape'],
+    ['- ==x== a b\n  `c` ==y== d\n', 'a highlight on BOTH sides of the fold']
+  ]
+  for (const [text, label] of NESTED) {
+    const where = `${JSON.stringify(text)} (${label})`
+    const index = buildSyntaxIndex(text)
+    const editorBlocks = textblocks(editorTree(text))
+    const kernelBlocks = textblocks(index.tree)
+    assert.ok(editorBlocks.length > 0, `${where}: fixture sanity — there is a textblock`)
+    assert.equal(kernelBlocks.length, editorBlocks.length, `${where}: nested textblock COUNT must agree`)
+    for (let i = 0; i < editorBlocks.length; i += 1) {
+      const charMap = buildCharacterMap(text, kernelBlocks[i])
+      assert.ok(charMap, `${where}: nested block #${i} must character-map`)
+      assert.equal(charMap.visibleLength, pmContentSize(editorBlocks[i]),
+        `${where}: nested block #${i} visibleLength must equal the PM content size`)
+    }
+    nestedChecked += 1
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +521,105 @@ for (const [text, label, options = {}] of CORPUS) {
     `${unmodelled} unmodelled`
 }
 
+// ---------------------------------------------------------------------------
+// CALL-SITE CENSUS for `textUnits`.
+//
+// The soft/hard-break continuation fold is a property of the CALL, not of the
+// function: `nextSibling` is an OPTIONAL third parameter, and a caller that
+// omits it gets the pre-fold fail-closed answer with no diagnostic —
+// `textUnits` cannot tell "this node has no following sibling" from "the
+// caller never looked". That is precisely how the D3 fold reached only ONE of
+// its three callers and left `highlight-syntax.js` (this suite's subject) and
+// `commands/review-markup.js` silently unable to fold, months of shapes
+// read-only for want of an argument.
+//
+// So the guard cannot live in `character-map.js`; it lives here. Every module
+// that imports `textUnits` from the character map is enumerated, and every one
+// of its call sites must pass three arguments. A FOURTH caller is not
+// forbidden — it just has to declare itself here and hand over the sibling.
+//
+// (`lib/markdown-preservation/table-source-parse.js` also defines a local
+// `textUnits(view, node)`. It is a DIFFERENT function in a different domain —
+// it does not import this one — so it is deliberately not in scope; the import
+// filter below is what keeps it out, rather than a name-based exclusion that
+// could go stale.)
+// ---------------------------------------------------------------------------
+{
+  const SRC = resolve(import.meta.dirname, '../src/renderer/src')
+  const files = []
+  const walk = async (dir) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) await walk(full)
+      else if (/\.(js|jsx|mjs)$/.test(entry.name)) files.push(full)
+    }
+  }
+  await walk(SRC)
+
+  // Count top-level arguments of the call whose '(' sits at `open`.
+  const argCount = (source, open) => {
+    let depth = 0
+    let args = 0
+    let seenToken = false
+    for (let i = open; i < source.length; i += 1) {
+      const ch = source[i]
+      if (ch === '(' || ch === '[' || ch === '{') {
+        depth += 1
+        if (depth === 1) continue
+      } else if (ch === ')' || ch === ']' || ch === '}') {
+        depth -= 1
+        if (depth === 0) return seenToken ? args + 1 : 0
+      } else if (ch === ',' && depth === 1) {
+        args += 1
+        continue
+      }
+      if (depth >= 1 && !/\s/.test(ch)) seenToken = true
+    }
+    throw new Error('unbalanced call at offset ' + open)
+  }
+
+  const census = new Map()
+  for (const file of files) {
+    const source = await readFile(file, 'utf8')
+    // Only modules that import THIS `textUnits` are in scope.
+    if (!/import\s*\{[^}]*\btextUnits\b[^}]*\}\s*from\s*['"][^'"]*character-map\.js['"]/.test(source) &&
+        !/^export function textUnits\(/m.test(source)) {
+      continue
+    }
+    const calls = []
+    const re = /(?<!function\s)\btextUnits\s*\(/g
+    let match = re.exec(source)
+    while (match) {
+      const open = match.index + match[0].length - 1
+      calls.push({ offset: open, args: argCount(source, open) })
+      match = re.exec(source)
+    }
+    if (calls.length) census.set(relative(SRC, file).replace(/\\/g, '/'), calls)
+  }
+
+  // The declared census. Update this list — with the sibling wired — when a
+  // new caller appears; do NOT relax the argument assertion.
+  const EXPECTED = {
+    'lib/source-kernel/character-map.js': 1,        // collectUnits -> children[i]
+    'lib/source-kernel/highlight-syntax.js': 1,     // offsetTables -> nextSibling
+    'lib/source-kernel/commands/review-markup.js': 1 // proveInlineTextSplice -> located.nextSibling
+  }
+  assert.deepEqual(
+    Object.fromEntries([...census].map(([file, calls]) => [file, calls.length])),
+    EXPECTED,
+    'a module started calling textUnits (or stopped) — declare it here AND pass the sibling'
+  )
+  for (const [file, calls] of census) {
+    for (const call of calls) {
+      assert.equal(call.args, 3,
+        `${file}: textUnits at offset ${call.offset} must pass the following sibling as its ` +
+        'third argument — omitting it silently disables the continuation fold')
+    }
+  }
+}
+
 console.log(
   `PASS source-kernel highlight cross-parser consistency (${checkedShapes} shapes agree, ` +
-  `${divergences} declared divergences fail closed; ${randomSummary})`
+  `${divergences} declared divergences fail closed, ${nestedChecked} nested continuation shapes pair; ` +
+  `${randomSummary})`
 )

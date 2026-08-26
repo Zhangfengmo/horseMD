@@ -20,6 +20,7 @@
 //   setActiveId/setTabs/setSidebarMode/setSidebarOpen/setHome/tRef — restore + onboarding
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { isTabDirty } from '../lib/tab-state.js'
+import { publishScratchDrafts } from '../lib/scratch-draft-publication.js'
 import { LS, genId, isHeavyDoc, isNewerVersion } from '../paths.js'
 import { HM_TOAST_EVENT } from '../ui.js'
 import { welcomeDoc } from '../onboarding.js'
@@ -72,6 +73,17 @@ export function useAppLifecycle({
   // so the persisted shape lives in exactly one place).
   const flushSession = useCallback(() => {
     if (!sessionRef.current) return
+    // THIS WRITE IS DURABLE STORAGE, so it is a PUBLICATION BOUNDARY
+    // (2026-08-26, correction A/B3). An unsaved scratch tab's `content` is the
+    // LIVE document mirror, which for a kernel tab still carries any
+    // outstanding provisional U+00A0 whitespace placeholder; the restore
+    // rebuilds the document with an EMPTY provenance ledger, so a placeholder
+    // stored here becomes an AUTHORED character forever and every later save
+    // writes it to the user's file. Draining the publishers first makes each
+    // scratch editor force-flush and hand the published bytes back through its
+    // own `onChange`, which updates `tabsRef.current` SYNCHRONOUSLY — so the
+    // read below sees them. A no-op when nothing is outstanding.
+    publishScratchDrafts()
     try {
       // Patch unsaved-scratch content from the live mirror so a close-time write
       // captures edits still inside a tab's debounce window. (commitAllLive, run

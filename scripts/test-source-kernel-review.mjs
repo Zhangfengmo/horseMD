@@ -132,6 +132,84 @@ const visOf = (src, findText, at = 0) => {
 }
 
 // ---------------------------------------------------------------------------
+// 4b) wrap in a SOFT-WRAPPED container whose continuation line opens with a
+//     non-text inline sibling. remark ends the text node AT the line
+//     terminator there, so the container prefix ('  ' / '> ') sits in the gap
+//     before that sibling and only `textUnits`' proven continuation fold can
+//     account for it — which needs the sibling handed to it. Without that,
+//     `proveInlineTextSplice` could not walk the node's units and every review
+//     wrap in these everyday shapes refused 'unsupported-structure', even
+//     though plain typing in the very same paragraph works (D3).
+// ---------------------------------------------------------------------------
+{
+  const src = '- a b\n  `c` d\n'
+  const { doc, index, map, block } = setup(src, src.indexOf('a b'))
+  const { rawFrom, rawTo } = visOf(src, 'b')
+  const r = wrapReviewMarkup({
+    doc, index, map,
+    visFrom: rawFrom - block.start, visTo: rawTo - block.start,
+    kind: 'addition'
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+    '- a {++b++}\n  `c` d\n')
+  assert.equal(doc.text, src)
+}
+{
+  const src = '> a b\n> **c** d\n'
+  const { doc, index, map, block } = setup(src, src.indexOf('a b'))
+  const { rawFrom, rawTo } = visOf(src, 'b')
+  const r = wrapReviewMarkup({
+    doc, index, map,
+    visFrom: rawFrom - block.start, visTo: rawTo - block.start,
+    kind: 'deletion'
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+    '> a {--b--}\n> **c** d\n')
+}
+{
+  // The wrap lands AFTER the fold — the target text node is the one that
+  // starts past the sibling, so the whole unit walk (fold included) has to be
+  // provable, not just the part before the line ending. Visible offsets come
+  // off the map's own units so the fixture cannot drift from the mapping.
+  const src = '- a b\n  `c` dd ee\n'
+  const { doc, index, map, block } = setup(src, src.indexOf('a b'))
+  const { rawFrom, rawTo } = visOf(src, 'ee')
+  const visAtRaw = (raw) => {
+    let v = 0
+    for (const unit of map.units) {
+      if (unit.rawStart === raw) return v
+      v += unit.width
+      if (unit.rawEnd === raw) return v
+    }
+    throw new Error(`raw ${raw} is not a unit boundary`)
+  }
+  const r = wrapReviewMarkup({
+    doc, index, map,
+    visFrom: visAtRaw(rawFrom), visTo: visAtRaw(rawTo),
+    kind: 'addition'
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+    '- a b\n  `c` dd {++ee++}\n')
+}
+{
+  // CRLF spelling of the same shape.
+  const src = '- a b\r\n  `c` d\r\n'
+  const { doc, index, map, block } = setup(src, src.indexOf('a b'))
+  const { rawFrom, rawTo } = visOf(src, 'b')
+  const r = wrapReviewMarkup({
+    doc, index, map,
+    visFrom: rawFrom - block.start, visTo: rawTo - block.start,
+    kind: 'addition'
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(applySourceTransaction(doc, r.transaction).doc.text,
+    '- a {++b++}\r\n  `c` d\r\n')
+}
+
+// ---------------------------------------------------------------------------
 // 5) wrap fully INSIDE an existing mark's content is provable (the marker
 //    lands inside the strong span; the display scan still sees one text node)
 // ---------------------------------------------------------------------------

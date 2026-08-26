@@ -147,7 +147,24 @@ async function runScenario({ ending, port }) {
     await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`), 'rich back')
 
     // 3. save: disk bytes keep the document's own line endings
-    await evaluate(`(window.confirm = () => true, 1)`)
+    //
+    // THE OVERRIDE MUST COUNT ITSELF (correction M6, 2026-08-26). This line
+    // used to be `window.confirm = () => true`, and `assert(app.dialogs.length
+    // === 0)` below was then VACUOUS: `app.dialogs` is filled by CDP's
+    // `Page.javascriptDialogOpening` (scripts/lib/cdp.mjs), which only fires
+    // for the NATIVE dialog — a JS override means Chromium never opens one, so
+    // the array stays empty no matter what the app asked. The one dialog this
+    // save path can raise, `save.sourceSyncRecoveryConfirm` (useFileOps.js:430,
+    // taken when the verified-source gate refuses the tab's bytes), was
+    // therefore invisible: the file would be written from a rebuilt/recovered
+    // source and this suite would still report "no dialog may appear". The
+    // counter below is what actually observes it; the native assertion stays as
+    // the second axis (an alert/beforeunload the override does not intercept).
+    await evaluate(`(() => {
+      window.__hmConfirmCalls = []
+      window.confirm = (message) => { window.__hmConfirmCalls.push(String(message ?? '')); return true }
+      return 1
+    })()`)
     await waitFor(() => evaluate(`!!document.querySelector('.hm-save-fab')`), 'save fab')
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save settle')
@@ -161,7 +178,11 @@ async function runScenario({ ending, port }) {
     if (ending === '\r\n') {
       assert.equal(/(?<!\r)\n/.test(disk), false, 'a CRLF document must not gain a lone LF')
     }
-    assert.equal(app.dialogs.length, 0, 'no dialog may appear')
+    const confirmCalls = JSON.parse(await evaluate('JSON.stringify(window.__hmConfirmCalls || [])'))
+    assert.deepEqual(confirmCalls, [],
+      `${label}: the save path asked the user something — typing marks must never ` +
+      `reach the source-sync recovery exit: ${JSON.stringify(confirmCalls)}`)
+    assert.equal(app.dialogs.length, 0, 'no native dialog may appear')
   } finally {
     await stopBuiltElectron(app, { removeProfile: false })
   }

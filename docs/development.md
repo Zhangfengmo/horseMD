@@ -263,6 +263,92 @@ npm run test:background-ui
 - `scripts/test-issue-79-list-spacing-ui.mjs` —— 真实 Electron 验证 #79：通过设置页选项调整行距和段距后，正文无序/有序/嵌套列表以及设置预览的列表样本同步变化
 - `scripts/test-review-ui.mjs` —— 真实源码同步后的 Review 高亮、同段批注堆叠、卡片编辑/取消/完成和 substitution DOM
 
+## 第二测试通道：真实 Chrome + Web 构建（压缩产物）
+
+上面整套 UI 矩阵跑的都是 Electron。**Electron 的 renderer 由 electron-vite
+产出，恰好是未压缩的**；而 `npm run build:mobile`（`vite.mobile.config.mjs`）
+是同一份 renderer 源码走 Vite 默认的 `build.minify: 'esbuild'`。缺陷 D4 就活在
+这条缝里：内核用 `step.constructor.name === 'ReplaceStep'` 识别 ProseMirror
+step，esbuild 把 `ReplaceStep` 改名成 `ki`，于是**压缩构建里每一次按键都被
+否决，编辑器静默变成只读**，而自诊断只留下
+`{"code":"unsupported-input-type","shape":"ki[1,1]@heading:d1:off0 …"}`。
+期间 100+ 个 Electron 套件全绿——内核的正确性事实上依赖一个没人守护的构建开关。
+
+因此增加**第二条通道**：真实 Google Chrome 驱动 web 构建。
+
+```bash
+# 跑（会按需自动 build:mobile，产物比源码旧才重建）
+npm run test:kernel-web-chrome-ui
+npm run test:web-chrome            # 同一目标的别名
+
+# 想看着窗口跑
+HORSEMD_CHROME_HEADED=1 npm run test:kernel-web-chrome-ui
+
+# 换浏览器
+CHROME_PATH=/path/to/chromium npm run test:kernel-web-chrome-ui
+```
+
+- `scripts/lib/chrome-test-app.mjs` —— 对标 `electron-test-app.mjs` 的形态：
+  按需构建 `dist-mobile/`，用本地静态 HTTP 服务器托管（**必须是 http 而不是
+  file://**，否则 origin 不透明，localStorage 会话和 IndexedDB 都用不了），
+  以 `--headless=new` + 独立临时 profile 启动 Chrome，用仓库自己的
+  `connectCdp()` 连接，返回同样的 `{ evaluate, send, dialogs, setDialogResponse }`，
+  外加 `pageExceptions` / `consoleErrors`、`navigate()` / `reload()`、
+  `addInitScript()`，以及一个同时杀掉 Chrome、关掉服务器并删除临时目录的 `stop()`。
+  端口占用检查沿用 Electron 侧的教训，但**归属证明换了依据**：Chrome 151 的
+  `--headless=new` 根本不写 `DevToolsActivePort`，改成匹配子进程 stderr 打印的
+  `DevTools listening on ws://…/devtools/browser/<uuid>` 与 `/json/version` 返回的
+  同一个 uuid——比文件更硬的证据。
+- `scripts/test-kernel-web-chrome-ui.mjs` —— 这条通道上的第一个套件，也是 D4 的
+  端到端验收：压缩产物里内核正常挂载，逐字符真实按键输入一整行富标记 ASCII
+  （`*em*`、`` `code` ``、`**bold**`——**必须是 ASCII**，缺陷 D1 当年就藏在
+  纯中文夹具后面），逐字节断言源码、断言 `window.api.writeFile` 的实参、再断言
+  刷新后逐字节往返。其中 Case E 是运行时的 D4 回归锁：从内核自己的诊断里读出
+  step 名字，只要出现不是 prosemirror 注册 `jsonID` 的名字（比如 `ki`）就失败。
+- **会话必须在 document-start 注入**（`addInitScript`）。在已经启动的页面里写
+  `localStorage` 会输给应用自己的持久化 effect——它会把当时还是空的 tab 列表
+  覆盖回去，刷新后什么都恢复不出来。同一段脚本也用来在平台 shim 出现之前挂上
+  `window.api.writeFile` 拦截。
+- **为什么拦截到的实参就是磁盘字节**：桌面端 `window.api.writeFile(path, content)`
+  就是 `ipcRenderer.invoke('fs:writeFile', …)`，而主进程处理函数
+  （`src/main/filesystem.js`）是纯透传 `await fs.writeFile(path, content, 'utf8')`。
+  中间没有任何转换，所以断言这个实参与 Electron 套件读回文件断言的是同一个事实。
+- **Web 端内核恒为默认开启**：web shim 没有 `legacyDefault`，所以
+  `--horsemd-legacy-default` 这条迁移桥在这里不存在，也无法把某个 tab 钉在 legacy。
+
+### 这条通道能证明什么、不能证明什么
+
+能证明：压缩构建下的内核行为（分类、否决、字节提交）、发布出去的字节、
+刷新往返、页面异常与 console 噪音、Capacitor web 平台 shim（IndexedDB 文件系统）。
+
+**不能证明**（这些只有 Electron 通道有）：
+
+- 进程级冷重开（这里只有页面刷新，主进程、单实例锁、启动参数都不存在）；
+- 文件监听（chokidar）与外部改动提醒；
+- PDF / HTML / Pandoc 导出，以及一切 `main/` 里的东西；
+- 原生菜单——**包括保存**。浏览器里 Ctrl/Cmd+S 不会触发保存，只能走
+  `.hm-save-fab` 或命令面板；
+- 所有钉在 legacy 的套件；
+- 分屏、窗口控件、拖拽打开、图床外部命令等桌面能力（`capabilities` 里已关闭）。
+
+**这是第二意见，永远不是替代品。** 判定一个改动是否安全，仍以 Electron 矩阵为准；
+Chrome 通道负责的是 Electron 通道结构上看不见的那一类问题（压缩、真实浏览器差异）。
+
+### chrome-devtools MCP
+
+仓库根目录的 `.mcp.json` 注册了 `chrome-devtools` MCP server，便于人工驱动
+Chrome 做探索式排查（而不是写死的套件）：
+
+```json
+{ "mcpServers": { "chrome-devtools": { "command": "npx", "args": ["-y", "chrome-devtools-mcp@latest"] } } }
+```
+
+**改动 `.mcp.json` 后需要重启 Claude Code 会话才会生效**（MCP server 只在会话
+启动时装载），首次使用还需要在会话里批准这个 server。它和上面的套件互不依赖：
+套件只用 `scripts/lib/cdp.mjs`，不需要 MCP。
+
+`dist-mobile/` 是构建产物，已在 `.gitignore` 中，**不要提交**。
+
 ### 用法
 
 ```bash

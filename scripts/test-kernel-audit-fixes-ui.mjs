@@ -331,9 +331,17 @@ async function run() {
       "the caret must sit at the end of 'ab c' (positive control)")
     await pressKey(send, { key: 'Backspace', code: 'Backspace' })
     await sleep(500)
-    const stranded = await readSourceViaToggle(evaluate, 'stranded space')
-    assert.ok(stranded.includes('ab' + NBSP + '\n'),
-      `the stranded space must be re-spelled U+00A0, not left as a dead ASCII byte: ${JSON.stringify(stranded.slice(0, 200))}`)
+    // Read the DOCUMENT, not source mode: entering source mode is a PUBLICATION
+    // boundary (2026-08-26, correction A/B1) and an outstanding block-trailing
+    // run has no byte spelling there. What must be proven here is that the
+    // stranded space was re-spelled U+00A0 rather than left as a dead ASCII
+    // byte, and that is a fact about the document — the click below then
+    // addresses that very character.
+    const stranded = await mounted(evaluate)
+    assert.ok(stranded.includes('ab' + NBSP),
+      `the stranded space must be re-spelled U+00A0, not left as a dead ASCII byte: ${JSON.stringify(String(stranded).slice(0, 200))}`)
+    assert.ok(!(await readSourceViaToggle(evaluate, 'stranded space')).includes('ab' + NBSP),
+      'and it must NOT be publishable — a run CommonMark strips has no byte spelling at all')
 
     await clickLine(evaluate, send, 'ab' + NBSP, 0, 'end')
     await typeTextLikeUser(send, 'd', { delayMs: delay })

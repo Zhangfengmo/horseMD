@@ -121,9 +121,25 @@ export function useSourceModeSwitch({
     // naturally exempt from the legacy serializer path without any branch
     // here — same call, same return contract (a string or a non-string
     // failure signal), just answered by a different implementation.
+    //
+    // `{ force: true }` — THIS IS A PUBLICATION BOUNDARY (2026-08-26,
+    // correction A/B1). The snapshot it returns does not stay in the view: it
+    // becomes `tab.content` (the dirty comparison AND the session mirror) and
+    // it becomes the source textarea's buffer, which a save in source mode
+    // writes to disk VERBATIM — App.jsx `getMarkdownForTab` short-circuits on
+    // the textarea before any flush runs. So everything downstream of this
+    // call is durable, and an un-forced read here leaked the kernel's
+    // outstanding U+00A0 whitespace placeholders straight into the file:
+    // save (clean bytes) -> toggle to source -> the just-saved tab went DIRTY
+    // again with placeholder-bearing text -> the next save wrote U+00A0.
+    // Publishing keeps source mode showing exactly the bytes a save writes,
+    // which is what source mode means. A LINE-START run is still whitespace
+    // the user can see and delete there — `resolveWhitespaceForPublish` KEEPS
+    // those; only a block-trailing run (which CommonMark deletes, so it has no
+    // byte spelling at all) is dropped.
     let markdown = typeof api?.flushMarkdownSettled === 'function'
-      ? await api.flushMarkdownSettled()
-      : api?.flushMarkdown?.()
+      ? await api.flushMarkdownSettled({ force: true })
+      : api?.flushMarkdown?.({ force: true })
     if (typeof markdown !== 'string' && api) {
       // A mapping failure costs the author's SPELLING, never their content:
       // the rebuild is still verified to describe the same document, and it is

@@ -414,6 +414,13 @@ async function runTabAtBlockEndSegment() {
   // was a dead byte — written to disk, invisible in the view, forever. Tab now
   // writes TWO no-break spaces (see lib/source-kernel/commands/trailing-whitespace.js).
   const AFTER_TAB = '段落甲' + '\u00A0\u00A0' + '\n'
+  // 2026-08-26 (correction A/B1): entering SOURCE MODE is a PUBLICATION
+  // boundary — its buffer is exactly what a save in source mode writes to disk
+  // (the save path short-circuits on the textarea before any flush). An
+  // outstanding block-trailing run has no byte spelling at all — D5 already
+  // proved the FILE holds nothing there — so source mode shows the PUBLISHED
+  // text. The DOCUMENT still holds the placeholder, asserted from the rich view.
+  const AFTER_TAB_PUBLISHED = '段落甲' + '\n'
 
   await rm(segRoot, { recursive: true, force: true })
   await mkdir(segRoot, { recursive: true })
@@ -447,12 +454,19 @@ async function runTabAtBlockEndSegment() {
     await sleep(250)
     assert.equal(app.dialogs.length, 0, 'Tab at a plain paragraph end must not toast unmapped')
 
+    // The DOCUMENT holds the placeholder run: that is the mechanism, and it is
+    // what the next keystroke heals.
+    assert.equal(await mounted(evaluate), AFTER_TAB.replace('\n', ''),
+      'Tab at a plain paragraph end must write two real no-break spaces into the DOCUMENT, byte-exact')
+
     await toggleSourceMode(evaluate)
     const shown = await waitFor(() => visibleSource(evaluate),
       'source view did not appear after Tab at the paragraph end')
-    assert.equal(shown, AFTER_TAB, 'Tab at a plain paragraph end must write two real no-break spaces, byte-exact')
+    assert.equal(shown, AFTER_TAB_PUBLISHED,
+      'source mode is a PUBLICATION boundary (correction A/B1): its buffer is what a save writes, ' +
+      'and an outstanding block-trailing run has no byte spelling at all')
 
-    console.log('PASS kernel-mode UI tab-at-block-end segment: Tab at a plain paragraph end writes real, surviving whitespace')
+    console.log('PASS kernel-mode UI tab-at-block-end segment: Tab at a plain paragraph end writes real whitespace into the document, and the publication boundary shows what a save would write')
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
