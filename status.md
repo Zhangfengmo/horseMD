@@ -121,3 +121,49 @@ Tab×3                      -> disk "末段。\t\t<U+00A0><U+00A0>\n"   （账�
 - 防抖 verify 挪动光标：0/71
 - 打单个标记字符锁块：0/992
 - `text-escape.js` 写入用户没打的反斜杠：17/17 用例 0 个多余反斜杠（含 `x = 1`、`4.5`、`a - b` 三个已知陷阱）
+
+---
+
+# 任务：全选删除（Ctrl/Cmd+A → Delete）在内核模式下无效
+
+## 现状（已实跑复现）
+
+`scripts/probe-select-all-delete.mjs`（8 KB / 60 KB / 200 KB 三档）+ 隔离对照：
+
+| 场景 | 选中 | 结果 |
+|---|---|---|
+| 内核 · 小选区（对照） | 3 字 | **删除成功** |
+| 内核 · 全选 | 31 字 | **失败** |
+| legacy · 全选 | 31 字 | **删除成功** |
+| 内核 · 全选（8 KB / 60 KB / 200 KB） | 全部 | **三档全失败** |
+
+**结论修正**：这不是大文档问题。**128 字的文档同样失败**——触发条件是「跨块选区」，不是体积。用户在大文档上遇到只是因为大文档更容易全选。
+
+**且完全静默**：0 条 diagnostic、0 个 dialog、0 个 toast。按 Delete 什么都不发生，也不告诉用户为什么。
+
+## 根因（代码自述）
+
+`editor-kernel-mode.js` 结构键路由的 `not-structural` 分支，注释原文：
+
+> Backspace/Delete: ... THEN let PM produce the plain text-deletion transaction;
+> handleTransactions' plain-text classification owns it
+> (**a cross-block deletion classifies as blocked -> veto, still fail-closed**)
+
+所以跨块删除是**设计上就 veto** 的 fail-closed 行为。它保证了不写坏字节，但把一个最日常的手势（全选重写）变成了死键，而且没有任何反馈。
+
+## 方案
+
+**不放松批量守卫**，而是给"整篇/跨块删除"补一个它缺的证明——这是本分支一贯的做法（证明更多，而不是假设更多）：
+
+1. **可证明的跨块删除命令**。删除后的候选字节 = 选区前缀 + 选区后缀；用编辑器自己的 parser 重解析该候选，要求它与删除后的 PM 文档一致。一致即提交，不一致即具名拒绝。整篇清空是它的特例（候选为空字符串），legacy 早有 `document-emptied` 先例（0.13.14）。
+2. **拒绝必须有名有声**。保留 fail-closed，但补一个具名 code + i18n（中英）+ toast，杜绝"按了没反应且没解释"。
+3. **回环测试**：`test:kernel-select-all-delete-ui` —— Delete 与 Backspace 两条手势 × LF/CRLF × 三档体积（含 >CHUNK_THRESHOLD）× 全选清空与部分跨块删除，断言字节、存盘、冷重开，并断言 0 dialog。
+4. **撤销**：清空后 Mod-Z 必须完整还原（整篇删除是单一历史组）。
+
+## 检查点
+
+* [x] 复现并定位根因（非体积相关，跨块选区触发；已实跑三档 + legacy 对照）
+* [x] 方案设计 + 二次 review
+* [ ] 实现可证明的跨块删除 + 具名拒绝
+* [ ] 回环测试通过（Delete/Backspace × LF/CRLF × 三档 × 保存冷重开 × 撤销）
+* [ ] 全量回归绿（source-kernel / kernel-headless / kernel-ui / 普查）
