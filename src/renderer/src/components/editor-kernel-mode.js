@@ -2056,7 +2056,13 @@ export function createKernelMode({
     // `ime-commit` is the transaction's HISTORY identity: not
     // insert-text-coalescable, bracketed as its own undo group (pinned by
     // the ime suites) — preserved across the routing.
-    committed.transaction.intent = 'ime-commit'
+    //
+    // EXCEPT when the core answered with a MARKER COMPLETION (2026-08-26): that
+    // is a different command's transaction, carrying its own intent and its own
+    // selection, and stamping this one over it would file a structural marker
+    // rewrite under the plain-typing identity. The undo bracketing below still
+    // applies — a composed marker completion is its own group either way.
+    if (!committed.markerCompletion) committed.transaction.intent = 'ime-commit'
     kernel.history.breakGroup()
     const applied = applyKernelTransaction(committed.transaction, view)
     kernel.history.breakGroup()

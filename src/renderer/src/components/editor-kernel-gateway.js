@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert, spellMarkerCompletingSpace } from '../lib/source-kernel/index.js'
 
 // ===========================================================================
 // STEP IDENTITY — ADR (defect D4, 2026-08-26). READ BEFORE ADDING A CHECK.
@@ -2142,6 +2142,68 @@ function commitPlainTextSteps({ kernel, map, steps }) {
         }
         // `not-structural` is the only non-ok answer this command gives (the
         // ruled fallback is the literal append), so there is no refusal arm.
+      }
+    }
+    // THE MARKER-COMPLETING SPACE, ON THIS PATH TOO (2026-08-26) — the fourth
+    // member of the route-blindness family that already brought the block-tail
+    // heal, the task-seed dissolve and the typing-spelling escape into this
+    // core.
+    //
+    // The typing policy spells a typed restructuring `N.` as `N\.` so it cannot
+    // split the block, and that escape is a TRANSIENT: the Space that follows
+    // resolves it into a real marker. The ESCAPE was routed through every
+    // channel on 2026-08-24 (f70938c, "the marker escape rides the IME commit
+    // path too"); its RESOLVER was not. `spellMarkerCompletingSpace` had exactly
+    // one call site — inside `spaceHandler`, reachable only from the Space
+    // KEYMAP — so a space that arrives without a keydown left the backslash in
+    // the document PERMANENTLY, and no later keystroke healed it:
+    //
+    //   real keydown     -> "1. 甲\n2. "        resolved
+    //   Input.insertText -> "1. 甲\n2. 2\."     stuck, and typing on gave "2\. 乙"
+    //   IME commit       -> "1. 甲\n2. 2\."     stuck
+    //
+    // Reported as 「1. 2\.」 by a user writing Chinese, whose IME commits the
+    // space as part of a composition. docs/ai-handoff.md §5.2d had recorded this
+    // as an accepted edge (「不经 keydown 注入空格的输入路径…接受为已知边界」) — it is
+    // not an edge for that user, it is the normal input path.
+    //
+    // ORDER IS LOAD-BEARING: this must be consulted BEFORE the whitespace
+    // re-spellers below, for the reason the keymap path states in its own
+    // comment — once the marker is PROVEN this space is SYNTAX, and letting the
+    // block-tail/line-start re-speller claim it would write U+00A0 for a
+    // position just proven to be structure, leaving both a stray invisible
+    // character and an unresolved escape.
+    //
+    // Claimed only for a BARE single space (the shape the keymap path can ever
+    // produce). A multi-character insert that merely begins with a space is a
+    // different gesture and keeps its literal bytes, so nothing is dropped.
+    if (!emptyFence && !headingWhitespace && !taskSeedDissolved && steps.length === 1 &&
+        oldFrom === oldTo && virtualPrefix === '' && !virtualBlock &&
+        insertText === ' ' && stepPair?.mdBlock?.type !== 'code') {
+      const routed = spellMarkerCompletingSpace({ doc: kernel.doc, offset: rawFrom })
+      // The command reparses and proves the minted structure itself; a
+      // `not-structural` answer means this space is ordinary content and falls
+      // through to the whitespace re-spellers exactly as before.
+      if (routed.ok) {
+        // This core's contract is to return an ALREADY-APPLIED result — the
+        // caller advances `kernel.doc` from `applied` — so the marker command's
+        // transaction is committed here, through the same
+        // `applySourceTransaction` chokepoint (revision check, edit ordering,
+        // CRLF-pair guard) as every other byte this function writes.
+        const result = applySourceTransaction(kernel.doc, routed.transaction)
+        if (!result.ok) return { ok: false, code: result.code }
+        return {
+          ok: true,
+          applied: result,
+          transaction: routed.transaction,
+          observability: null,
+          // The committed bytes are a marker REWRITE, not the space ProseMirror
+          // inserted, so the caller must reconcile the view instead of trusting
+          // it — the same reason every whitespace re-spelling sets this.
+          rewrote: true,
+          emptiedBlock: null,
+          markerCompletion: true
+        }
       }
     }
     // Block-TRAILING whitespace (2026-08-18) — the other end of the same block,
