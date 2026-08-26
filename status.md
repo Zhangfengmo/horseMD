@@ -160,10 +160,53 @@ Tab×3                      -> disk "末段。\t\t<U+00A0><U+00A0>\n"   （账�
 3. **回环测试**：`test:kernel-select-all-delete-ui` —— Delete 与 Backspace 两条手势 × LF/CRLF × 三档体积（含 >CHUNK_THRESHOLD）× 全选清空与部分跨块删除，断言字节、存盘、冷重开，并断言 0 dialog。
 4. **撤销**：清空后 Mod-Z 必须完整还原（整篇删除是单一历史组）。
 
+## 执行中的第三次修正（实测推翻了前两次的框定）
+
+前面两版都把它当成「删除」问题。实测证明**根本不是删除**：
+
+| 场景 | 手势 | 结果 |
+|---|---|---|
+| 内核 | Cmd+A → 打字 `X` | DOM 10 → 10 **无变化** |
+| 内核 | Cmd+A → Delete | DOM 10 → 10 **无变化** |
+| legacy | Cmd+A → 打字 `X` | DOM 10 → **1**（替换成功） |
+| 内核 | 小选区 → Delete | **删除成功** |
+
+**准确表述：内核模式下，任何跨越全文选区的编辑都被静默拒绝——打字和删除一样。**
+所以这不是删除命令缺证明，而是「全文选区的替换」这一整类事务过不去分类。
+
+且**完全无痕**：0 diagnostic、0 toast、0 dialog。连 `describeUnclassified` 的
+`unclassified-transaction` 都没有，说明它不是走到分类器才被拒的——更早就没了。
+
+**尝试过并已回退的**：在 `commitPlainText` 里加 `clearWholeDocument`（纯删除、
+整篇清空、走 `applySourceTransaction`）。没有生效，且我未能证明它被调用到。按
+「三次失败就停下来质疑模型」的规矩已回退，不留投机性死代码。
+
+**下一步该做的**（不是继续试第四次修法）：先定位这笔事务到底死在哪一层——
+是结构键 handler 提前 `return true` 吞掉、是 `extractPlainTextSteps` 拒绝了
+AllSelection 形状、还是 `classifyTransactions` 之前就没了。需要在 handler 入口和
+`classifyTransactions` 入口各打一个探针；本轮的 view 句柄挂钩失败
+（`ed.pmViewDesc.view` 取不到，生产构建下 `window.__horsemd` 被剥离），得换别的
+拿 view 的办法。
+
+## 二次 review 的两条修正
+
+**修正一 —— 首个增量收窄到「整篇清空」，不做通用跨块删除。**
+`proveBatchDelete({ doc, block, charMap, edits })` 只接受**单个** block 和它的
+charMap，所以今天根本不存在跨块删除命令。通用跨块删除的面比想象大得多（部分选区
+跨列表/表格/代码块边界，每种的前缀语义都不同），一次做完等于一大片欠证明的改动。
+先只做**全选清空**（用户报的手势），通用跨块删除留作后续、带自己的证明。
+
+**修正二 —— 清空的证明不能用朴素的 `.eq()`。**
+`reparse("")` 是空文档，而全选删除后的 PM 至少有一个空段落，两者永远不相等。
+仓库里已有专门机制——**vouched placeholder**（`spellEmptyListItemDelete` 的
+`placeholder` 分支 + `emptiedBlock` 透传给 `bindMap`）。必须复用它，而不是新造一条
+容差；新造容差正是这个仓库事故史的起点。
+
 ## 检查点
 
-* [x] 复现并定位根因（非体积相关，跨块选区触发；已实跑三档 + legacy 对照）
-* [x] 方案设计 + 二次 review
+* [x] 复现（非体积相关：10 字文档同样失败；kernel 专属，legacy 正常；**非删除专属**，打字同样被拒）
+* [ ] 定位根因到具体层（本轮三次尝试均未命中，已回退；需在 handler / classify 两处打探针）
+* [x] 方案设计 + 二次 review（产出上述两条修正，首个增量已收窄）
 * [ ] 实现可证明的跨块删除 + 具名拒绝
 * [ ] 回环测试通过（Delete/Backspace × LF/CRLF × 三档 × 保存冷重开 × 撤销）
 * [ ] 全量回归绿（source-kernel / kernel-headless / kernel-ui / 普查）
