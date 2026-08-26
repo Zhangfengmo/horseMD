@@ -182,6 +182,21 @@ function hasCellBreak(node) {
   return (node.children || []).some(hasCellBreak)
 }
 
+// Which character does an `escape` unit spell? `character-map.js`'s
+// `textUnits` emits the unit ONLY when `text[r] === '\\'` and `text[r + 1]` IS
+// the decoded character, so `text[rawStart + 1]` is that character by the
+// unit's own construction — read off the text rather than carried on the unit,
+// so the unit shape (and every consumer of it, in the kernel and in the
+// char-map suites that deep-compare `[kind, rawStart, rawEnd, width]`) stays
+// untouched. Anything not spelling exactly `\<char>` is a shape this module
+// has not proven and answers `null`, which its caller treats as unprovable.
+function escapedCharOf(text, unit) {
+  if (unit.rawEnd !== unit.rawStart + 2) return null
+  if (text[unit.rawStart] !== '\\') return null
+  const ch = text[unit.rawStart + 1]
+  return typeof ch === 'string' ? ch : null
+}
+
 // charMap-shaped object for an EMPTY cell ('| |', '|  |', '||'). The generic
 // `buildCharacterMap` returns a zero-unit map whose only boundary falls back
 // to the block node's own `position.start.offset` — which for a tableCell is
@@ -226,14 +241,35 @@ function buildCellCharMap(text, mdCell) {
   if (hasCellBreak(mdCell)) return null
   const charMap = buildCharacterMap(text, mdCell)
   if (!charMap || !charMap.units.length) return null
-  // Escapes are refused for stage 3. A GFM table cell unescapes `\|` into a
-  // literal `|` BEFORE inline parsing — a table-specific rule layered on top
-  // of the ordinary CommonMark escape the unit model encodes — and an edit
-  // that lands next to one has to reason about both. `textUnits` DOES map the
-  // shape correctly today (measured), so this is a scope decision, not a
-  // defect: the cell degrades to read-only rather than being served on a
-  // decode rule this module has not proven end-to-end.
-  if (charMap.units.some((unit) => unit.kind === 'escape')) return null
+  // `\|` — and ONLY `\|` — is refused. A GFM table cell unescapes `\|` into a
+  // literal `|` BEFORE inline parsing: a table-specific rule layered on top of
+  // the ordinary CommonMark escape the unit model encodes (it fires even
+  // inside a code span, where a CommonMark backslash escape does nothing), so
+  // an edit that lands next to one would have to reason about both decodes.
+  // That cell degrades to read-only.
+  //
+  // Every OTHER escape in a cell is the ORDINARY CommonMark escape — the exact
+  // same `textUnits` walk, with the exact same width-1-over-two-raw-bytes
+  // unit, that `buildCharacterMap` already serves in every paragraph and
+  // heading of every document. This guard used to be written over ALL escapes
+  // ("a scope decision, not a defect"), and that scope cost 330 read-only
+  // blocks = 63.7% of the entire read-only surface across 197 real documents
+  // (scripts/measure-kernel-readonly-causes.mjs, cause B), because
+  // remark-stringify writes `claude\-haiku\-4\.5` and `4\.00` inside cells as
+  // a matter of routine — one measured price list lost 110 of its 111 cells to
+  // it. Narrowing the guard to its true condition proves the same thing about
+  // less; it does not assume anything new.
+  //
+  // NOTE this reads the escape UNITS, i.e. the decode the unit model owns. A
+  // `\|` elsewhere in the cell's raw span (a link destination, an image `src`)
+  // is GAP bytes — no unit covers it, exactly like a `**` marker run — and no
+  // cell-text edit can address it, so it is out of this guard's scope by
+  // construction, not by omission (pinned in the table-map suite, Case 11).
+  for (const unit of charMap.units) {
+    if (unit.kind !== 'escape') continue
+    const escaped = escapedCharOf(text, unit)
+    if (escaped === null || escaped === '|') return null
+  }
   // The cell's inline children span [childStart, childEnd) — everything the
   // character map is allowed to touch. What sits between that span and the
   // cell's own delimiters must be PADDING: that is the proof that the `|`

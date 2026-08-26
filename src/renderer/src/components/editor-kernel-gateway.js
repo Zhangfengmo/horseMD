@@ -23,6 +23,96 @@
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
 import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert } from '../lib/source-kernel/index.js'
 
+// ===========================================================================
+// STEP IDENTITY — ADR (defect D4, 2026-08-26). READ BEFORE ADDING A CHECK.
+// ===========================================================================
+// THE HAZARD, and why every classifier below routes through `isStep`.
+//
+// Until this change every extractor identified its step by CLASS NAME:
+//   if (step?.constructor?.name !== 'ReplaceStep') return null
+// A JavaScript class's `.name` is a MINIFIER-OWNED identifier, not a fact
+// about the object. `npm run build:mobile` (vite.mobile.config.mjs) uses
+// Vite's default `build.minify: 'esbuild'`, which emits `class ki extends
+// xt {…}` — so in that build EVERY check above failed, EVERY extractor
+// returned null, `classifyTransactions` answered `blocked`/INPUT_TYPE, and
+// the dispatch veto refused EVERY keystroke. The editor was silently
+// READ-ONLY, diagnosing itself as
+//   {"code":"unsupported-input-type","shape":"ki[1,1]@heading:d1:off0 …"}
+// The desktop app escaped only because electron-vite happens to emit an
+// UNMINIFIED renderer — i.e. the kernel's correctness rested on a build flag
+// nobody guarded. Never reintroduce a `constructor.name` comparison here;
+// scripts/test-kernel-step-identity.mjs fails the build if one appears.
+//
+// THE STABLE FACT WE USE INSTEAD: prosemirror-transform's JSON id.
+// `Step.jsonID(id, stepClass)` (node_modules/prosemirror-transform/dist/
+// index.js:366-372, v1.12.0) does exactly two things:
+//     stepsByID[id] = stepClass
+//     stepClass.prototype.jsonID = id
+// so every registered step class's prototype carries an OWN `jsonID` string
+// property: 'replace' (:763), 'replaceAround' (:862), 'attr' (:1856),
+// 'addMark' (:495), 'removeMark' (:557), plus addNodeMark/removeNodeMark/
+// docAttr. Those are STRING LITERALS in the registration calls, and the
+// property NAME is a plain identifier this repo never mangles (no
+// `mangleProps` anywhere in electron.vite.config.mjs or
+// vite.mobile.config.mjs). esbuild renames bindings, not string literals, so
+// both survive minification unchanged.
+//
+// WHY NOT `instanceof ReplaceStep`. It works today, but it costs more than it
+// buys:
+//   * it would force this module to import from '@milkdown/prose/transform',
+//     breaking the header contract above ("imports NOTHING from
+//     electron/react/@milkdown") that keeps the gateway headless-testable;
+//   * `instanceof` is MODULE-INSTANCE identity. `npm ls prosemirror-transform`
+//     is fully deduped today, but that is an npm resolution accident, not an
+//     invariant — a second copy (a differently-resolved transitive range, a
+//     second bundle chunk) silently turns every check false, i.e. the exact
+//     same silent-read-only failure this ADR exists to end;
+//   * it is a SUBCLASS test where these checks mean EXACTLY-THIS-TYPE.
+//     (Confirmed against the installed source: `ReplaceAroundStep extends
+//     Step` at :769, NOT `extends ReplaceStep`, and `DocAttrStep extends
+//     Step` at :1860, not `extends AttrStep` — so today the two happen to
+//     coincide. Relying on that coincidence is assuming, not proving.)
+//
+// EXACT TYPE, NOT SUBCLASS — the fail-closed detail. `jsonID` is inherited,
+// so a hypothetical unregistered `class Foo extends ReplaceStep {}` would
+// read `foo.jsonID === 'replace'` and quietly widen every plain-text check
+// (the old `.name` comparison refused it). `Step.jsonID` writes the property
+// as an OWN property of the REGISTERED class's prototype, and a subclass's
+// own prototype does not have it — so requiring `hasOwnProperty` on the
+// instance's immediate prototype reproduces the old checks' exact-type
+// strictness while surviving minification. (No such subclass exists in the
+// dependency tree today — grepped: only `Selection` subclasses register
+// jsonIDs — but the guard costs one property lookup and the whole
+// architecture is fail-closed by construction.) Anything with no registered
+// prototype id — a plain object, a JSON round-trip, a custom step — reads
+// `null` and every classifier refuses it, unchanged.
+const STEP_IDS = Object.freeze({
+  REPLACE: 'replace',
+  REPLACE_AROUND: 'replaceAround',
+  ATTR: 'attr',
+  ADD_MARK: 'addMark',
+  REMOVE_MARK: 'removeMark'
+})
+
+// Exported so any other module that needs to name a step (the diagnostics in
+// editor-source-transactions.js, the legacy lib/source-transaction-sync.js —
+// both still carry the `constructor.name` hazard and are outside this
+// change's ownership) can adopt the same stable id instead of re-deriving it.
+export function stepTypeId(step) {
+  if (!step || typeof step !== 'object') return null
+  let proto
+  try {
+    proto = Object.getPrototypeOf(step)
+  } catch {
+    return null
+  }
+  if (!proto || !Object.prototype.hasOwnProperty.call(proto, 'jsonID')) return null
+  const id = proto.jsonID
+  return typeof id === 'string' && id ? id : null
+}
+
+const isStep = (step, id) => stepTypeId(step) === id
+
 // A step's slice counts as "plain text" only if it is exactly a run of
 // unmarked text nodes with no open ends (no partial node straddling the
 // slice boundary) and no line breaks (a hardbreak/newline inside the slice
@@ -345,7 +435,7 @@ function extractPlainTextSteps(transactions, oldState) {
     if (!Array.isArray(tr.steps) || !tr.steps.length) return null
     for (let index = 0; index < tr.steps.length; index += 1) {
       const step = tr.steps[index]
-      if (step?.constructor?.name !== 'ReplaceStep') return null
+      if (!isStep(step, STEP_IDS.REPLACE)) return null
       if (!Number.isFinite(step.from) || !Number.isFinite(step.to)) return null
       const stepDoc = tr.docs?.[index]
       if (!stepDoc) return null
@@ -400,7 +490,7 @@ function extractTaskToggleStep(transactions, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'AttrStep' || step.attr !== 'checked') return null
+  if (!isStep(step, STEP_IDS.ATTR) || step.attr !== 'checked') return null
   if (!Number.isFinite(step.pos)) return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
   if (!stepDoc) return null
@@ -449,7 +539,7 @@ function extractLanguageStep(transactions, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'AttrStep' || step.attr !== 'language') return null
+  if (!isStep(step, STEP_IDS.ATTR) || step.attr !== 'language') return null
   if (!Number.isFinite(step.pos)) return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
   if (!stepDoc) return null
@@ -534,7 +624,7 @@ function extractImageAttrStep(transactions, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'AttrStep') return null
+  if (!isStep(step, STEP_IDS.ATTR)) return null
   if (!IMAGE_SOURCE_ATTRS.has(step.attr) && step.attr !== 'caption') return null
   if (!Number.isFinite(step.pos)) return null
   if (typeof step.value !== 'string') return null
@@ -572,7 +662,7 @@ function extractImageDisplayRefusal(trs, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'AttrStep') return null
+  if (!isStep(step, STEP_IDS.ATTR)) return null
   if (!Number.isFinite(step.pos)) return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
   if (!stepDoc) return null
@@ -648,8 +738,8 @@ function extractMarkToggle(transactions, oldState) {
   let from = null
   let to = null
   for (const step of tr.steps) {
-    const name = step?.constructor?.name
-    if (name !== 'AddMarkStep' && name !== 'RemoveMarkStep') return null
+    const name = stepTypeId(step)
+    if (name !== STEP_IDS.ADD_MARK && name !== STEP_IDS.REMOVE_MARK) return null
     if (stepType && name !== stepType) return null
     stepType = name
     const mark = step.mark
@@ -682,7 +772,7 @@ function extractMarkToggle(transactions, oldState) {
     return null
   }
   if (!$from.sameParent($to) || !$from.parent.isTextblock) return null
-  return { pmFrom: from, pmTo: to, markName, markKind: kind, add: stepType === 'AddMarkStep' }
+  return { pmFrom: from, pmTo: to, markName, markKind: kind, add: stepType === STEP_IDS.ADD_MARK }
 }
 
 // Link editing (Plan 5 Task 6) — the ONE flow `extractMarkToggle` above must
@@ -730,18 +820,18 @@ function extractLinkEdit(transactions, oldState) {
   let insert = null
   let phase = 0 // 0 = removes, 1 = the lone insert, 2 = adds
   for (const step of tr.steps) {
-    const name = step?.constructor?.name
-    if (name === 'RemoveMarkStep') {
+    const name = stepTypeId(step)
+    if (name === STEP_IDS.REMOVE_MARK) {
       if (phase !== 0) return null
       removes.push(step)
-    } else if (name === 'ReplaceStep') {
+    } else if (name === STEP_IDS.REPLACE) {
       if (phase > 1 || insert) return null
       phase = 1
       if (step.from !== step.to) return null
       const text = plainSliceText(step.slice)
       if (!text) return null
       insert = { from: step.from, text }
-    } else if (name === 'AddMarkStep') {
+    } else if (name === STEP_IDS.ADD_MARK) {
       phase = 2
       adds.push(step)
     } else {
@@ -856,7 +946,7 @@ function extractTrailingAppend(transactions) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'ReplaceStep') return null
+  if (!isStep(step, STEP_IDS.REPLACE)) return null
   const stepDoc = tr.docs?.[0]
   if (!stepDoc) return null
   if (step.from !== step.to || step.from !== stepDoc.content.size) return null
@@ -934,7 +1024,7 @@ const sameMarks = (a, b) => {
 // Is `step` an attrs-only heading rewrite that changes nothing but `id`,
 // measured against `doc` (the document that step applies to)?
 const isHeadingIdOnlyStep = (step, doc) => {
-  if (step?.constructor?.name !== 'ReplaceAroundStep') return false
+  if (!isStep(step, STEP_IDS.REPLACE_AROUND)) return false
   if (step.structure !== true || step.insert !== 1) return false
   if (!Number.isFinite(step.from) || !Number.isFinite(step.to)) return false
   // The gap must be exactly the original node's content: `from`/`to` wrap the
@@ -1037,7 +1127,7 @@ function extractTrailingAtomTyping(transactions, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'ReplaceStep') return null
+  if (!isStep(step, STEP_IDS.REPLACE)) return null
   if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
   if (!stepDoc) return null
@@ -1354,7 +1444,7 @@ function extractHeadingDemotion(trs, oldState) {
   const tr = changed[0]
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
-  if (step?.constructor?.name !== 'ReplaceAroundStep') return null
+  if (!isStep(step, STEP_IDS.REPLACE_AROUND)) return null
   if (!Number.isFinite(step.from) || !Number.isFinite(step.to)) return null
   const doc = tr.docs?.[0] || oldState?.doc
   if (!doc) return null
@@ -1424,7 +1514,14 @@ function describeUnclassified(trs, oldState) {
       }
       for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index]
-        const name = step?.constructor?.name || 'unknown'
+        // The registered prosemirror-transform id FIRST (see the STEP IDENTITY
+        // ADR at the top): under a minified build `constructor.name` is the
+        // mangled binding, which is what made the original report read
+        // `"shape":"ki[1,1]@heading…"` — a string that named nothing. The
+        // class name survives only as a last-resort label for a step with no
+        // registered id (a custom/unregistered Step), where it is still the
+        // most informative thing available.
+        const name = stepTypeId(step) || step?.constructor?.name || 'unknown'
         const from = step?.from
         const to = step?.to
         const doc = tr.docs?.[index] || before

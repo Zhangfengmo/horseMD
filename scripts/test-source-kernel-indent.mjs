@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createMarkdownDocument, applySourceTransaction } from '../src/renderer/src/lib/source-kernel/markdown-document.js'
-import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
+import { buildSyntaxIndex, parseKernelMarkdown } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { indentListItem, outdentListItem } from '../src/renderer/src/lib/source-kernel/commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
 import { routeStructuralKey } from '../src/renderer/src/lib/source-kernel/router.js'
@@ -463,6 +463,69 @@ console.log('PASS source-kernel delete + router')
   const applied = applySourceTransaction(doc, r.transaction)
   assert.equal(applied.doc.text, '1. 甲\n2. 乙\n3. 丙丁\n')
   assert.equal(applied.selection.anchor, applied.doc.text.indexOf('丁'))
+}
+
+// ==========================================================================
+// THE RENUMBER'S MISSING HALF (2026-08-26). Every pin above is a SOURCE-
+// SPELLING claim, and the claim only holds because of one CommonMark rule:
+// an ordered list's `start` is the number of its FIRST list item, and every
+// later item's number is ignored. So the digits the renumber writes are free
+// exactly when the rewritten item is NOT its list's first child — on a first
+// item those same digits silently become the list's `start`, a visible
+// renumbering of the whole list.
+//
+// `provenNestingOnly` cannot see this (its `leafSignature` records leaf blocks'
+// type + decoded text and never reads a list's `ordered`/`start`), so from
+// 96518af until now the neutrality was assumed. `provenIgnoredOrdinal` in
+// indent.js now proves it, and this block pins the property the proof asserts:
+// for every renumbering outdent, the rewritten marker reparses into a NON-FIRST
+// item of an ordered list. A renumber that ever fires on a first item fails
+// here, and in the command falls back to the plain indentation strip (which
+// keeps the author's own number, hence the author's own `start`).
+{
+  const markerOffsetOfLine = (text, lineText) => {
+    const at = text.indexOf(lineText)
+    return at + (lineText.match(/^[ \t>]*/) || [''])[0].length
+  }
+  const ordinalIsIgnored = (text, markerAt) => {
+    let found = false
+    let ignored = false
+    const walk = (node) => {
+      if (found) return
+      if (node?.type === 'list') {
+        const items = node.children || []
+        for (let i = 0; i < items.length; i += 1) {
+          if (items[i]?.position?.start?.offset === markerAt) {
+            found = true
+            ignored = !!node.ordered && i > 0
+            return
+          }
+        }
+      }
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(parseKernelMarkdown(text))
+    return found && ignored
+  }
+  // [source, caret text, expected bytes, the rewritten marker's own line]
+  const cases = [
+    ['1. 甲\n2. 乙\n   1. 丙\n', '丙', '1. 甲\n2. 乙\n3. 丙\n', '3. 丙'],
+    ['1) 甲\n   1) 乙\n', '乙', '1) 甲\n2) 乙\n', '2) 乙'],
+    ['9. 甲\n   1. 乙\n', '乙', '9. 甲\n10. 乙\n', '10. 乙'],
+    ['1. 甲\n2. 乙\n   1. 丙\n      - 丁\n', '丙', '1. 甲\n2. 乙\n3. 丙\n   - 丁\n', '3. 丙'],
+    ['1. 甲\r\n2. 乙\r\n   1. 丙\r\n', '丙', '1. 甲\r\n2. 乙\r\n3. 丙\r\n', '3. 丙']
+  ]
+  for (const [src, caret, expected, markerLine] of cases) {
+    assert.equal(run(src, src.indexOf(caret), outdentListItem), expected)
+    assert.ok(ordinalIsIgnored(expected, markerOffsetOfLine(expected, markerLine)),
+      `renumbered marker must be a non-first ordered item (CommonMark ignores its ordinal): ${JSON.stringify(expected)}`)
+  }
+  // The blockquoted spelling takes the same path (quotePrefix-relative offsets).
+  assert.equal(run('> 1. 甲\n>    1. 乙\n', '> 1. 甲\n>    1. 乙\n'.indexOf('乙'), outdentListItem),
+    '> 1. 甲\n> 2. 乙\n')
+  assert.ok(ordinalIsIgnored('> 1. 甲\n> 2. 乙\n',
+    markerOffsetOfLine('> 1. 甲\n> 2. 乙\n', '> 2. 乙')),
+  'blockquoted renumber is ordinal-inert too')
 }
 
 // ==========================================================================

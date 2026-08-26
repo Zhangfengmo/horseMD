@@ -4336,7 +4336,14 @@ console.log('PASS kernel gateway (line-start whitespace: paragraph/continuation/
     assert.equal(classified.kind, 'blocked', 'the refusal is unchanged')
     assert.equal(classified.blockedCode, KERNEL_CODES.HEADING_DEMOTE,
       'but it now carries the heading-demote name, not the anonymous input-type one')
-    assert.ok(/ReplaceAroundStep/.test(classified.blockedShape || ''),
+    // `replaceAround`, not `ReplaceAroundStep`: since the D4 step-identity
+    // fix the diagnostic names steps by their prosemirror-transform JSON id
+    // (`Step.jsonID`), which is a string literal on the class prototype and
+    // therefore survives minification — a class NAME does not, which is why
+    // the original mobile-build report read `"shape":"ki[1,1]@heading…"`.
+    // See the STEP IDENTITY ADR in editor-kernel-gateway.js and
+    // scripts/test-kernel-step-identity.mjs.
+    assert.ok(/replaceAround/.test(classified.blockedShape || ''),
       `the shape travels with it — got ${classified.blockedShape}`)
     assert.ok(/heading/.test(classified.blockedShape || ''))
   }

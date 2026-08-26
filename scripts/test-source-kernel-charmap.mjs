@@ -779,3 +779,150 @@ console.log('PASS source-kernel character map (inline html)')
 }
 
 console.log('PASS source-kernel character map (hard break: continuation prefix folded, two shapes fail closed)')
+
+// ============================================================================
+// 软换行的续行前缀折叠必须**有界证明**（D3，2026-08-26）
+// ============================================================================
+// `consumeSoftBreak` 贪婪吞掉行尾之后的每一个前缀字符（' ' / '\t' / '>'），
+// `textUnits` 再拿结果去和**文本节点自己的** `position.end.offset` 比。当续行
+// 的第一个行内节点不是 text（inlineCode / strong / emphasis / link / image /
+// delete / inlineMath / html）时，remark 把文本节点**截在行尾**，前缀字节落在
+// 本节点 end 与下一个兄弟 start 之间的缺口里 —— 贪婪吞越过 end，整块 null，
+// 段落变只读。这正是 2026-08-18 `hardBreakUnitEnd` 为硬换行关掉的那个洞
+// （commit 6560df5），只是换了一种节点，所以用**同一个函数**同样关掉：折叠只
+// 能延伸到下一个兄弟节点自己的 start offset，且中间每个字节都必须是续行前缀
+// 字符。
+//
+//   'a b\n  `c` d'  -> 旧：null（本次修复）      'a b\n`c` d'  -> 旧：ok（无前缀）
+//   '- a b\n  `c` d'、'> a b\n> **c** d'          'a b\n  c d'  -> 旧：ok（纯文本续行）
+{
+  const cases = [
+    // [源码, 软换行单元的 raw 片段, 可见长度]
+    ['a b\n  `c` d\n', '\n  ', 7],              // 段落缩进续行 + inlineCode（最小复现）
+    ['a b\n\t`c` d\n', '\n\t', 7],              // 制表符缩进
+    ['a b\n  **c** d\n', '\n  ', 7],            // strong
+    ['a b\n  *c* d\n', '\n  ', 7],              // emphasis
+    ['a b\n  ~~c~~ d\n', '\n  ', 7],            // delete
+    ['a b\n  [c](u) d\n', '\n  ', 7],           // link
+    ['a b\n  ![c](u) d\n', '\n  ', 7],          // image（atom）
+    ['a b\n  $c$ d\n', '\n  ', 7],              // inlineMath（atom）
+    ['a b\n  <span>c</span> d\n', '\n  ', 7],   // 合并后的行内 HTML 片段（atom）
+    ['- a b\n  `c` d\n', '\n  ', 7],            // 列表项续行
+    ['> a b\n> **c** d\n', '\n> ', 7],          // 引用续行 —— 日常形态
+    ['>> a b\n>> `c` d\n', '\n>> ', 7],         // 嵌套引用
+    ['> - a b\n>   `c` d\n', '\n>   ', 7],      // 引用里的列表
+    ['a b\r\n  `c` d\r\n', '\r\n  ', 7],        // CRLF
+    ['> a b\r\n> `c` d\r\n', '\r\n> ', 7],      // CRLF + 引用
+    ['a b\r  `c` d\r', '\r  ', 7],              // 孤立 CR
+    ['> a b\r> `c` d\r', '\r> ', 7],            // 孤立 CR + 引用
+    ['a b\n`c` d\n', '\n', 7]                   // 对照：无前缀（本来就可映射）
+  ]
+  for (const [src, breakRaw, visibleLength] of cases) {
+    const label = JSON.stringify(src)
+    const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+    const map = buildCharacterMap(src, block.node)
+    assert.ok(map, `${label} 必须可映射`)
+    const index = map.units.findIndex((u) => u.kind === 'linebreak')
+    const lb = map.units[index]
+    assert.ok(lb, `${label} 必须有软换行单元`)
+    // 一个行尾（任何拼写）= 一个 width-1 单元（CRLF 加宽，2026-08-21 不得回退）
+    assert.equal(lb.width, 1, `${label}: 软换行单元宽度必须是 1`)
+    assert.equal(map.units.filter((u) => u.kind === 'linebreak').length, 1, `${label}: 只能有一个换行单元`)
+    assert.equal(src.slice(lb.rawStart, lb.rawEnd), breakRaw,
+      `${label}: 软换行单元必须吞下续行前缀`)
+    assert.equal(lb.ending, breakRaw.startsWith('\r\n') ? '\r\n' : breakRaw[0],
+      `${label}: ending 必须记 value 里的行尾拼写`)
+    assert.equal(map.visibleLength, visibleLength, `${label}: visibleLength`)
+    // 折叠的终点必须**恰好**是下一个行内兄弟的 start —— 既不留缺口，也不吞进
+    // 兄弟自己的字节。
+    const parent = block.node
+    const textIdx = parent.children.findIndex((c) =>
+      c.type === 'text' && c.position.start.offset <= lb.rawStart && c.position.end.offset > lb.rawStart)
+    const sibling = parent.children[textIdx + 1]
+    assert.ok(sibling, `${label}: 用例必须真的有下一个兄弟`)
+    if (breakRaw.length > (breakRaw.startsWith('\r\n') ? 2 : 1)) {
+      assert.equal(lb.rawEnd, sibling.position.start.offset,
+        `${label}: 折叠终点必须是下一个兄弟的 start`)
+    }
+    // 三个解析器在换行**前**必须给同一个字节；换行**后**的边界（visibleToRaw）
+    // 落在折叠之后。（后侧的 rawStartForVisible 会跳过 marker 缺口，这是既有的
+    // 缺口感知语义，不在此断言。）
+    let visBefore = 0
+    for (let i = 0; i < index; i += 1) visBefore += map.units[i].width
+    assert.equal(map.visibleToRaw(visBefore), lb.rawStart, `${label}: visibleToRaw(before)`)
+    assert.equal(map.rawStartForVisible(visBefore), lb.rawStart, `${label}: rawStartForVisible(before)`)
+    assert.equal(map.rawNeutralInsert(visBefore), lb.rawStart, `${label}: rawNeutralInsert(before)`)
+    assert.equal(map.visibleToRaw(visBefore + 1), lb.rawEnd, `${label}: visibleToRaw(after)`)
+    // 删除软换行 = 恰好它自己的字节（含前缀），既不多也不少。
+    assert.deepEqual(map.rawRangeForVisibleRange(visBefore, visBefore + 1),
+      { from: lb.rawStart, to: lb.rawEnd }, `${label}: 删除范围`)
+  }
+}
+
+// 对照：续行是**纯文本**时，remark 把整段放进同一个 text 节点，折叠仍走
+// `consumeSoftBreak` 的贪婪路径（由 value 的下一个字符自证），逐字节不变 ——
+// 修复只在折叠越过节点自身 end 时才接管。
+{
+  for (const [src, breakRaw] of [
+    ['a b\n  c d\n', '\n  '],
+    ['> a b\n> c d\n', '\n> '],
+    ['- a b\n  c d\n', '\n  ']
+  ]) {
+    const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+    const map = buildCharacterMap(src, block.node)
+    assert.ok(map, `${JSON.stringify(src)} 必须可映射`)
+    assert.equal(block.node.children.length, 1, `${JSON.stringify(src)}: 应该只有一个 text 节点`)
+    const lb = map.units.find((u) => u.kind === 'linebreak')
+    assert.equal(src.slice(lb.rawStart, lb.rawEnd), breakRaw)
+    assert.equal(map.visibleLength, 7)
+  }
+}
+
+// 负面对照 1：没有下一个兄弟可以证明，而行尾之后确实跟着前缀字节 → 整块拒绝。
+// （硬换行版本是 '> [a  \n> ](u)b'；软换行版本同形。）文本节点是 link 容器的
+// 最后一个子节点，'> ' 属于容器自己的收尾语法，没有任何 start offset 能证明
+// 前缀到哪里结束。
+{
+  const src = '> [a\n> ](u)b\n'
+  const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+  assert.equal(buildCharacterMap(src, block.node), null,
+    '无兄弟可证 + 后随前缀字符 → 必须 fail closed')
+}
+// 同一形态但没有容器前缀：行尾之后的第一个字节（']'）不可能是前缀的一部分，
+// 「没有缺口」因此是可证的 —— 块保持可编辑（既有行为，不得被修复带偏）。
+{
+  const src = '[a\n](u)b\n'
+  const block = buildSyntaxIndex(src).blockAt(src.indexOf('a'))
+  const map = buildCharacterMap(src, block.node)
+  assert.ok(map)
+  const lb = map.units.find((u) => u.kind === 'linebreak')
+  assert.equal(src.slice(lb.rawStart, lb.rawEnd), '\n')
+}
+
+// 负面对照 2：跨越的字节里有**非**续行前缀字符 → 整块拒绝。真实解析器不会
+// 产出这一形状（缺口只由 ' ' / '\t' / '>' 组成），所以用手工节点强制它 ——
+// 这条检查正是把「行尾之后是容器前缀」从假设变成前提的那一步。
+//
+// 两个源码串共用同一份节点形状（text[0,4) + inlineCode[6,9)），只差缺口
+// [4,6) 的字节：'  ' 全是前缀字符，' x' 里的 'x' 不是。注意 'x' 必须在贪婪
+// 消费**停下之后**才出现（即缺口的第一个字节仍是前缀字符），否则贪婪端根本
+// 越不过节点自身的 end，走不到这条证明路径。
+{
+  const shape = () => ({
+    type: 'paragraph',
+    position: { start: { offset: 0 }, end: { offset: 9 } },
+    children: [
+      { type: 'text', value: 'a b\n', position: { start: { offset: 0 }, end: { offset: 4 } } },
+      { type: 'inlineCode', value: 'c', position: { start: { offset: 6 }, end: { offset: 9 } } }
+    ]
+  })
+  // 对照：缺口是 '  '（全是前缀字符）→ 可证 → 可映射，折叠止于兄弟 start
+  const ok = buildCharacterMap('a b\n  `c`\n', shape())
+  assert.ok(ok, '缺口全是前缀字符时必须可映射')
+  assert.equal(ok.units.find((u) => u.kind === 'linebreak').rawEnd, 6)
+  // 负面：缺口是 ' x'（'x' 不是续行前缀字符）→ 不可证 → 整块拒绝
+  assert.equal(buildCharacterMap('a b\n x`c`\n', shape()), null,
+    '跨越非前缀字节 → 必须 fail closed')
+}
+
+console.log('PASS source-kernel character map (soft break: bounded, proven continuation fold)')

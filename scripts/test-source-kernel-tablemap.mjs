@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import { Schema } from '@milkdown/prose/model'
 import { buildSyntaxIndex } from '../src/renderer/src/lib/source-kernel/syntax-index.js'
 import { buildTableCellMaps } from '../src/renderer/src/lib/source-kernel/table-map.js'
+import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/commands/replace-text.js'
 
 const schema = new Schema({
   nodes: {
@@ -597,6 +598,234 @@ console.log('--- source kernel table map ---')
         'no cell unit may overlap the delimiter row')
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Case 11: the escape guard is `\|`-SHAPED, not escape-shaped (D2).
+//
+// The refusal at buildCellCharMap used to be
+// `units.some(u => u.kind === 'escape') -> null`, which owned 330 read-only
+// blocks = 63.7% of the entire read-only surface across 197 real documents
+// (scripts/measure-kernel-readonly-causes.mjs, cause B) — because
+// remark-stringify writes `claude\-haiku\-4\.5` and `4\.00` inside cells as a
+// matter of routine, and those are ORDINARY CommonMark escapes, byte-identical
+// to the ones `buildCharacterMap` already serves in every paragraph.
+//
+// Only `\|` carries the GFM-table-specific decode (a cell unescapes it into a
+// literal `|` BEFORE inline parsing, and it applies even inside a code span,
+// where a CommonMark backslash escape does nothing). That one spelling — and
+// nothing else — stays refused.
+// ---------------------------------------------------------------------------
+{
+  // NEGATIVE CONTROL 1 — a literal `\|` in a cell's text is STILL read-only.
+  // Probed '| a\|b | c |': text [2,6) value 'a|b', units char/escape/char with
+  // the escape's raw bytes '\|' at [3,5).
+  const md = '| a\\|b | c |\n| --- | --- |\n| d | e |\n'
+  const table = mdTableOf(md)
+  assert.equal(table.children[0].children[0].children[0].value, 'a|b',
+    'sanity: the parser really does unescape the pipe')
+  const result = buildTableCellMaps(md, table, tableNode([
+    [[text('a|b')], [text('c')]], [[text('d')], [text('e')]]
+  ]), 0)
+  assert.ok(result, 'escaped-pipe table still zips structurally')
+  assert.equal(result.cells[0].charMap, null,
+    'NARROWING IS NOT REMOVAL: a `\\|` cell must stay read-only')
+  assert.ok(result.cells[1].charMap, 'its sibling stays editable')
+  assert.ok(result.cells[2].charMap)
+  assert.ok(result.cells[3].charMap)
+}
+{
+  // NEGATIVE CONTROL 2 — the `\|` may be nested inside an inline container
+  // (the unit is emitted by the same `textUnits` walk either way). Probed
+  // '| **a\|b** | c |': strong [2,10) > text [4,8), units char/escape/char.
+  const md = '| **a\\|b** | c |\n| --- | --- |\n| d | e |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('a|b', 'strong')], [text('c')]], [[text('d')], [text('e')]]
+  ]), 0)
+  assert.ok(result, 'nested escaped-pipe table still zips structurally')
+  assert.equal(result.cells[0].charMap, null,
+    'a `\\|` inside a strong run must stay read-only too')
+  assert.ok(result.cells[1].charMap, 'its sibling stays editable')
+}
+{
+  // NEGATIVE CONTROL 3 — a `\|` inside an inline CODE span is where the GFM
+  // decode and the CommonMark one genuinely disagree; `inlineCodeUnits`
+  // already refuses it (raw content slice '\|' !== value '|'), so the cell has
+  // NO charMap at all and never reaches the escape guard. Pinned so the two
+  // refusals cannot silently swap places.
+  const md = '| `a\\|b` | c |\n| --- | --- |\n| d | e |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('a|b', 'inlineCode')], [text('c')]], [[text('d')], [text('e')]]
+  ]), 0)
+  assert.ok(result, 'code-span escaped-pipe table still zips structurally')
+  assert.equal(result.cells[0].charMap, null,
+    'a `\\|` inside a code span must stay read-only')
+  assert.ok(result.cells[1].charMap)
+}
+{
+  // POSITIVE — the ordinary CommonMark escapes become EDITABLE, with the
+  // escape mapped as exactly one width-1 unit spanning both raw bytes.
+  // Probed '| a\-b | 4\.00 |\n| --- | --- |\n| c\*d | e\_f |\n':
+  //   [0,0] cell [0,7)  '| a\-b '   text [2,6)  units a / \- / b
+  //   [0,1] cell [7,16) '| 4\.00 |' text [9,14) units 4 / \. / 0 / 0
+  //   [1,0] cell [31,38)'| c\*d '   text [33,37) units c / \* / d
+  //   [1,1] cell [38,46)'| e\_f |'  text [40,44) units e / \_ / f
+  const md = '| a\\-b | 4\\.00 |\n| --- | --- |\n| c\\*d | e\\_f |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('a-b')], [text('4.00')]], [[text('c*d')], [text('e_f')]]
+  ]), 0)
+  assert.ok(result, 'ordinary-escape table must zip')
+  assert.ok(result.cells.every((c) => c.charMap),
+    'every ordinary-escape cell must be EDITABLE')
+  assert.deepEqual(unitTrace(md, result.cells[0].charMap),
+    [['a', 'char', 1], ['\\-', 'escape', 1], ['b', 'char', 1]])
+  assert.deepEqual(unitTrace(md, result.cells[1].charMap),
+    [['4', 'char', 1], ['\\.', 'escape', 1], ['0', 'char', 1], ['0', 'char', 1]])
+  assert.deepEqual(unitTrace(md, result.cells[2].charMap),
+    [['c', 'char', 1], ['\\*', 'escape', 1], ['d', 'char', 1]])
+  assert.deepEqual(unitTrace(md, result.cells[3].charMap),
+    [['e', 'char', 1], ['\\_', 'escape', 1], ['f', 'char', 1]])
+  assert.deepEqual(boundaries(result.cells[0].charMap), [2, 3, 5, 6])
+  assert.deepEqual(boundaries(result.cells[1].charMap), [9, 10, 12, 13, 14])
+  // The visible length the PM side counts and the map's own must agree — the
+  // whole point of a width-1 escape unit.
+  for (const cell of result.cells) {
+    assert.equal(cell.pmNode.content.size, cell.charMap.visibleLength)
+  }
+}
+{
+  // POSITIVE — `\\` (an escaped BACKSLASH). Probed '| a\\b | c |': text [2,6)
+  // value 'a\b', units a / \\ / b.
+  const md = '| a\\\\b | c |\n| --- | --- |\n| d | e |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('a\\b')], [text('c')]], [[text('d')], [text('e')]]
+  ]), 0)
+  assert.ok(result, 'escaped-backslash table must zip')
+  assert.ok(result.cells[0].charMap, 'a `\\\\` cell must be EDITABLE')
+  assert.deepEqual(unitTrace(md, result.cells[0].charMap),
+    [['a', 'char', 1], ['\\\\', 'escape', 1], ['b', 'char', 1]])
+  assert.equal(result.cells[0].pmNode.content.size, 3)
+}
+{
+  // THE MEASURED REAL-WORLD SHAPE (~/Downloads/灵影网关模型价格清单.md, which
+  // lost 110 of its 111 cells to the blanket guard). Probed
+  // '| claude\-haiku\-4\.5 | 4\.00 |': cell [0,22), text [2,21) value
+  // 'claude-haiku-4.5' (16 visible chars over 19 raw bytes).
+  const md = '| claude\\-haiku\\-4\\.5 | 4\\.00 |\n| --- | --- |\n| a | b |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('claude-haiku-4.5')], [text('4.00')]], [[text('a')], [text('b')]]
+  ]), 0)
+  assert.ok(result, 'price-list table must zip')
+  assert.ok(result.cells.every((c) => c.charMap), 'every price-list cell editable')
+  const map = result.cells[0].charMap
+  assert.equal(map.visibleLength, 16)
+  assert.equal(result.cells[0].pmNode.content.size, 16)
+  assert.deepEqual(boundaries(map),
+    [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 17, 18, 20, 21])
+  assert.deepEqual(map.units.filter((u) => u.kind === 'escape')
+    .map((u) => md.slice(u.rawStart, u.rawEnd)), ['\\-', '\\-', '\\.'])
+
+  // ---- an EDIT into such a cell lands byte-exactly and never disturbs an
+  // escape. `replaceVisibleText` is the real commit primitive (it resolves the
+  // raw range through this very map and consults the typing-spelling policy),
+  // and every result is REPARSED to prove the escape survived as an escape.
+  const doc = { text: md, revision: 7 }
+  const apply = (tx) => md.slice(0, tx.from) + tx.insert + md.slice(tx.to)
+  const cellValueOf = (source) => {
+    const t = mdTableOf(source)
+    return t?.children?.[0]?.children?.[0]?.children?.[0]?.value ?? null
+  }
+
+  // (a) replace the trailing '5' (visible [15,16)) -> raw [20,21).
+  const a = replaceVisibleText({ doc, map, visFrom: 15, visTo: 16, insert: '6' })
+  assert.ok(a.ok, 'replacing a plain char in an escaped cell must be provable')
+  assert.deepEqual([a.transaction.from, a.transaction.to, a.transaction.insert], [20, 21, '6'])
+  assert.equal(apply(a.transaction),
+    '| claude\\-haiku\\-4\\.6 | 4\\.00 |\n| --- | --- |\n| a | b |\n')
+  assert.equal(cellValueOf(apply(a.transaction)), 'claude-haiku-4.6')
+
+  // (b) a zero-width insert BEFORE the '\.' escape (visible 14) -> raw 18,
+  //     i.e. in front of the backslash, never between `\` and `.`.
+  const b = replaceVisibleText({ doc, map, visFrom: 14, visTo: 14, insert: 'Z' })
+  assert.ok(b.ok)
+  assert.deepEqual([b.transaction.from, b.transaction.to, b.transaction.insert], [18, 18, 'Z'])
+  assert.equal(apply(b.transaction),
+    '| claude\\-haiku\\-4Z\\.5 | 4\\.00 |\n| --- | --- |\n| a | b |\n')
+  assert.equal(cellValueOf(apply(b.transaction)), 'claude-haiku-4Z.5')
+
+  // (c) a zero-width insert AFTER the '\.' escape (visible 15) -> raw 20.
+  const c = replaceVisibleText({ doc, map, visFrom: 15, visTo: 15, insert: 'Z' })
+  assert.ok(c.ok)
+  assert.deepEqual([c.transaction.from, c.transaction.to, c.transaction.insert], [20, 20, 'Z'])
+  assert.equal(apply(c.transaction),
+    '| claude\\-haiku\\-4\\.Z5 | 4\\.00 |\n| --- | --- |\n| a | b |\n')
+  assert.equal(cellValueOf(apply(c.transaction)), 'claude-haiku-4.Z5')
+
+  // (d) replacing the ESCAPED character itself consumes BOTH of its raw bytes
+  //     — an escape is one indivisible unit, never half-written.
+  const d = replaceVisibleText({ doc, map, visFrom: 14, visTo: 15, insert: 'X' })
+  assert.ok(d.ok)
+  assert.deepEqual([d.transaction.from, d.transaction.to, d.transaction.insert], [18, 20, 'X'])
+  assert.equal(apply(d.transaction),
+    '| claude\\-haiku\\-4X5 | 4\\.00 |\n| --- | --- |\n| a | b |\n')
+  assert.equal(cellValueOf(apply(d.transaction)), 'claude-haiku-4X5')
+
+  // (e) after any of these the cell is STILL cell-addressable (the edit did
+  //     not push the table out of the provable set).
+  for (const tx of [a, b, c, d]) {
+    const next = apply(tx.transaction)
+    const nextTable = mdTableOf(next)
+    const nextResult = buildTableCellMaps(next, nextTable, tableNode([
+      [[text(cellValueOf(next))], [text('4.00')]], [[text('a')], [text('b')]]
+    ]), 0)
+    assert.ok(nextResult && nextResult.cells[0].charMap,
+      'the edited cell must remain editable')
+  }
+}
+{
+  // UNCHANGED — a `<br>` cell degrades even when its escapes are the ordinary
+  // kind: `hasCellBreak` runs BEFORE the escape guard and is untouched by the
+  // narrowing. Probed '| a\-b<br>c | d |': cell [0,12), children
+  // text/html/text, units a / \- / b / <br> / c.
+  const md = '| a\\-b<br>c | d |\n| --- | --- |\n| e | f |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('a-b'), schema.node('hardbreak'), text('c')], [text('d')]],
+    [[text('e')], [text('f')]]
+  ]), 0)
+  assert.ok(result, '<br>+escape table still zips structurally')
+  assert.equal(result.cells[0].charMap, null,
+    'a <br> cell degrades regardless of the escapes it holds')
+  assert.ok(result.cells[1].charMap, 'its sibling stays editable')
+}
+{
+  // UNCHANGED — the whole-TABLE ragged refusal is independent of escapes.
+  const md = '| a\\-b | c |\n| --- | --- |\n| d |\n'
+  assert.equal(buildTableCellMaps(md, mdTableOf(md),
+    tableNode([[[text('a-b')], [text('c')]], [[text('d')]]]), 0), null,
+  'a ragged table refuses as a whole, escapes or not')
+}
+{
+  // SCOPE STATEMENT — the guard reads the escape UNITS, i.e. the decode the
+  // unit model owns. A `\|` sitting in a link DESTINATION is gap bytes: no
+  // unit covers it, and no cell-text edit can address it (the map's only
+  // visible content is the label). Probed '| [x](a\|b) | c |': cell [0,12),
+  // link [2,11), the ONE unit is the label char 'x' at [3,4).
+  const md = '| [x](a\\|b) | c |\n| --- | --- |\n| d | e |\n'
+  const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
+    [[text('x')], [text('c')]], [[text('d')], [text('e')]]
+  ]), 0)
+  assert.ok(result, 'link-destination table must zip')
+  const map = result.cells[0].charMap
+  assert.ok(map, 'the cell is editable — its escape is not in the unit model')
+  assert.deepEqual(unitTrace(md, map), [['x', 'char', 1]])
+  // Every addressable range stays strictly inside the label, so the `\|` in
+  // the destination is unreachable from a text edit.
+  const doc = { text: md, revision: 1 }
+  const edit = replaceVisibleText({ doc, map, visFrom: 0, visTo: 1, insert: 'y' })
+  assert.ok(edit.ok)
+  assert.deepEqual([edit.transaction.from, edit.transaction.to], [3, 4])
+  assert.equal(md.slice(0, 3) + 'y' + md.slice(4),
+    '| [y](a\\|b) | c |\n| --- | --- |\n| d | e |\n')
 }
 
 console.log('PASS source-kernel table map')

@@ -77,6 +77,8 @@ import {
   resolveReviewMarker
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
+import { resolveCommittedRawOffset } from '../lib/source-kernel/commands/insert-point.js'
+import { resolveWhitespaceForPublish } from '../lib/source-kernel/commands/trailing-whitespace.js'
 import { classifyTransactions, commitPlainText, commitMarkInputRule, commitResolvedTextSteps, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
@@ -833,7 +835,16 @@ export function createKernelMode({
       if (Number.isFinite(caretRaw)) {
         try {
           const nextMap = buildProjectionMap(kernel.doc.text, parsed)
-          const found = nextMap?.rawToPmCaret?.(caretRaw)
+          // Same three-step ladder as `applyKernelTransaction`, in the same
+          // order of decreasing strength: the WRITE resolver (`rawToPmPos`,
+          // inside `resolveCommittedRawOffset`), then the inverse of the
+          // writer's own zero-width insert point, then `rawToPmCaret`'s
+          // empty-textblock derivation. The middle rung is this file's own
+          // committed anchor coming home: a plain char committed at a mark
+          // run's edge sits just outside the delimiters, which is no unit
+          // boundary, so this repair used to drop the caret with
+          // `caret-unmappable` (measured while typing ASCII `**bold**`).
+          const found = resolveCommittedRawOffset(nextMap, caretRaw) || nextMap?.rawToPmCaret?.(caretRaw)
           if (found && Number.isFinite(found.pos)) caretPos = found.pos
         } catch {
           caretPos = null
@@ -978,12 +989,51 @@ export function createKernelMode({
     clearTimeout(verifyTimer)
     runScheduledVerify()
   }
-  const requestVerify = (newDoc, caretRaw = null) => {
+  const requestVerify = (newDoc, caretRaw = null, caretPmPos = null) => {
     if (!kernel.map) {
       // Rebind failed: verify is the repair path and must run NOW, against
       // the doc the caller is installing (the live view may not carry it yet
       // — handleTransactions runs before updateState).
       if (newDoc) verifyPlainTextProjection(newDoc, caretRaw)
+      return
+    }
+    // SECOND IMMEDIATE CASE (2026-08-26): the map built, but the block the
+    // caret is in came back DEGRADED. That is not a perf judgement call — it
+    // is the projection saying, from the map it just rebuilt, that it cannot
+    // describe the very block this commit wrote into, so `degradedPairAt`
+    // (the predicate the refusal itself uses) will refuse the NEXT keystroke
+    // with `block-read-only`. Debouncing the repair for 200 ms therefore
+    // swallows whatever the user types inside that window.
+    //
+    // Measured: typing ASCII `**bold**` at ~120 ms/key. Key 7 commits the
+    // byte `**bold*`, whose reparse is `*` + <em>bold</em> (5 visible chars)
+    // while the view still holds the literal 7 characters — the pair's size
+    // proof fails, so the block is degraded — and key 8 arrives before the
+    // debounced repair, losing the keystroke. (CJK `与**粗*` never diverges,
+    // because CommonMark's rule of 3 keeps it literal; that asymmetry is why
+    // the CJK-only fixture never saw this.) `> 200 ms/key` typing passes
+    // today purely by outrunning the timer.
+    //
+    // This is the same class as the `!kernel.map` case above — "verify IS the
+    // repair, and the next keystroke depends on it" — narrowed to one block,
+    // and it costs a parse ONLY when a divergence is already proven, so the
+    // perf assessment §9 #5 healthy path is untouched. It is a repair-TIMING
+    // change; verify is post-hoc and gates no byte decision, so it cannot
+    // make any commit more permissive.
+    //
+    // Mid-session it must not run: `runScheduledVerify` DROPS a verify while
+    // split placeholders are live (Case PERF-3 — the placeholder is a
+    // view-only paragraph the reparse cannot contain, and its repair would
+    // delete the block under the parked caret), and running it here instead
+    // would be that same regression by another door.
+    if (
+      Number.isFinite(caretPmPos)
+      && !splitPlaceholders.length
+      && newDoc
+      && degradedPairAt(caretPmPos)
+    ) {
+      pushKernelDiagnostic({ type: 'verify-immediate-degraded-block', revision: kernel.doc.revision })
+      verifyPlainTextProjection(newDoc, caretRaw)
       return
     }
     scheduleVerify(caretRaw)
@@ -1177,7 +1227,7 @@ export function createKernelMode({
         if ((hadPlaceholders || committed.rewrote) && newState?.doc) {
           verifyPlainTextProjection(newState.doc, caretRide)
         } else {
-          requestVerify(newState?.doc, caretRide)
+          requestVerify(newState?.doc, caretRide, newState?.selection?.head)
         }
         onChange?.(kernel.doc.text, false)
         return undefined
@@ -1235,7 +1285,7 @@ export function createKernelMode({
         // transaction produces, so the ordinary rebind + debounced verify
         // suffice (nothing is known to differ — the §9 #5 healthy path).
         bindMap(newState.doc)
-        requestVerify(newState.doc, committed.applied?.selection?.anchor)
+        requestVerify(newState.doc, committed.applied?.selection?.anchor, newState.selection?.head)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -1825,7 +1875,20 @@ export function createKernelMode({
       pushKernelDiagnostic({ type: 'projection-unmappable-refused', intent: txn.intent })
       return false
     }
-    if (requireMap && Number.isFinite(anchor) && !nextMap?.rawToPmPos?.(anchor)) {
+    // A COMMITTED offset is resolved through `resolveCommittedRawOffset`
+    // (commands/insert-point.js), never through `rawToPmPos` alone: the write
+    // resolver first, and only when it refuses, the INVERSE of the writer's
+    // own zero-width insert point. That second resolver is what makes an
+    // anchor sitting just outside a mark's delimiter run nameable — the very
+    // byte this transaction wrote, because `pmPosToRawInsert` chased the mark
+    // gaps to put it there. Without it the kernel refused its own proven
+    // commit and swallowed the keystroke (ASCII `**bold**` lost its 8th key,
+    // measured 2026-08-26; see insert-point.js's own ADR).
+    //
+    // It cannot invent a position: a DEGRADED pair has no charMap and both
+    // resolvers answer null, so the degradation half of this guard — Case M4c
+    // (`see ==www.a.com== ok`) included — keeps its full meaning.
+    if (requireMap && Number.isFinite(anchor) && !resolveCommittedRawOffset(nextMap, anchor)) {
       // The map built, but the block this transaction acted on degraded to a
       // non-editable pair (see the P5-2.5 note above) — same refusal, same
       // untouched state.
@@ -1842,11 +1905,11 @@ export function createKernelMode({
     if (record) recordHistory(result, txn)
     let target = null
     if (Number.isFinite(anchor) && nextMap) {
-      const found = nextMap.rawToPmPos?.(anchor)
+      const found = resolveCommittedRawOffset(nextMap, anchor)
       if (found && Number.isFinite(found.pos)) {
         target = { pos: found.pos, headPos: null }
         if (Number.isFinite(head) && head !== anchor) {
-          const foundHead = nextMap.rawToPmPos?.(head)
+          const foundHead = resolveCommittedRawOffset(nextMap, head)
           if (foundHead && Number.isFinite(foundHead.pos)) target.headPos = foundHead.pos
         }
       }
@@ -3741,6 +3804,53 @@ export function createKernelMode({
     ? legacyApi[name]
     : null)
 
+  // ===========================================================================
+  // THE PUBLICATION BOUNDARY (2026-08-26, D5)
+  // ===========================================================================
+  // `kernel.doc.text` is the DOCUMENT. What a save / export / scratch-draft
+  // persistence writes is the document's PUBLICATION — the same bytes with
+  // every outstanding whitespace placeholder resolved
+  // (`resolveWhitespaceForPublish`, whose ADR states what is dropped, what is
+  // kept, and how each drop is proven). Without it, a Space or Tab typed as the
+  // LAST action reached the file as U+00A0 and stayed there forever: the heal
+  // that owns the placeholder needs a NEXT keystroke, and at that boundary
+  // there is none.
+  //
+  // PURE, AND THE DOCUMENT IS NOT REWRITTEN. Nothing is dispatched, no
+  // projection is reconciled, the ledger is untouched and the caret does not
+  // move — so the character the user typed is still in the editor after the
+  // save, and typing on still heals it into an ordinary space ('hello', Space,
+  // Cmd+S, 'world' -> 'hello world', not 'helloworld').
+  //
+  // ONLY A DURABILITY BOUNDARY PUBLISHES (`{ force: true }` — save, export,
+  // pending-rich-draft; plus getRecoveryMarkdown, which has no options and is
+  // always one). A SOURCE-MODE toggle passes no options and therefore keeps
+  // reading the document itself: source mode is where the user sees and deletes
+  // the placeholder, and the standing ruling on this spelling is that source
+  // mode must show whitespace («源码模式里，不接受这个写法» / «就是空白，类似于在
+  // 源码中也是空格»). A caller that forgets `force` gets today's behaviour —
+  // the fail-safe direction.
+  //
+  // Memoised on the document OBJECT (not its revision: `replaceMarkdown`
+  // installs a fresh document at revision 0), so repeated flush readers on one
+  // unchanged document pay for the proof's parses once. With an empty ledger —
+  // every keystroke that is not an outstanding placeholder — it is O(1).
+  let publishCache = null
+  const publishedDocumentText = () => {
+    if (publishCache?.doc === kernel.doc) return publishCache.text
+    const resolved = resolveWhitespaceForPublish(kernel.doc)
+    publishCache = { doc: kernel.doc, text: resolved.text }
+    if (resolved.drops.length) {
+      pushKernelDiagnostic({
+        type: 'publish-whitespace-resolved',
+        drops: resolved.drops.length,
+        revision: kernel.doc.revision
+      })
+    }
+    return resolved.text
+  }
+  const publishesDurably = (args) => args?.[0]?.force === true
+
   const apiOverrides = {
     // kernel.doc.text IS the durable source; no serializer round-trip, no
     // preservation mapper, no fail-closed null path. NOTE every delegate
@@ -3753,7 +3863,7 @@ export function createKernelMode({
       // A flush reader (save, mode switch, export) must not read past a
       // pending debounced verify — run it now (see the debounce ADR above).
       flushPendingVerify()
-      return kernel.doc.text
+      return publishesDurably(args) ? publishedDocumentText() : kernel.doc.text
     },
     // Await any in-flight IME composition before serving the flush: a save
     // (or any other flush caller) that ran mid-composition must see the
@@ -3767,7 +3877,7 @@ export function createKernelMode({
       if (delegate) return delegate(...args)
       await composition.settled()
       flushPendingVerify()
-      return kernel.doc.text
+      return publishesDurably(args) ? publishedDocumentText() : kernel.doc.text
     },
     replaceMarkdown: (markdown) => {
       const delegate = legacy('replaceMarkdown')
@@ -3810,7 +3920,9 @@ export function createKernelMode({
       const delegate = legacy('getRecoveryMarkdown')
       if (delegate) return delegate(...args)
       flushPendingVerify()
-      return kernel.doc.text
+      // A recovery copy is written to a FILE — a durability boundary with no
+      // options bag of its own.
+      return publishedDocumentText()
     },
     markdownOffsetFromSelection: (...args) => {
       const delegate = legacy('markdownOffsetFromSelection')

@@ -65,6 +65,12 @@ function decodeEntity(raw) {
 // decoded character can be matched again — the caller re-verifies alignment
 // on the following iteration, so an over-greedy consume here still fails
 // closed rather than silently mis-mapping.
+//
+// That re-verification is what makes the greedy consume safe, and it exists
+// only while the fold stays INSIDE this text node (there is more decoded value
+// to match against). When the break ENDS the node, nothing is left to
+// re-verify and the fold has to be proven instead — see `continuationFoldEnd`
+// and its caller below.
 function consumeSoftBreak(text, r) {
   let i = r
   if (text[i] === '\r') i += text[i + 1] === '\n' ? 2 : 1
@@ -76,6 +82,8 @@ function consumeSoftBreak(text, r) {
   return i
 }
 
+// LINE-ENDING CONTINUATION FOLD — one proof, both break kinds.
+//
 // HARD BREAK: the same continuation-prefix problem `consumeSoftBreak` solves,
 // solved the same way (2026-08-18). An mdast `break` is an ATOM here (one
 // width-1 unit), and its own position STOPS at the line terminator:
@@ -111,9 +119,32 @@ function consumeSoftBreak(text, r) {
 //  2. a `break` node whose raw span does not end at a line terminator. No
 //     parser output does this; the check is what makes "the bytes after this
 //     unit start a new line" a verified premise rather than an assumption.
+//
+// SOFT BREAK (D3, 2026-08-26): the hole was never soft-break-proof either, it
+// merely moved. `consumeSoftBreak`'s greedy fold is re-verified by the value's
+// own next character — but remark ends a `text` node AT the line terminator
+// whenever the wrapped line's first inline sibling is NOT text (inlineCode /
+// strong / emphasis / link / image / delete / inlineMath / html). The prefix
+// bytes then lie in the gap between that node's end and the sibling's start,
+// there is no decoded character left to re-verify against, and the greedy
+// consume overshot the node's own `position.end.offset`:
+//
+//   'a b\n  `c` d'   text[0,4) inlineCode[6,9) text[9,11)  -> null (whole block)
+//   'a b\n`c` d'     (no prefix)                           -> ok
+//   'a b\n  c d'     (plain-text continuation, ONE node)   -> ok
+//
+// '- a b\n  `c` d' and '> a b\n> **c** d' are the everyday spellings: any
+// wrapped list item or quoted paragraph whose continuation line opens with
+// code/bold/a link was wholly read-only. The fix is this same function, called
+// for the soft break's line-ending span — the fold is proven against the next
+// sibling's own start offset, never consumed on faith — so the two break kinds
+// cannot drift apart again. Both refusals above carry over verbatim: a soft
+// break ending a container's last text node with prefix bytes after it
+// ('> [a\n> ](u)b') still fails closed, and so does a gap holding any byte a
+// container prefix cannot be made of.
 const isContinuationPrefixChar = (ch) => ch === ' ' || ch === '\t' || ch === '>'
 
-function hardBreakUnitEnd(text, breakStart, breakEnd, nextSibling) {
+function continuationFoldEnd(text, breakStart, breakEnd, nextSibling) {
   if (!Number.isInteger(breakStart) || !Number.isInteger(breakEnd) || breakEnd <= breakStart) return null
   const last = text[breakEnd - 1]
   if (last !== '\n' && last !== '\r') return null
@@ -137,7 +168,14 @@ function hardBreakUnitEnd(text, breakStart, breakEnd, nextSibling) {
 // that already prove every other unit (escape / character reference / soft
 // break with its continuation prefix / astral pair), not by a second,
 // parallel decoder.
-export function textUnits(text, node) {
+//
+// `nextSibling` (D3, 2026-08-26) is the mdast node that FOLLOWS this text node
+// in its parent's children — the only thing that can prove where a trailing
+// soft break's continuation prefix ends (see `continuationFoldEnd`). It is
+// OPTIONAL: omitting it does not change any other unit, it only keeps the
+// cross-node fold unprovable, which is the same fail-closed answer the caller
+// got before the parameter existed.
+export function textUnits(text, node, nextSibling = null) {
   const value = String(node.value ?? '')
   const start = node.position?.start?.offset
   const end = node.position?.end?.offset
@@ -145,6 +183,10 @@ export function textUnits(text, node) {
   const units = []
   let r = start
   let v = 0
+  // The furthest raw byte this node's units may reach. Normally the node's own
+  // end; a PROVEN cross-node continuation fold is the one thing allowed to move
+  // it, and only as far as the next sibling's own start offset.
+  let rawLimit = end
   while (v < value.length) {
     const cp = value.codePointAt(v)
     const ch = String.fromCodePoint(cp)
@@ -170,9 +212,23 @@ export function textUnits(text, node) {
       if (!text.startsWith(ending, r)) return null
       if (ch === '\r' && !pair && text[r + 1] === '\n') return null
       const next = consumeSoftBreak(text, r)
-      if (next === null || next > end) return null
-      units.push({ rawStart: r, rawEnd: next, width: 1, kind: 'linebreak', ending })
-      r = next
+      if (next === null) return null
+      let unitEnd = next
+      if (next > end) {
+        // The greedy fold ran past this text node's own end: the prefix bytes
+        // sit in the gap before the next inline sibling, so the value cannot
+        // re-verify them. Prove the fold instead (`continuationFoldEnd`) —
+        // and only for a break that ENDS the value, because with decoded
+        // characters still to come, a fold reaching the sibling's start would
+        // hand them the SIBLING's bytes to match against.
+        if (v + ending.length !== value.length) return null
+        const proven = continuationFoldEnd(text, r, r + ending.length, nextSibling)
+        if (proven === null) return null
+        unitEnd = proven
+        rawLimit = Math.max(rawLimit, proven)
+      }
+      units.push({ rawStart: r, rawEnd: unitEnd, width: 1, kind: 'linebreak', ending })
+      r = unitEnd
       v += ending.length
       continue
     }
@@ -210,7 +266,7 @@ export function textUnits(text, node) {
     // rule (escape/entity/literal) — can't prove alignment, fail closed.
     return null
   }
-  return r <= end ? units : null
+  return r <= rawLimit ? units : null
 }
 
 // Per-value-char units for an mdast `inlineCode` node (P4-3.5). The node has
@@ -318,17 +374,19 @@ function collectUnits(text, node, gaps = null) {
       if (!Number.isInteger(s) || !Number.isInteger(e)) return null
       // A `break` (hard break) is the one atom whose raw span ends at a LINE
       // ENDING, so its unit has to swallow the next line's continuation prefix
-      // the way `consumeSoftBreak` does for a soft break — see
-      // `hardBreakUnitEnd` above for the proof and the two refused shapes.
-      // `children[i]` is the following sibling: `i` was already advanced past
-      // `child`.
+      // the way a soft break's does — see `continuationFoldEnd` above for the
+      // proof and the refused shapes. `children[i]` is the following sibling:
+      // `i` was already advanced past `child`.
       const rawEnd = child.type === 'break'
-        ? hardBreakUnitEnd(text, s, e, children[i])
+        ? continuationFoldEnd(text, s, e, children[i])
         : e
       if (rawEnd === null) return null
       units.push({ rawStart: s, rawEnd, width: 1, kind: 'atom' })
     } else if (child.type === 'text') {
-      const t = textUnits(text, child)
+      // `children[i]` is the following sibling (`i` was already advanced past
+      // `child`) — the offset a trailing soft break's continuation fold is
+      // proven against, exactly as for the hard break above.
+      const t = textUnits(text, child, children[i])
       if (!t) return null
       units.push(...t)
     } else if (child.type === 'inlineCode') {

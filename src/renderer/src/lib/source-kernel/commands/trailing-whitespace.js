@@ -550,6 +550,248 @@ export function spellBlockTailInsert({ doc, block, offset, insert, heal = null }
   return needsSpelling ? UNSUPPORTED : NOT_STRUCTURAL
 }
 
+// THE ENDPOINT OF THE PLACEHOLDER: WHAT IS PUBLISHED (2026-08-26, D5)
+// ===========================================================================
+// Everything above is a TYPING design. Its correctness argument is the heal:
+// «U+00A0 exists only while the space really is the last thing in the block».
+// That argument has an endpoint it never covered — the keystroke that is
+// GENUINELY last. Measured on the built app, real keydowns, kernel mode
+// (scripts/test-kernel-whitespace-disk-probe.mjs):
+//
+//   paragraph end + Space -> save -> disk '# 标题甲\n\n末段。<U+00A0>\n'
+//   paragraph end + Tab   -> save -> disk '末段。<U+00A0><U+00A0>\n'
+//   Tab x3                -> save -> disk '末段。\t\t<U+00A0><U+00A0>\n'
+//
+// The save SUCCEEDS — no dialog, no toast, the document round-trips. The file
+// simply holds characters the user never typed, the ledger does not persist,
+// and on the next open they are AUTHORED content this kernel will preserve
+// forever. That is the one outcome the whole placeholder design exists to
+// avoid, arriving through the one door it never guarded.
+//
+// WHAT A TRAILING SPACE SHOULD BECOME ON DISK. Three candidates, and the
+// ledger plus a reparse decide between them rather than taste:
+//   * KEEP U+00A0 — a character the user did not type, permanently, that
+//     renders as nothing at the end of a line in every reader. Rejected: it is
+//     the measured defect.
+//   * WRITE THE LITERAL ' ' / '\t' — the byte CommonMark deletes. The reparse
+//     says so out loud, which is why `literalTailIsStripped` refuses to write
+//     it in the first place; publishing it would only move the dead byte from
+//     the editor to the file (and a two-space run before a line ending is a
+//     HARD BREAK, a meaning nobody asked for). Rejected.
+//   * DROP IT — publish no bytes at all. This is what the keystroke MEANS:
+//     CommonMark deletes that whitespace, so the faithful spelling of «Space
+//     at a block end» is the empty string. Nothing semantic is lost, the file
+//     is clean, and the next open sees exactly the document the author wrote.
+// The third one is what this function does, and each drop is PROVEN (below).
+//
+// A LINE START IS A DIFFERENT ANSWER, and deliberately so. There the U+00A0 is
+// not a placeholder waiting for a heal: it is DURABLE, VISIBLE indentation —
+// it survives the round-trip, it renders as leading space in every reader, and
+// it is the only spelling markdown has for what the user asked for (the reason
+// commands/line-start-whitespace.js exists at all: «tab 在行开头输入容易触发
+// 内核不支持此操作»). Dropping it would silently discard the indentation on
+// save. So only a run at a block's END is ever claimed; a run with content
+// after it is kept, and for a leading TAB the proof below refuses it anyway
+// (the literal '\t' turns the paragraph into an indented code block, so the
+// drop and the literal do not say the same thing).
+//
+// THE PROOF — three documents, no construction-by-argument:
+//   O  the document as it stands (the run present)
+//   L  the LITERAL spelling: the run replaced by the ASCII the ledger records
+//      — i.e. the bytes the user's keystrokes would have written directly
+//   D  the DROPPED candidate: those bytes removed
+// A drop is accepted only when
+//   (1) tree(D) is IDENTICAL to tree(L) — publishing nothing says exactly what
+//       the keystroke says. This is what refuses a leading Tab (L is an
+//       indented code block), and what would refuse any position where the
+//       ASCII actually means something.
+//   (2) tree(D) differs from tree(O) in NOTHING but ONE text value, and there
+//       only by one contiguous run of whitespace being removed. Same node
+//       count, same types, same attributes. This is what refuses a drop that
+//       would delete a block (an NBSP-only spacer paragraph) or change one
+//       (`- [ ] <NBSP>` -> `- [ ]`, which demotes the checkbox to a
+//       literal-bracket bullet on reload).
+// (1) alone is not enough — L and D can agree with each other while both
+// disagree with O, which is exactly the task-item case. Both are required.
+//
+// ONLY LEDGERED RUNS. A U+00A0 the author typed, or one that came in from the
+// file, is not in `doc.whitespaceMarks` and is never looked at. The task SEED
+// (`ascii: ''`, commands/task-seed.js) stands for no keystroke at all — it has
+// no literal spelling to compare against and may only ever be dissolved by the
+// first label character — so it is excluded by requiring real ASCII whitespace.
+//
+// THE DOCUMENT IS NOT TOUCHED. This is a pure function of `doc`: it returns the
+// bytes to PUBLISH and leaves `kernel.doc.text`, the ledger, the projection and
+// the caret exactly where they are. That is not a shortcut, it is the point —
+// the space the user typed is still in the editor, still visible, still
+// deletable, and the heal still owns it, so typing on after a save produces
+// `a b` and not `ab`. (An earlier draft rewrote the document at the flush; it
+// makes «type 'hello', Space, Cmd+S, type 'world'» produce 'helloworld'.)
+// Which readers publish is decided at the boundary, not here — see
+// editor-kernel-mode.js's flush overrides.
+//
+// FAIL-CLOSED: a run whose drop cannot be proven is LEFT ALONE. The file then
+// still holds a U+00A0 — the pre-existing outcome — which is strictly better
+// than a guess.
+
+// A ledger entry this function may consider at all: a real whitespace key
+// (never the empty-`ascii` task seed) over bytes that are still a pure U+00A0
+// run.
+const publishableMark = (mark, text) =>
+  !!mark && Number.isInteger(mark.from) && Number.isInteger(mark.to) && mark.from < mark.to &&
+  mark.to <= text.length && typeof mark.ascii === 'string' &&
+  ASCII_WHITESPACE_RE.test(mark.ascii) && NO_BREAK_RUN_RE.test(text.slice(mark.from, mark.to))
+
+const safeParse = (text) => {
+  try {
+    return parseKernelMarkdown(text)
+  } catch {
+    return null
+  }
+}
+
+// Every node of a tree, document order. The comparisons below are structural
+// and read-only (the parse memo may serve frozen trees).
+const nodeList = (tree) => {
+  const out = []
+  const walk = (node) => {
+    out.push(node)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return out
+}
+
+// One node's IDENTITY minus its characters: type plus every own property that
+// is neither the span, the children, nor the text value — `depth`, `ordered`,
+// `start`, `spread`, `checked`, `lang`, `url`, `alt`, `align`, `data`, … Keys
+// are sorted so two parses can never differ by property order alone.
+const nodeShape = (node) => {
+  const out = {}
+  for (const key of Object.keys(node || {}).sort()) {
+    if (key === 'position' || key === 'children' || key === 'value') continue
+    out[key] = node[key]
+  }
+  return JSON.stringify(out)
+}
+
+const treesIdentical = (a, b) => {
+  const left = nodeList(a)
+  const right = nodeList(b)
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (nodeShape(left[index]) !== nodeShape(right[index])) return false
+    if ((left[index].value ?? null) !== (right[index].value ?? null)) return false
+  }
+  return true
+}
+
+const WHITESPACE_RUN_RE = /^[ \t ]+$/
+
+// Is `after` the same document as `before` except that ONE text value lost one
+// contiguous run of whitespace? Same node count, same shapes, exactly one
+// differing value, and that difference is a pure whitespace deletion.
+const differsByOneWhitespaceRemoval = (before, after) => {
+  const left = nodeList(before)
+  const right = nodeList(after)
+  if (left.length !== right.length) return false
+  let differences = 0
+  for (let index = 0; index < left.length; index += 1) {
+    if (nodeShape(left[index]) !== nodeShape(right[index])) return false
+    const was = left[index].value
+    const now = right[index].value
+    if (was === now) continue
+    if (typeof was !== 'string' || typeof now !== 'string') return false
+    differences += 1
+    if (differences > 1) return false
+    if (now.length >= was.length) return false
+    if (!isOneContiguousReplacement(was, now, '')) return false
+    let head = 0
+    while (head < now.length && was[head] === now[head]) head += 1
+    if (!WHITESPACE_RUN_RE.test(was.slice(head, head + (was.length - now.length)))) return false
+  }
+  return differences === 1
+}
+
+// The innermost TAIL-STRIPPING block whose span covers the run — the block
+// whose content the run belongs to. Deliberately not "the innermost node":
+// that is the inline `text` leaf, and deliberately not "any block": a run
+// inside a `code`/`math` block is CONTENT and is never claimed (the same
+// exclusion `TAIL_STRIPPING_BLOCKS` states for the typing paths).
+const innermostBlockCovering = (tree, from, to) => {
+  let found = null
+  const walk = (node) => {
+    const start = node?.position?.start?.offset
+    const end = node?.position?.end?.offset
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return
+    if (start > from || end < to) return
+    if (TAIL_STRIPPING_BLOCKS.has(node.type)) found = node
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return found
+}
+
+// Try to publish ONE run away. Returns the candidate text plus the raw span
+// that was removed, or null (fail-closed: the caller keeps the bytes).
+const dropRunForPublish = (text, tree, mark) => {
+  const block = innermostBlockCovering(tree, mark.from, mark.to)
+  if (!TAIL_STRIPPING_BLOCKS.has(block?.type)) return null
+  const blockStart = block.position.start.offset
+  const blockEnd = block.position.end.offset
+  if (mark.from < blockStart || mark.to > blockEnd) return null
+  // BLOCK-END ONLY. Anything but ASCII whitespace between the run and the
+  // block's end means the run has content after it — a line start, an interior
+  // position — and it is kept (see the ADR).
+  if (!/^[ \t]*$/.test(text.slice(mark.to, blockEnd))) return null
+
+  const literal = text.slice(0, mark.from) + mark.ascii + text.slice(mark.to)
+  const literalTree = safeParse(literal)
+  if (!literalTree) return null
+
+  // The WIDER candidate first: the ASCII whitespace immediately in front of the
+  // run dies with it (CommonMark deletes the whole trailing run), and it is the
+  // heal's own output — 'a' + Tab + Tab + Tab leaves two real tabs plus one
+  // outstanding run, and dropping only the run would strand them. The narrower
+  // candidate is the fallback, so an unprovable extension never costs the fix.
+  let widened = mark.from
+  while (widened > blockStart && isSpaceOrTab(text[widened - 1])) widened -= 1
+  const starts = widened === mark.from ? [mark.from] : [widened, mark.from]
+  for (const from of starts) {
+    const candidate = text.slice(0, from) + text.slice(mark.to)
+    const candidateTree = safeParse(candidate)
+    if (!candidateTree) continue
+    if (!treesIdentical(candidateTree, literalTree)) continue
+    if (!differsByOneWhitespaceRemoval(tree, candidateTree)) continue
+    return { text: candidate, from, to: mark.to }
+  }
+  return null
+}
+
+// The bytes to PUBLISH for `doc` (save / export / draft persistence), with the
+// raw spans that were dropped, ascending. `doc` itself is never modified.
+export function resolveWhitespaceForPublish(doc) {
+  const text = typeof doc?.text === 'string' ? doc.text : ''
+  const marks = (doc?.whitespaceMarks || []).filter((mark) => publishableMark(mark, text))
+  if (!marks.length) return { text, drops: [] }
+  // RIGHT TO LEFT, so every remaining span keeps its coordinates: each drop
+  // only ever removes bytes to the right of the runs still to be considered.
+  const ordered = [...marks].sort((a, b) => b.from - a.from)
+  const drops = []
+  let candidate = text
+  for (const mark of ordered) {
+    if (drops.length && mark.to > drops[drops.length - 1].from) continue
+    const tree = safeParse(candidate)
+    if (!tree) break
+    const dropped = dropRunForPublish(candidate, tree, mark)
+    if (!dropped) continue
+    candidate = dropped.text
+    drops.push({ from: dropped.from, to: dropped.to })
+  }
+  drops.reverse()
+  return { text: candidate, drops }
+}
+
 // THE DELETE SIDE OF THE SAME RULE (2026-08-19, audit finding)
 // ===========================================================================
 // Everything above is an INSERT-path design, and a delete can put a literal

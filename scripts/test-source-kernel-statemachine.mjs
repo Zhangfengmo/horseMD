@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import {
   createMarkdownDocument, applySourceTransaction, buildSyntaxIndex, scanLines,
   buildCharacterMap, replaceVisibleText, toggleTaskMarker, routeStructuralKey,
-  createSourceHistory
+  createSourceHistory, parseKernelMarkdown
 } from '../src/renderer/src/lib/source-kernel/index.js'
 import { markdownComparisonKey } from '../src/renderer/src/lib/markdown-preservation/roundtrip.js'
 
@@ -122,6 +122,59 @@ const isUniform = (profile) =>
   })
   assert.equal(r.ok, true, 'zero-width insert at a plain paragraph block end must succeed')
   assert.equal(applySourceTransaction(doc, r.transaction).doc.text, '甲乙x\n')
+}
+
+// ---- ordered-marker rewrites, and why the invariant below tolerates them ---
+// The indent/outdent line-shape invariant (further down) says these two
+// commands may only touch each line's leading `[ \t>]*` prefix. Two proven
+// rescues break that letter by rewriting the item's OWN ordered marker, and
+// each had to be admitted explicitly rather than by loosening the rule:
+//   * indent side (2026-08-22): `N.` -> `1.`, because CommonMark only lets an
+//     ordered list interrupt a paragraph when its number is 1.
+//   * outdent side (2026-08-23, 96518af): `N.` -> `parent.number + 1`, so
+//     Shift+Tab continues the DESTINATION list's count instead of carrying the
+//     nested item's own number back up.
+// The outdent one was never added here — 96518af updated
+// test-source-kernel-indent.mjs and left this file untouched — so this harness
+// has been RED since that commit (verified: `git archive 96518af^` passes this
+// exact file at STEPS=400; `git archive 96518af` fails it at the default 120,
+// seed 2 step 54). It only became visible on 2026-08-24 because 1f2c5aa moved
+// the fuzz stream onto a shape that reaches it.
+//
+// `ordinalIsIgnored` is the teeth that keep the admission from being a mere
+// loosening. CommonMark takes an ordered list's `start` from its FIRST item and
+// ignores every later item's number, so a digit rewrite is render-inert exactly
+// when the rewritten item is NOT its list's first child. Re-derived here from
+// the AFTER text — independently of the command that produced it — so a
+// renumber that WOULD be rendered (a first item, whose digits silently become
+// the list's `start`) still fails the invariant, as does a torn marker, a
+// mid-word offset, or any change to the bytes after the marker.
+const ORDERED_MARKER = /^\d+[.)]/
+const ordinalIsIgnored = (text, markerAt) => {
+  let tree
+  try {
+    tree = parseKernelMarkdown(text)
+  } catch {
+    return false
+  }
+  let found = false
+  let ignored = false
+  const walk = (node) => {
+    if (found) return
+    if (node?.type === 'list') {
+      const items = node.children || []
+      for (let i = 0; i < items.length; i += 1) {
+        if (items[i]?.position?.start?.offset === markerAt) {
+          found = true
+          ignored = !!node.ordered && i > 0
+          return
+        }
+      }
+    }
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return found && ignored
 }
 
 const stats = { attempted: {}, applied: {} }
@@ -281,9 +334,15 @@ const runSeed = (seed, starter) => {
     // 每一行"引用/缩进前缀"字符类(`[ \t>]*`)之内的字符——行数不变，且每行
     // 剥离前导前缀后的剩余内容逐字相同。一个撕裂 marker 或落在词中间的
     // 错误偏移会在这里被发现（前缀之外多/少出的字符会让剥离后的内容不等）。
-    // 唯一的例外(2026-08-22 有序 marker rescue)：indent 打开新子列表时允许
-    // 把该项自己的 marker 数字改写为 `1`（分隔符不变，且整个事务至多一行）——
-    // CommonMark 只允许序号为 1 的有序列表打断段落，不改写就无法嵌套。
+    // 例外只有两个，且都是"该项自己的有序 marker"——见本文件上方
+    // ORDERED_MARKER / ordinalIsIgnored 的长注释：
+    //   (1) 2026-08-22 indent rescue：打开新子列表时把该项 marker 数字改写为
+    //       `1`（分隔符不变，至多一行）——CommonMark 只允许序号为 1 的有序
+    //       列表打断段落，不改写就无法嵌套。
+    //   (2) 2026-08-23 outdent renumber（96518af）：Shift+Tab 落到父列表时把该
+    //       项 marker 改写为 parent.number + 1（可随目标列表换分隔符，至多一
+    //       行），且必须由 ordinalIsIgnored 从 AFTER 文本独立证明该序号被
+    //       CommonMark 忽略（非列表首项）——marker 之后的字节必须逐字不变。
     if (result.transaction.intent === 'indent-list-item' || result.transaction.intent === 'outdent-list-item') {
       const beforeLines = scanLines(before)
       const afterLines = scanLines(applied.doc.text)
@@ -301,8 +360,16 @@ const runSeed = (seed, starter) => {
         // empty item is representable instead of a setext underline). They
         // compose on an empty ordered item.
         const renumberedText = b.replace(/^(\d+)([.)])/, '1$2')
-        const isRescue = result.transaction.intent === 'indent-list-item' &&
-          (renumberedText === a || b + '\u00A0' === a || renumberedText + '\u00A0' === a)
+        // (2) the outdent renumber: the leading ordered marker may be rewritten
+        // (nothing after it may move), and only when CommonMark provably
+        // ignores the number it now spells.
+        const markerAt = afterLines[i].start +
+          (afterLines[i].text.match(/^[ \t>]*/) || [''])[0].length
+        const isRescue = result.transaction.intent === 'indent-list-item'
+          ? (renumberedText === a || b + '\u00A0' === a || renumberedText + '\u00A0' === a)
+          : (ORDERED_MARKER.test(b) && ORDERED_MARKER.test(a) &&
+             b.replace(ORDERED_MARKER, '') === a.replace(ORDERED_MARKER, '') &&
+             ordinalIsIgnored(applied.doc.text, markerAt))
         assert.ok(isRescue,
           `${action} changed line ${i} content beyond its leading prefix (seed ${seed} step ${step})`)
         renumbered += 1

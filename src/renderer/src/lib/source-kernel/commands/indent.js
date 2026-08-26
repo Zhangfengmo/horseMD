@@ -248,6 +248,61 @@ const sortedLeafValues = (tree) => {
   walk(tree)
   return out.sort()
 }
+// THE PROOF THE OUTDENT RENUMBER DID NOT HAVE (2026-08-26).
+//
+// The ORDERED-MARKER RENUMBER below rewrites the outdented item's own marker
+// digits. Its whole defence is the claim that this is a SOURCE-SPELLING
+// gesture with no rendering consequence — and that claim rests entirely on one
+// CommonMark rule: an ordered list's `start` attribute is the number of its
+// FIRST list item, and every subsequent item's number is ignored. So digits on
+// a non-first item are free; digits on a FIRST item silently become the list's
+// `start`, i.e. a real, visible renumbering of the whole list.
+//
+// Nothing checked which of the two we were writing. `provenNestingOnly`'s
+// `leafSignature` records LEAF blocks' type + decoded text and never looks at a
+// list's `ordered`/`start` at all, so a `start` rewrite passes it unnoticed —
+// the neutrality was ASSUMED from 2026-08-23 (96518af) onward, not proven.
+//
+// Prove it instead: the rewritten marker must reparse into a listItem that is
+// a NON-FIRST child of an ordered list. Then, by the rule above, whatever
+// number we spelled is ignored by every conforming renderer, and the rewrite
+// provably cannot change the document. Unprovable → the caller falls back to
+// the plain indentation strip, which keeps the author's own number and
+// therefore the author's own `start` (the renumber can never make an outdent
+// fail — that contract is unchanged).
+//
+// Reachability, measured rather than asserted: across 8 902 renumbering
+// outdents generated over a systematic corpus (8 marker spellings x 8, five
+// indentations, 14 document shapes incl. blockquoted and blank-line-separated
+// ones) the rewritten item was first-of-list 0 times. So this guard is a net,
+// not a behaviour change — which is exactly why it is cheap to hold.
+const provenIgnoredOrdinal = (candidate, markerAt) => {
+  let tree
+  try {
+    tree = parseKernelMarkdown(candidate)
+  } catch {
+    return false
+  }
+  let found = false
+  let ignored = false
+  const walk = (node) => {
+    if (found) return
+    if (node?.type === 'list') {
+      const items = node.children || []
+      for (let i = 0; i < items.length; i += 1) {
+        if (items[i]?.position?.start?.offset === markerAt) {
+          found = true
+          ignored = !!node.ordered && i > 0
+          return
+        }
+      }
+    }
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return found && ignored
+}
+
 const provenSeededEmptyIndent = (text, edits, seedAt) => {
   const candidate = applyEdits(text, edits)
   let before
@@ -388,20 +443,36 @@ export function outdentListItem({ doc, index, offset }) {
   // byte-minimal, mirroring the indent side's no-renumber-when-joining. The
   // same reparse proof gates the rewritten bytes; if it refuses, the plain
   // strip below still runs (renumber never makes an outdent fail).
+  //
+  // SECOND proof since 2026-08-26: `provenNestingOnly` is blind to list
+  // ordinals, so it can only show that no LEAF content moved — not that the
+  // digits we spell are inert. `provenIgnoredOrdinal` (above) supplies the
+  // missing half from CommonMark's start-attribute rule. Both must pass.
   if (item.ordered && parent.ordered) {
     const marker = String(parent.ordered.number + 1) + parent.ordered.delimiter
     if (marker !== item.marker) {
       const markerLineAt = index.lines[item.markerLineIndex].start + item.quotePrefix.length
+      const keptIndent = index.text.slice(markerLineAt + width, markerLineAt + item.indent.length)
       const renumbered = rows.map((i) => {
         const at = index.lines[i].start + item.quotePrefix.length
         if (i !== item.markerLineIndex) return { from: at, to: at + width, insert: '' }
         return {
           from: markerLineAt,
           to: markerLineAt + item.indent.length + item.marker.length,
-          insert: index.text.slice(markerLineAt + width, markerLineAt + item.indent.length) + marker
+          insert: keptIndent + marker
         }
       })
-      if (!provenNestingOnly(index.text, renumbered, item)) {
+      // Where the rewritten marker lands in the CANDIDATE. The marker line is
+      // `rows[0]` by construction (ownedLineIndexes starts at markerLineIndex
+      // and only skips blank lines, which the marker line never is), so no
+      // sibling edit precedes it — the sum is defensive, and stays correct if
+      // that ordering assumption ever changes.
+      const shift = renumbered
+        .filter((edit) => edit.from < markerLineAt)
+        .reduce((total, edit) => total + String(edit.insert ?? '').length - (edit.to - edit.from), 0)
+      const markerAt = markerLineAt + shift + keptIndent.length
+      if (!provenNestingOnly(index.text, renumbered, item) &&
+          provenIgnoredOrdinal(applyEdits(index.text, renumbered), markerAt)) {
         return multiTxn(doc, renumbered, 'outdent-list-item', offset)
       }
     }

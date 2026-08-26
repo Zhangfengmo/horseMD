@@ -12,6 +12,20 @@
 //   2. the rendered DOM carries all five mark elements;
 //   3. save is byte-exact and a cold reopen renders the same marks.
 // LF + CRLF.
+//
+// BOTH SCRIPTS, DELIBERATELY (2026-08-26). The original fixture was
+// `*斜*与**粗**与…` — every delimiter run flanked by CJK — and that is exactly
+// why it passed while ASCII `**bold**` silently lost its 8th keystroke for
+// months. The difference is CommonMark's RULE OF 3, not anything in the
+// kernel: `与**粗*` is left- AND right-flanking, so the 2+1 match is forbidden
+// and the text stays literal, whereas `**bold*` (line start / after a space)
+// is left-flanking only and IS `*` + <em>bold</em>. Only the ASCII shape
+// therefore reaches the mark-input-rule LITERAL FALLBACK, where the commit's
+// own selection anchor sits just outside the closing `**` — no charMap unit
+// boundary — and the kernel refused the byte it had already proven
+// (`projection-unmappable-refused`; fixed by commands/insert-point.js, whose
+// ADR carries the full account). A CJK-only fixture cannot see any of this, so
+// the ASCII line below is a permanent second axis, not a nicety.
 import assert from 'node:assert/strict'
 import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -49,7 +63,26 @@ const typeReal = async (send, s) => {
   }
 }
 
+// Every delimiter run is flanked by CJK letters -> left- AND right-flanking ->
+// rule of 3 forbids the asymmetric match, so each intermediate stays literal.
 const MARK_LINE = '*斜*与**粗**与`码`与~~删~~与==高==完'
+// Every delimiter run is flanked by line-start / ASCII space -> left-flanking
+// ONLY, so `**bd*` really is `*` + <em>bd</em> and the closing `*` goes
+// through the literal fallback (the shape this whole suite axis exists for).
+//
+// `**bd**` is LAST on purpose, and the reason is a SEPARATE, pre-existing
+// defect this line must not be silently coupled to: typing at the trailing
+// edge of a `strong` run inherits the mark (ProseMirror's `strong` is
+// `inclusive`), and the gateway's `plainSliceText` refuses a marked slice
+// (`unclassified-transaction` / `unsupported-input-type`). That refusal
+// reproduces with NO input rule at all — open a file already containing
+// `**bd**` OR `与**粗**`, click at the paragraph's end, type — so it is
+// script-independent and lives in editor-kernel-gateway.js, not here. The
+// CJK line above never meets it because its marks all complete through the
+// input rule's HAPPY path, which clears the stored mark; a fallback-completed
+// mark leaves the caret with the mark live. Ordering keeps this fixture
+// measuring the mark-input-rule axis alone.
+const MARK_LINE_ASCII = '*it* `cd` ~~dl~~ ==hl== **bd**'
 
 async function runScenario({ ending, port }) {
   const label = ending === '\n' ? 'LF' : 'CRLF'
@@ -79,8 +112,13 @@ async function runScenario({ ending, port }) {
     await sleep(400)
     await typeReal(send, MARK_LINE)
     await sleep(800)
+    await keyDown(send, 'Enter', 'Enter')
+    await sleep(400)
+    await typeReal(send, MARK_LINE_ASCII)
+    await sleep(800)
 
-    // 1. the rendered DOM carries every mark, on exactly the right glyphs
+    // 1. the rendered DOM carries every mark, on exactly the right glyphs —
+    //    CJK paragraph first, ASCII paragraph second (document order).
     const domMarks = JSON.parse(await evaluate(`(() => {
       const ed = ${VISIBLE}
       const pick = (sel) => [...ed.querySelectorAll(sel)].map((n) => n.textContent).join(',')
@@ -89,16 +127,17 @@ async function runScenario({ ending, port }) {
         del: pick('p del, p s'), mark: pick('p mark')
       })
     })()`))
-    assert.equal(domMarks.em, '斜', `${label}: em renders — got ${JSON.stringify(domMarks)}`)
-    assert.equal(domMarks.strong, '粗', `${label}: strong renders`)
+    assert.equal(domMarks.em, '斜,it', `${label}: em renders in BOTH scripts — got ${JSON.stringify(domMarks)}`)
+    assert.equal(domMarks.strong, '粗,bd', `${label}: strong renders in BOTH scripts — got ${JSON.stringify(domMarks)}`)
     assert.ok(domMarks.code.includes('码'), `${label}: inline code renders — got ${JSON.stringify(domMarks.code)}`)
-    assert.equal(domMarks.del, '删', `${label}: strike renders`)
-    assert.equal(domMarks.mark, '高', `${label}: highlight renders`)
+    assert.ok(domMarks.code.includes('cd'), `${label}: ASCII inline code renders — got ${JSON.stringify(domMarks.code)}`)
+    assert.equal(domMarks.del, '删,dl', `${label}: strike renders in BOTH scripts — got ${JSON.stringify(domMarks)}`)
+    assert.equal(domMarks.mark, '高,hl', `${label}: highlight renders in BOTH scripts — got ${JSON.stringify(domMarks)}`)
 
     // 2. the source bytes are EXACTLY the typed string
     await evaluate(`(() => { const b = [...document.querySelectorAll('.status-btn')].find((n) => n.offsetParent && !n.classList.contains('block-switch-caret-btn') && /源码|Source/.test((n.title||'')+(n.textContent||''))); b?.click(); return !!b })()`)
     const source = await waitFor(() => evaluate(`[...document.querySelectorAll('textarea.source-editor')].find((n) => n.offsetParent)?.value ?? null`), 'source view')
-    const expected = ['# 标记输入', '', '甲段。', '', MARK_LINE, ''].join('\n')
+    const expected = ['# 标记输入', '', '甲段。', '', MARK_LINE, '', MARK_LINE_ASCII, ''].join('\n')
     if (source !== expected) {
       console.error('  actual  :', JSON.stringify(source))
       console.error('  expected:', JSON.stringify(expected))
@@ -113,7 +152,7 @@ async function runScenario({ ending, port }) {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save settle')
     const disk = await readFile(file, 'utf8')
-    const expectedDisk = ['# 标记输入', '', '甲段。', '', MARK_LINE, ''].join(ending)
+    const expectedDisk = ['# 标记输入', '', '甲段。', '', MARK_LINE, '', MARK_LINE_ASCII, ''].join(ending)
     if (disk !== expectedDisk) {
       console.error('  actual  :', JSON.stringify(disk))
       console.error('  expected:', JSON.stringify(expectedDisk))
@@ -132,16 +171,17 @@ async function runScenario({ ending, port }) {
   try {
     const { evaluate } = app
     await waitFor(() => evaluate(`(${VISIBLE})?.textContent?.includes('完')`), 'reopen mount')
+    await waitFor(() => evaluate(`(${VISIBLE})?.textContent?.includes('bd')`), 'reopen mount ascii')
     await sleep(500)
     const marks = JSON.parse(await evaluate(`(() => {
       const ed = ${VISIBLE}
       const pick = (sel) => [...ed.querySelectorAll(sel)].map((n) => n.textContent).join(',')
       return JSON.stringify({ em: pick('p em'), strong: pick('p strong'), del: pick('p del, p s'), mark: pick('p mark') })
     })()`))
-    assert.equal(marks.em, '斜', `${label} reopen: em`)
-    assert.equal(marks.strong, '粗', `${label} reopen: strong`)
-    assert.equal(marks.del, '删', `${label} reopen: strike`)
-    assert.equal(marks.mark, '高', `${label} reopen: highlight`)
+    assert.equal(marks.em, '斜,it', `${label} reopen: em`)
+    assert.equal(marks.strong, '粗,bd', `${label} reopen: strong`)
+    assert.equal(marks.del, '删,dl', `${label} reopen: strike`)
+    assert.equal(marks.mark, '高,hl', `${label} reopen: highlight`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
     await rm(root, { recursive: true, force: true })
@@ -151,4 +191,4 @@ async function runScenario({ ending, port }) {
 
 await runScenario({ ending: '\n', port: Number(process.env.CDP_PORT || 10336) })
 await runScenario({ ending: '\r\n', port: Number(process.env.CDP_PORT || 10336) + 4 })
-console.log('PASS kernel mark input rules: typing *斜* / **粗** / `码` / ~~删~~ / ==高== lands byte-for-byte with every mark rendered, byte-exact save, mark-exact cold reopen (LF + CRLF)')
+console.log('PASS kernel mark input rules: typing *斜* / **粗** / `码` / ~~删~~ / ==高== AND the ASCII-flanked **bd** / *it* / `cd` / ~~dl~~ / ==hl== lands byte-for-byte with every mark rendered, byte-exact save, mark-exact cold reopen (LF + CRLF)')
