@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert, spellMarkerCompletingSpace } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert, spellMarkerCompletingSpace, spellMarkerRunGrowth, spellMarkerFollowingText } from '../lib/source-kernel/index.js'
 
 // ===========================================================================
 // STEP IDENTITY — ADR (defect D4, 2026-08-26). READ BEFORE ADDING A CHECK.
@@ -1810,6 +1810,50 @@ export function commitResolvedTextSteps(args) {
   return commitPlainTextSteps(args)
 }
 
+// The raw offset a single character lands at, for the marker commands only.
+// Mirrors `markerRawOffsetAt` in editor-kernel-mode.js: the map's own
+// insert-position answer first, then — for the MARKER-ONLY intermediate whose
+// content anchor is unprovable by construction — the pair's recorded end. A
+// wrong derivation cannot write a byte; every caller reparses before returning.
+function markerInsertOffset(map, pmPos) {
+  if (!map) return null
+  const direct = typeof map.pmPosToRawInsert === 'function'
+    ? map.pmPosToRawInsert(pmPos)
+    : map.pmPosToRaw(pmPos)
+  if (Number.isFinite(direct)) return direct
+  const pairs = Array.isArray(map.blockPairs) ? map.blockPairs : []
+  let best = null
+  for (const pair of pairs) {
+    const size = pair?.pmNode?.nodeSize
+    if (!Number.isFinite(size) || !Number.isFinite(pair.pmPos)) continue
+    if (pmPos <= pair.pmPos || pmPos >= pair.pmPos + size) continue
+    if (!best || pair.pmPos >= best.pmPos) best = pair
+  }
+  const node = best?.pmNode
+  if (!best || best.virtual || best.charMap || !node?.isTextblock) return null
+  if (node.content.size !== 0) return null
+  const end = best.mdBlock?.position?.end?.offset ?? best.mdItem?.contentStart
+  return Number.isInteger(end) ? end : null
+}
+
+// A marker command answered `ok`, so its transaction is what gets committed
+// instead of the raw keystroke. This core returns an ALREADY-APPLIED result, so
+// the bytes go through the same `applySourceTransaction` chokepoint as
+// everything else it writes.
+function commitMarkerTransaction(kernel, transaction) {
+  const result = applySourceTransaction(kernel.doc, transaction)
+  if (!result.ok) return { ok: false, code: result.code }
+  return {
+    ok: true,
+    applied: result,
+    transaction,
+    observability: null,
+    rewrote: true,
+    emptiedBlock: null,
+    markerCompletion: true
+  }
+}
+
 function commitPlainTextSteps({ kernel, map, steps }) {
   const edits = []
   // Per-step bookkeeping for the MULTI-STEP delete gate below: each entry pairs
@@ -1845,6 +1889,28 @@ function commitPlainTextSteps({ kernel, map, steps }) {
   // commands produce them, so the coordinates need no rebasing.
   let pendingMarks = null
   const prefixedVirtualBlocks = new Set()
+  // RUN GROWTH AND FOLLOWING-TEXT, AHEAD OF STEP RESOLUTION. Their shared
+  // intermediate is a MARKER-ONLY block with no content anchor, so the loop's
+  // own resolution refuses and the keystroke is vetoed before any later branch
+  // runs. Growth is tried first: a `#` after a bare `#` is the growth gesture,
+  // not "an ordinary character proving the marker was content". Both commands
+  // reparse before returning and answer `not-structural` everywhere they do not
+  // apply, so ordinary typing falls straight through.
+  if (steps.length === 1 && steps[0].from === steps[0].to &&
+      typeof steps[0].insertText === 'string' && steps[0].insertText !== '') {
+    const insert = steps[0].insertText
+    const offset = markerInsertOffset(map, steps[0].from)
+    if (Number.isInteger(offset)) {
+      if (insert === '#') {
+        const grown = spellMarkerRunGrowth({ doc: kernel.doc, offset, character: insert })
+        if (grown.ok) return commitMarkerTransaction(kernel, grown.transaction)
+      }
+      if ([...insert].length === 1 && !/\s/.test(insert)) {
+        const followed = spellMarkerFollowingText({ doc: kernel.doc, offset, text: insert })
+        if (followed.ok) return commitMarkerTransaction(kernel, followed.transaction)
+      }
+    }
+  }
   for (const step of steps) {
     const oldFrom = step.from - cumulativeDelta
     const oldTo = step.to - cumulativeDelta

@@ -105,9 +105,21 @@ export function createCompositionSession({
   revertProjection,
   notify,
   getT,
+  resolveRawOffset,
   settleTimeoutMs = 3000
 }) {
   let session = null // { state: 'composing'|'invalid', pmBaseDoc, blockRange, timer }
+  // The same two-stage derivation the keyboard path uses. `pmPosToRaw` alone
+  // cannot resolve the MARKER-ONLY intermediate a bare `#`/`- ` leaves (its
+  // content anchor is unprovable by construction), so both the session's
+  // mappability proof and the commit's own range resolution refused there and
+  // an IME-committed second `#` was reverted away.
+  const resolvePos = (pos) => {
+    const direct = resolveRawOffset?.(pos)
+    return Number.isFinite(direct) ? direct : kernel?.map?.pmPosToRaw?.(pos)
+  }
+
+
   let waiters = []
   let queued = []
 
@@ -218,8 +230,8 @@ export function createCompositionSession({
     // unless proven necessary" posture as commitPlainText's own branch.
     const rawFrom = diff.from < diff.to
       ? (kernel?.map?.pmPosToRawStart ?? kernel?.map?.pmPosToRaw)?.(diff.from)
-      : kernel?.map?.pmPosToRaw?.(diff.from)
-    const rawTo = kernel?.map?.pmPosToRaw?.(diff.to)
+      : resolvePos(diff.from)
+    const rawTo = resolvePos(diff.to)
     if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo) || rawFrom > rawTo) {
       revert(COMPOSITION_INVALIDATED)
       return
@@ -273,8 +285,8 @@ export function createCompositionSession({
       // from the diff (see the "design-doc deviation" comment in commit()
       // above), not from these values — they are not retained on the
       // session, only used to decide 'composing' vs 'invalid'.
-      const rawFrom = kernel?.map?.pmPosToRaw?.(from)
-      const rawTo = kernel?.map?.pmPosToRaw?.(to)
+      const rawFrom = resolvePos(from)
+      const rawTo = resolvePos(to)
       const blockRange = resolveTextblockRange(view.state.doc, from)
       const proven = Number.isFinite(rawFrom) && Number.isFinite(rawTo) &&
         rawFrom <= rawTo && !!blockRange

@@ -2139,7 +2139,10 @@ export function createKernelMode({
     commitReplace,
     revertProjection,
     notify,
-    getT
+    getT,
+    // Lazy on purpose: `markerRawOffsetAt` is declared further down this same
+    // closure, so passing the identifier here would hit its TDZ.
+    resolveRawOffset: (pos) => markerRawOffsetAt(pos)
   })
   // Wrappers gate on `inactive()` exactly like every other kernel-mode entry
   // point: before attach (Crepe still creating / chunks still appending),

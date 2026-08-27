@@ -248,3 +248,34 @@ charMap，所以今天根本不存在跨块删除命令。通用跨块删除的�
 负控已钉进套件——`#` 单独一个字符重解析是**空标题**而不是含 `#` 的段落，所以它被
 正确拒绝、字节不动。没有这条证明，同一条路径会痛快写下一个视图根本不显示的文档。
 仍拒绝的还有带 mark 或行内原子的替换（`textContent` 会把它们悄悄压平）。
+
+
+---
+
+# 任务：`#` → `##` 经 IME 上屏丢第二个 `#`（已修）
+
+标记族的第三条路由失明，但机制和前两条**不同**——不在标记路由，在 IME 组合会话。
+
+## 根因（八个 revert 点逐一打标定位）
+
+组合会话在 `onStart` 用 `kernel.map.pmPosToRaw(from)` 证明可映射性。一个裸 `#` 留下的是
+**只有标记、没有内容锚点**的中间态，那个位置 `pmPosToRaw` **按构造就解析不出来**
+（`editor-kernel-mode.js` 的 `requireMap` 注释白纸黑字写过），于是 session 直接标成
+`invalid`，`onEnd` 整段 revert——第二个 `#` 连同整个组合一起被丢掉。
+
+修的时候逐层剥出三道**同一个原因**的关卡：
+
+| 探针命中 | 位置 | 修法 |
+|---|---|---|
+| site 8 | `onEnd`：session 从没进入 `composing` | `onStart` 改用两段式解析 |
+| site 4 | `commit` 自己再解析一次 raw 区间 | 同一个 `resolvePos`，提到工厂作用域共用 |
+| site 6 | `commitReplace` 被内核拒绝 | 核心里补 `spellMarkerRunGrowth` / `spellMarkerFollowingText` 的接入 |
+
+第三关正是我上一轮试了三次没做成的那个改动——**它当时没错，只是永远到不了**：
+组合在更早的两关就被 revert 了。先修通前两关，它自然就生效了。
+
+## 验证
+
+`test:kernel-marker-space-channels-ui` 现在 **8/8**（空格三通道 × LF/CRLF + runGrowth × LF/CRLF）。
+`test:kernel-ui` **62 套件 / 103 PASS / 0 FAIL**；source-kernel、kernel-headless、
+markdown-preservation、editor-source-verification 全 EXIT=0。

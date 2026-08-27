@@ -173,6 +173,64 @@ async function runChannel(channel, index, { ending, port }) {
   }
 }
 
+// `spellMarkerRunGrowth` ('#' -> '##') shares the marker family's route
+// blindness, but for a different reason: the composition SESSION refuses to
+// start when the caret sits in the marker-only intermediate a bare `#` creates,
+// because its mappability proof used `pmPosToRaw` alone and that position is
+// unprovable there by construction. onEnd then reverts the whole composition,
+// so an IME-committed second `#` is lost and `## ` stays `# `.
+async function runRunGrowth({ ending, port }) {
+  const label = `runGrowth/${ending === '\n' ? 'LF' : 'CRLF'}`
+  const root = `/tmp/horsemd-run-growth-${process.pid}-${port}`
+  const file = join(root, 'doc.md')
+  await rm(root, { recursive: true, force: true })
+  await mkdir(root, { recursive: true })
+  await writeFile(file, ['# T', '', '甲', ''].join(ending))
+
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file], kernelDefault: true })
+    const { evaluate, send } = app
+    await waitFor(() => evaluate(`(${VISIBLE})?.textContent?.includes('甲')`), 'mount')
+    await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`), 'kernel attach')
+    await sleep(800)
+
+    const rect = await evaluate(`(() => {
+      const p = [...(${VISIBLE}).querySelectorAll('p')].find((n) => n.textContent.startsWith('甲'))
+      p.scrollIntoView({ block: 'center' })
+      const r = p.getBoundingClientRect()
+      return { x: r.right - 2, y: r.top + r.height / 2 }
+    })()`)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...rect })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...rect })
+    await sleep(300)
+    await keyDown(send, 'Enter')
+    await sleep(400)
+
+    await keyDown(send, '#', '#')
+    await sleep(400)
+    // The second '#' arrives through an IME commit, which handleTextInput never
+    // sees and which the composition session used to refuse outright.
+    await send('Input.imeSetComposition', { text: '#', selectionStart: 1, selectionEnd: 1 })
+    await sleep(160)
+    await send('Input.insertText', { text: '#' })
+    await sleep(400)
+    await keyDown(send, ' ', ' ')
+    await sleep(300)
+    await keyDown(send, '乙', '乙')
+    await sleep(700)
+
+    const source = await readSource(evaluate)
+    assert.equal(source, ['# T', '', '甲', '', '## 乙', ''].join('\n'), `${label}: bytes`)
+    assert.equal(await evaluate(`!!(${VISIBLE}).querySelector('h2')`), true, `${label}: must render an <h2>`)
+    assert.deepEqual(app.dialogs.map((d) => d.message), [], `${label}: no dialog`)
+    console.log(`  PASS ${label}`)
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 const basePort = Number(process.env.CDP_PORT || 11001)
 let index = 0
 for (const ending of ['\n', '\r\n']) {
@@ -180,5 +238,9 @@ for (const ending of ['\n', '\r\n']) {
     await runChannel(channel, index, { ending, port: basePort + index })
     index += 1
   }
+}
+for (const ending of ['\n', '\r\n']) {
+  await runRunGrowth({ ending, port: basePort + index })
+  index += 1
 }
 console.log('PASS kernel marker-completing space: every delivery channel (keydown, insertText, IME commit) resolves the escape to the same bytes (LF + CRLF)')
