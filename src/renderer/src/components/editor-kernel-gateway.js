@@ -1385,12 +1385,21 @@ export function extractWholeDocumentClear(trs, oldState) {
   if (step.from !== 0 || step.to !== size) return null
   const content = step.slice?.content
   if (!content) return null
-  if (content.size === 0) return { cleared: true }
-  // ProseMirror replaces the document with ONE empty textblock, never nothing.
+  if (content.size === 0) return { text: '' }
+  // ProseMirror replaces the document with ONE textblock — empty for a delete,
+  // holding the typed characters when the user types over the selection.
   if (content.childCount !== 1) return null
   const only = content.child(0)
-  if (!only.isTextblock || only.content.size !== 0) return null
-  return { cleared: true }
+  if (!only.isTextblock) return null
+  if (only.content.size === 0) return { text: '' }
+  // Plain text only: a mark or an inline atom would need syntax bytes this
+  // path does not derive, and `textContent` would silently flatten them.
+  let plain = true
+  only.forEach((child) => {
+    if (!child.isText || (child.marks && child.marks.length)) plain = false
+  })
+  if (!plain) return null
+  return { text: only.textContent }
 }
 
 export function classifyTransactions(transactions, oldState, { isComposing = false } = {}) {
@@ -1434,7 +1443,8 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   const trailingAtomTyping = extractTrailingAtomTyping(trs, oldState)
   if (trailingAtomTyping) return { kind: 'trailing-atom-typing', ...trailingAtomTyping }
 
-  if (extractWholeDocumentClear(trs, oldState)) return { kind: 'clear-document' }
+  const wholeDoc = extractWholeDocumentClear(trs, oldState)
+  if (wholeDoc) return { kind: 'clear-document', text: wholeDoc.text }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) {

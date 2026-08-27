@@ -27,10 +27,10 @@ async function waitFor(fn, msg, tries = 200) {
   throw new Error(`timeout: ${msg}`)
 }
 
-const VK = { Delete: 46, Backspace: 8, a: 65, z: 90 }
-const keyDown = async (send, key, code, modifiers = 0) => {
+const VK = { Delete: 46, Backspace: 8, a: 65, z: 90, X: 88 }
+const keyDown = async (send, key, code, modifiers = 0, text) => {
   const common = { key, code, modifiers, windowsVirtualKeyCode: VK[key] || 0 }
-  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
+  await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...common, ...(text ? { text } : {}) })
   await sleep(60)
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
   await sleep(220)
@@ -100,6 +100,59 @@ async function run({ key, ending, port }) {
   }
 }
 
+// Typing over a select-all is the same gesture with content: the whole document
+// is replaced by what was typed.
+async function runReplace({ ending, port }) {
+  const label = `type/${ending === '\n' ? 'LF' : 'CRLF'}`
+  const root = `/tmp/horsemd-selall-rep-${process.pid}-${port}`
+  const file = join(root, 'doc.md')
+  await rm(root, { recursive: true, force: true })
+  await mkdir(root, { recursive: true })
+  await writeFile(file, ['# 标题', '', '段落甲。', '', '- 项目一', ''].join(ending))
+
+  let app
+  try {
+    app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file], kernelDefault: true })
+    const { evaluate, send } = app
+    await waitFor(() => evaluate("((" + VISIBLE + ")?.textContent || '').includes('段落甲')"), 'mount')
+    await waitFor(() => evaluate("[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)"), 'kernel attach')
+    await sleep(1200)
+    await evaluate("(" + VISIBLE + ").focus()")
+    await sleep(300)
+    await keyDown(send, 'a', 'KeyA', 4)
+    await sleep(600)
+    await keyDown(send, 'X', 'KeyX', 0, 'X')
+    await sleep(1500)
+
+    const shown = await evaluate("((" + VISIBLE + ")?.textContent || '').trim()")
+    assert.equal(shown, 'X', `${label}: the document must be replaced by what was typed, got ${JSON.stringify(String(shown).slice(0, 120))}`)
+
+    await evaluate("(window.confirm = () => true, 1)")
+    await waitFor(() => evaluate("!!document.querySelector('.hm-save-fab')"), 'save fab')
+    await evaluate("document.querySelector('.hm-save-fab')?.click()")
+    await waitFor(() => evaluate("!document.querySelector('.hm-save-fab')"), 'save settle')
+    const disk = await readFile(file, 'utf8')
+    assert.equal(disk.trim(), 'X', `${label}: disk bytes, got ${JSON.stringify(disk.slice(0, 120))}`)
+    assert.deepEqual(app.dialogs.map((d) => d.message), [], `${label}: no dialog`)
+
+    // NEGATIVE CONTROL. A character that carries block syntax does not spell
+    // itself: `#` alone reparses to an empty heading, not a paragraph holding
+    // '#'. The reparse proof must refuse it, leaving the bytes untouched —
+    // without this the same path would happily write a document the view does
+    // not show.
+    await keyDown(send, 'a', 'KeyA', 4)
+    await sleep(500)
+    await keyDown(send, '3', 'Digit3', 8, '#')
+    await sleep(1200)
+    const afterHash = await evaluate("((" + VISIBLE + ")?.textContent || '').trim()")
+    assert.equal(afterHash, 'X', `${label}: a syntax-bearing replacement must be refused, got ${JSON.stringify(String(afterHash).slice(0, 60))}`)
+    console.log(`  PASS ${label} (+ syntax-bearing replacement refused)`)
+  } finally {
+    await stopBuiltElectron(app, { removeProfile: true })
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 let port = Number(process.env.CDP_PORT || 11901)
 for (const key of ['Delete', 'Backspace']) {
   for (const ending of ['\n', '\r\n']) {
@@ -107,4 +160,8 @@ for (const key of ['Delete', 'Backspace']) {
     port += 1
   }
 }
-console.log('PASS kernel select-all delete: Ctrl/Cmd+A then Delete or Backspace clears the document, undo restores it in one group, save and cold reopen agree (LF + CRLF)')
+for (const ending of ['\n', '\r\n']) {
+  await runReplace({ ending, port })
+  port += 1
+}
+console.log('PASS kernel select-all delete: Ctrl/Cmd+A then Delete or Backspace clears the document and typing replaces it, undo restores in one group, save agrees (LF + CRLF)')

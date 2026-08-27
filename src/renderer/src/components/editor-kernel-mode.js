@@ -1164,15 +1164,26 @@ export function createKernelMode({
         bindMap(newState?.doc || null)
         return undefined
       case 'clear-document': {
-        // Select-all then Delete (or typing over it). The bytes are provably
-        // empty, so nothing needs pairing; PM's own transaction already shows
-        // the empty paragraph, so it is allowed through and only the source is
-        // committed here.
+        // Select-all then Delete, or typing over it. Nothing needs pairing: the
+        // whole document is replaced, so the candidate bytes ARE the result.
+        // PM's own transaction already shows it, so it rides through and only
+        // the source is committed here.
         const text = kernel.doc.text
-        if (typeof text !== 'string' || text === '') return undefined
+        const next = typeof classified.text === 'string' ? classified.text : ''
+        if (typeof text !== 'string' || text === next) return undefined
+        // Empty needs no proof. Anything else must reparse to exactly the
+        // document ProseMirror is about to show, or the typed characters carry
+        // syntax this path cannot spell (a lone `#` would become a heading).
+        if (next !== '' && newState?.doc) {
+          const parsed = safeParse(next)
+          if (!parsed || !parsed.eq(newState.doc)) {
+            notifyRefusal(KERNEL_CODES.UNSUPPORTED, batchTargetPos(transactions, oldState))
+            return { veto: true }
+          }
+        }
         const txn = {
           baseRevision: kernel.doc.revision,
-          edits: [{ from: 0, to: text.length, insert: '' }],
+          edits: [{ from: 0, to: text.length, insert: next }],
           intent: 'clear-document'
         }
         const cleared = applySourceTransaction(kernel.doc, txn)
