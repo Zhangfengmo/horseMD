@@ -75,7 +75,9 @@ for (const [index, target] of SIZES.entries()) {
     const elapsed = Date.now() - t0
 
     const domLen = await evaluate("((" + VISIBLE + ")?.textContent || '').length")
-    const source = await readSource(evaluate)
+    // An emptied document has no source textarea to switch to, so the rich view
+    // is the reading that always exists.
+    const source = domLen === 0 ? '' : await readSource(evaluate)
     const diags = JSON.parse(await evaluate("JSON.stringify((window.__hmKernelDiagnostics||[]).map(d=>d.type||d.code))"))
     const counts = {}
     for (const d of diags) counts[d] = (counts[d] || 0) + 1

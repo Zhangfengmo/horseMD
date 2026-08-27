@@ -1371,6 +1371,28 @@ function extractMarkInputRule(transactions, oldState) {
   return payload
 }
 
+// Ctrl/Cmd+A then Delete (or typing over a select-all) reaches ProseMirror as a
+// DOC-LEVEL ReplaceStep, which `extractPlainTextSteps` rejects — so the gesture
+// was refused as `unsupported-input-type`. Recognised here so the controller can
+// commit the one thing it provably is: an empty document.
+export function extractWholeDocumentClear(trs, oldState) {
+  const size = oldState?.doc?.content?.size
+  if (!Number.isInteger(size) || size <= 0) return null
+  const steps = trs.flatMap((tr) => tr.steps || [])
+  if (steps.length !== 1) return null
+  const step = steps[0]
+  if (!isStep(step, 'replace')) return null
+  if (step.from !== 0 || step.to !== size) return null
+  const content = step.slice?.content
+  if (!content) return null
+  if (content.size === 0) return { cleared: true }
+  // ProseMirror replaces the document with ONE empty textblock, never nothing.
+  if (content.childCount !== 1) return null
+  const only = content.child(0)
+  if (!only.isTextblock || only.content.size !== 0) return null
+  return { cleared: true }
+}
+
 export function classifyTransactions(transactions, oldState, { isComposing = false } = {}) {
   const trs = Array.isArray(transactions) ? transactions : [transactions]
 
@@ -1411,6 +1433,8 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const trailingAtomTyping = extractTrailingAtomTyping(trs, oldState)
   if (trailingAtomTyping) return { kind: 'trailing-atom-typing', ...trailingAtomTyping }
+
+  if (extractWholeDocumentClear(trs, oldState)) return { kind: 'clear-document' }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) {

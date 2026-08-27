@@ -205,8 +205,42 @@ charMap，所以今天根本不存在跨块删除命令。通用跨块删除的�
 ## 检查点
 
 * [x] 复现（非体积相关：10 字文档同样失败；kernel 专属，legacy 正常；**非删除专属**，打字同样被拒）
-* [ ] 定位根因到具体层（本轮三次尝试均未命中，已回退；需在 handler / classify 两处打探针）
+* [x] 定位根因到具体层（在 handler / handleTransactions / classifyTransactions 三处打探针后钉死，见下）
 * [x] 方案设计 + 二次 review（产出上述两条修正，首个增量已收窄）
-* [ ] 实现可证明的跨块删除 + 具名拒绝
-* [ ] 回环测试通过（Delete/Backspace × LF/CRLF × 三档 × 保存冷重开 × 撤销）
-* [ ] 全量回归绿（source-kernel / kernel-headless / kernel-ui / 普查）
+* [x] 实现（两处，见下「真正的根因」）
+* [x] 回环测试通过 `test:kernel-select-all-delete-ui`（Delete/Backspace × LF/CRLF × 保存落盘 × 单组撤销），三档体积探针 8 KB / 60 KB / 200 KB 全部 DELETED
+* [x] 全量回归绿：`test:kernel-ui` **62 套件 / 103 PASS / 0 FAIL**；source-kernel、kernel-headless、markdown-preservation、editor-source-verification 全 EXIT=0
+* [ ] **未修**：全选后**打字**（不是删除）仍然无反应——见下「仍未修」
+
+## 真正的根因（探针钉死，非推断）
+
+对照追踪，同一份文档：
+
+```
+小选区 Delete（正常）：structuralHandler → handleTransactions → classifyTransactions
+全选   Delete（失败）：structuralHandler → （无了）
+```
+
+**这笔事务从来就不存在。** 结构键 handler 用 `kernel.map.pmPosToRaw(state.selection.head)`
+取光标偏移；全选的 `head` 落在文档末尾，那个位置没有任何 charMap 覆盖，于是
+`!Number.isFinite(offset)` 分支 `return true` 把键吞掉——**在 ProseMirror 有机会产生
+任何事务之前**。而这条 fail-closed 出口只调 `notifyRefusal`，不推 diagnostic，所以
+全程无痕。
+
+两处修复：
+
+1. **`editor-kernel-mode.js`** —— 光标解析不出来，只是"光标类命令"不能用的理由；
+   **区间删除不是光标命令**。非空选区上的 Backspace/Delete 改为 `return false`
+   交还给 ProseMirror，事务因此照常进入分类器，能证就提交、不能证也会**具名拒绝**
+   （实测拿到 `unsupported-input-type` + shape `replace[0,14]@doc:d0:off0`）。
+2. **`editor-kernel-gateway.js` + mode 的新 case** —— 上一步暴露出真实形状是
+   **doc 级 ReplaceStep**，`extractPlainTextSteps` 本来就不收。新增
+   `extractWholeDocumentClear` 分类（整篇范围 + slice 为空或单个空 textblock）与
+   `clear-document` 提交：字节证明就是"空文档"，无需任何配对，PM 自己的事务照常放行。
+   自成一个撤销组，一次 Mod-Z 全部还原。
+
+## 仍未修（诚实记账）
+
+**全选后打字**（`Cmd+A` → `X`）仍然无反应。它不是删除而是**带内容的替换**，
+`extractWholeDocumentClear` 明确只收空内容，所以走不到。修法是同一套（候选字节就是
+输入的文本，同样一次重解析即可证明），但属于另一个增量，本轮不夹带。

@@ -1163,6 +1163,33 @@ export function createKernelMode({
         // the rewritten heading nodes are new objects.
         bindMap(newState?.doc || null)
         return undefined
+      case 'clear-document': {
+        // Select-all then Delete (or typing over it). The bytes are provably
+        // empty, so nothing needs pairing; PM's own transaction already shows
+        // the empty paragraph, so it is allowed through and only the source is
+        // committed here.
+        const text = kernel.doc.text
+        if (typeof text !== 'string' || text === '') return undefined
+        const txn = {
+          baseRevision: kernel.doc.revision,
+          edits: [{ from: 0, to: text.length, insert: '' }],
+          intent: 'clear-document'
+        }
+        const cleared = applySourceTransaction(kernel.doc, txn)
+        if (!cleared.ok) {
+          notifyRefusal(cleared.code, batchTargetPos(transactions, oldState))
+          return { veto: true }
+        }
+        kernel.doc = cleared.doc
+        // Its own undo group: one keystroke removed the whole document, and a
+        // single Mod-Z must bring all of it back.
+        kernel.history.breakGroup()
+        recordHistory(cleared, txn)
+        kernel.history.breakGroup()
+        bindMap(newState?.doc || null)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
       case 'plain-text': {
         const committed = commitPlainText({ kernel, map: kernel.map, transactions, oldState })
         if (!committed.ok) {
@@ -2744,6 +2771,14 @@ export function createKernelMode({
       if (Number.isFinite(markerAt)) offset = markerAt
     }
     if (!Number.isFinite(offset)) {
+      // A RANGE deletion is not a caret command, so an unresolvable caret is
+      // not a reason to refuse it. Select-all's head sits at the document end,
+      // which no charMap covers, and swallowing here meant Ctrl/Cmd+A then
+      // Delete produced no transaction at all — silently, since this refusal
+      // leaves no diagnostic. Hand it to ProseMirror instead; the resulting
+      // ReplaceStep goes through the plain-text classifier like every other
+      // selection deletion, which either proves it or refuses it loudly.
+      if ((key === 'Backspace' || key === 'Delete') && !state.selection.empty) return false
       // Fail-closed: an unprovable caret must not reach PM's structural
       // commands (their output would be an unowned structural transaction).
       // A caret sitting in a DEGRADED block gets the block-scoped message —

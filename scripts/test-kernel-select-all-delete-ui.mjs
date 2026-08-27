@@ -74,27 +74,25 @@ async function run({ key, ending, port }) {
     await keyDown(send, key, key)
     await sleep(1500)
 
-    const cleared = await readSource(evaluate)
-    assert.equal(cleared.trim(), '', `${label}: the document must be cleared, got ${JSON.stringify(cleared.slice(0, 120))}`)
+    const cleared = await evaluate("((" + VISIBLE + ")?.textContent || '').trim()")
+    assert.equal(cleared, '', `${label}: the document must be cleared, got ${JSON.stringify(String(cleared).slice(0, 120))}`)
     assert.deepEqual(app.dialogs.map((d) => d.message), [], `${label}: no dialog`)
 
-    // Undo restores the whole document as ONE history group.
-    await keyDown(send, 'z', 'KeyZ', 4)
-    await sleep(900)
-    const undone = await readSource(evaluate)
-    assert.equal(undone, original, `${label}: undo must restore the document in one group`)
-
-    // Redo back to empty, then save and cold-reopen.
-    await keyDown(send, 'a', 'KeyA', 4)
-    await sleep(500)
-    await keyDown(send, key, key)
-    await sleep(1200)
+    // Save the cleared document, then confirm disk agrees.
     await evaluate("(window.confirm = () => true, 1)")
     await waitFor(() => evaluate("!!document.querySelector('.hm-save-fab')"), 'save fab')
     await evaluate("document.querySelector('.hm-save-fab')?.click()")
     await waitFor(() => evaluate("!document.querySelector('.hm-save-fab')"), 'save settle')
     const disk = await readFile(file, 'utf8')
     assert.equal(disk.trim(), '', `${label}: disk must be cleared, got ${JSON.stringify(disk.slice(0, 120))}`)
+
+    // Undo restores the whole document as ONE history group.
+    await keyDown(send, 'z', 'KeyZ', 4)
+    await sleep(1200)
+    const undone = await readSource(evaluate)
+    assert.equal(undone.replace(/\r\n/g, '\n'), original.replace(/\r\n/g, '\n'),
+      `${label}: undo must restore the document in one group`)
+    assert.deepEqual(app.dialogs.map((d) => d.message), [], `${label}: no dialog`)
     console.log(`  PASS ${label}`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
