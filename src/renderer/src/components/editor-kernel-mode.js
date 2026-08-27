@@ -79,7 +79,7 @@ import {
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { resolveCommittedRawOffset } from '../lib/source-kernel/commands/insert-point.js'
 import { resolveWhitespaceForPublish } from '../lib/source-kernel/commands/trailing-whitespace.js'
-import { classifyTransactions, commitPlainText, commitMarkInputRule, commitResolvedTextSteps, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
+import { classifyTransactions, commitPlainText, commitMarkInputRule, commitMarkedTextInsert, commitResolvedTextSteps, commitTaskToggle, commitCodeLanguage, commitImageAttrs, routeLinkEdit, routeTrailingAtomTyping, isTypableTextblock } from './editor-kernel-gateway.js'
 import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
@@ -1322,6 +1322,49 @@ export function createKernelMode({
         // The parse WAS just proven value-equal to the view doc the allowed
         // transaction produces, so the ordinary rebind + debounced verify
         // suffice (nothing is known to differ — the §9 #5 healthy path).
+        bindMap(newState.doc)
+        requestVerify(newState.doc, committed.applied?.selection?.anchor, newState.selection?.head)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'marked-text-insert': {
+        // D6 (2026-08-27). A character typed inside — or at the edge of — a
+        // bold/italic/strike/link run inherits the run's mark, so the slice is
+        // not plain and the plain-text path refused it, silently.
+        //
+        // Shape (b), same as `mark-input-rule`: commit the bytes, then let the
+        // ORIGINAL transaction through — behind the same pre-proof, which is
+        // the real gate. The gateway proved the STRUCTURE; this proves the
+        // BYTES: reparse the candidate and require value-equality with the
+        // document the transaction is about to show. That one equality subsumes
+        // every per-shape check (a typed '*' re-reading the delimiters, an
+        // escape remark resolves differently, a link that stops being a link).
+        // On failure bytes AND view are untouched and the refusal is NAMED.
+        const committed = commitMarkedTextInsert({
+          kernel,
+          map: kernel.map,
+          transactions,
+          oldState
+        })
+        if (!committed.ok) {
+          notifyRefusal(committed.code, classified.pmFrom)
+          return { veto: true }
+        }
+        const parsed = safeParse(committed.applied.doc.text)
+        if (!parsed || !newState?.doc || !parsed.eq(newState.doc)) {
+          notifyRefusal(KERNEL_CODES.MARKED_INSERT, classified.pmFrom)
+          pushKernelDiagnostic({
+            type: 'marked-insert-unprovable',
+            text: classified.text
+          })
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
+        // The parse was just proven value-equal to the view doc the allowed
+        // transaction produces, so nothing is known to differ: the ordinary
+        // rebind + debounced verify suffice (perf assessment §9 #5's healthy
+        // path), exactly as `mark-input-rule` concludes.
         bindMap(newState.doc)
         requestVerify(newState.doc, committed.applied?.selection?.anchor, newState.selection?.head)
         onChange?.(kernel.doc.text, false)

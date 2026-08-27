@@ -135,5 +135,15 @@ export const KERNEL_CODES = Object.freeze({
   // into the title slot — a multi-slot byte scheme the kernel deliberately
   // does not own (see the CAPTION ADR). A NAMING code only: the refusal
   // itself predates it, this gives the toast the gesture and its exits.
-  IMAGE_RESIZE: 'image-resize-unsupported'
+  IMAGE_RESIZE: 'image-resize-unsupported',
+  // Typing inside — or at the edge of — a bold/italic/strike/link run, where
+  // ProseMirror's inclusive-mark inheritance stamps the typed character with
+  // the run's mark (editor-kernel-gateway.js `extractMarkedTextInsert`). The
+  // shape commits when the candidate bytes reparse to the document the view is
+  // about to show; when they do not — a typed delimiter that would re-read the
+  // run, an escape the parser resolves differently — the keystroke is swallowed
+  // with bytes AND view untouched. Named because before 2026-08-27 this refusal
+  // WAS the defect: 4 of 7 trailing-mark spellings silently ate the keystroke
+  // with no code, no toast and no diagnostic.
+  MARKED_INSERT: 'marked-insert-unprovable'
 })

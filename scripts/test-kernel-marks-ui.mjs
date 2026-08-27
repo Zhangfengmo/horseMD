@@ -705,14 +705,30 @@ async function run() {
 
     await assertSource(evaluate, AFTER_TYPING, 'the before/after/far-plain typing matrix must commit at the exact derived raw offsets')
 
-    // (d) INSIDE the bold word -> refused. Assert via byte stability only
-    // (content unchanged), never the toast DOM.
+    // (d) INSIDE the bold word. THIS PINNED A REFUSAL UNTIL 2026-08-27, and
+    // that refusal was defect D6: ProseMirror stamps the typed character with
+    // the run's inclusive `strong` mark, the gateway's plain-text path refuses
+    // any marked insert slice, and the keystroke was swallowed with no code
+    // and no message — i.e. a bolded word could not be edited at all. (The
+    // razor-edge note on (b) above described the same defect as a "residual
+    // gap"; it was the narrow half.) It is now its own classification with its
+    // own reparse proof, and the character commits INSIDE the delimiters,
+    // which is where the view already shows it.
     await clickAt(evaluate, send, '前X午未申酉后Y段尾Z', 4) // between 未 and 申
-    const beforeInside = await paragraphTexts(evaluate)
     await typeTextLikeUser(send, 'W', { delayMs: delay })
-    await sleep(300)
-    const afterInside = await paragraphTexts(evaluate)
-    assert.deepEqual(afterInside, beforeInside, 'typing inside the bold word content must be refused (bytes unchanged)')
+    await waitFor(async () => (await mounted(evaluate) || '').includes('前X午未W申酉后Y段尾Z'),
+      'typed W inside the bold run never landed')
+    await sleep(200)
+    await assertSource(evaluate,
+      AFTER_F.replace('前**午未申酉**后段尾', '前X**午未W申酉**后Y段尾Z'),
+      'a character typed inside the bold run must commit inside the ** delimiters, never outside them')
+
+    // …and it is ONE undo group of its own, which also restores the document
+    // every step below this one is written against.
+    await pressUndo(send)
+    await sleep(400)
+    await assertSource(evaluate, AFTER_TYPING,
+      'undo must revert exactly the marked-insert group')
 
     // ============================================================
     // 8) `/quote` slash item — the ONLY reachable invocation is on a block

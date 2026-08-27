@@ -205,9 +205,17 @@ console.log('--- kernel gateway ---')
   assert.deepEqual(committed.transaction.edits, [{ from: 0, to: 0, insert: 'X' }])
   assert.equal(committed.applied.doc.text, 'X**bold**\n')
 
-  // …and the inheriting form IS refused (the mark-inheritance trap pin).
+  // …and the inheriting form takes the MARKED classification (D6,
+  // 2026-08-27; this pin asserted `blocked` before that). The two forms are
+  // the same caret and opposite intents, which is exactly why they resolve
+  // through opposite tables: the plain char lands before the opening '**'
+  // (above), the strong-marked one lands after it, because `boundaries[0]` is
+  // the first unit's own rawStart. Both spell what the view shows. The byte
+  // outcome is asserted in scripts/test-kernel-marked-insert.mjs.
   const trInherit = state.tr.insertText('X', 1)
-  assert.equal(classifyTransactions([trInherit], state).kind, 'blocked')
+  const inherited = classifyTransactions([trInherit], state)
+  assert.equal(inherited.kind, 'marked-text-insert')
+  assert.notEqual(inherited.kind, 'plain-text')
 }
 
 // Case 7: a slice containing a hard_break (not text) is not plain text.
@@ -1228,9 +1236,8 @@ const commitOf = (md, map, state, tr) => {
 }
 
 // (b) type AFTER the bold run with a PLAIN slice: the neutral resolver
-// lands the char AFTER the closing '**', never inside it. (Real typing at
-// this exact caret inherits the strong mark — `$from.marks()` — and stays
-// refused, pinned right below; the plain shape is built explicitly.)
+// lands the char AFTER the closing '**', never inside it. This half is the
+// contract the D6 fix may not disturb, and it is unchanged.
 {
   const { md, state, map } = markedFixture()
   const tr = state.tr.replaceWith(7, 7, text('X'))
@@ -1239,9 +1246,21 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(committed.ok, true, committed.code)
   assert.equal(committed.applied.doc.text, 'a **bold**X b\n')
 
-  // inherited-mark typing at the run's trailing edge → refused (trap pin).
+  // Real typing at this exact caret inherits the strong mark
+  // (`$from.marks()`), and until 2026-08-27 this pin asserted it was BLOCKED.
+  // That refusal was D6: a keystroke swallowed with no code and no message on
+  // the everyday "keep typing after a bolded word" gesture (measured 4 of 7
+  // trailing-mark spellings, plus every keystroke INSIDE a bold word). It is
+  // now its own classification with its own byte proof — the pin is flipped
+  // deliberately, and the byte outcome it now produces is asserted in
+  // scripts/test-kernel-marked-insert.mjs ('a **boldX** b'), the MIRROR of the
+  // plain outcome directly above. The trap the old pin guarded (a marked slice
+  // must never travel the PLAIN path, whose resolver would put it outside the
+  // delimiters and unbold it) is intact: this is not `plain-text`.
   const trInherit = state.tr.insertText('X', 7)
-  assert.equal(classifyTransactions([trInherit], state).kind, 'blocked')
+  const inherited = classifyTransactions([trInherit], state)
+  assert.equal(inherited.kind, 'marked-text-insert')
+  assert.notEqual(inherited.kind, 'plain-text')
 }
 
 // (c) type in the PLAIN run of the marked paragraph.
@@ -1271,14 +1290,19 @@ const commitOf = (md, map, state, tr) => {
 }
 
 // (e) type INSIDE the bold run with an inherited mark (real typing inside a
-// run inserts a MARKED slice) → still refused: the storedMarks/
-// mark-inheritance trap stays closed.
+// run inserts a MARKED slice). Until 2026-08-27 this asserted `blocked` /
+// INPUT_TYPE — i.e. that a bolded word could not be edited at all, which is
+// the larger half of D6 and was measured on the real app, not deduced
+// (scripts/probe-mark-run-interior.mjs: SWALLOWED). It now classifies, and
+// commits INSIDE the delimiters ('a **boXld** b', asserted with the rest of
+// the byte matrix in scripts/test-kernel-marked-insert.mjs).
 {
   const { state } = markedFixture()
   const tr = state.tr.replaceWith(5, 5, schema.text('X', [schema.mark('strong')]))
   const result = classifyTransactions([tr], state)
-  assert.equal(result.kind, 'blocked')
-  assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(result.kind, 'marked-text-insert')
+  assert.equal(result.pmFrom, 5)
+  assert.equal(result.text, 'X')
 }
 
 // (f) DELETE straddling a mark boundary (from plain text INTO the run):

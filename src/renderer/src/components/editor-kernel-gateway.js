@@ -481,6 +481,78 @@ function extractPlainTextSteps(transactions, oldState) {
   return steps
 }
 
+// MARKED TEXT INSERT (D6, 2026-08-27) — the mirror of the plain-text insert.
+//
+// `plainSliceText` refuses any marked insert slice. That is right FOR THE PLAIN
+// PATH (an unmarked char at a run's boundary must land OUTSIDE the delimiters —
+// `rawNeutralInsert`'s whole job), but ProseMirror stamps a typed character with
+// the run's mark whenever the mark is INCLUSIVE (strong/emphasis/
+// strike_through/link all are), so typing inside or at the edge of a bolded
+// word produced a marked slice and was swallowed.
+//
+// Claimed shape: ONE transaction, ONE zero-width ReplaceStep, a slice of ONE
+// marked text node, no line ending, no open ends, and the slice's marks EXACTLY
+// those of the run it joins.
+//
+// That last condition is what makes the offset derivable, not decoration. The
+// commit resolves through `pmPosToRaw` (`visibleToRaw`, the gap-BEFORE table),
+// which lands the bytes inside the markers of the run CLOSING at the boundary —
+// the run BEFORE the caret. Hence marks must match that run and no other: at a
+// seam ('**a**_b_') an emphasis slice would be written into the STRONG run's
+// delimiters, contradicting the view. The block's content start is the one
+// position with no node before it; there `boundaries[0]` is already past the
+// opening markers, so the run AFTER owns the offset — the only case that
+// consults the node after.
+//
+// STRUCTURE is all this proves. The byte proof is the caller's: mode's
+// `marked-text-insert` case reparses and requires equality with the document
+// the transaction produces, as `mark-input-rule` does. Surviving here and
+// failing there is refused `MARKED_INSERT` — named and toasted, never silent.
+const sameMarkSet = (a, b) => {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  return a.every((mark, index) => mark.eq(b[index]))
+}
+
+function extractMarkedTextInsert(transactions, oldState) {
+  const changed = (Array.isArray(transactions) ? transactions : []).filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const tr = changed[0]
+  if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
+  const step = tr.steps[0]
+  if (!isStep(step, STEP_IDS.REPLACE)) return null
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.from !== step.to) return null
+
+  const slice = step.slice
+  if (!slice || slice.openStart || slice.openEnd) return null
+  if (slice.content?.childCount !== 1) return null
+  const inserted = slice.content.child(0)
+  if (!inserted?.isText || !inserted.marks?.length) return null
+  const text = inserted.text || ''
+  if (!text.length || /[\r\n]/.test(text)) return null
+
+  const stepDoc = tr.docs?.[0] || oldState?.doc
+  if (!stepDoc) return null
+  let $from
+  try {
+    $from = stepDoc.resolve(step.from)
+  } catch {
+    return null
+  }
+  // The same admission the plain path uses, so a block this module refuses to
+  // type in at all cannot be entered through the marked door either.
+  if (!textblockProfile($from.parent)) return null
+  if ($from.parent.type?.name === 'code_block') return null
+
+  const before = $from.nodeBefore
+  const after = $from.nodeAfter
+  const joinsRunBefore = !!before?.isText && sameMarkSet(before.marks || [], inserted.marks)
+  const joinsRunAtStart = !before && $from.parentOffset === 0 &&
+    !!after?.isText && sameMarkSet(after.marks || [], inserted.marks)
+  if (!joinsRunBefore && !joinsRunAtStart) return null
+
+  return { pmFrom: step.from, text }
+}
+
 // Detects the task-checkbox click shape: `@milkdown/components`'
 // `listItemBlockView` (list-item-block/view.ts `setAttr`) toggles a task
 // item's checked state with a bare `tr.setNodeAttribute(pos, 'checked', v)`
@@ -1446,6 +1518,12 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
   const wholeDoc = extractWholeDocumentClear(trs, oldState)
   if (wholeDoc) return { kind: 'clear-document', text: wholeDoc.text }
 
+  // Asked BEFORE `extractPlainTextSteps` only because that extractor refuses
+  // this shape outright (`plainSliceText` rejects a marked slice); order is
+  // otherwise irrelevant, the two shapes are disjoint by construction.
+  const markedInsert = extractMarkedTextInsert(trs, oldState)
+  if (markedInsert) return { kind: 'marked-text-insert', ...markedInsert }
+
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) {
     // The refusal is unchanged; only its NAME improves when the shape is one
@@ -1800,6 +1878,40 @@ export function commitMarkInputRule({ kernel, map, pmFrom, text }) {
   return commitPlainTextSteps({ kernel, map, steps: [{ from: pmFrom, to: pmFrom, insertText: text }] })
 }
 
+// commitMarkedTextInsert: the byte half of a `marked-text-insert`
+// classification (see `extractMarkedTextInsert` above). Same pipeline as every
+// other typed character — `commitPlainTextSteps` — with ONE difference, carried
+// on the step itself: the raw offset resolves through the gap-BEFORE table
+// (`pmPosToRaw`) instead of the marker-gap-neutral one, so the character lands
+// INSIDE the run's delimiters, which is where ProseMirror has already put it in
+// the view. Everything else (escape safety, CRLF pairs, table-structure
+// preservation, the whitespace ledger) applies verbatim, because it is the same
+// function.
+//
+// It RE-DERIVES the shape from the transactions rather than trusting the
+// caller's `pmFrom`/`text` — the same contract `commitPlainText` states for
+// itself, and here it is load-bearing rather than hygienic: the mirror resolver
+// is only sound because the slice's marks were proven to be the closing run's,
+// so a caller that passed a bare position would be choosing "write inside the
+// delimiters" with nothing behind it.
+//
+// This does NOT publish: like `commitPlainText`, it returns the applied result
+// and leaves `kernel.doc` to the caller, which reparses first.
+export function commitMarkedTextInsert({ kernel, map, transactions, oldState }) {
+  if (!kernel?.doc || !map || typeof map.pmPosToRaw !== 'function' ||
+      typeof map.pmPosToRawStart !== 'function') {
+    return { ok: false, code: KERNEL_CODES.UNMAPPED }
+  }
+  const trs = Array.isArray(transactions) ? transactions : [transactions]
+  const insert = extractMarkedTextInsert(trs, oldState)
+  if (!insert) return { ok: false, code: KERNEL_CODES.MARKED_INSERT }
+  return commitPlainTextSteps({
+    kernel,
+    map,
+    steps: [{ from: insert.pmFrom, to: insert.pmFrom, insertText: insert.text, markedInsert: true }]
+  })
+}
+
 // Exported for the IME commit route (editor-kernel-mode.js commitReplace):
 // the composition's one replace is synthesized as a resolved step and flows
 // through THIS core — the same virtual-prefix/seed-dissolve/heal/escape
@@ -1896,7 +2008,12 @@ function commitPlainTextSteps({ kernel, map, steps }) {
   // not "an ordinary character proving the marker was content". Both commands
   // reparse before returning and answer `not-structural` everywhere they do not
   // apply, so ordinary typing falls straight through.
-  if (steps.length === 1 && steps[0].from === steps[0].to &&
+  // A MARKED insert is never this shape: both commands act on a marker-only
+  // intermediate block (a bare '#' with no content anchor), and a block whose
+  // caret sits in a mark run has content by construction. Skipped explicitly
+  // rather than left to `markerInsertOffset` returning null, so the marked
+  // path cannot be re-spelled by a command that was never asked about it.
+  if (steps.length === 1 && !steps[0].markedInsert && steps[0].from === steps[0].to &&
       typeof steps[0].insertText === 'string' && steps[0].insertText !== '') {
     const insert = steps[0].insertText
     const offset = markerInsertOffset(map, steps[0].from)
@@ -1953,9 +2070,19 @@ function commitPlainTextSteps({ kernel, map, steps }) {
     // value. Using one resolver for both ends keeps `rawFrom === rawTo`
     // structurally (never a spurious non-zero-width edit); the legacy
     // `pmPosToRaw` fallback covers hand-built maps in older tests.
-    const insertPoint = typeof map.pmPosToRawInsert === 'function'
-      ? map.pmPosToRawInsert
-      : map.pmPosToRaw
+    //
+    // A MARKED insert (D6) takes the MIRROR resolver deliberately: its slice
+    // was proven to carry exactly the marks of the run closing at this
+    // boundary, so the byte must land INSIDE that run's delimiters
+    // ('a **bold**' + strong X at the run's end -> 'a **boldX**') — the very
+    // outcome the neutral resolver exists to prevent for a PLAIN char. Same
+    // boundary, opposite intent, and the slice's marks are what distinguish
+    // them; `pmPosToRaw` is the gap-BEFORE table that answers it.
+    const insertPoint = step.markedInsert
+      ? map.pmPosToRaw
+      : typeof map.pmPosToRawInsert === 'function'
+        ? map.pmPosToRawInsert
+        : map.pmPosToRaw
     const rawFrom = virtualBlock
       ? virtualBlock.raw
       : oldFrom < oldTo ? map.pmPosToRawStart(oldFrom) : insertPoint(oldFrom)

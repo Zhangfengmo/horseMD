@@ -60,7 +60,7 @@
 
 ## 明确未修的遗留（不列进"已完成"）
 
-1. **D6：段落末尾接着打字被吞**。`**bold**` / `*em*` / `~~del~~` / `[link]()` 结尾的段落，点到末尾再打字 → 击键被静默吞掉（`unsupported-input-type`）；`` `code` `` 和 `==high==` 正常。实测 **4/7 被吞**（`scripts/probe-trailing-mark-append.mjs`）。这是**先前就存在**的行为（CLAUDE.md 里"续加粗手势"一直列在 veto 清单），fail-closed 不丢字节，但"点到加粗词后面打字没反应"是个很常见的手势。**至少该给它一个具名拒绝码 + i18n 文案**，现在它连提示都没有。
+1. ~~**D6：段落末尾接着打字被吞**~~ —— **已修，见下方「任务：标记内打字」**。
 2. **行首空格/Tab 仍写 U+00A0**。D5 只解决了块尾。行首是另一类账本，本轮未动。
 3. **剩余 25 个只读块**：主要是**行内代码跨换行且在容器内**（`- a \`co\n  de\` b`）——和 D3 同一族，只是在 `inlineCodeUnits` 而非 `textUnits`。
 4. **PDF/HTML 导出不带源码序号**（`editor-pdf-content.js:13` 剥掉 `.label-wrapper`），源码忠实序号是编辑器专属，此前无处记载，已补记进文档。
@@ -279,3 +279,83 @@ charMap，所以今天根本不存在跨块删除命令。通用跨块删除的�
 `test:kernel-marker-space-channels-ui` 现在 **8/8**（空格三通道 × LF/CRLF + runGrowth × LF/CRLF）。
 `test:kernel-ui` **62 套件 / 103 PASS / 0 FAIL**；source-kernel、kernel-headless、
 markdown-preservation、editor-source-verification 全 EXIT=0。
+
+---
+
+# 任务：标记内打字被静默吞掉（原 D6，已修）
+
+## 范围勘误（实测推翻了原记载）
+
+遗留清单把它记成「段落末尾接着打字被吞，4/7」。**实测更大**：
+
+| 手势 | 修复前 |
+|---|---|
+| `**bold**` 中间打字 | **被吞** |
+| `**bold**` 尾部打字 | 被吞 |
+| `**bold**` 词首打字 | 落字（那里不继承 mark） |
+
+`scripts/probe-mark-run-interior.mjs`。所以它不是「末尾续写」这一条手势，
+而是**加粗/斜体/删除线/链接的词内部整体不可编辑**。
+
+## 根因（探针钉死，非推断）
+
+**不在光标位置**——`probe-trailing-mark-inclusive.mjs` 实测 7 例光标全部落在元素内部
+（`text("bold") < strong < p`），`code`/`mark` 也一样。区别在 mark 的 `inclusive`：
+PM 给打出的字符盖上运行段的 mark（strong/emphasis/strike_through/link 都是 inclusive），
+gateway `plainSliceText`（editor-kernel-gateway.js:144）拒绝**任何**带 mark 的插入切片；
+零宽插入又跳过 `stepRespectsMarkedRuns`，于是死在这里：
+`unsupported-input-type` + shape `replace[n,n]@paragraph:d1:offN open0/0 <text>`。
+
+**一个被 A/B 实测推翻的假设**：我原以为 inline code 是 `inclusive:false` 的豁免项。
+对着 stash 出来的**修复前构建**跑 `probe-code-edge.mjs`：点在 `<code>` 元素**右边缘**时，
+inline code 修复前**同样被吞**。此前那条「inline code 不受影响」的观察点的是**段落**右边缘，
+是另一个位置——两条观察不矛盾，是位置不同。真正的对照组只有 `==高亮==`。
+
+## 方案：不放宽明文路径，补一条镜像分类
+
+明文插入的契约是「在运行段边界打字必须落在定界符**外**」（`a **bold**` + X → `a **bold**X`），
+由 `rawNeutralInsert` 保证，一字未动。带 mark 的插入是它的**镜像**，需要镜像解析器
+——`visibleToRaw`（gap-BEFORE 表），`character-map.js` 自己的 ADR 早写明它把字符落在**闭合标记之内**。
+
+- **结构证明**（gateway `extractMarkedTextInsert`）：单事务单零宽 ReplaceStep、切片为单个带 mark
+  文本节点、无换行、且切片的 mark **恰为它要接入的那个运行段的**。最后一条是偏移可推导的前提：
+  gap-BEFORE 表落进的是**在此边界闭合**的运行段，所以只认光标**前**的节点；唯一无前节点的位置
+  是块内容起点（`boundaries[0]` 已越过开标记），只有那里才看后节点。
+- **字节证明**（mode `marked-text-insert`，与 `mark-input-rule` 同形）：候选字节经编辑器自己的
+  解析链重解析，必须与事务即将显示的文档逐值相等。
+- **不可证则具名拒绝** `marked-insert-unprovable`（新 KERNEL_CODES + 中英 i18n + toast），
+  字节与视图都不动——这正是遗留清单要求的「至少给它一个名字」。
+- commit **自行重推**形状而非信任调用方（`commitPlainText` 的既有契约，在这里是承重的）。
+
+## 有意翻转的旧钉子（5 处，每处都写明理由）
+
+| 位置 | 原本钉的 |
+|---|---|
+| `test-kernel-gateway.mjs` (b) | 尾边继承 → blocked |
+| `test-kernel-gateway.mjs` (e) | 运行段内部 → blocked/INPUT_TYPE |
+| `test-kernel-gateway.mjs` Case 6 | 块首继承 → blocked |
+| `test-kernel-marks-ui.mjs` (d) | 加粗词内部打字必须被拒绝 |
+| `test-mode-switch-combination-ui.mjs` 6c | 带 mark 表格单元格边界必须 VISIBLY 拒绝 |
+
+五处钉的都是这个缺陷本身。最后一条的注释原文已预写退出条件（「若将来支持 mark 边界插入，
+本断言会失败并应被有意删除」）——没有删掉，而是**倒转成字节断言**
+（`| **粗体格肆** | 一<br>二 | 普通格贰 |`）并加断言「无 toast，因为提交成功而非拒绝未上报」。
+明文对照半边全部保留。
+
+## 验证
+
+| | |
+|---|---|
+| 真实 app 探针 `probe-trailing-mark-append` | **0 / 7 被吞**（修复前 4/7），字节 `甲 **boldZ**` / `甲 [linkZ](http://x)` |
+| 真实 app 探针 `probe-mark-run-interior` | 中间/词首/段尾 **全部落字** |
+| `test:kernel-marked-insert`（新，无头） | PASS（四拼写 × 内部/尾边/块首 + 明文对照 + 4 条负控 + UNMAPPED 具名） |
+| `test:kernel-marked-insert-ui`（新，真实 app） | **15 例全 PASS**（strong/em/del/link/code × 尾边+内部 × LF/CRLF，高亮对照，落盘 + 冷重开 + 0 dialog） |
+| `test:kernel-ui` | **104 PASS / 0 FAIL**（EXIT=0） |
+| `test:source-kernel` / `test:kernel-headless` | EXIT=0 |
+| `test:markdown-preservation` / `test:editor-source-verification` / `test:roundtrip-acceptance` | EXIT=0 |
+| `test:kernel-census` | PASS（0 / 784 锁块） |
+
+UI 套件的内部断言**刻意不钉具体下标**——点击按几何落点，四字运行段的中点会在字形两侧取整；
+钉的是不变量：恰好多一个字符、其余逐字不变、且该字符严格落在运行段可见文字内部。
+（一次自纠：我第一版把 `link/interior` 钉成了固定下标，实测落在 `[linZk]` 而非 `[liZnk]`——
+那是在钉取整，不是钉行为。）

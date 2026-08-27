@@ -154,7 +154,9 @@ const FIXTURE = [
 const RICH_EDIT_LIST = '壹'
 const RICH_EDIT_CELL = '贰'
 const SOURCE_EDIT = '叁'
-const REFUSED_EDIT = '肆'
+// Was REFUSED_EDIT: until 2026-08-27 typing at a marked cell's boundary was a
+// pinned refusal. It commits now (D6), so the name says what it does.
+const MARKED_CELL_EDIT = '肆'
 
 // ==========================================================================
 // THE HEADLESS EXPECTATION (this is what step 2 cross-checks)
@@ -163,7 +165,7 @@ const REFUSED_EDIT = '肆'
 // harness's ProseMirror document, then `pairIsReadOnlyToUser` — which is
 // literally the predicate the status indicator counts with
 // (src/renderer/src/lib/kernel-status.js).
-for (const marker of [RICH_EDIT_LIST, RICH_EDIT_CELL, SOURCE_EDIT, REFUSED_EDIT]) {
+for (const marker of [RICH_EDIT_LIST, RICH_EDIT_CELL, SOURCE_EDIT, MARKED_CELL_EDIT]) {
   assert.ok(
     !FIXTURE.includes(marker),
     `edit marker ${JSON.stringify(marker)} already occurs in the fixture — the "exactly once" counts would be meaningless`
@@ -487,40 +489,32 @@ async function runKernelSession() {
     await waitFor(async () => (await mounted(evaluate) || '').includes(RICH_EDIT_CELL), 'the plain table-cell edit never reached the editor')
     await sleep(250)
 
-    // ---- 6c. KNOWN-REFUSED: typing at a MARKED cell's boundary ------------
-    // Measured in the built app: with the caret at the end of `**粗体格**`, a
-    // typed character is REFUSED with the toast
-    // 「源码权威内核实验阶段暂未支持此操作 (unsupported-input-type)」 — the insert
-    // would inherit the `strong` mark, so the gateway cannot classify it as a
-    // plain-text step and vetoes the transaction.
+    // ---- 6c. typing at a MARKED cell's boundary --------------------------
+    // THIS PINNED A REFUSAL UNTIL 2026-08-27, deliberately and loudly: with
+    // the caret at the end of `**粗体格**` the insert inherits the `strong`
+    // mark, the gateway could not classify a marked slice as a plain-text
+    // step, and the transaction was vetoed with the toast
+    // 「…暂未支持此操作 (unsupported-input-type)」. The pin's own note said it
+    // would fail and be removed deliberately if mark-boundary inserts ever
+    // became supported. They have (defect D6): the character now commits
+    // INSIDE the delimiters, proven by reparse before any byte is written.
     //
-    // That is the correct fail-closed posture and it is LOUD, so it is pinned
-    // here rather than avoided: the assertion is that the refusal is visible
-    // AND that not one byte moved. If mark-boundary inserts later become
-    // supported, this assertion fails and is removed deliberately.
-    //
-    // Note `window.__hmKernelDiagnostics` stays EMPTY for this refusal — the
-    // ring buffer does not record it — so the toast is the only observable
-    // signal and therefore the thing worth asserting.
-    const beforeRefusal = await visibleRichText(evaluate)
+    // The assertion is therefore inverted, not deleted — it now pins the BYTE
+    // outcome (the cell's markers survive, the character is inside them) and
+    // that the operation is silent because it SUCCEEDED, not because a refusal
+    // went unreported.
     await clickCellEnd(evaluate, send, '粗体格')
-    await typeTextLikeUser(send, REFUSED_EDIT, { delayMs: delay })
-    await sleep(600)
-    const refusalToast = await evaluate("document.querySelector('.hm-toast')?.textContent ?? null")
-    assert.ok(
-      refusalToast && refusalToast.includes('unsupported-input-type'),
-      `KNOWN-REFUSED: typing at a marked table cell's boundary must refuse VISIBLY; toast was ${JSON.stringify(refusalToast)}`
-    )
-    assert.equal(
-      await visibleRichText(evaluate),
-      beforeRefusal,
-      'a refused mark-boundary insert must not change the document at all'
-    )
-    console.log(`KNOWN-REFUSED confirmed (marked table cell): ${JSON.stringify(refusalToast)}`)
+    await typeTextLikeUser(send, MARKED_CELL_EDIT, { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('粗体格' + MARKED_CELL_EDIT),
+      'the marked table-cell edit never reached the editor')
+    await sleep(300)
+    const markedCellToast = await evaluate("document.querySelector('.hm-toast')?.textContent ?? null")
+    assert.equal(markedCellToast, null,
+      `a committed marked-cell insert must not toast; got ${JSON.stringify(markedCellToast)}`)
 
     await toggleSourceMode(evaluate)
     const afterRichEdits = await waitFor(() => visibleSource(evaluate), 'source view did not appear after the rich edits')
-    assertOnlyTheseEdits(afterRichEdits, [SOURCE_EDIT, RICH_EDIT_LIST, RICH_EDIT_CELL], 'rich-mode edits')
+    assertOnlyTheseEdits(afterRichEdits, [SOURCE_EDIT, RICH_EDIT_LIST, RICH_EDIT_CELL, MARKED_CELL_EDIT], 'rich-mode edits')
     const listLine = lineContaining(afterRichEdits, RICH_EDIT_LIST)
     const cellLine = lineContaining(afterRichEdits, RICH_EDIT_CELL)
     assert.ok(listLine?.includes('- [ ] 未完成'), `the nested-task-item edit landed on the wrong line: ${JSON.stringify(listLine)}`)
@@ -528,7 +522,12 @@ async function runKernelSession() {
       cellLine?.includes('|') && cellLine.includes('普通格'),
       `the table-cell edit landed on the wrong line: ${JSON.stringify(cellLine)}`
     )
-    console.log(`rich edits landed as: ${JSON.stringify(listLine)} / ${JSON.stringify(cellLine)}`)
+    const markedLine = lineContaining(afterRichEdits, MARKED_CELL_EDIT)
+    assert.ok(
+      markedLine?.includes('**粗体格' + MARKED_CELL_EDIT + '**'),
+      `the marked table-cell edit must land INSIDE the ** delimiters: ${JSON.stringify(markedLine)}`
+    )
+    console.log(`rich edits landed as: ${JSON.stringify(listLine)} / ${JSON.stringify(cellLine)} / ${JSON.stringify(markedLine)}`)
 
     // ---- 7. save + cold reopen -> byte-exact ------------------------------
     await waitFor(() => evaluate("!!document.querySelector('.hm-save-fab')"), 'save button missing after edits')
