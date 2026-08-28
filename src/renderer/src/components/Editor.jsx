@@ -430,6 +430,18 @@ export default function Editor({
           getView: () => viewRef.current,
           parse: (md) => parseAdapter.parse(md),
           prepareMarkdown: parseAdapter.prepare,
+          // Paste only (editor-kernel-mode.js `commitPaste`): the pasted
+          // content has no bytes of its own, so the editor's own serializer
+          // spells it, and the SCRATCH cleanup — the transform for markdown
+          // that has no author behind it — strips the serializer's own
+          // placeholders (`<br />` in an empty table cell / list item) and
+          // compacts list spacing. Read lazily: `crepe` is created below this
+          // options object, and the kernel never calls these before then.
+          serializeDoc: (docNode) => {
+            const markdown = crepe.editor.ctx.get(serializerCtx)(docNode)
+            if (!parseTables) parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
+            return generatedScratchMarkdown(markdown, parseTables, { compactSpacing: true })
+          },
           notify: fireToast,
           getT: (key) => tRef.current(key),
           onChange: (markdown, opts) => {

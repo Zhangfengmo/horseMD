@@ -1402,7 +1402,15 @@ export function extractWholeDocumentClear(trs, oldState) {
   return { text: only.textContent }
 }
 
-export function classifyTransactions(transactions, oldState, { isComposing = false } = {}) {
+// ProseMirror's own paste marker: `doPaste` dispatches its replaceSelection
+// transaction with BOTH metas set (prosemirror-view input.ts), and Milkdown's
+// paste plugins keep them when they build their own slice. `uiEvent` is the
+// same channel the drop refusal above reads.
+const isPasteBatch = (trs) =>
+  trs.some((tr) => tr && typeof tr.getMeta === 'function' &&
+    (tr.getMeta('paste') === true || tr.getMeta('uiEvent') === 'paste'))
+
+export function classifyTransactions(transactions, oldState, { isComposing = false, isPaste = false } = {}) {
   const trs = Array.isArray(transactions) ? transactions : [transactions]
 
   if (trs.some((tr) => tr && typeof tr.getMeta === 'function' && tr.getMeta('sourceProjection'))) {
@@ -1451,6 +1459,21 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
     // The refusal is unchanged; only its NAME improves when the shape is one
     // we have since identified. Asked here, after every extractor has passed,
     // so it can never steal a batch something else would have classified.
+    // PASTE (2026-08-28). Asked LAST, for the same reason as the named codes
+    // above: a paste whose slice is a plain single-block text run is already
+    // handled by `extractPlainTextSteps` and must keep that route, byte for
+    // byte. What arrives here is the multi-block / cross-parent slice the
+    // step extractors cannot express — measured shapes:
+    //   replace[12,12] open1/1 <paragraph+paragraph>
+    //   replace[12,13] cross-parent open1/0 <paragraph+heading+bullet_list>
+    // Those were refused outright until now, which meant EVERY rich or
+    // multi-paragraph paste wrote nothing once the kernel became the default.
+    // The controller's `commitPaste` owns them; it still refuses whatever it
+    // cannot prove, so this only ever converts a blanket refusal into a
+    // provable commit.
+    if (isPaste || isPasteBatch(trs)) {
+      return { kind: 'paste', shape: describeUnclassified(trs, oldState) }
+    }
     const namedCode = extractHeadingDemotion(trs, oldState)
       ? KERNEL_CODES.HEADING_DEMOTE
       : extractImageDisplayRefusal(trs, oldState)

@@ -571,7 +571,11 @@ export function createConfiguredCrepe({
             // Undecided-ordinal graying (typing-policy ADR 第二阶段 ②): pure
             // view decoration, kernel mode only — legacy never escapes `4.`.
             ...(typeof kernelPlugins.undecidedOrdinalPlugin === 'function' ? [kernelPlugins.undecidedOrdinalPlugin()] : []),
-            ...(typeof kernelPlugins.sourceOrdinalPlugin === 'function' ? [kernelPlugins.sourceOrdinalPlugin()] : [])
+            ...(typeof kernelPlugins.sourceOrdinalPlugin === 'function' ? [kernelPlugins.sourceOrdinalPlugin()] : []),
+            // Paste provenance for the kernel's paste route: a capture-phase
+            // DOM listener, because the three paste dispatchers label their
+            // transactions differently (see pasteFlagPlugin).
+            ...(typeof kernelPlugins.pasteFlagPlugin === 'function' ? [kernelPlugins.pasteFlagPlugin()] : [])
           ]
         : []),
       // Markdown, not a rich-only list boundary, is the durable authority.

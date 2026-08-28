@@ -23,6 +23,7 @@
 //    legacy behavior (pass everything through, intercept no keys).
 import { keymap } from '@milkdown/prose/keymap'
 import { Plugin, TextSelection } from '@milkdown/prose/state'
+import { Fragment } from '@milkdown/prose/model'
 import { Decoration, DecorationSet } from '@milkdown/prose/view'
 // Table-cell navigation (Plan 5 Task 4 review fix): the SAME two commands
 // @milkdown/preset-gfm's own `tableKeymap` binds Tab / Shift-Tab to
@@ -74,7 +75,9 @@ import {
   TABLE_OP_CODES,
   toggleInlineMark,
   wrapReviewMarkup,
-  resolveReviewMarker
+  resolveReviewMarker,
+  parseKernelMarkdown,
+  outsideSignature
 } from '../lib/source-kernel/index.js'
 import { buildProjectionMap } from './editor-kernel-projection-map.js'
 import { resolveCommittedRawOffset } from '../lib/source-kernel/commands/insert-point.js'
@@ -84,6 +87,7 @@ import { pairIsReadOnlyToUser, readOnlyPairAt } from '../lib/kernel-status.js'
 import { diffReplaceRange, diffReplaceRegions, reconcileProjection, reconcileProjectionRegions } from './editor-kernel-reconciler.js'
 import { createCompositionSession } from './editor-kernel-composition.js'
 import { createUndecidedOrdinalPlugin } from './editor-kernel-undecided-ordinal.js'
+import { areDurablyEquivalent } from './editor-durable-semantics.js'
 
 // Bounded diagnostics ring buffer (<=100 entries). Shared by this module and
 // Editor.jsx's kernel-mode markdownUpdated gate. Entries carry structural
@@ -102,6 +106,10 @@ export function createKernelMode({
   getView,
   parse,
   prepareMarkdown,
+  // Markdown for a PM doc node, from the editor's OWN serializer. Only the
+  // paste route uses it, and only for content that has no bytes yet (see
+  // `commitPaste`) — never to re-derive bytes the document already owns.
+  serializeDoc,
   notify,
   getT,
   onChange,
@@ -326,6 +334,30 @@ export function createKernelMode({
     }
     return oldState?.selection?.from
   }
+
+  // A paste is mid-flight (its DOM event is still dispatching). Recorded at the
+  // DOM level because the DISPATCHERS disagree: ProseMirror's own `doPaste`
+  // sets `paste`/`uiEvent` metas, editor-md-paste.js now sets them too, but
+  // @milkdown/plugin-clipboard dispatches its slice with no metas at all
+  // (node_modules/@milkdown/plugin-clipboard/lib/index.js) — and that is the
+  // dispatcher a plain multi-paragraph paste goes through. One capture-phase
+  // listener sees every one of them, before any of them runs.
+  let pasteDepth = 0
+  const pasteInFlight = () => pasteDepth > 0
+  const pasteFlagPlugin = () =>
+    new Plugin({
+      view: (view) => {
+        const onPaste = () => {
+          pasteDepth += 1
+          // Paste handling is synchronous inside the event dispatch; the flag
+          // must not outlive that task, or an unrelated later transaction
+          // would be judged a paste.
+          setTimeout(() => { pasteDepth = Math.max(0, pasteDepth - 1) }, 0)
+        }
+        view.dom.addEventListener('paste', onPaste, true)
+        return { destroy: () => view.dom.removeEventListener('paste', onPaste, true) }
+      }
+    })
 
   // Mirror `@milkdown/plugin-trailing`'s default shouldAppend (Crepe ships it
   // unconditionally, with the default config): the live view always carries
@@ -1122,7 +1154,8 @@ export function createKernelMode({
     if (inactive()) return undefined
     const view = getView?.()
     const classified = classifyTransactions(transactions, oldState, {
-      isComposing: !!view?.composing
+      isComposing: !!view?.composing,
+      isPaste: pasteInFlight()
     })
     switch (classified.kind) {
       case 'projection':
@@ -1206,6 +1239,43 @@ export function createKernelMode({
         recordHistory(cleared, txn)
         kernel.history.breakGroup()
         bindMap(newState?.doc || null)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
+      case 'paste': {
+        // See `commitPaste`. Shape (b) like `mark-input-rule`: the bytes are
+        // committed and the ORIGINAL transaction is allowed through, because
+        // the proof already established that reparsing those bytes yields the
+        // document the transaction produced. A refusal vetoes, so a paste the
+        // kernel cannot prove leaves both the bytes and the view untouched —
+        // the same answer as before this case existed, only now it is the
+        // exception rather than every rich paste.
+        const committed = commitPaste(oldState, newState)
+        if (!committed.ok) {
+          pushKernelDiagnostic({ type: 'paste-unprovable', code: committed.code, stage: committed.stage, shape: classified.shape })
+          notifyRefusal(committed.code, batchTargetPos(transactions, oldState))
+          return { veto: true }
+        }
+        // TIER 2 (see commitPaste): the bytes hold the content but not the
+        // exact slice shape, so the BYTES define the view. Veto the PM
+        // transaction and publish through the shared reconcile path instead —
+        // the same posture mark-toggle takes, and the reason the user sees the
+        // table with the header row Markdown actually gives it.
+        if (!committed.exact) {
+          if (!view) return { veto: true }
+          kernel.history.breakGroup()
+          applyKernelTransaction(committed.transaction, view)
+          kernel.history.breakGroup()
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        // Its own undo group: one gesture brought in a whole block of content,
+        // and a single Mod-Z must take all of it back out.
+        kernel.history.breakGroup()
+        recordHistory(committed.applied, committed.transaction)
+        kernel.history.breakGroup()
+        bindMap(newState?.doc || null)
+        requestVerify(newState?.doc, committed.applied?.selection?.anchor, newState?.selection?.head)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -1871,6 +1941,196 @@ export function createKernelMode({
   // scripts/test-kernel-mode-headless.mjs is that pin; without the guard the
   // toggle would commit into a paragraph the user could no longer type in.
   //
+  // ==========================================================================
+  // PASTE (2026-08-28)
+  // ==========================================================================
+  // A paste is the one gesture whose content arrives with NO bytes of its own:
+  // the clipboard holds HTML or text, ProseMirror turns it into a slice, and
+  // there is nothing in `kernel.doc` for the kernel to map it back to. Every
+  // other domain refuses when it cannot find existing bytes; refusing here
+  // meant refusing PASTE ITSELF — measured 2026-08-28, kernel default-on: a
+  // multi-paragraph, Markdown or rich-HTML paste wrote nothing at all.
+  //
+  // The shape of the answer, and why it does not break byte authority:
+  //   * ProseMirror keeps its own transaction. The view it produces IS what
+  //     the user asked for, and it is the EXPECTATION the bytes must match —
+  //     the same posture `mark-input-rule` takes (commit, reparse, `.eq`).
+  //   * only the TOP-LEVEL BLOCKS the paste touched are re-spelled, from the
+  //     editor's own serializer. Untouched blocks keep their authored bytes
+  //     byte for byte; the pasted content has no earlier spelling to keep.
+  //   * the proof is the whole document: the committed bytes are reparsed and
+  //     must be durably equivalent to the transaction's own document. Anything
+  //     the serializer spells in a way remark reads differently — and anything
+  //     this range arithmetic gets wrong — fails that equality and the paste
+  //     is refused with bytes AND view untouched.
+  // The blocks the touched PM range covers, widened to whole top-level
+  // children (a paste that lands mid-paragraph edits that paragraph's bytes,
+  // so its whole block is the unit that gets re-spelled).
+  const topLevelSpanCovering = (docNode, from, to) => {
+    if (!docNode) return null
+    let pos = 0
+    let firstIndex = -1
+    let lastIndex = -1
+    let pmFrom = 0
+    let pmTo = 0
+    for (let i = 0; i < docNode.childCount; i += 1) {
+      const size = docNode.child(i).nodeSize
+      const start = pos
+      const end = pos + size
+      // Touching counts: a collapsed diff at a block boundary belongs to the
+      // block it sits inside, and an insertion between two blocks belongs to
+      // both — taking both is the safe direction (more bytes re-spelled, the
+      // equality proof unchanged).
+      if (end >= from && start <= to) {
+        if (firstIndex < 0) {
+          firstIndex = i
+          pmFrom = start
+        }
+        lastIndex = i
+        pmTo = end
+      }
+      pos = end
+    }
+    return firstIndex < 0 ? null : { firstIndex, lastIndex, pmFrom, pmTo }
+  }
+
+  // The raw byte span those blocks occupy, read from the projection map's own
+  // pairs. Derived, never guessed: a top-level list is not itself a pair, so
+  // the span is the union over every pair whose PM position falls inside.
+  const rawSpanForPmRange = (pmFrom, pmTo) => {
+    const pairs = Array.isArray(kernel.map?.blockPairs) ? kernel.map.blockPairs : []
+    let from = null
+    let to = null
+    for (const pair of pairs) {
+      if (!Number.isFinite(pair?.pmPos) || pair.pmPos < pmFrom || pair.pmPos >= pmTo) continue
+      const start = pair.mdBlock?.position?.start?.offset
+      const end = pair.mdBlock?.position?.end?.offset
+      if (!Number.isInteger(start) || !Number.isInteger(end)) {
+        // A VIRTUAL pair is a node the view owns and the source does not (the
+        // empty paragraph a paste lands in, the trailing placeholder): it has
+        // no bytes to contribute, and it is the ordinary companion of the
+        // block the paste really targets. Any OTHER pair without positions is
+        // a real block whose bytes we cannot name — that one still refuses.
+        if (pair.virtual || !pair.mdBlock) continue
+        return null
+      }
+      from = from === null ? start : Math.min(from, start)
+      to = to === null ? end : Math.max(to, end)
+    }
+    return from === null ? null : { from, to }
+  }
+
+  // Where a paste goes when its target block owns no bytes. Two shapes, both
+  // measured: an EMPTY DOCUMENT (whose whole text is whitespace — replace it,
+  // so the paste does not inherit a stray blank line) and a placeholder AFTER
+  // real content (append past the last block that does have bytes, separated
+  // by one blank line). `separator` is prepended to the serialized markdown.
+  const emptyTargetSpan = (oldSpan) => {
+    const text = kernel.doc.text
+    if (!text.trim()) return { from: 0, to: text.length, separator: '' }
+    const pairs = Array.isArray(kernel.map?.blockPairs) ? kernel.map.blockPairs : []
+    let end = null
+    for (const pair of pairs) {
+      if (!Number.isFinite(pair?.pmPos) || pair.pmPos >= oldSpan.pmFrom) continue
+      const candidate = pair.mdBlock?.position?.end?.offset
+      if (!Number.isInteger(candidate)) continue
+      end = end === null ? candidate : Math.max(end, candidate)
+    }
+    if (end === null) return null
+    return { from: end, to: end, separator: 'blank-line' }
+  }
+
+  const commitPaste = (oldState, newState) => {
+    if (!kernel.map) return { ok: false, code: KERNEL_CODES.UNMAPPED, stage: 'unmapped' }
+    if (typeof serializeDoc !== 'function') return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-serializer' }
+    const oldDoc = oldState?.doc
+    const newDoc = newState?.doc
+    if (!oldDoc || !newDoc) return { ok: false, code: KERNEL_CODES.INPUT_TYPE, stage: 'no-docs' }
+    const diff = diffReplaceRange(oldDoc, newDoc)
+    if (!diff) return { ok: false, code: KERNEL_CODES.INPUT_TYPE, stage: 'no-diff' }
+    const oldSpan = topLevelSpanCovering(oldDoc, diff.from, diff.to)
+    const newSpan = topLevelSpanCovering(newDoc, diff.insertFrom, diff.insertTo)
+    if (!oldSpan || !newSpan) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-span' }
+    // No pairs in range means the paste landed where the document has no bytes
+    // at all: an empty document, or the view's trailing placeholder. Both are
+    // ordinary places to paste into — an empty document is the FIRST one —
+    // so they get a derived insertion point rather than a refusal. The
+    // derivation is allowed to be a guess precisely because the reparse
+    // equality below judges it: a wrong offset cannot produce the document
+    // the transaction produced.
+    const raw = rawSpanForPmRange(oldSpan.pmFrom, oldSpan.pmTo) || emptyTargetSpan(oldSpan)
+    if (!raw) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-raw' }
+    let markdown
+    try {
+      const children = []
+      // The view's trailing placeholder (withTrailingParagraph / Crepe's
+      // plugin-trailing) has no markdown bytes and must not gain any: it
+      // serializes to `<br />`, which the durable oracle correctly treats as
+      // a non-content placeholder — so the equality proof would PASS while
+      // the artifact sat in the file (measured before this trim).
+      let last = newSpan.lastIndex
+      while (last > newSpan.firstIndex && last === newDoc.childCount - 1 &&
+             newDoc.child(last).type?.name === 'paragraph' && newDoc.child(last).content.size === 0) {
+        last -= 1
+      }
+      for (let i = newSpan.firstIndex; i <= last; i += 1) children.push(newDoc.child(i))
+      markdown = serializeDoc(newDoc.type.create(null, Fragment.fromArray(children)))
+    } catch {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'serialize-failed' }
+    }
+    if (typeof markdown !== 'string' || !markdown.trim()) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'empty-markdown' }
+    // The serializer always answers LF and a trailing newline; the span it
+    // replaces is the block's own bytes, which carry neither.
+    const ending = kernel.doc.text.includes('\r\n') ? '\r\n' : '\n'
+    const body = markdown.replace(/\r\n?/g, '\n').replace(/\n+$/, '').replace(/\n/g, ending)
+    const insert = (raw.separator === 'blank-line' ? ending + ending : '') + body
+    const transaction = {
+      baseRevision: kernel.doc.revision,
+      from: raw.from,
+      to: raw.to,
+      insert,
+      intent: 'paste',
+      selection: { anchor: raw.from + insert.length, head: raw.from + insert.length }
+    }
+    const applied = applySourceTransaction(kernel.doc, transaction)
+    if (!applied.ok) return { ok: false, code: applied.code, stage: 'apply-failed' }
+    const parsed = safeParse(applied.doc.text)
+    if (!parsed) return { ok: false, code: KERNEL_CODES.PROJECTION, stage: 'parse-failed' }
+    // TIER 1 — the bytes reproduce the view ProseMirror just built. `.eq`
+    // first (the mark-input-rule bar), then the durable oracle the
+    // source-verification gate uses (a pasted heading's `id` attribute and
+    // the serializer's own spelling choices are not content). The PM
+    // transaction is then allowed through untouched: no reconcile, no churn.
+    if (parsed.eq(newDoc) || areDurablyEquivalent(parsed, newDoc)) {
+      return { ok: true, applied, transaction, exact: true }
+    }
+    // TIER 2 — Markdown can hold the content, but not in the exact shape the
+    // clipboard had. Measured: an HTML table with no header row (GFM requires
+    // one, so the reparse promotes the first row) and a list whose spacing the
+    // serializer normalises. Tier 1 alone refused those pastes outright, which
+    // is the wrong trade: the file CAN hold this content, and in a
+    // source-authoritative editor what the bytes say is what the user must
+    // see. So commit the bytes and let the view be rebuilt from them (the
+    // caller reconciles) — the user sees the pasted content in the shape the
+    // file will really have, immediately, instead of losing the paste.
+    //
+    // What still has to be proven is that the paste stayed in its own span:
+    // pasted bytes can FUSE with a neighbour (a list item landing under an
+    // existing list) and change a block nobody touched. Same neighbour proof
+    // the list-merge and block-type domains use.
+    const delta = insert.length - (raw.to - raw.from)
+    let before = null
+    let after = null
+    try {
+      before = outsideSignature(parseKernelMarkdown(kernel.doc.text), raw.from, raw.to, 0)
+      after = outsideSignature(parseKernelMarkdown(applied.doc.text), raw.from, raw.from + insert.length, delta)
+    } catch {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'outside-parse-failed' }
+    }
+    if (before === null || before !== after) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'outside-mismatch' }
+    return { ok: true, applied, transaction, exact: false }
+  }
+
   // The ANCHOR half of the guard is what P5-2.5 added, and it is what keeps
   // the refusal meaningful now that the projection map degrades an unprovable
   // block instead of the whole document: a toggle whose block degrades still
@@ -4118,6 +4378,9 @@ export function createKernelMode({
     // content is the escaped `N\.`/`N\)`. Registered by editor-crepe-setup.js
     // alongside the other kernel plugins (kernel mode only; zero byte impact).
     undecidedOrdinalPlugin: createUndecidedOrdinalPlugin,
+    // Paste provenance (see pasteFlagPlugin): registered by
+    // editor-crepe-setup.js alongside the other kernel plugins.
+    pasteFlagPlugin,
     sourceOrdinalPlugin,
     handleMarkerRunGrowth,
     // Empty-selection mark-shortcut guard (Plan 4 Task 3): registered by

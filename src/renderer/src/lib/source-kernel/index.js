@@ -2,6 +2,8 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 export { createMarkdownDocument, applySourceTransaction } from './markdown-document.js'
 export { buildSyntaxIndex, scanLines, parseKernelMarkdown } from './syntax-index.js'
+// The paste route's neighbour proof (editor-kernel-mode.js commitPaste).
+export { outsideSignature } from './commands/list-merge.js'
 export { buildCharacterMap, bisectsLineEnding } from './character-map.js'
 export { buildCodeMap } from './code-map.js'
 export { inlineMarkAt, markerFor, rangeFromInlineCode } from './mark-map.js'

@@ -90,6 +90,8 @@ const insertMermaidBesideCodeBlock = (view, target, body) => {
     const tr = target.node.textContent.trim()
       ? view.state.tr.insert(target.pos + target.node.nodeSize, node)
       : view.state.tr.replaceWith(target.pos, target.pos + target.node.nodeSize, node)
+    tr.setMeta('paste', true)
+    tr.setMeta('uiEvent', 'paste')
     view.dispatch(tr.scrollIntoView())
     return true
   } catch {
@@ -220,6 +222,14 @@ function insert(view, fragment) {
   try {
     const tr = view.state.tr.replaceSelection(new Slice(fragment, 0, 0))
     tr.scrollIntoView()
+    // Same metas ProseMirror's own `doPaste` sets. This handler runs in the
+    // capture phase, BEFORE PM's, so without them a smart-Markdown paste
+    // reaches the source kernel's classifier as an anonymous multi-block
+    // replace — which is exactly what it refuses (editor-kernel-gateway.js
+    // `isPasteBatch`). Labelling the gesture at its source is what lets the
+    // kernel's paste route own it.
+    tr.setMeta('paste', true)
+    tr.setMeta('uiEvent', 'paste')
     view.dispatch(tr)
     return true
   } catch {
