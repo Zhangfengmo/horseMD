@@ -134,6 +134,98 @@ function provenSeededSameLineDelete(text, candidate, seedAt) {
 // 行）整体替换为 `ending + 当前行的引用前缀`，让本段文本原地续接到上一段末
 // 尾，成为其惰性延续行。标题/列表/代码块等任何非段落边界，或引用深度不一
 // 致，都判定为 unsupported-structure（fail-closed，不猜测语义）。
+// The root-level node whose span contains `offset`.
+function rootNodeAt(tree, offset) {
+  for (const node of tree?.children || []) {
+    const start = node.position?.start?.offset
+    const end = node.position?.end?.offset
+    if (Number.isInteger(start) && Number.isInteger(end) && offset >= start && offset < end) return node
+  }
+  return null
+}
+
+// Every node outside `[regionStart, regionEnd)`, offsets normalised by `delta`
+// — the heading join's own signature, lifted out so both branches share ONE
+// definition of "nothing else changed meaning".
+function outsideJoinSignature(tree, regionStart, regionEnd, delta) {
+  const rows = []
+  let ok = true
+  const walk = (node) => {
+    if (!ok) return
+    const s = node.position?.start?.offset
+    const e = node.position?.end?.offset
+    if (!Number.isInteger(s) || !Number.isInteger(e)) { ok = false; return }
+    if (s < regionEnd && e > regionStart) {
+      for (const child of node.children || []) walk(child)
+      return
+    }
+    rows.push(`${node.type}:${s <= regionStart ? s : s - delta}:${e <= regionStart ? e : e - delta}`)
+    for (const child of node.children || []) walk(child)
+  }
+  for (const child of tree.children || []) walk(child)
+  return ok ? rows.join('\n') : null
+}
+
+// See the ADR at the call site. Returns a transaction, or null to mean "not
+// this shape" (the caller then runs its own paragraph/heading branches), never
+// a refusal of its own — a shape this cannot prove simply falls through to the
+// guards that refused it before.
+function joinIntoContainerLastLine({ doc, index, block, previous }) {
+  const text = index.text
+  let baseTree
+  try {
+    baseTree = parseKernelMarkdown(text)
+  } catch {
+    return null
+  }
+  const container = rootNodeAt(baseTree, previous.start)
+  if (!container || (container.type !== 'list' && container.type !== 'blockquote')) return null
+  // The joined paragraph must be a ROOT-LEVEL paragraph. Without this, two
+  // paragraphs INSIDE one blockquote (`> 甲\n>\n> 乙`) both resolve to the
+  // same container and this branch would delete the gap between them, fusing
+  // two quoted lines into one — the existing pinned answer there is the
+  // quote's own paragraph join (`> 甲\n> 乙`), which the caller's later
+  // branches produce. Caught by test-source-kernel-indent's own case.
+  // The joined paragraph must be top-level and single-line: a multi-line
+  // paragraph would orphan its continuation lines into the container, and a
+  // paragraph already inside a list item is the list domain's own business.
+  if (index.listItemAt(block.start)) return null
+  const joinedRoot = rootNodeAt(baseTree, block.start)
+  if (!joinedRoot || joinedRoot.type !== 'paragraph' || joinedRoot.position?.start?.offset !== block.start) return null
+  const line = index.lineAt(block.start)
+  if (!line || block.end > line.end) return null
+  if (index.bisectsInlineHtml(previous.end, block.start)) return null
+  const containerStart = container.position.start.offset
+  const gap = block.start - previous.end
+  if (gap <= 0) return null
+  const candidate = text.slice(0, previous.end) + text.slice(block.start)
+  let candTree
+  try {
+    candTree = parseKernelMarkdown(candidate)
+  } catch {
+    return null
+  }
+  const joined = rootNodeAt(candTree, containerStart)
+  if (!joined || joined.type !== container.type) return null
+  // The container swallowed EXACTLY the paragraph: it now ends where the
+  // paragraph ended, shifted by the gap that went away.
+  if (joined.position?.end?.offset !== block.end - gap) return null
+  const before = outsideJoinSignature(baseTree, containerStart, block.end, 0)
+  const after = outsideJoinSignature(candTree, containerStart, block.end - gap, -gap)
+  if (before === null || after === null || before !== after) return null
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      from: previous.end,
+      to: block.start,
+      insert: '',
+      intent: 'join-block-backward',
+      selection: { anchor: previous.end, head: previous.end }
+    }
+  }
+}
+
 export function joinParagraphBackward({ doc, index, offset }) {
   const block = index.blockAt(offset)
   if (!block || block.type !== 'paragraph' || offset !== block.start) {
@@ -150,6 +242,22 @@ export function joinParagraphBackward({ doc, index, offset }) {
   if (!previous || (previous.type !== 'paragraph' && previous.type !== 'heading')) {
     return { ok: false, code: 'unsupported-structure' }
   }
+  // JOINING INTO A CONTAINER'S LAST LINE (2026-08-28, user: 「继续完成」 —
+  // the sweep's remaining refusals). A paragraph directly after a LIST or a
+  // BLOCKQUOTE joins that container's last line, which is exactly what the
+  // legacy pipeline does with the same keystroke (measured: `- 甲\n- 乙` +
+  // Backspace at the paragraph below -> `- 甲\n- 乙尾段。`; `> 引用内容` ->
+  // `> 引用内容尾段。`). The byte edit is the heading branch's edit — delete
+  // the inter-block gap — and the proof is the heading branch's proof applied
+  // to the CONTAINER: after the join it must be the same kind of node, ending
+  // exactly where the joined paragraph ended, with every node outside the
+  // joined region byte-identical.
+  //
+  // Asked BEFORE the list-item and quote-prefix guards below, because those
+  // exist to keep the plain paragraph-to-paragraph join from reaching these
+  // shapes at all — this branch is what proves them instead of assuming.
+  const containerJoin = joinIntoContainerLastLine({ doc, index, block, previous })
+  if (containerJoin) return containerJoin
   // Neither side may be a paragraph nested inside a list item. blockAt does
   // not distinguish "top-level paragraph" from "a listItem's own paragraph
   // child" — both are plain `paragraph` nodes to it — so without this check

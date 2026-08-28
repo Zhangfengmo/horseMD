@@ -240,29 +240,33 @@ assert.equal(run('头\n===\n\n乙\n', 8, joinParagraphBackward).code, 'unsupport
 
 console.log('PASS source-kernel delete + router')
 
-// Regression: joinParagraphBackward / the Delete branch must never join
-// across a list-item boundary. blockAt treats a list item's own paragraph
-// child the same as a top-level paragraph, so without an explicit
-// listItemAt-based guard both directions can splice unrelated prose into a
-// list item as a lazy continuation line — a silent, wrong structural edit
-// (code review finding, both repros confirmed against the pre-fix code
-// before the guards were added).
+// FLIPPED 2026-08-28 (user: 「分割线、图片、表格这些也无法删除…」 then 「继续
+// 完成」). The rule this held in place — "never join across a list-item
+// boundary in either direction" — was phase 1's blanket refusal, and it was
+// right while nothing could PROVE such a join. What the flip rests on:
+//
+//   * LEGACY, the reference for what the editor means, merges here. Measured
+//     on the same fixture, one Backspace: `- 甲\n- 乙` + a paragraph below
+//     becomes `- 甲\n- 乙尾段。`; `> 引用内容` becomes `> 引用内容尾段。`.
+//     The kernel refusing a gesture legacy performs is the kernel being
+//     wrong, not careful.
+//   * the join is now PROVEN rather than assumed (commands/delete.js
+//     `joinIntoContainerLastLine`): the container must come back the same
+//     kind of node ending exactly where the joined paragraph ended, and every
+//     node outside the joined region must survive byte-for-byte — the same
+//     two axes the heading join (FLIPPED 2026-08-23, just above) uses.
+//
+// The old worry is still pinned, one case down: a paragraph INSIDE a
+// blockquote keeps its own quoted join, and Delete (repro B) still refuses.
 {
-  // Repro A (Backspace): 乙 sits right after a list ('- x'); caret at 乙's
-  // start must NOT merge it into the list item's paragraph as a lazy
-  // continuation line.
+  // 乙 sits right after a list ('- x'); Backspace at 乙's start joins it into
+  // the item's own line, exactly as legacy does.
   const src = '甲\n\n- x\n\n乙\n'
   const doc = createMarkdownDocument(src)
   const index = buildSyntaxIndex(src)
   const offset = src.indexOf('乙')
-  assert.equal(
-    routeStructuralKey('Backspace', { doc, index, offset }).code,
-    'unsupported-structure'
-  )
-  assert.equal(
-    joinParagraphBackward({ doc, index, offset }).code,
-    'unsupported-structure'
-  )
+  assert.equal(run(src, offset, joinParagraphBackward), '甲\n\n- x乙\n')
+  assert.equal(routeStructuralKey('Backspace', { doc, index, offset }).ok, true)
 }
 {
   // Repro B (Delete): caret at the end of a list item's own text ('甲'); the
