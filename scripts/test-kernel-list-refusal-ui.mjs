@@ -164,9 +164,12 @@ const statusTitle = (evaluate) => evaluate(`(document.querySelector('.block-swit
 
 const READ_ONLY = /只读|read-only/
 // The generic refusal, whose whole point is that it is a statement about the
-// OPERATION ("not supported yet"), not about the block. `notifyBlocked` appends
-// the kernel code in parentheses, which is what makes it recognizable here.
-const GENERIC = /暂未支持此操作|blocked this edit/
+// OPERATION (it was blocked), not about the block. `notifyBlocked` appends the
+// kernel code in parentheses, which is what makes it recognizable here.
+// 2026-08-28: the string moved from `kernelMode.unsupported` ("not supported
+// yet in the EXPERIMENTAL kernel" — stale since the kernel became the default,
+// and it read as a missing feature) to `kernelMode.blockedGeneric`.
+const GENERIC = /无效操作|Invalid operation|blocked this edit/
 
 async function run() {
   await rm(root, { recursive: true, force: true })

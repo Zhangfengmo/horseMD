@@ -556,7 +556,7 @@ class SlashMenu {
       // nor call onCommand — the caller's before/after bookkeeping (e.g.
       // markUserEdit, source-commit hooks) must not fire for a no-op.
       this.provider.hide()
-      this.notify?.(tOr(this.getT, blockedKey, 'Not supported yet in the experimental source kernel'))
+      this.notify?.(tOr(this.getT, blockedKey, 'This command is not available in source-kernel mode'))
       this.armImeGuard()
       this.view.focus()
       return
