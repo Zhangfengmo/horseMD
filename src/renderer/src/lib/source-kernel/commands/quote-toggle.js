@@ -3,6 +3,7 @@
 // multi-edit-atomic idiom indent.js uses for list indent/outdent.
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { QUOTE_MARKER_SOURCE } from '../../markdown-preservation/block-prefix.js'
+import { parseKernelMarkdown } from '../syntax-index.js'
 
 // One quote level, anchored at line start. Deliberately NOT the (unanchored,
 // repeated) QUOTE_PREFIX — this command only ever adds/removes exactly ONE
@@ -174,4 +175,135 @@ export function toggleBlockquote({ doc, index, offset }) {
   }
   const edits = wrapEdits(index, rows)
   return multiTxn(doc, edits, 'wrap-blockquote', offset)
+}
+
+
+// ===========================================================================
+// BACKSPACE ON A BLOCKQUOTE (2026-08-28, user: 「引用要求参照代码一样要支持删除」)
+// ===========================================================================
+// Measured before this pair existed, kernel default-on:
+//   caret in an EMPTY quote (`>`), Backspace
+//     -> PM lifted the paragraph out; the gateway could not classify the
+//        cross-parent replaceAround and refused: nothing written, the quote
+//        unremovable (`unsupported-input-type`).
+//   caret at the CONTENT START of `> 引用内容`, Backspace
+//     -> routed structurally, and refused (`unsupported-structure`).
+// So a blockquote could be created and typed in, but never taken back out —
+// the dead end the empty fenced block was in until `deleteEmptyCodeBlock`
+// (commands/code-exit.js), which is the shape the user asked these to mirror.
+
+// The blockquote whose own span contains `offset`, at ANY depth: Backspace in
+// a nested quote belongs to the innermost one.
+function blockquoteAt(index, offset) {
+  let found = null
+  const walk = (node) => {
+    if (!within(node, offset) && !(offset > 0 && within(node, offset - 1))) return
+    if (node.type === 'blockquote') found = node
+    for (const child of node.children || []) walk(child)
+  }
+  for (const child of index.tree?.children || []) walk(child)
+  return found
+}
+
+const countNodeType = (tree, type) => {
+  let n = 0
+  const walk = (node) => {
+    if (node?.type === type) n += 1
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return n
+}
+
+const leafValues = (tree) => {
+  const out = []
+  const walk = (node) => {
+    if (typeof node?.value === 'string') out.push(node.value)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(tree)
+  return out.sort()
+}
+
+// A quote with nothing in it: `>` on its own line(s), no content node at all.
+// `> ` with trailing spaces parses the same way — the spaces are not content.
+const quoteIsEmpty = (node) => !(node?.children || []).length
+
+// Backspace inside an EMPTY blockquote deletes it, in `deleteEmptyCodeBlock`'s
+// posture exactly: the edit runs from the first line's content (AFTER any
+// OUTER quote prefix, so a nested empty quote keeps its parent) through the
+// last line's end, leaving one prefix-only line with its ending for the
+// controller's placeholder machinery to land the caret on.
+//
+// PROVEN, NOT ASSUMED, on the same three axes the code-block twin uses: one
+// fewer blockquote, the heading count unchanged (the setext trap this family
+// shares), and every leaf value identical — an empty quote owns no leaf, so
+// the multiset may not move at all.
+export function deleteEmptyBlockquote({ doc, index, offset }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return { ok: false, code: 'unsupported-structure' }
+  if (!Number.isInteger(offset)) return { ok: false, code: 'unsupported-structure' }
+  const node = blockquoteAt(index, offset)
+  if (!node || !quoteIsEmpty(node)) return { ok: false, code: 'unsupported-structure' }
+  const start = node.position?.start?.offset
+  const end = node.position?.end?.offset
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return { ok: false, code: 'unsupported-structure' }
+  const first = index.lineAt(start)
+  const last = index.lineAt(Math.max(start, end - 1))
+  if (!first || !last || last.start < first.start) return { ok: false, code: 'unsupported-structure' }
+  // Everything before this quote's OWN marker: outer quote levels only. Any
+  // other prefix (list indent, a marker) is a container this command has not
+  // proven, so it refuses rather than cutting into it.
+  const outerMatch = first.text.slice(0, start - first.start).match(/^[ \t]*(?:>[ \t]*)*$/)
+  if (!outerMatch) return { ok: false, code: 'unsupported-structure' }
+  const from = first.start + outerMatch[0].length
+  const to = last.end
+  if (to <= from) return { ok: false, code: 'unsupported-structure' }
+  const candidate = text.slice(0, from) + text.slice(to)
+  let baseline
+  let after
+  try {
+    baseline = parseKernelMarkdown(text)
+    after = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (countNodeType(after, 'blockquote') !== countNodeType(baseline, 'blockquote') - 1) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (countNodeType(after, 'heading') !== countNodeType(baseline, 'heading')) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (JSON.stringify(leafValues(after)) !== JSON.stringify(leafValues(baseline))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from, to, insert: '' }],
+      intent: 'delete-empty-blockquote',
+      selection: { anchor: from, head: from }
+    }
+  }
+}
+
+// Backspace at the CONTENT START of a quote's first line unwraps one level —
+// the gesture every editor binds there, and byte-wise the exact edit
+// `toggleBlockquote` already proves (one `> ` stripped from every owned row).
+// Delegating keeps ONE unwrap spelling in the codebase instead of a second
+// copy that could drift from it.
+export function unwrapBlockquoteAtContentStart({ doc, index, offset }) {
+  const node = blockquoteAt(index, offset)
+  if (!node || quoteIsEmpty(node)) return { ok: false, code: 'unsupported-structure' }
+  const start = node.position?.start?.offset
+  if (!Number.isInteger(start)) return { ok: false, code: 'unsupported-structure' }
+  const line = index.lineAt(start)
+  if (!line) return { ok: false, code: 'unsupported-structure' }
+  // The caret must sit at the first content byte of the quote's FIRST line:
+  // anywhere else Backspace is an ordinary character delete.
+  const marker = line.text.slice(start - line.start).match(/^>[ \t]?/)
+  if (!marker) return { ok: false, code: 'unsupported-structure' }
+  if (offset !== start + marker[0].length) return { ok: false, code: 'unsupported-structure' }
+  return toggleBlockquote({ doc, index, offset })
 }

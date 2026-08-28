@@ -3137,7 +3137,15 @@ export function createKernelMode({
       // there commits prefix-less at the anchor: `> 正文`, the quote-body
       // line. materializePlaceholder is itself fail-closed — an unprovable
       // voucher removes the node again and rebinds plain.
-      if (exitIntent) placeholderForUnmappableAnchor(view, exitAnchor)
+      // The empty-blockquote delete (2026-08-28) leaves the same shape for the
+      // same reason: its edit keeps one prefix-only line whose blank the
+      // reparse drops, so its anchor is unmappable and the caret would be
+      // tossed to a neighbour. Same vouched placeholder, same fail-closed
+      // machinery — this is the half `runDeleteEmptyCodeBlock` does explicitly
+      // for the code twin.
+      if (exitIntent || routed.transaction.intent === 'delete-empty-blockquote') {
+        placeholderForUnmappableAnchor(view, exitAnchor)
+      }
       return true
     }
     // Every refused structural key leaves a CONTENT-FREE breadcrumb: the key,

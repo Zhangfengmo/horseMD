@@ -7,6 +7,7 @@ import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock, isVisua
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
 import { isLedgeredWhitespaceTaskItem } from './commands/task-seed.js'
+import { deleteEmptyBlockquote, unwrapBlockquoteAtContentStart } from './commands/quote-toggle.js'
 import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
@@ -99,6 +100,18 @@ export function routeStructuralKey(key, ctx) {
             item.end - item.contentStart === 1) ||
           isVisuallyEmptyListItem(index.text, item)) {
         return liftEmptyListItem(ctx)
+      }
+      // BLOCKQUOTE (2026-08-28, 「引用要求参照代码一样要支持删除」). Asked
+      // before joinParagraphBackward: an empty quote is deleted whole (the
+      // empty-code-block twin) and a quote's content start unwraps one level.
+      // Both refuse for any other position, so the paragraph join keeps every
+      // case it owned. List items keep their own branch above — a quote
+      // inside a list item is not proven here.
+      if (!item) {
+        const emptyQuote = deleteEmptyBlockquote(ctx)
+        if (emptyQuote.ok) return emptyQuote
+        const unwrapped = unwrapBlockquoteAtContentStart(ctx)
+        if (unwrapped.ok) return unwrapped
       }
       const block = index.blockAt(offset)
       if (block && offset === block.start && !item) return joinParagraphBackward(ctx)
