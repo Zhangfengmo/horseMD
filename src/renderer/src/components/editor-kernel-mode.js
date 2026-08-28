@@ -22,7 +22,7 @@
 //    the initial projection map: the tab announces it and reverts to complete
 //    legacy behavior (pass everything through, intercept no keys).
 import { keymap } from '@milkdown/prose/keymap'
-import { Plugin, TextSelection } from '@milkdown/prose/state'
+import { Plugin, TextSelection, NodeSelection } from '@milkdown/prose/state'
 import { Fragment } from '@milkdown/prose/model'
 import { Decoration, DecorationSet } from '@milkdown/prose/view'
 // Table-cell navigation (Plan 5 Task 4 review fix): the SAME two commands
@@ -1242,6 +1242,28 @@ export function createKernelMode({
         onChange?.(kernel.doc.text, false)
         return undefined
       }
+      case 'delete-blocks': {
+        // See commitBlockDeletion. Same publish shapes as `paste`: tier 1
+        // passes ProseMirror's own transaction through, tier 2 vetoes it and
+        // republishes from the bytes.
+        const committed = commitBlockDeletion({ pmFrom: classified.pmFrom, pmTo: classified.pmTo, expectedDoc: newState?.doc || null })
+        if (!committed.ok) {
+          pushKernelDiagnostic({ type: 'block-delete-unprovable', code: committed.code, stage: committed.stage })
+          notifyRefusal(committed.code, batchTargetPos(transactions, oldState))
+          return { veto: true }
+        }
+        if (!committed.exact) {
+          if (!view) return { veto: true }
+          applyKernelTransaction(committed.transaction, view)
+          return { veto: true }
+        }
+        kernel.doc = committed.applied.doc
+        recordHistory(committed.applied, committed.transaction)
+        bindMap(newState?.doc || null)
+        requestVerify(newState?.doc, committed.applied?.selection?.anchor, newState?.selection?.head)
+        onChange?.(kernel.doc.text, false)
+        return undefined
+      }
       case 'paste': {
         // See `commitPaste`. Shape (b) like `mark-input-rule`: the bytes are
         // committed and the ORIGINAL transaction is allowed through, because
@@ -2018,6 +2040,72 @@ export function createKernelMode({
       to = to === null ? end : Math.max(to, end)
     }
     return from === null ? null : { from, to }
+  }
+
+  // ==========================================================================
+  // WHOLE-BLOCK DELETION (2026-08-28)
+  // ==========================================================================
+  // "Select the divider / image / table and press Backspace." The gateway
+  // proved the STEP removes complete top-level children (extractBlockDeletion);
+  // what is left is naming their bytes and proving the removal reads the same.
+  //
+  // Their bytes are nameable even though none of them is a textblock: the
+  // projection map pairs `hr` with `thematicBreak` and Crepe's `image-block`
+  // with its own mdast node, so `mdBlock.position` is right there — the pairs
+  // simply carry no charMap, which is a statement about TYPING inside them,
+  // not about their span. A block whose bytes cannot be named still refuses.
+  const commitBlockDeletion = ({ pmFrom, pmTo, expectedDoc = null }) => {
+    if (!kernel.map) return { ok: false, code: KERNEL_CODES.UNMAPPED }
+    const raw = rawSpanForPmRange(pmFrom, pmTo)
+    if (!raw) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-raw' }
+    const text = kernel.doc.text
+    // Take the block separator with the block: a deletion that leaves the
+    // blank line behind turns one gesture into two (delete, then delete the
+    // gap). The run after the span is taken first; at the document end there
+    // is none, so the run BEFORE it is taken instead — otherwise the file
+    // keeps a trailing blank run nobody asked for.
+    let from = raw.from
+    let to = raw.to
+    const after = text.slice(to).match(/^(?:\r\n|\r|\n){1,2}/)
+    if (after) {
+      to += after[0].length
+    } else {
+      const before = text.slice(0, from).match(/(?:\r\n|\r|\n){1,2}$/)
+      if (before) from -= before[0].length
+    }
+    const transaction = {
+      baseRevision: kernel.doc.revision,
+      from,
+      to,
+      insert: '',
+      intent: 'delete-blocks',
+      selection: { anchor: from, head: from }
+    }
+    const applied = applySourceTransaction(kernel.doc, transaction)
+    if (!applied.ok) return { ok: false, code: applied.code, stage: 'apply-failed' }
+    const parsed = safeParse(applied.doc.text)
+    if (!parsed) return { ok: false, code: KERNEL_CODES.PROJECTION, stage: 'parse-failed' }
+    // The same two-tier judgment the paste route uses, for the same reason:
+    // tier 1 lets ProseMirror keep its own transaction, tier 2 rebuilds the
+    // view from the bytes when the reparse legitimately differs (deleting a
+    // block can leave the trailing placeholder in a different place than PM
+    // put it). Tier 2's gate is the neighbour proof: nothing OUTSIDE the
+    // deleted span may change meaning.
+    if (expectedDoc && (parsed.eq(expectedDoc) || areDurablyEquivalent(parsed, expectedDoc))) {
+      return { ok: true, applied, transaction, exact: true }
+    }
+    let before = null
+    let afterSig = null
+    try {
+      before = outsideSignature(parseKernelMarkdown(text), from, to, 0)
+      afterSig = outsideSignature(parseKernelMarkdown(applied.doc.text), from, from, -(to - from))
+    } catch {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'outside-parse-failed' }
+    }
+    if (before === null || before !== afterSig) {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'outside-mismatch' }
+    }
+    return { ok: true, applied, transaction, exact: false }
   }
 
   // Where a paste goes when its target block owns no bytes. Two shapes, both
@@ -2988,6 +3076,51 @@ export function createKernelMode({
     return [...before, '·', ...after].join(',')
   }
 
+  // Backspace at a textblock's start when the block ABOVE is a divider, an
+  // image or a table (2026-08-28). Every editor answers this by SELECTING that
+  // block rather than deleting anything, and the kernel wants that answer for
+  // its own reason too: the selection writes no bytes, and the second press is
+  // then the ordinary node deletion the gateway's `delete-blocks` route owns.
+  // Before this, the press reached `joinParagraphBackward`, which refuses to
+  // merge a paragraph into a node that holds no text — a named refusal on a
+  // gesture the user reads as "delete the thing above me".
+  //
+  // Containers (list, blockquote) are deliberately absent: Backspace/Delete
+  // there has its own established answers (lift the item, unwrap the quote,
+  // merge the paragraph), and those are TEXT merges, not node removals.
+  // `code_block` covers fenced code AND block math — the projection map pairs
+  // both under that one PM type (PM_TO_MD `code_block: ['code', 'math']`) —
+  // and `frontmatter` is deliberately absent: it is the document's own header,
+  // not a block a stray keystroke should be able to select and drop.
+  const ATOM_BLOCK_TYPES = new Set(['hr', 'image-block', 'image', 'table', 'code_block', 'html'])
+  // Backspace at a textblock start selects the block ABOVE; Delete at a
+  // textblock end selects the block BELOW. Same rule, both directions — the
+  // sweep found Delete refusing on exactly the blocks Backspace refused on.
+  const selectNeighbourAtomBlock = (state, view, direction) => {
+    const selection = state.selection
+    if (!selection.empty) return false
+    const $head = selection.$head
+    if (!$head || $head.depth !== 1) return false
+    const parent = $head.parent
+    if (!parent?.isTextblock) return false
+    const atEdge = direction < 0 ? $head.parentOffset === 0 : $head.parentOffset === parent.content.size
+    if (!atEdge) return false
+    const index = $head.index(0)
+    const neighbourIndex = direction < 0 ? index - 1 : index + 1
+    if (neighbourIndex < 0 || neighbourIndex >= state.doc.childCount) return false
+    const neighbour = state.doc.child(neighbourIndex)
+    if (!ATOM_BLOCK_TYPES.has(neighbour?.type?.name)) return false
+    const pos = direction < 0
+      ? $head.before(1) - neighbour.nodeSize
+      : $head.after(1)
+    try {
+      view.dispatch(state.tr.setSelection(NodeSelection.create(state.doc, pos)).scrollIntoView())
+      return true
+    } catch {
+      return false
+    }
+  }
+
   const structuralHandler = (key) => (state, dispatch, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -3098,6 +3231,36 @@ export function createKernelMode({
         shrinkSplitPlaceholder(view, key)
         return true
       }
+    }
+    // A SELECTED atom block + Backspace/Delete is a deletion, and the kernel
+    // performs it itself rather than letting the node view answer: measured,
+    // Crepe's code-block view turns the press into "become a paragraph holding
+    // my code" (`replace[6,19] <paragraph:11>`), which is a block-type
+    // conversion, not a delete — and the user pressing Delete on a selected
+    // fence means the fence should go. Divider/image/table reach the same
+    // bytes through the gateway route; doing it here makes every atom answer
+    // the key the same way.
+    // `instanceof NodeSelection` is NOT the test: a bundle can hold more than
+    // one prosemirror-state instance and the check then silently fails. A
+    // NodeSelection is the only selection carrying `.node`.
+    if ((key === 'Backspace' || key === 'Delete') && state.selection?.node &&
+        ATOM_BLOCK_TYPES.has(state.selection.node?.type?.name)) {
+      const committed = commitBlockDeletion({ pmFrom: state.selection.from, pmTo: state.selection.to })
+      if (!committed.ok) {
+        pushKernelDiagnostic({ type: 'block-delete-unprovable', code: committed.code, stage: committed.stage })
+        notifyBlocked(committed.code)
+        return true
+      }
+      applyKernelTransaction(committed.transaction, view)
+      return true
+    }
+    // See selectNeighbourAtomBlock: one press selects the divider / image /
+    // table / fence / block-math / block-HTML next to the caret, the next
+    // deletes it through the gateway's `delete-blocks` route. Asked before the
+    // router so the paragraph-join refusal can never claim the gesture.
+    if ((key === 'Backspace' || key === 'Delete') && state.selection.empty &&
+        selectNeighbourAtomBlock(state, view, key === 'Backspace' ? -1 : 1)) {
+      return true
     }
     let routed = routeStructuralKey(key, {
       doc: kernel.doc,

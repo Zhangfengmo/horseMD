@@ -1402,6 +1402,59 @@ export function extractWholeDocumentClear(trs, oldState) {
   return { text: only.textContent }
 }
 
+// A DELETION OF WHOLE TOP-LEVEL BLOCKS (2026-08-28, user: 「分割线、图片、表格
+// 这些也无法删除」). The gesture is "select the block, press Backspace/Delete",
+// which for an atom (a divider, a Crepe image-block) is what a plain CLICK
+// already sets up — ProseMirror answers it with one ReplaceStep carrying an
+// EMPTY slice over the node's own span. Measured refusals before this
+// extractor existed, all three identical in shape:
+//   hr    -> replace[6,7]@doc:d0:off6 open0/0 <empty>
+//   image -> replace[6,7]@doc:d0:off6 open0/0 <empty>
+//   table -> the same, when the table is the selected node
+// They were refused as `unsupported-input-type` because no extractor claims a
+// step that removes a node rather than text.
+//
+// The gate is deliberately narrow: the step must delete COMPLETE top-level
+// children and nothing else. A partial deletion (half a table, the inside of a
+// blockquote) is not this gesture and keeps its old refusal.
+export function extractBlockDeletion(trs, oldState) {
+  const doc = oldState?.doc
+  if (!doc) return null
+  const steps = trs.flatMap((tr) => tr.steps || [])
+  if (steps.length !== 1) return null
+  const step = steps[0]
+  if (!isStep(step, 'replace')) return null
+  // The slice is empty for a divider/image/table, but ProseMirror leaves ONE
+  // EMPTY TEXTBLOCK behind for a code block (measured: `replace[6,19] open0/0
+  // <paragraph>`) — the node view's own answer to "delete me". Both are the
+  // same gesture and the same byte edit: the block's bytes go, and an empty
+  // paragraph owns none, so it changes nothing to write.
+  const slice = step.slice
+  const content = slice?.content
+  if (content?.size) {
+    if (slice.openStart || slice.openEnd) return null
+    if (content.childCount !== 1) return null
+    const only = content.child(0)
+    if (!only.isTextblock || only.content.size !== 0) return null
+  }
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+  // Both ends must be top-level child boundaries, and every child between them
+  // is being removed whole.
+  let pos = 0
+  let first = -1
+  let last = -1
+  for (let i = 0; i < doc.childCount; i += 1) {
+    const size = doc.child(i).nodeSize
+    if (pos === step.from) first = i
+    if (pos + size === step.to) last = i
+    pos += size
+  }
+  if (first < 0 || last < first) return null
+  // The whole document is `clear-document`'s case, not this one.
+  if (first === 0 && last === doc.childCount - 1) return null
+  return { pmFrom: step.from, pmTo: step.to, firstIndex: first, lastIndex: last }
+}
+
 // ProseMirror's own paste marker: `doPaste` dispatches its replaceSelection
 // transaction with BOTH metas set (prosemirror-view input.ts), and Milkdown's
 // paste plugins keep them when they build their own slice. `uiEvent` is the
@@ -1453,6 +1506,13 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
 
   const wholeDoc = extractWholeDocumentClear(trs, oldState)
   if (wholeDoc) return { kind: 'clear-document', text: wholeDoc.text }
+
+  // Whole top-level blocks removed by a node selection (divider / image /
+  // table). Asked after the whole-document clear so a select-all delete keeps
+  // its own route, and before the plain-text extractor, which cannot express a
+  // step that removes nodes rather than text.
+  const blockDeletion = extractBlockDeletion(trs, oldState)
+  if (blockDeletion) return { kind: 'delete-blocks', ...blockDeletion }
 
   const steps = extractPlainTextSteps(trs, oldState)
   if (!steps || !steps.length) {
@@ -1608,9 +1668,14 @@ function describeUnclassified(trs, oldState) {
         }
         const slice = step?.slice
         const open = slice ? `open${slice.openStart}/${slice.openEnd}` : 'no-slice'
+        // Each child's own content size travels with its type: an EMPTY
+        // textblock and one carrying text are the same word here otherwise,
+        // and telling them apart is exactly what the block-deletion gate
+        // turns on (2026-08-28 — the code block's `<paragraph>` read as
+        // "replaced with a paragraph" when it was "left an empty one").
         const sliceShape = slice?.content
           ? [...Array(slice.content.childCount).keys()]
-            .map((i) => slice.content.child(i).type?.name).join('+') || 'empty'
+            .map((i) => `${slice.content.child(i).type?.name}:${slice.content.child(i).content.size}`).join('+') || 'empty'
           : 'empty'
         parts.push(`${name}[${from},${to}]${where} ${open} <${sliceShape}>` +
           (step?.structure ? ' structure' : ''))
