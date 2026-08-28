@@ -26,6 +26,7 @@
 
 import { SlashProvider } from '@milkdown/kit/plugin/slash'
 import { commandsCtx } from '@milkdown/kit/core'
+import { pushKernelDiagnostic } from './editor-kernel-mode.js'
 import {
   clearTextInCurrentBlockCommand,
   setBlockTypeCommand,
@@ -38,6 +39,16 @@ import { Plugin, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { pinyin as toPinyin } from 'pinyin-pro'
 
 const KEY = new PluginKey('hm-slash-menu')
+
+// A Chinese IME's own `/` panel (微信/搜狗) opens on the SAME `/` this menu does
+// and takes the SAME navigation keys, so one Enter confirms BOTH: we convert the
+// block, and ~150ms later the IME commits ITS entry as a trusted `insertText`
+// carrying no keydown and no composition. Measured in a user session
+// (2026-08-28): picking 有序列表 wrote `1. 2\.` — the `2.` is the panel's own
+// text, escaped because it landed at a list item's content start. A real
+// keystroke ALWAYS carries a keydown, which is the whole discriminator; the
+// window only bounds how long we watch for one.
+const IME_PANEL_GRACE_MS = 400
 
 // Neutralize Crepe's built-in slash menu. BlockEdit's slash is the slice named
 // "CREPE_MENU_SLASH_SPEC" (slashFactory id + "_SLASH_SPEC"); its $prose plugin
@@ -351,6 +362,32 @@ class SlashMenu {
       offset: 10,
       shouldShow: (v) => this.shouldShow(v)
     })
+
+    // See IME_PANEL_GRACE_MS. Capture phase so the veto beats ProseMirror's own
+    // beforeinput handling — a cancelled insertText never becomes a transaction,
+    // so no channel below (kernel or legacy) ever sees the panel's text.
+    this.ranAt = 0
+    this.keydownSinceRun = false
+    this.onDomKeyDown = () => {
+      this.keydownSinceRun = true
+    }
+    this.onDomBeforeInput = (event) => {
+      if (event.inputType !== 'insertText' || event.isComposing) return
+      if (this.keydownSinceRun || !this.ranAt) return
+      if (performance.now() - this.ranAt > IME_PANEL_GRACE_MS) return
+      event.preventDefault()
+      this.ranAt = 0
+      pushKernelDiagnostic({ type: 'slash-ime-panel-insert', length: (event.data || '').length })
+    }
+    view.dom.addEventListener('keydown', this.onDomKeyDown, true)
+    view.dom.addEventListener('beforeinput', this.onDomBeforeInput, true)
+  }
+
+  // The confirming keystroke's own keydown has already fired by now, so the
+  // window opens clean and the NEXT keydown is the user's.
+  armImeGuard() {
+    this.ranAt = performance.now()
+    this.keydownSinceRun = false
   }
 
   shouldShow(view) {
@@ -520,6 +557,7 @@ class SlashMenu {
       // markUserEdit, source-commit hooks) must not fire for a no-op.
       this.provider.hide()
       this.notify?.(tOr(this.getT, blockedKey, 'Not supported yet in the experimental source kernel'))
+      this.armImeGuard()
       this.view.focus()
       return
     }
@@ -527,6 +565,7 @@ class SlashMenu {
     const token = this.onCommand?.({ phase: 'before', id: item.id, view: this.view })
     item.run(this.ctx, this.view)
     this.onCommand?.({ phase: 'after', id: item.id, view: this.view, token })
+    this.armImeGuard()
     this.view.focus()
   }
 
@@ -590,6 +629,8 @@ class SlashMenu {
     this.provider.update(view, prev)
   }
   destroy() {
+    this.view.dom.removeEventListener('keydown', this.onDomKeyDown, true)
+    this.view.dom.removeEventListener('beforeinput', this.onDomBeforeInput, true)
     this.provider.destroy()
     this.content.remove()
   }

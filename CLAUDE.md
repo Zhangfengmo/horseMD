@@ -368,6 +368,16 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   `.menu-groups` > `.menu-group` > `h6` + `li[svg,span]`, `.hover`/`.active`) so it
   inherits Crepe's `block-edit.css` theme + the bounds-fixer in
   `editor-dom-bindings.js` (which keys off those classes).
+  **IME-panel guard**: a Chinese IME's own `/` panel opens on the SAME `/` and
+  takes the same nav keys, so one Enter confirms both — the panel then commits
+  ITS entry as a trusted keydown-less `insertText` ~150 ms later (measured: it
+  wrote `1. 2\.` after picking 有序列表). `runSelected()` arms a 400 ms window in
+  which a keydown-less, non-composition `insertText` is `preventDefault`ed on
+  `view.dom` (capture phase, so no PM transaction is ever created). A real
+  keystroke always carries a keydown — that is the whole discriminator, and it
+  is why the regression must press a real key (`keyDown` with text) rather than
+  use `typeTextLikeUser`, which is `Input.insertText` and carries none. Locked
+  by `test:slash-ime-panel-guard-ui`.
 - **Math**: enable `CrepeFeature.Latex` (off by default). Block math needs `$$` on
   their own lines. Long display math scrolls (`.katex-display { overflow-x:auto }`).
   Inline math `$x^2$` converts only on the closing `$` (Milkdown input rule

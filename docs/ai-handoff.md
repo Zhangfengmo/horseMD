@@ -514,6 +514,21 @@ ADR 两阶段全部执行完毕)。钉:`test:kernel-source-ordinal-ui`
 
 (2) **「回车后 3,4 一起出来」实为旧行还魂**:用户文件里老的 `3. 4.` 行仍在,`2131` 尾回车插入新 `3. ` 后,老行按 CommonMark 序数在视图顺延显示为 `4.`/嵌套 `5.`——字节实测 `3. 1\n3. 4.`(分裂**不给后继根项改号**,留重复 `3.` marker,记为**已知拼写疣**:后继改号是 ordered-marker renumber 家族的第三面〔indent rescue/outdent renumber 之后〕,做时注意同行嵌套 marker 绝不能跟着改。**勘误(2026-08-26)**:本条原写「CommonMark 序数语义下视图编号正确」——**不成立**。`68a0b38`(2026-08-24)的 `sourceOrdinalPlugin` 让编辑器显示**作者字节里的号**,所以重复的 `3.` 在视图里就是两个 `3.`,不是「顺延显示为 4.」;这条疣是**可见的**,这也正是它值得做的理由。真做第三面时,判据不是「序数被忽略所以不可见」,而是与前两面同一条:改写须由 `provenNonFirstOrdinal` 证明落在有序列表**非首项**上(否则数字变成列表 `start`,所有兄弟项一起改号),外加 `provenNestingOnly`。背景见 `docs/typing-policy-chokepoint-adr.md` 补记「源码忠实序号与 outdent 改号」)。（CriticMarkup review）接通内核**：CriticMarkup 是**纯文本语法**——编辑器自己的高亮规则就是为它让路的（`HIGHLIGHT_RE` 的 `(?<![={])`/`(?!\})` 使 `{==a==}{>>c<<}` 在两条链上都保持字面文本），所以在源码权威内核里每个审阅命令都是一次可证明偏移处的字节插入/替换。纯命令 `lib/source-kernel/commands/review-markup.js`（拼写与 legacy 共用同一份 `reviewMarkup.js` 的 `wrapReviewSelection`/`makeHighlightCommentMarkup`/`scanReviewMarkup`，两模式字节永不漂移）：`wrapReviewMarkup`（选区包裹）+ `resolveReviewMarker`（既有 `{==文==}{>>注<<}` 的 Done/Delete=去标记留文字、Edit→Save=整段重拼写；标记位置**由源码重扫描定位**且内容须与卡片所见逐字相符，否则具名 stale 拒绝 `review-marker-not-found`）。证明是本目录的家族式两轴：选区须为字符图里**连续的字面 `char` 单元**（碰到 mark 定界 gap/原子/实体/转义即 `review-plain-selection`，跨行即 `review-multiline`→沿用 `review.inlineOnly` 文案），候选重解析后**该文本节点的解码值恰为预测拼接**、块内其余后代按分段平移逐字相等、祖先链类型不变、块外 `outsideSignature` 恒等；提交走 `applyKernelTransaction({ requireMap: true })`。入口三条：状态栏工具条审阅四键与菜单经 `apiOverrides.applyReviewMarkup`→`runReviewWrap`；审阅卡片动作经装饰插件新 `kernelReview` 选项（editor-crepe-setup.js）→`runReviewResolve`，kernel 非属主时答 `null` 回落 legacy 派发（与斜杠项同一委托约定）；**全部接受/拒绝不需要内核入口**——它是 `tab.content` 的整文档字符串改写 + reloadNonce 重挂载（onChange 在每次内核提交后同步 content），重挂载后内核按 per-tab 旗标重新 attach，连**替换标记**也一并结算。gateway 对未路由审阅事务的兜底拒绝**原样保留**（卡片在派发前分流，PM 端不再产生这类事务）。**仍具名拒绝**：替换标记的插入（`review-substitution`，机制见上方 veto 清单——内核链没有 `remarkReconstructSubstitution` 的镜像，做镜像是让替换段落脱离只读的正道，本轮明确不做）、非纯文本/跨行选区、空段落处的空选区包裹（virtual pair 不经 `editablePairForRange`）。锁定：`test:source-kernel-review`（纯命令字节预言机，LF+CRLF+具名拒绝+no-mutation+stale-revision）、`test-kernel-mode-headless` Case R1-R3（控制器：wrap 提交+选区保持+撤销一组、substitution 具名、resolve 的 stale/replace/remove）、`test:kernel-review-ui`（真实拖选+工具条+卡片+命令面板 Accept-All+只读替换段落 toast+保存冷重开，端口 13100）；legacy 平价由 `test:review` + `test:review-ui` 继续钉。
 
+**2026-08-28 输入法 `/` 面板与斜杠菜单抢键（用户报告「使用 / 选择有序列表后 1.2 一起弹出来」，源码 `1. 2\.`）**。定性花了整轮盲试才转向：插入路径本身**完全干净**——空文档/带 H1/未命名 scratch tab/上方已有列表 × query 为空`/`、`/ol`、`/1.`、`/有序列表`（直接键入与 IME 组合）× 回车确认、方向键、鼠标点选，共 20 余种变体在同一份渲染包上实测字节一律 `1. `，诊断环全空。真凶靠**在用户机器上挂只读探针**抓到（app 带 `--remote-debugging-port` 启动 + CDP 注入捕获阶段监听器）：
+
+```
+keydown Enter                                  ← 确认「有序列表」
+dom-child added OL / removed H1                ← 转换完成，字节此刻是 `1. `
+beforeinput insertText data="2." trusted=true  ← 146ms / 156ms 后（两次复现）
+   stack: 只有监听器自身，无任何应用代码帧；composing=false，无 composition 事件
+```
+
+即：中文输入法（微信/搜狗类）自己的 **`/` 快捷面板**在同一个 `/` 上打开，6 次 ArrowUp 与 Enter **两边都收到**——HorseMD 转换了块，输入法提交了**它自己**选中的条目文本 `2.`。落在列表项正文开头的 `2.` 被 `escapePolicyForInsert` 正确转义成 `2\.`（不转义会被重解析成同行嵌套），于是呈现为「灰 `1.` + 黑 `2.`」的未决态。用户切 ABC 输入法后消失，闭环。**不是字节层缺陷**，但 app 有能力拒收。
+
+**判别式（唯一可靠、且零误伤）**：真人按键**必然**带 keydown（IME 正常组合也带，key 为 `Process`/229），而面板提交没有。故 `editor-slash-menu.js`：`runSelected()` 结束时 `armImeGuard()` 记下时刻并清空 `keydownSinceRun`；`view.dom` 上一对捕获阶段监听器（keydown 置位、beforeinput 判定），在 **400ms** 窗口内收到**无 keydown 相伴、非 composition** 的 `insertText` 即 `preventDefault()` 并记诊断 `slash-ime-panel-insert`。捕获阶段是必需的——被取消的 beforeinput 永不成为 PM 事务，kernel 与 legacy 两条通道都看不到那段文字。被 blocked 的菜单项也 arm（菜单已确认，面板照样会提交）。
+
+**测试工具的盲区（记录，勿踩）**：`scripts/lib/human-input.mjs` 的 `typeTextLikeUser` 是**每字符一次 `Input.insertText`**，不带 keydown——在本判别式下与面板提交同形。所以回归里代表"真人按键"必须用 `keyDown`(带 text)+`keyUp`（`pressKey` 只发 `rawKeyDown`，有 keydown 但**不插字符**；`keyDown`(带 text) 再加 `char` 会**插两遍**，均为实测）。钉：`test:slash-ime-panel-guard-ui`（Case 1 用 `Input.insertText` 重放面板提交、字节须为 `1. `；Case 2 用物理按键、字节须为 `1. a`），已入 `test:kernel-ui`。回归复跑绿：blocktype / blockinsert / slash-combo(LF+CRLF) / leaf-insert / task-item / ime / ime-marker-escape / undecided-ordinal / manual-number。
+
 ### 5.3 PDF 导出
 
 - PDF 导出读取 `getPdfSource()` 生成的结构化 `{ html, headings, title }`，不是直接打印 live editor DOM。
