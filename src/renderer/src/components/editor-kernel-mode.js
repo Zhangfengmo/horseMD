@@ -2241,7 +2241,26 @@ export function createKernelMode({
     // derivation the empty-document/trailing cases use. Anything else without
     // both spans stays a refusal.
     const pureInsertion = !oldSpan && diff.from === diff.to && newSpan
-    if ((!oldSpan && !pureInsertion) || !newSpan) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-span' }
+    // A pure DELETION mirrors it on the other side: the new diff is collapsed,
+    // so the merged remainder is the block whose INTERIOR holds the collapse
+    // point (a mid-to-mid selection merges the halves into one block). A
+    // collapse point sitting ON a boundary means whole blocks were removed
+    // cleanly and nothing merged — the span serializes to nothing, which the
+    // deletion-empty allowance below accepts.
+    let effectiveNewSpan = newSpan
+    if (oldSpan && !newSpan && diff.insertFrom === diff.insertTo) {
+      let pos = 0
+      for (let i = 0; i < newDoc.childCount; i += 1) {
+        const size = newDoc.child(i).nodeSize
+        if (pos < diff.insertFrom && diff.insertFrom < pos + size) {
+          effectiveNewSpan = { firstIndex: i, lastIndex: i, pmFrom: pos, pmTo: pos + size }
+          break
+        }
+        pos += size
+      }
+      if (!effectiveNewSpan) effectiveNewSpan = { firstIndex: 0, lastIndex: -1, pmFrom: diff.insertFrom, pmTo: diff.insertFrom }
+    }
+    if ((!oldSpan && !pureInsertion) || !effectiveNewSpan) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-span' }
     // No pairs in range means the paste landed where the document has no bytes
     // at all: an empty document, or the view's trailing placeholder. Both are
     // ordinary places to paste into — an empty document is the FIRST one —
@@ -2254,24 +2273,48 @@ export function createKernelMode({
       : (rawSpanForPmRange(oldSpan.pmFrom, oldSpan.pmTo) || emptyTargetSpan(oldSpan))
     if (!raw) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-raw' }
     let markdown
-    try {
+    // An EMPTY effective span (clean whole-block deletion, nothing merged)
+    // serializes to nothing — creating a doc node from an empty fragment
+    // throws, and refusing here was the select-to-the-end gesture's failure.
+    if (effectiveNewSpan.lastIndex < effectiveNewSpan.firstIndex) {
+      markdown = ''
+    } else try {
       const children = []
       // The view's trailing placeholder (withTrailingParagraph / Crepe's
       // plugin-trailing) has no markdown bytes and must not gain any: it
       // serializes to `<br />`, which the durable oracle correctly treats as
       // a non-content placeholder — so the equality proof would PASS while
       // the artifact sat in the file (measured before this trim).
-      let last = newSpan.lastIndex
-      while (last > newSpan.firstIndex && last === newDoc.childCount - 1 &&
+      let last = effectiveNewSpan.lastIndex
+      while (last > effectiveNewSpan.firstIndex && last === newDoc.childCount - 1 &&
              newDoc.child(last).type?.name === 'paragraph' && newDoc.child(last).content.size === 0) {
         last -= 1
       }
-      for (let i = newSpan.firstIndex; i <= last; i += 1) children.push(newDoc.child(i))
+      for (let i = effectiveNewSpan.firstIndex; i <= last; i += 1) children.push(newDoc.child(i))
       markdown = serializeDoc(newDoc.type.create(null, Fragment.fromArray(children)))
     } catch {
       return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'serialize-failed' }
     }
-    if (typeof markdown !== 'string' || !markdown.trim()) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'empty-markdown' }
+    if (typeof markdown !== 'string') return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'empty-markdown' }
+    // An EMPTY serialization is an error for an insertion but the CORRECT
+    // spelling for a deletion whose selection covered the span's whole
+    // content (2026-08-30, the select-across-the-table gesture): the touched
+    // blocks merge to one empty paragraph, whose bytes are nothing. The
+    // two-tier proof below still judges the result.
+    if (!markdown.trim() && diff.to <= diff.from) {
+      return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'empty-markdown' }
+    }
+    // A deletion that serializes to NOTHING takes one block separator with it
+    // (the same absorption commitBlockDeletion does), so removed blocks do
+    // not leave a stranded blank run behind.
+    if (!markdown && raw.to > raw.from) {
+      const text0 = kernel.doc.text
+      const afterRun = text0.slice(raw.to).match(/^(?:\r\n|\r|\n){1,2}/)
+      const beforeRun = text0.slice(0, raw.from).match(/(?:\r\n|\r|\n){1,2}$/)
+      if (afterRun && raw.to + afterRun[0].length < text0.length) raw.to += afterRun[0].length
+      else if (beforeRun) raw.from -= beforeRun[0].length
+      else if (afterRun) raw.to += afterRun[0].length
+    }
     // The serializer always answers LF and a trailing newline; the span it
     // replaces is the block's own bytes, which carry neither.
     const ending = kernel.doc.text.includes('\r\n') ? '\r\n' : '\n'
@@ -3307,6 +3350,62 @@ export function createKernelMode({
     if (!view) return false
     if (!kernel.map) {
       notifyBlocked(KERNEL_CODES.UNMAPPED)
+      return true
+    }
+    // A CELL SELECTION (prosemirror-tables' cross-cell drag / Shift+click)
+    // deletes by CLEARING every selected cell — legacy's answer, measured:
+    // `| 甲甲甲 | 乙乙乙 |` becomes `|  |  |`. PM's own deleteCellSelection
+    // replaces each cell's content with an empty paragraph slice, which no
+    // gateway extractor can classify (2026-08-30 sweep: the gesture was
+    // refused outright), so the kernel performs the byte edit itself: one
+    // multi-edit transaction, each selected cell's visible content span
+    // deleted. Duck-typed via `$anchorCell` — instanceof is unreliable across
+    // bundled prosemirror-state copies.
+    if ((key === 'Backspace' || key === 'Delete') && state.selection.$anchorCell) {
+      const edits = []
+      let unmappable = false
+      state.selection.forEachCell((cell, pos) => {
+        if (unmappable) return
+        const para = cell.child(0)
+        if (!para?.isTextblock) { unmappable = true; return }
+        if (para.content.size === 0) return
+        const fromRaw = kernel.map.pmPosToRaw(pos + 2)
+        const toRaw = kernel.map.pmPosToRaw(pos + 2 + para.content.size)
+        if (!Number.isFinite(fromRaw) || !Number.isFinite(toRaw) || toRaw < fromRaw) { unmappable = true; return }
+        if (toRaw > fromRaw) edits.push({ from: fromRaw, to: toRaw, insert: '' })
+      })
+      if (unmappable) {
+        notifyBlocked(KERNEL_CODES.UNSUPPORTED)
+        return true
+      }
+      if (!edits.length) return true
+      // applySourceTransaction's contract: edits ASCENDING, non-overlapping.
+      edits.sort((a, b) => a.from - b.from)
+      const clearTxn = {
+        baseRevision: kernel.doc.revision,
+        edits,
+        intent: 'clear-cell-selection',
+        selection: { anchor: edits[edits.length - 1].from, head: edits[edits.length - 1].from }
+      }
+      const cleared = applySourceTransaction(kernel.doc, clearTxn)
+      if (!cleared.ok) {
+        notifyBlocked(cleared.code)
+        return true
+      }
+      // Same publish path as every structural command: bytes first, view
+      // rebuilt from the reparse, caret restored from the anchor. The FULL
+      // transaction goes into history — redo replays it.
+      kernel.doc = cleared.doc
+      recordHistory(cleared, clearTxn)
+      const parsed = safeParse(kernel.doc.text)
+      if (parsed) {
+        reconcileProjection({ view, newDoc: withTrailingParagraph(parsed) })
+        bindMap(view.state.doc)
+        setCaretFromRaw(view, edits[edits.length - 1].from)
+      } else {
+        bindMap(view.state.doc)
+      }
+      onChange?.(kernel.doc.text, false)
       return true
     }
     // A RANGE selection is not a caret gesture (2026-08-30 branch review,

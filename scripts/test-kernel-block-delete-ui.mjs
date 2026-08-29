@@ -163,4 +163,55 @@ await withApp('- 甲\n\n---\n\n- 乙\n\n尾段。\n', async (ctx) => {
   assert.equal(await save(), '- 甲\n\n---\n\n- 乙\n\n尾段。\n', 'a refused deletion writes nothing')
 })
 
+// 5) CROSS-CELL CLEAR (2026-08-30, user: 「表格的删除也有问题」): click one
+//    cell, Shift+click another — prosemirror-tables makes it a CellSelection —
+//    Backspace clears BOTH cells' text, legacy's own answer byte for byte.
+await withApp('开头段。\n\n| A | B |\n| --- | --- |\n| 甲甲甲 | 乙乙乙 |\n\n尾段。\n', async (ctx) => {
+  const { evaluate, send, save } = ctx
+  const cellBox = async (text) => evaluate(`(() => {
+    const n = [...(${V}).querySelectorAll('td')].find((x) => x.textContent.includes(${JSON.stringify(text)}))
+    const r = n.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  const a = await cellBox('甲甲甲')
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: a.x, y: a.y, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: a.x, y: a.y, button: 'left', clickCount: 1 })
+  await sleep(300)
+  const b = await cellBox('乙乙乙')
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: b.x, y: b.y, button: 'left', clickCount: 1, modifiers: 8 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: b.x, y: b.y, button: 'left', clickCount: 1, modifiers: 8 })
+  await sleep(400)
+  await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+  await sleep(900)
+  await noRefusal(evaluate, 'cross-cell CellSelection Backspace')
+  assert.equal(await save(), '开头段。\n\n| A | B |\n| --- | --- |\n|  |  |\n\n尾段。\n',
+    'a CellSelection Backspace clears every selected cell, byte-identical to legacy')
+})
+
+// 6) RANGE ACROSS THE TABLE (2026-08-30, user: 「直接删除整个表格也是有问题的」):
+//    select from the paragraph above across the whole table into the paragraph
+//    below, Backspace — everything selected goes, PM's own result as bytes.
+await withApp('开头段。\n\n| A | B |\n| --- | --- |\n| 甲甲甲 | 乙乙乙 |\n\n尾段。\n', async (ctx) => {
+  const { evaluate, send, save } = ctx
+  const box = await evaluate(`(() => {
+    const p1 = [...(${V}).querySelectorAll('p')].find((x) => x.textContent === '开头段。')
+    const p2 = [...(${V}).querySelectorAll('p')].find((x) => x.textContent === '尾段。')
+    const r1 = p1.getBoundingClientRect()
+    const r2 = p2.getBoundingClientRect()
+    return { x1: r1.left + 3, y1: r1.top + r1.height / 2, x2: r2.right - 3, y2: r2.top + r2.height / 2 }
+  })()`)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x1, y: box.y1, button: 'left', clickCount: 1 })
+  for (let i = 1; i <= 5; i += 1) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x1 + ((box.x2 - box.x1) * i) / 5, y: box.y1 + ((box.y2 - box.y1) * i) / 5, button: 'left', buttons: 1 })
+    await sleep(40)
+  }
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x2, y: box.y2, button: 'left', clickCount: 1 })
+  await sleep(400)
+  await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+  await sleep(1000)
+  await noRefusal(evaluate, 'range-across-table Backspace')
+  const bytes = await save()
+  assert.equal(bytes.includes('|'), false, `the table inside the selection must be gone: ${bytes}`)
+})
+
 console.log('PASS kernel block delete: divider, image, table and block math delete from either side (one press selects, one deletes), the selecting press writes nothing, and the deletion never disturbs its neighbours')

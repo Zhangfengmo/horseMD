@@ -2382,7 +2382,11 @@ const toggleVia = (h, markType, from, to) => {
   // ever flips to "read-only", `degradedPairAt` has started over-reporting.
   assert.ok(g.controller.kernel.map.blockPairs[0].charMap,
     'the fragment-bearing paragraph is mapped, not degraded')
-  assert.ok(g.notifications.at(-1).includes('unsupported-input-type'),
+  // 2026-08-30: the cross-block range now routes through the paste kind,
+  // whose commit refuses THIS shape (the harness serves no serializer), so
+  // the machine code changed spelling — the contract (generic message, never
+  // "read-only") is what this pin holds.
+  assert.ok(/unsupported-(input-type|structure)/.test(g.notifications.at(-1)),
     `a non-degraded refusal keeps the generic message, got: ${g.notifications.at(-1)}`)
   assert.ok(!g.notifications.at(-1).includes('read-only'),
     'a non-degraded refusal must not claim the block is read-only')
@@ -2501,7 +2505,8 @@ const toggleVia = (h, markType, from, to) => {
   assert.ok(h.notifications.length > before, 'the refusal is surfaced, never silent')
   assert.ok(!h.notifications.at(-1).includes('read-only'),
     `a refusal inside a PROVEN list item must not claim it is read-only, got: ${h.notifications.at(-1)}`)
-  assert.ok(h.notifications.at(-1).includes('unsupported-input-type'),
+  // 2026-08-30: routed through the paste kind now; the code spelling moved.
+  assert.ok(/unsupported-(input-type|structure)/.test(h.notifications.at(-1)),
     `it keeps the generic message, got: ${h.notifications.at(-1)}`)
 
   // The predicate itself, over the SAME real map: no position inside this
@@ -2899,7 +2904,11 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(cross?.veto, true, 'a cross-cell range must be vetoed')
   assert.equal(h.controller.kernel.doc.text, before, 'kernel bytes untouched')
   assert.equal(h.controller.kernel.doc.revision, revision)
-  assert.ok(h.notifications.length >= 2, 'both refusals notify')
+  // 2026-08-30: the cross-cell range routes through the paste kind and its
+  // refusal now shares the pipe refusal's CODE, so the 1.5s per-code toast
+  // cooldown (its own ADR) merges the two into one. The property this pin
+  // holds — a refusal is never SILENT — is unchanged.
+  assert.ok(h.notifications.length >= 1, 'the refusals notify')
 }
 
 // ---- Case 22 (Plan 5 Task 5): image attribute edits end to end ----

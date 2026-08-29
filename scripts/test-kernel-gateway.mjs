@@ -163,11 +163,14 @@ console.log('--- kernel gateway ---')
   assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
 }
 
-// Case 5: cross-block ReplaceStep (delete spanning a paragraph boundary,
-// joining 'abc'+'def' into one paragraph) -> blocked. doc(p('abc'), p('def')):
-// p1 spans PM [0,5) content [1,4); p2 spans [5,10) content [6,9). Deleting
-// [3,7) removes 'c' + the boundary + 'd', producing ONE ReplaceStep whose
-// $from (pos 3, inside p1) and $to (pos 7, inside p2) do NOT share a parent.
+// Case 5 — FLIPPED 2026-08-30 (user: 「直接删除整个表格也是有问题的」). A
+// cross-block ReplaceStep with an EMPTY slice is a pure range deletion — the
+// everyday select-and-delete gesture — and it used to be blocked outright,
+// which is why selecting across a table and pressing Backspace wrote nothing.
+// It now routes to the PASTE kind, whose two-tier commit serializes the
+// merged remainder of the touched span and proves it (tier 1 reparse
+// equality, tier 2 neighbour signature). The old refusal was the absence of
+// machinery, not a safety property: the proofs are the safety property.
 {
   const d = doc(p(text('abc')), p(text('def')))
   const state = EditorState.create({ schema, doc: d })
@@ -176,8 +179,7 @@ console.log('--- kernel gateway ---')
   assert.equal(tr.steps.length, 1)
   assert.equal(tr.steps[0].constructor.name, 'ReplaceStep')
   const result = classifyTransactions([tr], state)
-  assert.equal(result.kind, 'blocked')
-  assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(result.kind, 'paste')
 }
 
 // Case 6 (FLIPPED by P4-3.5 Fix B — this used to pin the blanket "any mark
@@ -1281,24 +1283,29 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)
 }
 
-// (f) DELETE straddling a mark boundary (from plain text INTO the run):
-// would strand the run's delimiters ('a **' corruption shape) → refused.
+// (f) DELETE straddling a mark boundary — FLIPPED 2026-08-30: it now
+// CLASSIFIES as the paste kind, whose commit serializes the edited block's
+// merged remainder ('a ' + still-bold 'ld' → \`a **ld**\`) and proves the
+// reparse — the delimiters can no longer be stranded, because the whole
+// block is re-spelled coherently. The PLAIN-TEXT channel's own refusal
+// below is unchanged: that channel still cannot express this edit, and the
+// commit-level guard stays as its net.
 {
   const { md, state, map } = markedFixture()
   const tr = state.tr.delete(2, 5) // ' b' of 'a |bo|ld' — crosses into the run
   const result = classifyTransactions([tr], state)
-  assert.equal(result.kind, 'blocked')
+  assert.equal(result.kind, 'paste')
   const { kernel, committed } = commitOf(md, map, state, tr)
   assert.equal(committed.ok, false)
   assert.equal(committed.code, KERNEL_CODES.INPUT_TYPE)
   assert.equal(kernel.doc.text, md, 'refused deletion leaves bytes untouched')
 }
 
-// (f2) …and the mirrored straddle (from inside the run OUT past its end).
+// (f2) …and the mirrored straddle — flipped with (f), same machinery.
 {
   const { state } = markedFixture()
   const tr = state.tr.delete(5, 8)
-  assert.equal(classifyTransactions([tr], state).kind, 'blocked')
+  assert.equal(classifyTransactions([tr], state).kind, 'paste')
 }
 
 // (g) delete the run's EXACT content → '****' residue (byte-consistent,
@@ -1594,8 +1601,14 @@ const withSelection = (state, from, to) =>
   }
 }
 
-// Case T2: a step spanning TWO cells is refused at classification — the
-// gateway never sees a cross-cell edit as plain text.
+// Case T2 — FLIPPED 2026-08-30 with the range-deletion route: a step
+// spanning two cells still never reaches the PLAIN-TEXT channel (that half
+// of the old pin is intact by construction — extractPlainTextSteps refuses
+// it), but classification now hands it to the paste kind, whose commit
+// serializes the touched table from ProseMirror's own result and proves the
+// reparse. Keyboard cross-cell selections are CellSelections and take the
+// dedicated clear branch before any of this; this shape is the programmatic
+// remainder.
 {
   const md = '| a | b |\n| - | - |\n| c | d |\n'
   const d = doc(tbl([['a', 'b'], ['c', 'd']]))
@@ -1603,8 +1616,7 @@ const withSelection = (state, from, to) =>
   const tr = state.tr.delete(4, 10) // cell0 content .. cell1 content
   assert.equal(tr.docChanged, true, 'fixture sanity: the delete changed the doc')
   const classified = classifyTransactions([tr], state)
-  assert.equal(classified.kind, 'blocked', 'a cross-cell range must be refused')
-  assert.equal(classified.blockedCode, KERNEL_CODES.INPUT_TYPE)
+  assert.equal(classified.kind, 'paste')
 }
 // …and a cross-ROW range too.
 {
@@ -1613,6 +1625,9 @@ const withSelection = (state, from, to) =>
   const state = EditorState.create({ schema, doc: d })
   const tr = state.tr.delete(4, 17)
   const classified = classifyTransactions([tr], state)
+  // NOT flipped with T2: a cross-ROW delete's step carries row structure in
+  // its slice (openStart/openEnd > 0, content non-empty), so the pure-range
+  // extractor rightly never claims it and the refusal stands.
   assert.equal(classified.kind, 'blocked', 'a cross-row range must be refused')
   void md
 }
@@ -2774,8 +2789,11 @@ const atomBytes = ({ md, state, map }, tr) => {
   // P4-2 byte-consistent outcome, unchanged by this task.
   assert.deepEqual(atomBytes(f, f.state.tr.delete(1, 3)),
     { kind: 'plain-text', text: '****![x](y.png)c\n' })
-  // a range straddling the run's edge AND the atom is refused by both guards.
-  assert.equal(classifyTransactions([f.state.tr.delete(2, 4)], f.state).kind, 'blocked')
+  // a range straddling the run's edge AND the atom — flipped 2026-08-30 with
+  // the range-deletion route: classification hands it to the paste kind
+  // (whole-block re-spell from PM's own result, reparse-proven); the
+  // plain-text channel still refuses it, as the commit cases above pin.
+  assert.equal(classifyTransactions([f.state.tr.delete(2, 4)], f.state).kind, 'paste')
 }
 
 // A8: CRLF document — the atom's raw span sits inside one line, so neither
@@ -2888,14 +2906,17 @@ const atomBytes = ({ md, state, map }, tr) => {
   // Real typing at PM 3 INHERITS the link mark from the atom, so the
   // pre-existing plain-slice guard refuses it — unchanged by this task.
   assert.equal(classifyTransactions([f.state.tr.insertText('X', 3)], f.state).kind, 'blocked')
-  // Deleting the atom stays REFUSED even after P6-1b, and this is the reason
-  // the whole-atom rule carries its unmarked condition: the link's own '[' and
-  // '](url)' bytes belong to no unit, so the resolved range would be the
-  // image's [2,13) alone and the source would keep 'a[](url)b' — orphaned
-  // delimiters, the P4-2 corruption shape. `stepRespectsMarkedRuns` cannot
-  // catch it (it walks TEXT children only), so `stepRespectsAtoms` does.
-  assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'blocked')
-  assert.equal(classifyTransactions([f.state.tr.delete(1, 4)], f.state).kind, 'blocked')
+  // Deleting the MARKED atom — FLIPPED 2026-08-30 with the range-deletion
+  // route. The old refusal existed because the plain-text channel could only
+  // resolve the image's own [2,13) bytes, leaving 'a[](url)b' — orphaned
+  // delimiters. The paste route re-spells the whole block from ProseMirror's
+  // result ('ab', link mark gone WITH its atom) and proves the reparse, so
+  // the corruption shape is unreachable and the deletion finally works. The
+  // plain-text channel itself still refuses (stepRespectsAtoms unchanged).
+  assert.equal(classifyTransactions([f.state.tr.delete(2, 3)], f.state).kind, 'paste')
+  assert.equal(classifyTransactions([f.state.tr.delete(1, 4)], f.state).kind, 'paste')
+  // A REPLACE carrying new content is not a pure deletion and keeps the old
+  // refusal.
   assert.equal(classifyTransactions([f.state.tr.replaceWith(2, 3, text('Z'))], f.state).kind, 'blocked')
 }
 

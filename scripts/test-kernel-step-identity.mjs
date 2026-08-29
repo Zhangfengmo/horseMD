@@ -181,8 +181,11 @@ for (const [name, build] of Object.entries(fixtures)) {
 // classes must still name itself with a stable id.
 check('R2 blocked-shape diagnostics survive the rename', () => {
   const state = EditorState.create({ doc: doc(para('a'), para('b')) })
-  // Cross-block delete: a shape the gateway refuses by design.
-  const tr = state.tr.delete(2, 4)
+  // A TWO-step chain (cross-block delete + insert): still refused by design.
+  // (A LONE cross-block delete routes to the paste kind since 2026-08-30, so
+  // it no longer serves as this test's blocked example — the test's subject
+  // is the DIAGNOSTIC string, not the deletion.)
+  const tr = state.tr.delete(2, 4).insertText('Z', 1)
   const classes = stepClassesOf([tr])
   const restore = []
   for (const cls of classes) {

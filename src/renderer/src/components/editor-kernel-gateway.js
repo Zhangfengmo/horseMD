@@ -1455,6 +1455,21 @@ export function extractBlockDeletion(trs, oldState) {
   return { pmFrom: step.from, pmTo: step.to, firstIndex: first, lastIndex: last }
 }
 
+// One document-changing transaction whose steps compose to a single empty-
+// slice ReplaceStep over a real range: ProseMirror's deleteSelection (and
+// cut). See the call site in classifyTransactions.
+export function extractPureRangeDeletion(trs) {
+  const changed = trs.filter((tr) => tr && tr.docChanged)
+  if (changed.length !== 1) return null
+  const steps = changed[0].steps || []
+  if (steps.length !== 1) return null
+  const step = steps[0]
+  if (!isStep(step, 'replace')) return null
+  if (step.slice?.content?.size) return null
+  if (!Number.isFinite(step.from) || !Number.isFinite(step.to) || step.to <= step.from) return null
+  return { pmFrom: step.from, pmTo: step.to }
+}
+
 // ProseMirror's own paste marker: `doPaste` dispatches its replaceSelection
 // transaction with BOTH metas set (prosemirror-view input.ts), and Milkdown's
 // paste plugins keep them when they build their own slice. `uiEvent` is the
@@ -1532,6 +1547,19 @@ export function classifyTransactions(transactions, oldState, { isComposing = fal
     // cannot prove, so this only ever converts a blanket refusal into a
     // provable commit.
     if (isPaste || isPasteBatch(trs)) {
+      return { kind: 'paste', shape: describeUnclassified(trs, oldState) }
+    }
+    // A PURE RANGE DELETION across blocks (2026-08-30, user: 「直接删除整个
+    // 表格也是有问题的」): select from one paragraph across a table (or any
+    // blocks) into another and press Backspace/Delete. ProseMirror answers
+    // with ONE ReplaceStep carrying an EMPTY slice; no step extractor can
+    // express it, so the everyday select-and-delete gesture was refused
+    // outright. The paste route's two-tier commit is exactly the machinery
+    // it needs — serialize the merged remainder of the touched span, prove
+    // the reparse (tier 1) or the neighbours (tier 2) — so it routes there.
+    // Cut (Mod+X) produces the same shape and is covered by the same route.
+    const rangeDeletion = extractPureRangeDeletion(trs)
+    if (rangeDeletion) {
       return { kind: 'paste', shape: describeUnclassified(trs, oldState) }
     }
     const namedCode = extractHeadingDemotion(trs, oldState)
