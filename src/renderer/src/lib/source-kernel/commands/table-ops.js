@@ -700,6 +700,15 @@ export function insertTableCellBreak({ doc, index, offset }) {
     return { ok: false, code: 'unsupported-structure' }
   }
   if (!Number.isInteger(offset)) return { ok: false, code: 'unsupported-structure' }
+  // CHEAP GATE BEFORE THE PARSE. This command sits at the front of the Enter
+  // route, so an unguarded parse here costs every Enter in the document a
+  // second one — caught by the headless perf pin ("a structural Enter runs at
+  // most 1 kernel parse"). A GFM cell always lives on a line carrying a `|`,
+  // so a line without one is not this gesture and pays nothing.
+  const lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1
+  let lineEnd = text.indexOf('\n', offset)
+  if (lineEnd < 0) lineEnd = text.length
+  if (!text.slice(lineStart, lineEnd).includes('|')) return { ok: false, code: 'unsupported-structure' }
   let baseTree
   try {
     baseTree = parseKernelMarkdown(text)

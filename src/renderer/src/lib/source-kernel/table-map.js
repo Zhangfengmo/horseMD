@@ -238,7 +238,13 @@ function buildCellCharMap(text, mdCell) {
     if (!PADDING_RE.test(text.slice(region.from, region.to))) return null
     return emptyCellCharMap(text, region)
   }
-  if (hasCellBreak(mdCell)) return null
+  // UNLOCKED 2026-08-29 (user: 「表格内部需要支持换行不可能都是单行噻」). The
+  // note above this function's `hasCellBreak` helper said the map itself was
+  // provable and the degrade was a stage-3 CHOICE — measured, it is: a cell
+  // holding `甲<br>乙` maps to [char, atom(width 1), char], the `<br>` counted
+  // once on both sides. Keeping the degrade meant Enter in a cell produced a
+  // visible second line the user could not type on (the cell answered
+  // 「此段落…暂为只读」), which is a break in name only.
   const charMap = buildCharacterMap(text, mdCell)
   if (!charMap || !charMap.units.length) return null
   // `\|` — and ONLY `\|` — is refused. A GFM table cell unescapes `\|` into a

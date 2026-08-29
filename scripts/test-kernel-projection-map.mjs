@@ -435,7 +435,14 @@ console.log('--- kernel projection map ---')
   const map = buildProjectionMap(md, d)
   assert.ok(map, '<br> table must map')
   assert.equal(map.blockPairs.length, 5)
-  assert.equal(map.blockPairs[0].charMap, null, 'the <br> cell degrades')
+  // FLIPPED 2026-08-29 (user: 「表格内部需要支持换行不可能都是单行噻」). The
+  // stage-3/4 note this case carried said the map was PROVABLE and the degrade
+  // was a choice — measured, it is: `甲<br>乙` maps to [char, atom(width 1),
+  // char], the `<br>` counted once on each side. Keeping the degrade meant Enter
+  // in a cell drew a second line the user could not type on (「此段落…暂为只读」),
+  // while guide/editing/tables.md has documented in-cell breaks all along. The
+  // cell now maps, and the break is usable.
+  assert.ok(map.blockPairs[0].charMap, 'the <br> cell maps')
   assert.ok(map.blockPairs[1].charMap, 'its sibling stays editable')
   assert.ok(map.blockPairs[2].charMap)
   assert.ok(map.blockPairs[3].charMap)

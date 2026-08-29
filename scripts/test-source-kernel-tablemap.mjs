@@ -457,16 +457,21 @@ console.log('--- source kernel table map ---')
 // ---------------------------------------------------------------------------
 {
   // `<br>` in a cell: mdast keeps an `html` node, the editor chain rewrites it
-  // to a PM `hardbreak` — both count 1, so the map is provable, but stage 4
-  // deliberately keeps the shape read-only (the gateway's textblockProfile
-  // refuses a non-text inline child anyway).
+  // to a PM `hardbreak` — both count 1, so the map is provable.
+  // FLIPPED 2026-08-29 (user: 「表格内部需要支持换行不可能都是单行噻」). The
+  // stage-3/4 note this case carried said the map was PROVABLE and the degrade
+  // was a choice — measured, it is: `甲<br>乙` maps to [char, atom(width 1),
+  // char], the `<br>` counted once on each side. Keeping the degrade meant Enter
+  // in a cell drew a second line the user could not type on (「此段落…暂为只读」),
+  // while guide/editing/tables.md has documented in-cell breaks all along. The
+  // cell now maps, and the break is usable.
   const md = '| a<br>b | c |\n| --- | --- |\n| d | e |\n'
   const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
     [[text('a'), schema.node('hardbreak'), text('b')], [text('c')]],
     [[text('d')], [text('e')]]
   ]), 0)
   assert.ok(result, '<br> table still zips structurally')
-  assert.equal(result.cells[0].charMap, null, 'the <br> cell degrades')
+  assert.ok(result.cells[0].charMap, 'the <br> cell maps — the break is a width-1 atom on both sides')
   assert.ok(result.cells[1].charMap, 'its sibling stays editable')
   assert.ok(result.cells[2].charMap)
   assert.ok(result.cells[3].charMap)
@@ -783,18 +788,19 @@ console.log('--- source kernel table map ---')
   }
 }
 {
-  // UNCHANGED — a `<br>` cell degrades even when its escapes are the ordinary
-  // kind: `hasCellBreak` runs BEFORE the escape guard and is untouched by the
-  // narrowing. Probed '| a\-b<br>c | d |': cell [0,12), children
-  // text/html/text, units a / \- / b / <br> / c.
+  // A `<br>` cell WITH ordinary escapes maps too (FLIPPED 2026-08-29 with the
+  // rest of the in-cell break work): the break is a width-1 atom and `\-` is
+  // the ordinary CommonMark escape the unit model already encodes. Probed
+  // '| a\-b<br>c | d |': cell [0,12), children text/html/text, units
+  // a / \- / b / <br> / c. Only `\|` still degrades a cell (next case).
   const md = '| a\\-b<br>c | d |\n| --- | --- |\n| e | f |\n'
   const result = buildTableCellMaps(md, mdTableOf(md), tableNode([
     [[text('a-b'), schema.node('hardbreak'), text('c')], [text('d')]],
     [[text('e')], [text('f')]]
   ]), 0)
   assert.ok(result, '<br>+escape table still zips structurally')
-  assert.equal(result.cells[0].charMap, null,
-    'a <br> cell degrades regardless of the escapes it holds')
+  assert.ok(result.cells[0].charMap,
+    'a <br> cell maps, and its ordinary escapes map with it')
   assert.ok(result.cells[1].charMap, 'its sibling stays editable')
 }
 {

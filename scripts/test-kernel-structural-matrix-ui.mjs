@@ -33,7 +33,7 @@ async function waitFor(fn, message, tries = 80) {
 }
 
 let seq = 0
-async function run({ body, selector, target, edge, key, modifiers = 0, expect, expectSilent = false, label }) {
+async function run({ body, selector, target, edge, key, modifiers = 0, expect, expectSilent = false, label, type = '' }) {
   seq += 1
   const fixture = `开头段。\n\n${body}\n\n尾段。\n`
   const root = `/tmp/horsemd-structural-${process.pid}-${seq}`
@@ -67,6 +67,10 @@ async function run({ body, selector, target, edge, key, modifiers = 0, expect, e
     await sleep(400)
     await pressKey(send, { key, code: key === 'Shift-Tab' ? 'Tab' : key, modifiers })
     await sleep(900)
+    if (type) {
+      await send('Input.insertText', { text: type })
+      await sleep(800)
+    }
     const toasts = await evaluate(`JSON.stringify(window.__t)`)
     assert.ok(!/无效操作|Invalid operation|未写入|只读/.test(toasts), `${label}: must not be refused — toasts: ${toasts}`)
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
@@ -101,6 +105,25 @@ await run({
   key: 'Enter',
   expect: '开头段。\n\n| A | B |\n| --- | --- |\n| 甲<br> | 乙 |\n\n尾段。\n'
 })
+
+// A CELL BREAK IS USABLE, not just visible: the second line must accept
+// typing. The guide has documented this since before kernel mode
+// (guide/editing/tables.md: 「在表格单元格内按 Enter 或 Shift+Enter 会插入
+// 换行」), and kernel mode used to render the break and then refuse the block
+// as read-only — a break in name only.
+for (const [label, key, modifiers] of [['Enter', 'Enter', 0], ['Shift+Enter', 'Enter', 8], ['Mod+Enter', 'Enter', 4]]) {
+  await run({
+    label: `table cell + ${label} then typing`,
+    body: '| A | B |\n| --- | --- |\n| 甲 | 乙 |',
+    selector: 'td p, td',
+    target: '甲',
+    edge: 'mid',
+    key,
+    modifiers,
+    type: '第二行',
+    expect: '开头段。\n\n| A | B |\n| --- | --- |\n| 甲<br>第二行 | 乙 |\n\n尾段。\n'
+  })
+}
 
 // NO-OPS ARE SILENT — no bytes, and no toast either.
 await run({ label: 'Tab on a first item', body: '- 甲\n- 乙', selector: 'li p', target: '甲', edge: 'end', key: 'Tab', expectSilent: true })

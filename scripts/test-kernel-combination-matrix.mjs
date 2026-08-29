@@ -556,16 +556,21 @@ const KNOWN_UNEDITABLE = new Map([])
 // written down so the snapshot is readable and so a future reader can tell an
 // intended entry from a regression that got rubber-stamped.
 //
-// D1. GFM TABLE CELL CONTAINING `<br>`  ->  that CELL is read-only.
+// D1. (FIXED 2026-08-29 — family removed.) GFM TABLE CELL CONTAINING `<br>`
+//     used to make that CELL read-only.
 //     Shape:      `| 一<br>二 | 三 |`
-//     Mechanism:  the `<br>` is rewritten to an mdast `break` by
-//                 `brToBreakRemarkPlugin`, so PM holds text/hardbreak/text
-//                 (content.size 3), while `buildTableCellMaps`
-//                 (lib/source-kernel/table-map.js) returns `charMap: null` for
-//                 the cell outright.
-//     Posture:    fail-closed and LOUD — the cell simply cannot be typed into,
-//                 its siblings stay editable, and the status bar reports
-//                 "some blocks read-only". No byte is at risk.
+//     Mechanism:  `buildTableCellMaps` (lib/source-kernel/table-map.js)
+//                 returned `charMap: null` for any cell holding a break — a
+//                 deliberate stage-3 CHOICE, not an inability: its own comment
+//                 recorded that both sides count the break as exactly one unit
+//                 and the map is provable. Measured: `甲<br>乙` maps to
+//                 [char, atom(width 1), char].
+//     Why it went: the user asked for it (「表格内部需要支持换行不可能都是单行
+//                 噻」), and the degrade made Enter in a cell draw a second line
+//                 the user could not type on — while guide/editing/tables.md
+//                 has documented in-cell breaks all along. 182 compositions in
+//                 this family stopped degrading at once, which is what the
+//                 snapshot update below records.
 //
 // D2. (FIXED 2026-08-21 — family removed.) CRLF + SOFT LINE BREAK IN PROSE
 //     used to make the paragraph read-only: `textUnits` counted the `\r` of a

@@ -4372,7 +4372,38 @@ export function createKernelMode({
   // `Space` rides in the SAME keymap slot (ahead of the preset keymaps) rather
   // than in its own plugin, so its precedence relative to Tab/Enter is fixed by
   // construction. prosemirror-keymap normalizes the name 'Space' to ' '.
-  const structuralKeymap = () => keymap({ ...structuralHandlers, Space: spaceHandler })
+  // IN-CELL LINE BREAK, on the SAME three keys legacy binds (2026-08-29, user:
+  // 「表格内部需要支持换行不可能都是单行噻」 + 「对应的交互逻辑和快捷键操作也要
+  // 适配，不能提升用户使用成本」). editor-tablebreak.js binds Enter,
+  // Shift+Enter AND Mod+Enter inside a cell; kernel mode only ever routed
+  // Enter, so the other two reached Crepe's own keymap, produced a PM
+  // hardbreak the gateway could not classify, and refused — a user switching a
+  // tab to kernel mode silently lost two thirds of the shortcut.
+  //
+  // Both extra keys go through the SAME command as Enter (the router's
+  // `insertTableCellBreak`), so there is one spelling of an in-cell break, and
+  // OUTSIDE a table they answer `false` and fall through to whatever owns them
+  // there — this adds a table route, it does not take Shift+Enter away from
+  // the paragraph domain.
+  const cellBreakHandler = (state, dispatch, viewArg) => {
+    const view = viewArg || getView?.()
+    if (inactive() || !view || !kernel.map) return false
+    if (!state.selection.empty) return false
+    let inCell = false
+    try {
+      inCell = isInTable(state)
+    } catch {
+      inCell = false
+    }
+    if (!inCell) return false
+    return structuralHandler('Enter')(state, dispatch, view)
+  }
+  const structuralKeymap = () => keymap({
+    ...structuralHandlers,
+    Space: spaceHandler,
+    'Shift-Enter': cellBreakHandler,
+    'Mod-Enter': cellBreakHandler
+  })
   const historyKeymap = () => keymap({
     'Mod-z': historyHandlers.undo,
     'Mod-y': historyHandlers.redo,
