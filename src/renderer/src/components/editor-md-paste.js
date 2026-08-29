@@ -11,6 +11,7 @@
 //   (2) any strong Markdown block marker → parse the whole clipboard as Markdown.
 // Never takes over when pasting INTO a code block (append code there).
 import { Slice, Fragment } from '@milkdown/prose/model'
+import { TextSelection } from '@milkdown/prose/state'
 import { startsAsMermaid } from './editor-mermaid.js'
 import { hasStructuredWebHtml } from './editor-web-paste.js'
 
@@ -220,7 +221,18 @@ export function attachMdPasteHandler(view, parse, prepareRawMarkdownPaste, markU
 
 function insert(view, fragment) {
   try {
+    const selFrom = view.state.selection.from
     const tr = view.state.tr.replaceSelection(new Slice(fragment, 0, 0))
+    // A CLOSED slice (openEnd 0) makes replaceSelection walk the caret
+    // forward into the NEXT block's start — measured (2026-08-30, both
+    // modes): paste a list, and the following paste/typing lands in the
+    // neighbouring block below. `tr.selection` is already the walked-forward
+    // position (backing up from IT can land in an interposed placeholder
+    // paragraph instead), so the pasted content's end is computed from the
+    // insertion point + the fragment's own size, then walked BACKWARD into
+    // the last pasted textblock — where every editor leaves the caret.
+    const end = Math.min(selFrom + fragment.size, tr.doc.content.size)
+    tr.setSelection(TextSelection.near(tr.doc.resolve(end), -1))
     tr.scrollIntoView()
     // Same metas ProseMirror's own `doPaste` sets. This handler runs in the
     // capture phase, BEFORE PM's, so without them a smart-Markdown paste

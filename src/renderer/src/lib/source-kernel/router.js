@@ -107,15 +107,21 @@ export function routeStructuralKey(key, ctx) {
     case 'Tab': {
       if (!item) return NOT_STRUCTURAL
       const indented = indentListItem(ctx)
-      // A FIRST item has nothing to nest under — CommonMark has no spelling
-      // for it, so this is a no-op, not a failure.
-      return indented.ok ? indented : SILENT_NO_OP
+      if (indented.ok) return indented
+      // Only the bare "nothing to nest under" answer (a FIRST item — the
+      // generic unsupported-structure) is a no-op. The NAMED protective
+      // refusals (empty-item-would-become-heading, would-restructure-document)
+      // keep their own toasts: collapsing them too silenced deliberately
+      // didactic messages (2026-08-30 branch review, confirmed twice).
+      return indented.code === 'unsupported-structure' ? SILENT_NO_OP : indented
     }
     case 'Shift-Tab': {
       if (!item) return NOT_STRUCTURAL
       const outdented = outdentListItem(ctx)
-      // A TOP-LEVEL item has nothing to outdent out of.
-      return outdented.ok ? outdented : SILENT_NO_OP
+      if (outdented.ok) return outdented
+      // Same rule: a TOP-LEVEL item's generic refusal is a no-op; anything
+      // named passes through.
+      return outdented.code === 'unsupported-structure' ? SILENT_NO_OP : outdented
     }
     case 'Backspace': {
       // A session-ledgered, never-labelled seed item is EFFECTIVELY empty

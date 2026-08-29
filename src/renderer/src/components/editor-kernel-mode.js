@@ -1326,7 +1326,14 @@ export function createKernelMode({
         recordHistory(committed.applied, committed.transaction)
         kernel.history.breakGroup()
         bindMap(newState?.doc || null)
-        requestVerify(newState?.doc, committed.applied?.selection?.anchor, newState?.selection?.head)
+        // NO raw caret ride for an exact paste (2026-08-30 canary repro): PM
+        // already left the caret at the pasted slice's end, and the verify's
+        // repair here only removes a placeholder that sits AFTER it — PM's own
+        // step mapping preserves the caret exactly. Re-deriving it from the
+        // raw anchor through the repair's ladder is what threw it into the
+        // NEXT block (the starred item), where the following paste then
+        // landed.
+        requestVerify(newState?.doc, null, newState?.selection?.head)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -2042,11 +2049,17 @@ export function createKernelMode({
       const size = docNode.child(i).nodeSize
       const start = pos
       const end = pos + size
-      // Touching counts: a collapsed diff at a block boundary belongs to the
-      // block it sits inside, and an insertion between two blocks belongs to
-      // both — taking both is the safe direction (more bytes re-spelled, the
-      // equality proof unchanged).
-      if (end >= from && start <= to) {
+      // STRICT interior overlap (2026-08-30 branch review + the canary the
+      // strengthened paste suite caught the same day): "touching counts" was
+      // NOT the safe direction. A paste whose diff merely TOUCHED the next
+      // block's boundary pulled that untouched neighbour into the re-spell —
+      // measured: an authored \`* 星号项\` list adjacent to the paste point
+      // lost its blank-line separation on one paste, then received the
+      // following pastes' content, ending as a marker-less \`  星号项\`
+      // continuation line. Only a block the diff actually enters is touched;
+      // the pure between-blocks insertion falls back to the touching rule
+      // below, where there is no neighbour content to damage.
+      if (end > from && start < to) {
         if (firstIndex < 0) {
           firstIndex = i
           pmFrom = start
@@ -2056,6 +2069,11 @@ export function createKernelMode({
       }
       pos = end
     }
+    // No interior overlap = a COLLAPSED diff exactly on a block seam: the
+    // paste is a pure INSERTION between blocks, and the caller must treat the
+    // old side as an insertion POINT (emptyTargetSpan), never widen it onto
+    // the neighbours — widening is exactly what ate `第二段` and the starred
+    // list in the canary repro (2026-08-30).
     return firstIndex < 0 ? null : { firstIndex, lastIndex, pmFrom, pmTo }
   }
 
@@ -2109,12 +2127,19 @@ export function createKernelMode({
     // keeps a trailing blank run nobody asked for.
     let from = raw.from
     let to = raw.to
-    const after = text.slice(to).match(/^(?:\r\n|\r|\n){1,2}/)
-    if (after) {
-      to += after[0].length
-    } else {
-      const before = text.slice(0, from).match(/(?:\r\n|\r|\n){1,2}$/)
-      if (before) from -= before[0].length
+    const afterRun = text.slice(to).match(/^(?:\r\n|\r|\n){1,2}/)
+    const beforeRun = text.slice(0, from).match(/(?:\r\n|\r|\n){1,2}$/)
+    // Absorb the after-run only when real content FOLLOWS it: for the file's
+    // LAST block the after-run is the file's own final newline, and taking it
+    // left a trailing blank run behind (2026-08-30 review: deleting the hr in
+    // `甲\n\n---\n` produced `甲\n\n`). At the end, take the run BEFORE the
+    // block instead, so the file closes with its ordinary single newline.
+    if (afterRun && to + afterRun[0].length < text.length) {
+      to += afterRun[0].length
+    } else if (beforeRun) {
+      from -= beforeRun[0].length
+    } else if (afterRun) {
+      to += afterRun[0].length
     }
     const transaction = {
       baseRevision: kernel.doc.revision,
@@ -2211,7 +2236,12 @@ export function createKernelMode({
     if (!diff) return { ok: false, code: KERNEL_CODES.INPUT_TYPE, stage: 'no-diff' }
     const oldSpan = topLevelSpanCovering(oldDoc, diff.from, diff.to)
     const newSpan = topLevelSpanCovering(newDoc, diff.insertFrom, diff.insertTo)
-    if (!oldSpan || !newSpan) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-span' }
+    // A pure between-blocks insertion has NO old span (the diff is collapsed
+    // on a seam): the old side is an insertion point, served by the same
+    // derivation the empty-document/trailing cases use. Anything else without
+    // both spans stays a refusal.
+    const pureInsertion = !oldSpan && diff.from === diff.to && newSpan
+    if ((!oldSpan && !pureInsertion) || !newSpan) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-span' }
     // No pairs in range means the paste landed where the document has no bytes
     // at all: an empty document, or the view's trailing placeholder. Both are
     // ordinary places to paste into — an empty document is the FIRST one —
@@ -2219,7 +2249,9 @@ export function createKernelMode({
     // derivation is allowed to be a guess precisely because the reparse
     // equality below judges it: a wrong offset cannot produce the document
     // the transaction produced.
-    const raw = rawSpanForPmRange(oldSpan.pmFrom, oldSpan.pmTo) || emptyTargetSpan(oldSpan)
+    const raw = pureInsertion
+      ? emptyTargetSpan({ pmFrom: diff.from })
+      : (rawSpanForPmRange(oldSpan.pmFrom, oldSpan.pmTo) || emptyTargetSpan(oldSpan))
     if (!raw) return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'no-raw' }
     let markdown
     try {
@@ -3225,7 +3257,14 @@ export function createKernelMode({
     let empty = true
     table.descendants((node) => {
       if (!empty) return false
-      if (node.isText && node.text?.length) { empty = false; return false }
+      if (node.isText) {
+        if (node.text?.length) { empty = false; return false }
+        return true
+      }
+      // Any OTHER inline node — an image, inline math, an inline-HTML atom, a
+      // hardbreak — is content too (2026-08-30 branch review: an image-only
+      // table read as empty and one Backspace deleted it whole).
+      if (node.isInline) { empty = false; return false }
       return true
     })
     if (!empty) return null
@@ -3269,6 +3308,21 @@ export function createKernelMode({
     if (!kernel.map) {
       notifyBlocked(KERNEL_CODES.UNMAPPED)
       return true
+    }
+    // A RANGE selection is not a caret gesture (2026-08-30 branch review,
+    // confirmed): every Backspace/Delete/Enter branch below routes from the
+    // caret HEAD's offset alone, so Shift+Home then Backspace inside a list
+    // item used to run the content-start outdent/lift on the item — the
+    // selected text survived while a structural rewrite the user never asked
+    // for was committed. Backspace/Delete over a selection mean "delete the
+    // selection" and Enter means "replace it": hand the key to ProseMirror,
+    // whose resulting transaction the gateway classifies and proves like any
+    // other selection edit (the select-all suites pin exactly that path). A
+    // NodeSelection is exempt — it IS a caret-less gesture, and the selected-
+    // atom deletion branch below owns it.
+    if ((key === 'Backspace' || key === 'Delete' || key === 'Enter') &&
+        !state.selection.empty && !state.selection.node) {
+      return false
     }
     // Tab / Shift-Tab inside a GFM table cell NAVIGATE between cells (Plan 5
     // Task 4 review fix). Two things made this necessary the moment table

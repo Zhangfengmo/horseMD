@@ -52,7 +52,12 @@ async function run() {
   const file = join(root, 'doc.md')
   await rm(root, { recursive: true, force: true })
   await mkdir(root, { recursive: true })
-  await writeFile(file, '开头段。\n')
+  // AUTHORED-SPELLING canaries after the paste point (2026-08-30 branch
+  // review: the old fixture had no byte that could distinguish a span-scoped
+  // commit from a whole-document re-serialization). The serializer would
+  // write `- 星号项` and could re-spell the escape — if either tail byte
+  // moves, blocks the paste never touched were re-spelled.
+  await writeFile(file, '开头段。\n\n* 星号项\n\n1\\. 转义序数段\n')
 
   let app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file], kernelDefault: true })
   try {
@@ -102,11 +107,20 @@ async function run() {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await sleep(900)
     const bytes = await readFile(file, 'utf8')
-    for (const expected of ['第一段', '第二段', '# 标题', '- 甲\n- 乙', '**粗体**', '*斜体*', '| 表格 A', '|  |  |']) {
-      assert.ok(bytes.includes(expected), `pasted content missing from the saved bytes: ${expected}\n--- bytes ---\n${bytes}`)
+    let cursor = -1
+    for (const expected of ['第一段', '第二段', '# 标题', '- 甲\n- 乙', '**粗体**', '*斜体*', '|  |  |', '| 表格 A']) {
+      const at = bytes.indexOf(expected)
+      assert.ok(at >= 0, `pasted content missing from the saved bytes: ${expected}\n--- bytes ---\n${bytes}`)
+      assert.ok(at > cursor, `pasted content out of order: ${expected} at ${at} (cursor ${cursor})`)
+      cursor = at
     }
-    // The authored first paragraph never moved.
-    assert.ok(bytes.startsWith('开头段。'), `the authored paragraph must keep its own bytes: ${bytes}`)
+    // The authored blocks keep their OWN spelling, byte for byte: the prefix
+    // before the paste point, and the canary tail after it. A whole-document
+    // re-serialization (or a paste landing past the canaries) fails here.
+    assert.ok(bytes.startsWith('开头段。\n'), `the authored paragraph must keep its own bytes: ${bytes}`)
+    assert.ok(bytes.endsWith('\n* 星号项\n\n1\\. 转义序数段\n'),
+      `the authored tail must survive byte-for-byte (star bullet + escape untouched): ${JSON.stringify(bytes.slice(-40))}`)
+    assert.ok(cursor < bytes.indexOf('* 星号项'), 'every paste must land BEFORE the authored tail')
 
     await stopBuiltElectron(app)
     app = null

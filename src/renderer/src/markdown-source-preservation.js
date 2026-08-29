@@ -74,7 +74,7 @@ export {
 // one Milkdown produced. The compact spelling is what users expect from
 // incremental typing, so it is proposed first — but a compaction that changed
 // the parse must cost blank lines, not every authored marker.
-export const generatedScratchMarkdown = (canonical, parseTables, { compactSpacing = true } = {}) => {
+export const generatedScratchMarkdown = (canonical, parseTables, { compactSpacing = true, unescapePunctuation = true } = {}) => {
   // A brand-new document is authored entirely by rich typing; its canonical is
   // the only structural source. Serializer punctuation escapes outside proven
   // code/HTML literals therefore have no author-owned spelling to preserve:
@@ -87,9 +87,15 @@ export const generatedScratchMarkdown = (canonical, parseTables, { compactSpacin
   const normalized = withoutStandaloneEmptyBlockLines(
     normalizeEmptyListItems(normalizeSerializerEmptyTableCells(canonical, parseTables))
   )
-  return canonicalFreshTextToSource(
-    compactSpacing ? compactGeneratedListSpacing(normalized) : normalized
-  ).replace(/\r?\n+$/, '\n')
+  const spaced = compactSpacing ? compactGeneratedListSpacing(normalized) : normalized
+  // `unescapePunctuation: false` is the PASTE route's posture (2026-08-30
+  // branch review): there the PM document is the authority and the
+  // serializer's escapes are what PRESERVE its meaning — unescaping them
+  // promoted pasted literal text (`\# not heading`) into live syntax inside
+  // the committed span, which tier 2's outside-only proof cannot see. The
+  // fresh-scratch callers keep the unescape: their text was typed in rich
+  // mode and has no author-owned escape spelling to protect.
+  return (unescapePunctuation ? canonicalFreshTextToSource(spaced) : spaced).replace(/\r?\n+$/, '\n')
 }
 
 // GFM deliberately treats a bare `* [ ]` as ordinary list text.  When the

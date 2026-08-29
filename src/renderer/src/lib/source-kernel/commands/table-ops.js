@@ -758,10 +758,16 @@ export function insertTableCellBreak({ doc, index, offset }) {
     const walk = (node) => {
       if (node?.type === 'tableCell') {
         let text = ''
-        // TEXT leaves only: the `<br>` we write parses as an `html` node, and
-        // counting it as content would make the command refuse its own edit.
+        // TEXT and INLINE-CODE leaves: the `<br>` we write parses as an
+        // `html` node, and counting html as content would make the command
+        // refuse its own edit — but an inlineCode VALUE is content, and
+        // leaving it out let a `<br>` landing inside backticks pass the proof
+        // and commit literal `<br>` into the code span (2026-08-30 branch
+        // review, reproduced headless). The backtick fence in the spelling
+        // also catches a text<->code type flip.
         const collect = (child) => {
           if (child?.type === 'text' && typeof child.value === 'string') text += child.value
+          else if (child?.type === 'inlineCode' && typeof child.value === 'string') text += '\u0000`' + child.value + '`\u0000'
           for (const grand of child?.children || []) collect(grand)
         }
         for (const child of node.children || []) collect(child)

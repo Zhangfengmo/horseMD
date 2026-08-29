@@ -440,7 +440,10 @@ export default function Editor({
           serializeDoc: (docNode) => {
             const markdown = crepe.editor.ctx.get(serializerCtx)(docNode)
             if (!parseTables) parseTables = getGfmTableSourceParser(crepe.editor.ctx.get(remarkCtx))
-            return generatedScratchMarkdown(markdown, parseTables, { compactSpacing: true })
+            // `unescapePunctuation: false`: for a PASTE the PM document is the
+            // authority and the serializer's escapes preserve its meaning —
+            // see generatedScratchMarkdown's own note (2026-08-30 review).
+            return generatedScratchMarkdown(markdown, parseTables, { compactSpacing: true, unescapePunctuation: false })
           },
           notify: fireToast,
           getT: (key) => tRef.current(key),

@@ -65,7 +65,11 @@ async function run({ body, selector, target, edge, key, modifiers = 0, expect, e
     await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
     await sleep(400)
-    await pressKey(send, { key, code: key === 'Shift-Tab' ? 'Tab' : key, modifiers })
+    // 'Shift-Tab' is not a DOM key: the event must carry key='Tab' with the
+    // shift MODIFIER, or no handler ever sees it and a silence assertion
+    // passes vacuously (2026-08-30 branch review, confirmed).
+    const domKey = key === 'Shift-Tab' ? 'Tab' : key
+    await pressKey(send, { key: domKey, code: domKey === 'Tab' ? 'Tab' : domKey, modifiers })
     await sleep(900)
     if (type) {
       await send('Input.insertText', { text: type })
@@ -123,6 +127,51 @@ for (const [label, key, modifiers] of [['Enter', 'Enter', 0], ['Shift+Enter', 'E
     type: '第二行',
     expect: '开头段。\n\n| A | B |\n| --- | --- |\n| 甲<br>第二行 | 乙 |\n\n尾段。\n'
   })
+}
+
+// A RANGE SELECTION IS NOT A CARET GESTURE (2026-08-30 review finding, fixed):
+// select a list item's text backward so the selection HEAD lands on the item's
+// content start, press Backspace — the SELECTION is deleted; the item keeps
+// its marker and is never outdented/lifted.
+{
+  const fixture = `开头段。\n\n- 甲\n- 乙末尾\n\n尾段。\n`
+  const root = `/tmp/horsemd-structural-${process.pid}-sel`
+  const file = join(root, 'doc.md')
+  await rm(root, { recursive: true, force: true })
+  await mkdir(root, { recursive: true })
+  await writeFile(file, fixture)
+  const app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file], kernelDefault: true })
+  try {
+    const { evaluate, send } = app
+    await waitFor(() => evaluate(`(${V})?.textContent?.includes('乙末尾')`), 'selection-guard mount')
+    await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`), 'kernel mode')
+    await sleep(800)
+    const box = await evaluate(`(() => {
+      const n = [...(${V}).querySelectorAll('li p')].find((x) => x.textContent === '乙末尾')
+      const r = n.getBoundingClientRect()
+      return { x: r.right - 3, y: r.top + r.height / 2 }
+    })()`)
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await sleep(300)
+    await pressKey(send, { key: 'End', code: 'End' })
+    await sleep(200)
+    // Shift+Home: select the item's text backward — the head lands at the
+    // content start, the exact offset the outdent/lift branches key on.
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Home', code: 'Home', modifiers: 8, windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 })
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', modifiers: 8, windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 })
+    await sleep(400)
+    const selected = await evaluate(`(() => { const s = window.getSelection(); return s ? s.toString() : '' })()`)
+    assert.equal(selected, '乙末尾', 'Shift+Home must select the item text backward')
+    await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+    await sleep(900)
+    await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
+    await sleep(800)
+    assert.equal(await readFile(file, 'utf8'), '开头段。\n\n- 甲\n- \n\n尾段。\n',
+      'Backspace over the selection deletes the TEXT — the item keeps its marker and is never outdented')
+  } finally {
+    await stopBuiltElectron(app)
+  }
 }
 
 // NO-OPS ARE SILENT — no bytes, and no toast either.

@@ -252,7 +252,14 @@ export function liftListItemToParagraph({ doc, index, offset }) {
   // or indented item's lift has a prefix story this command has not proven.
   const from = line.start
   if (item.quotePrefix) return { ok: false, code: 'unsupported-structure' }
-  if (from + (item.indent || '').length !== line.start + (item.indent || '').length) {
+  // NESTED/INDENTED items refuse. The original guard here was a tautology
+  // (`from + indent.length !== line.start + indent.length` with from ===
+  // line.start — 2026-08-30 branch review), so a nested item whose outdent
+  // declined (e.g. a lazy continuation line below it) fell through and was
+  // ripped to a TOP-LEVEL paragraph, splitting the list — exactly the
+  // "prefix story this command has not proven" the dead guard was written
+  // to refuse. Stated for real now.
+  if ((item.indent || '') !== '') {
     return { ok: false, code: 'unsupported-structure' }
   }
   const to = item.contentStart
