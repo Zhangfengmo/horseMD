@@ -166,7 +166,18 @@ export function routeStructuralKey(key, ctx) {
         if (unwrapped.ok) return unwrapped
       }
       const block = index.blockAt(offset)
-      if (block && offset === block.start && !item) return joinParagraphBackward(ctx)
+      if (block && offset === block.start && !item) {
+        // Nothing above to join into — the caret is at the document's first
+        // block. Backspace there does nothing, and saying so with a toast is
+        // the noise the matrix sweep was looking for (measured at a real
+        // document's HEAD anchor).
+        let hasPrevious = false
+        for (let at = block.start - 1; at >= 0; at -= 1) {
+          if (index.blockAt(at)) { hasPrevious = true; break }
+        }
+        if (!hasPrevious) return SILENT_NO_OP
+        return joinParagraphBackward(ctx)
+      }
       return NOT_STRUCTURAL
     }
     case 'Delete': {

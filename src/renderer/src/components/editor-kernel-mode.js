@@ -886,6 +886,34 @@ export function createKernelMode({
           // `caret-unmappable` (measured while typing ASCII `**bold**`).
           const found = resolveCommittedRawOffset(nextMap, caretRaw) || nextMap?.rawToPmCaret?.(caretRaw)
           if (found && Number.isFinite(found.pos)) caretPos = found.pos
+          // FOURTH RUNG — THE BARE MARKER (2026-08-29, measured: Enter, then
+          // `##`, with any content BELOW). `##` alone is an empty ATX heading:
+          // it owns no character-map unit, so the three rungs above cannot
+          // name a position inside it, and the repair used to leave the caret
+          // wherever the reconcile put it — the NEXT paragraph. The following
+          // Space then completed nothing and the title was typed into the
+          // wrong block (`开头段。\n\n##\n\n 标题尾段。`). At the document end
+          // the same keystrokes work, because the trailing placeholder gives
+          // the caret a home there — which is exactly what this rung supplies
+          // when there is no trailing placeholder to borrow.
+          //
+          // The block is found by BYTES, not by guessing: the pair whose
+          // mdBlock span contains (or ends at) the committed offset, whose PM
+          // node is an empty textblock. The caret goes inside it, which is
+          // where the marker machinery's next keystroke expects to land.
+          if (caretPos === null && nextMap) {
+            for (const pair of nextMap.blockPairs || []) {
+              const start = pair?.mdBlock?.position?.start?.offset
+              const end = pair?.mdBlock?.position?.end?.offset
+              if (!Number.isInteger(start) || !Number.isInteger(end)) continue
+              if (caretRaw < start || caretRaw > end) continue
+              const node = pair.pmNode
+              if (!node?.isTextblock || node.content.size !== 0) continue
+              if (!Number.isFinite(pair.pmPos)) continue
+              caretPos = pair.pmPos + 1
+              break
+            }
+          }
         } catch {
           caretPos = null
         }
@@ -2275,6 +2303,29 @@ export function createKernelMode({
   // Structural intents keep `requireMap: false` — their existing
   // placeholder flows legitimately pass through transient states this
   // strict guard would wrongly refuse.
+  // See the call site in applyKernelTransaction: the caret home for a block
+  // that is nothing but its own marker. Returns true when it placed the caret.
+  const caretIntoBareMarkerBlock = (view, anchor) => {
+    if (!view || !kernel.map) return false
+    for (const pair of kernel.map.blockPairs || []) {
+      const start = pair?.mdBlock?.position?.start?.offset
+      const end = pair?.mdBlock?.position?.end?.offset
+      if (!Number.isInteger(start) || !Number.isInteger(end)) continue
+      if (anchor < start || anchor > end) continue
+      const node = pair.pmNode
+      if (!node?.isTextblock || node.content.size !== 0) continue
+      if (!Number.isFinite(pair.pmPos)) continue
+      try {
+        const pos = Math.min(pair.pmPos + 1, view.state.doc.content.size)
+        view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(pos), 1)))
+        return true
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+
   const applyKernelTransaction = (txn, view, { record = true, requireMap = false, repairOnUnmapped = false } = {}) => {
     const result = applySourceTransaction(kernel.doc, txn)
     if (!result.ok) {
@@ -2428,6 +2479,20 @@ export function createKernelMode({
       // blank line the reparse cannot represent — give it a real, editable
       // PM home (see ensureSplitPlaceholder above).
       ensureSplitPlaceholder(view, txn, anchor)
+    } else if (Number.isFinite(anchor) && caretIntoBareMarkerBlock(view, anchor)) {
+      // THE BARE MARKER'S OWN HOME (2026-08-29). Measured: Enter, `#`, `#`,
+      // with any content BELOW the new line. `##` alone is an empty ATX
+      // heading — it owns no character-map unit, so no resolver above can name
+      // a position inside it, and the caret stayed where the reconcile left
+      // it: the NEXT paragraph. The completing Space then completed nothing
+      // and the title landed in the wrong block
+      // (`开头段。\n\n##\n\n 标题尾段。`). At the document END the same keys
+      // work, because the trailing placeholder happens to give the caret a
+      // home — this rung is that home, derived rather than borrowed.
+      //
+      // Found by BYTES: the pair whose mdBlock span contains the committed
+      // offset, whose PM node is an EMPTY textblock. That is the block the
+      // marker just became, and the caret belongs inside it.
     } else if (Number.isFinite(anchor)) {
       // The caret stays wherever the reconcile left it — record why, so a
       // misplaced continuation keystroke is diagnosable instead of silent.
