@@ -226,6 +226,94 @@ function joinIntoContainerLastLine({ doc, index, block, previous }) {
   }
 }
 
+// BACKSPACE AT A LIST ITEM'S CONTENT START (2026-08-29 matrix sweep). The
+// kernel refused it; legacy lifts the item out of the list (measured on
+// `- 甲\n- 乙`, caret before 乙: `- 甲\n\n  乙\n` — the two spaces are the
+// serializer's own noise, not meaning). The kernel writes the clean spelling
+// of the same document: the marker becomes a blank line, so the item's text
+// stands as its own paragraph and the list ends there.
+//
+//   `- 甲\n- 乙\n`        -> `- 甲\n\n乙\n`
+//   `- 甲\n- 乙\n- 丙\n`  -> `- 甲\n\n乙\n- 丙\n`   (the list splits, as it must)
+//
+// PROVEN on three axes: the candidate parses, every leaf value survives
+// unchanged (nothing but syntax moved), and the document holds exactly one
+// fewer list item with the freed text sitting in a paragraph of its own.
+export function liftListItemToParagraph({ doc, index, offset }) {
+  const item = index.listItemAt(offset)
+  if (!item) return { ok: false, code: 'unsupported-structure' }
+  if (item.empty) return { ok: false, code: 'unsupported-structure' }
+  if (!Number.isInteger(item.contentStart) || offset !== item.contentStart) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const line = index.lines[item.markerLineIndex]
+  if (!line) return { ok: false, code: 'unsupported-structure' }
+  // Only a marker that starts its own line, and only outside quotes: a quoted
+  // or indented item's lift has a prefix story this command has not proven.
+  const from = line.start
+  if (item.quotePrefix) return { ok: false, code: 'unsupported-structure' }
+  if (from + (item.indent || '').length !== line.start + (item.indent || '').length) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const to = item.contentStart
+  if (to <= from) return { ok: false, code: 'unsupported-structure' }
+  const text = index.text
+  const ending = line.ending || index.dominantEnding || '\n'
+  // A blank line in place of the marker: without it the freed text would be a
+  // LAZY CONTINUATION of the item above, which is the same document with the
+  // text swallowed — the exact silent corruption this domain guards against.
+  const insert = from === 0 ? '' : ending
+  const candidate = text.slice(0, from) + insert + text.slice(to)
+  let baseTree
+  let candTree
+  try {
+    baseTree = parseKernelMarkdown(text)
+    candTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const leaves = (tree) => {
+    const out = []
+    const walk = (node) => {
+      if (typeof node?.value === 'string') out.push(node.value)
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return out.sort()
+  }
+  if (JSON.stringify(leaves(candTree)) !== JSON.stringify(leaves(baseTree))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const countType = (tree, type) => {
+    let n = 0
+    const walk = (node) => {
+      if (node?.type === type) n += 1
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return n
+  }
+  if (countType(candTree, 'listItem') !== countType(baseTree, 'listItem') - 1) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  // The freed text must be a PARAGRAPH at the marker's own position — not a
+  // continuation line folded into the item above.
+  const anchor = from + insert.length
+  const freed = (candTree.children || []).find((node) => node.position?.start?.offset === anchor)
+  if (!freed || freed.type !== 'paragraph') return { ok: false, code: 'unsupported-structure' }
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      from,
+      to,
+      insert,
+      intent: 'lift-list-item',
+      selection: { anchor, head: anchor }
+    }
+  }
+}
+
 export function joinParagraphBackward({ doc, index, offset }) {
   const block = index.blockAt(offset)
   if (!block || block.type !== 'paragraph' || offset !== block.start) {

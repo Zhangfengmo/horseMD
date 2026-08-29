@@ -201,8 +201,14 @@ assert.equal(run('头\n===\n\n乙\n', 8, joinParagraphBackward).code, 'unsupport
   const doc = createMarkdownDocument(src)
   const index = buildSyntaxIndex(src)
   assert.equal(routeStructuralKey('Enter', { doc, index, offset: 4 }).ok, true)
+  // FLIPPED 2026-08-29: Tab on a list's FIRST item has no previous sibling to
+  // nest under, so nothing can happen — and nothing happening is not an
+  // error. It used to answer `unsupported-structure`, which the controller
+  // turns into a 「无效操作」 toast on a key the user pressed by habit. The
+  // router now names it `silent-no-op` and the key is swallowed without a
+  // toast or a diagnostic (router.js SILENT_NO_OP).
   assert.equal(routeStructuralKey('Tab', { doc, index, offset: 4 }).code,
-    'unsupported-structure')  // 无前兄弟
+    'silent-no-op')
   assert.equal(
     routeStructuralKey('Backspace', { doc, index, offset: 4 }).code,
     'not-structural')          // 项中字符删除走文本路径
@@ -269,16 +275,17 @@ console.log('PASS source-kernel delete + router')
   assert.equal(routeStructuralKey('Backspace', { doc, index, offset }).ok, true)
 }
 {
-  // Repro B (Delete): caret at the end of a list item's own text ('甲'); the
-  // next paragraph ('乙') must NOT be absorbed into the item.
+  // FLIPPED 2026-08-29, the Delete side of the join the Backspace case above
+  // flipped a day earlier. Delete at a list item's end and Backspace at the
+  // next paragraph's start are the SAME seam, so answering them differently
+  // was the inconsistency the matrix sweep set out to remove — and the join
+  // is proven, not assumed (delete.js `joinIntoContainerLastLine`). The two
+  // keys now produce the same bytes for the same seam.
   const src = '- 甲\n\n乙\n'
   const doc = createMarkdownDocument(src)
   const index = buildSyntaxIndex(src)
   const offset = src.indexOf('甲') + 1 // right after "甲", == the item's block.end
-  assert.equal(
-    routeStructuralKey('Delete', { doc, index, offset }).code,
-    'not-structural'
-  )
+  assert.equal(run(src, offset, (ctx) => routeStructuralKey('Delete', ctx)), '- 甲乙\n')
 }
 {
   // Positive control: an ordinary paragraph-into-paragraph join with a list

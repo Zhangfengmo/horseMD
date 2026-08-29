@@ -77,6 +77,9 @@ export const KERNEL_CODES = Object.freeze({
   UNMAPPED: 'unmapped-selection',
   UNSUPPORTED: 'unsupported-structure',
   NOT_STRUCTURAL: 'not-structural',
+  // See router.js SILENT_NO_OP: the key is swallowed with no toast and no
+  // diagnostic, because nothing was supposed to happen.
+  SILENT_NO_OP: 'silent-no-op',
   PROJECTION: 'projection-mismatch',
   INPUT_TYPE: 'unsupported-input-type',
   // A structural edit whose BYTES are legal but whose reparse yields a

@@ -5,12 +5,29 @@
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
 import { splitTextBlock, splitListItem, exitEmptyListItem, exitEmptyQuoteLine, resolveBlock, isVisuallyEmptyListItem } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
-import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
+import { liftEmptyListItem, joinParagraphBackward, liftListItemToParagraph } from './commands/delete.js'
 import { isLedgeredWhitespaceTaskItem } from './commands/task-seed.js'
 import { deleteEmptyBlockquote, unwrapBlockquoteAtContentStart } from './commands/quote-toggle.js'
+import { insertTableCellBreak } from './commands/table-ops.js'
 import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
+// "This key has nothing to do HERE, and that is not an error." Distinct from
+// not-structural (which sends the key to the text path, where Tab would write
+// a literal tab) and from a refusal (which toasts). Added 2026-08-29 for the
+// matrix sweep's noise: Shift-Tab on a top-level item and Tab on a list's
+// first item both raised 「无效操作」 for gestures whose correct answer is
+// simply nothing — the user asked for the state machine to be definite, and a
+// toast on a no-op is the opposite of definite.
+const SILENT_NO_OP = { ok: false, code: 'silent-no-op' }
+
+// The AUTHORED-SEED DOCTRINE's shape (pinned twice in
+// test-source-kernel-commands): an item whose content begins with an
+// unledgered U+00A0 is CONTENT, and the whole-item structural gestures must
+// leave it to the text path. The content-start lift added 2026-08-29 is such a
+// gesture, so it defers here — the doctrine is older than the gesture.
+const startsWithAuthoredNbsp = (index, item) =>
+  Number.isInteger(item?.contentStart) && index.text[item.contentStart] === '\u00A0'
 
 // ctx: { doc, index, offset, empty? }. `empty`（选区是否折叠）当前决策表未
 // 消费任何分支——只是为了签名与调用方（未来可能传入选区状态）保持前向兼
@@ -71,6 +88,13 @@ export function routeStructuralKey(key, ctx) {
           ? exitEmptyListItem(ctx)
           : splitListItem(ctx)
       }
+      // Inside a TABLE CELL, Enter is the editor's own `<br>` convention
+      // (commands/table-ops.js `insertTableCellBreak`) — GFM cells are
+      // single-line, so that is the only break they can hold.
+      {
+        const cellBreak = insertTableCellBreak(ctx)
+        if (cellBreak.ok) return cellBreak
+      }
       // An EMPTY quote line takes the list's exit, for the list's reason: the
       // only other answer is a second empty quoted line, and the user pressing
       // Enter on a blank quote line is leaving the quote. See
@@ -80,10 +104,19 @@ export function routeStructuralKey(key, ctx) {
         if (quoteExit.ok) return quoteExit
       }
       return splitTextBlock(ctx)
-    case 'Tab':
-      return item ? indentListItem(ctx) : NOT_STRUCTURAL
-    case 'Shift-Tab':
-      return item ? outdentListItem(ctx) : NOT_STRUCTURAL
+    case 'Tab': {
+      if (!item) return NOT_STRUCTURAL
+      const indented = indentListItem(ctx)
+      // A FIRST item has nothing to nest under — CommonMark has no spelling
+      // for it, so this is a no-op, not a failure.
+      return indented.ok ? indented : SILENT_NO_OP
+    }
+    case 'Shift-Tab': {
+      if (!item) return NOT_STRUCTURAL
+      const outdented = outdentListItem(ctx)
+      // A TOP-LEVEL item has nothing to outdent out of.
+      return outdented.ok ? outdented : SILENT_NO_OP
+    }
     case 'Backspace': {
       // A session-ledgered, never-labelled seed item is EFFECTIVELY empty
       // for Backspace by the same doctrine as Enter above (2026-08-22 user
@@ -108,6 +141,17 @@ export function routeStructuralKey(key, ctx) {
             item.end - item.contentStart === 1) ||
           isVisuallyEmptyListItem(index.text, item)) {
         return liftEmptyListItem(ctx)
+      }
+      // Backspace at a NON-empty item's content start: outdent a nested item
+      // one level (the Shift-Tab answer, which is what every editor gives that
+      // caret), and lift a top-level item out of the list. Measured before
+      // this: the kernel refused, while legacy lifted — see
+      // `liftListItemToParagraph`.
+      if (item && offset === item.contentStart && !startsWithAuthoredNbsp(index, item)) {
+        const outdented = outdentListItem(ctx)
+        if (outdented.ok) return outdented
+        const lifted = liftListItemToParagraph(ctx)
+        if (lifted.ok) return lifted
       }
       // BLOCKQUOTE (2026-08-28, 「引用要求参照代码一样要支持删除」). Asked
       // before joinParagraphBackward: an empty quote is deleted whole (the
@@ -137,12 +181,37 @@ export function routeStructuralKey(key, ctx) {
       // the second net for the few paths that could still reach it via a
       // future caller, but this check keeps the common case from ever
       // starting the forward scan.
-      if (item) return NOT_STRUCTURAL
-      // offset === block.end 要用 resolveBlock 而非裸 blockAt：blockAt 是
-      // exclusive-end，caret 恰好停在段落最后一个字符之后（下一行终止符之
-      // 前——Delete 最常见的触发位置）时，直接探测在该偏移处会落空。
+      // Delete at a list item's CONTENT START is the same gesture Backspace
+      // answers there (legacy gives both keys the same answer — measured:
+      // `- 甲\n- 乙` with the caret before 乙 becomes `- 甲\n\n  乙` for
+      // either key). Matching it keeps a tab's behaviour identical whichever
+      // mode it is in, which is worth more here than the Word-style
+      // "delete the next character" reading.
+      if (item && offset === item.contentStart && !startsWithAuthoredNbsp(index, item)) {
+        const outdented = outdentListItem(ctx)
+        if (outdented.ok) return outdented
+        const lifted = liftListItemToParagraph(ctx)
+        if (lifted.ok) return lifted
+      }
+      // DELETE IS BACKSPACE'S MIRROR (2026-08-29 matrix sweep). Both keys mean
+      // "close the seam next to me", and the seam is the same one — so the
+      // caret's own block may be a LIST ITEM's paragraph or a HEADING here,
+      // not only a top-level paragraph. Measured before this: Delete at the
+      // end of `- 乙` or of `## 中间标题` refused, while Backspace at the start
+      // of the paragraph below joined them. The delegation below is what makes
+      // the two keys ONE rule: the join is always judged at the NEXT block's
+      // start, by the same command, with the same proof.
+      //
+      // The old `if (item) return NOT_STRUCTURAL` bail existed because
+      // `resolveBlock` cannot tell a list item's own paragraph from a
+      // top-level one, and the forward scan would then absorb prose into the
+      // item WITHOUT proof. The proof now exists (delete.js
+      // `joinIntoContainerLastLine`, added 2026-08-28), so the guard is no
+      // longer the thing standing between this gesture and a wrong byte —
+      // and a caret that is NOT at its block's end still returns
+      // not-structural, exactly as before.
       const block = resolveBlock(index, offset)
-      if (!block || block.type !== 'paragraph' || offset !== block.end) {
+      if (!block || (block.type !== 'paragraph' && block.type !== 'heading') || offset !== block.end) {
         return NOT_STRUCTURAL
       }
       // 下一个块：从 block.end 起逐字符向后探测，穿过任意宽度的块间空隙，

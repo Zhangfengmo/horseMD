@@ -3413,6 +3413,10 @@ export function createKernelMode({
     // caret (never the bytes themselves — the diagnostics doctrine). The
     // HEADING_DEMOTE lesson, applied to the whole family: a generic toast on
     // a refused Enter is undiagnosable from a screenshot without this.
+    // A no-op the router named as such: swallow the key, say nothing. Asked
+    // before the breadcrumb so it leaves no diagnostic either — nothing
+    // happened, and nothing was supposed to (router.js SILENT_NO_OP).
+    if (routed.code === KERNEL_CODES.SILENT_NO_OP) return true
     if (routed.code !== KERNEL_CODES.NOT_STRUCTURAL) {
       pushKernelDiagnostic({
         type: 'structural-refusal',

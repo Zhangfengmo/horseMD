@@ -681,3 +681,101 @@ export function setTableColumnAlignment({ doc, offset, columnIndex, alignment })
     }
   })
 }
+
+
+// ENTER INSIDE A TABLE CELL (2026-08-29 matrix sweep). GFM cells are
+// single-line, so the editor's own convention for a break inside one is the
+// literal `<br>` (components/editor-tablebreak.js: a keymap inserts a
+// hardbreak and the serializer writes `<br>` ONLY inside a tableCell). Kernel
+// mode had no answer at all and refused the key — measured 「无效操作…未写入」
+// on Enter in any cell.
+//
+// The byte edit is that convention, written directly: `<br>` at the caret.
+// PROVEN by reparse — the table must come back with the same row and column
+// counts (a stray `|` or newline would restructure it) and every cell's text
+// must survive, with exactly the edited cell gaining the break.
+export function insertTableCellBreak({ doc, index, offset }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (!Number.isInteger(offset)) return { ok: false, code: 'unsupported-structure' }
+  let baseTree
+  try {
+    baseTree = parseKernelMarkdown(text)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const cellAt = (tree, at) => {
+    let hit = null
+    const walk = (node) => {
+      if (hit) return
+      const start = node.position?.start?.offset
+      const end = node.position?.end?.offset
+      if (!Number.isInteger(start) || !Number.isInteger(end)) return
+      if (at < start || at > end) return
+      if (node.type === 'tableCell') hit = node
+      for (const child of node.children || []) walk(child)
+    }
+    for (const child of tree.children || []) walk(child)
+    return hit
+  }
+  const cell = cellAt(baseTree, offset)
+  if (!cell) return { ok: false, code: 'unsupported-structure' }
+  const insert = '<br>'
+  const candidate = text.slice(0, offset) + insert + text.slice(offset)
+  let candTree
+  try {
+    candTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const shape = (tree) => {
+    const rows = []
+    const walk = (node) => {
+      if (node?.type === 'table') {
+        rows.push(`table:${(node.children || []).length}`)
+        for (const row of node.children || []) rows.push(`row:${(row.children || []).length}`)
+      }
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return rows.join('|')
+  }
+  if (shape(candTree) !== shape(baseTree)) return { ok: false, code: 'unsupported-structure' }
+  // The cell's own text must be unchanged: a `<br>` is a BREAK, not content.
+  const cellTexts = (tree) => {
+    const out = []
+    const walk = (node) => {
+      if (node?.type === 'tableCell') {
+        let text = ''
+        // TEXT leaves only: the `<br>` we write parses as an `html` node, and
+        // counting it as content would make the command refuse its own edit.
+        const collect = (child) => {
+          if (child?.type === 'text' && typeof child.value === 'string') text += child.value
+          for (const grand of child?.children || []) collect(grand)
+        }
+        for (const child of node.children || []) collect(child)
+        out.push(text)
+      }
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return out
+  }
+  if (JSON.stringify(cellTexts(candTree)) !== JSON.stringify(cellTexts(baseTree))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const caret = offset + insert.length
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      from: offset,
+      to: offset,
+      insert,
+      intent: 'table-cell-break',
+      selection: { anchor: caret, head: caret }
+    }
+  }
+}
