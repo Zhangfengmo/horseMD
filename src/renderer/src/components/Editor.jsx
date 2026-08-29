@@ -1159,6 +1159,16 @@ export default function Editor({
     })
     const setBlock = (id) => {
       if (readOnlyRef.current) return
+      // Source-kernel mode (2026-08-29): the conversion is a BYTE edit — the
+      // block's marker prefix rewritten in one source transaction
+      // (`convertBlockTypeAtCaret`). Before this, the legacy PM transaction
+      // reached the gateway unclassified and was refused, so `Mod+1`…`Mod+6`,
+      // the H button, the right-click list and the status-bar switcher all
+      // silently stopped working the moment a tab used kernel mode — while the
+      // onboarding doc still listed them. `runSetBlockType` answers false for
+      // anything it does not claim, and that falls through to the legacy path
+      // unchanged.
+      if (kernelController?.isActive?.() && kernelController.runSetBlockType?.(id, viewRef.current)) return
       setEditableBlock(id)
     }
     const convertBlockToList = (targetType, blockPos) => {

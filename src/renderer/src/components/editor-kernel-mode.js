@@ -64,6 +64,7 @@ import {
   routeStructuralKey,
   toggleBlockquote,
   setBlockTypeFromQuery,
+  convertBlockTypeAtCaret,
   demoteHeadingAtCaret,
   looksLikeAtxContentStart,
   insertBlockFromQuery,
@@ -4054,6 +4055,33 @@ export function createKernelMode({
   // failure leaves bytes, history and view exactly as they were. A block the
   // kernel creates but cannot map would be read-only, which is strictly worse
   // than a refused menu item.
+  // BLOCK TYPE AT THE CARET — the shortcut/toolbar/menu entry point
+  // (`Mod+1`…`Mod+6`, `Mod+0`, the H button, the right-click list, the status
+  // bar). Measured before this existed: kernel mode refused all of them while
+  // legacy converted the block, so switching a tab to kernel mode silently
+  // removed a documented shortcut. Returns false when the kernel does not
+  // claim the gesture, so the caller can fall back to its legacy path.
+  const runSetBlockType = (target, viewArg) => {
+    if (inactive()) return false
+    const view = viewArg || getView?.()
+    if (!view || !kernel.map) return false
+    const offset = kernel.map.pmPosToRaw(view.state.selection.head)
+    if (!Number.isFinite(offset)) return false
+    const routed = convertBlockTypeAtCaret({
+      doc: kernel.doc,
+      index: buildSyntaxIndex(kernel.doc.text),
+      offset,
+      target
+    })
+    if (!routed.ok) {
+      // A no-op is silent; anything else is a named refusal.
+      if (routed.code !== KERNEL_CODES.SILENT_NO_OP) notifyBlocked(routed.code)
+      return true
+    }
+    applyKernelTransaction(routed.transaction, view, { requireMap: true })
+    return true
+  }
+
   const runInsertBlockFromQuery = (route, viewArg) => {
     if (inactive()) return false
     const view = viewArg || getView?.()
@@ -4771,6 +4799,9 @@ export function createKernelMode({
     runQuoteToggle,
     runQuoteToggleFromQuery,
     runBlockTypeFromQuery,
+    // Shortcut/toolbar/menu block-type conversion (2026-08-29): consumed by
+    // Editor.jsx's `setBlock`, which falls back to its legacy path on false.
+    runSetBlockType,
     runInsertBlockFromQuery,
     // CriticMarkup review (review domain): the wrap is reached through
     // apiOverrides.applyReviewMarkup; the resolve is handed to the review

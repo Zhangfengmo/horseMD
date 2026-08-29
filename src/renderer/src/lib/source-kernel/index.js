@@ -18,7 +18,7 @@ export { exitCodeBlock, deleteEmptyCodeBlock } from './commands/code-exit.js'
 export { splitTextBlock, splitListItem, exitEmptyListItem, shrinkBlankRun } from './commands/enter.js'
 export { indentListItem, outdentListItem } from './commands/indent.js'
 export { toggleBlockquote, deleteEmptyBlockquote, unwrapBlockquoteAtContentStart } from './commands/quote-toggle.js'
-export { setBlockTypeFromQuery, demoteHeadingAtCaret, BLOCK_TYPE_MARKERS } from './commands/block-type.js'
+export { setBlockTypeFromQuery, demoteHeadingAtCaret, convertBlockTypeAtCaret, BLOCK_TYPE_MARKERS } from './commands/block-type.js'
 export { insertBlockFromQuery, BLOCK_INSERT_TARGETS } from './commands/block-insert.js'
 export {
   insertTableRow,

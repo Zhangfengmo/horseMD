@@ -472,3 +472,125 @@ function outsideSignatureThroughContainers(tree, regionStart, regionEnd, delta, 
   for (const child of tree.children || []) walk(child)
   return ok ? parts.join('\n') : null
 }
+
+
+// ===========================================================================
+// BLOCK TYPE AT THE CARET (2026-08-29)
+// ===========================================================================
+// The entry point this file's header ADR reserved: 「When a toolbar/shortcut
+// entry point exists, it belongs in this module next to this one.」 It exists
+// now — `Mod+1`…`Mod+6` / `Mod+0` (command-definitions.js
+// `editor.block.h1`…`editor.block.paragraph`, listed in the onboarding doc),
+// plus the selection toolbar's H button, the right-click menu and the status
+// bar, which all funnel through the same `setBlock`.
+//
+// Measured before this command: kernel mode REFUSED all of them
+// (「无效操作…未写入」) while legacy converted the block — `Mod+1` on a
+// paragraph gives `# 中间段落文字` there. A documented shortcut that a mode
+// switch silently removes is the "restore the operation logic" case the user
+// named, not a missing feature.
+//
+// The edit is the marker prefix and nothing else: a paragraph GAINS `#`*n + a
+// space, a heading's run is REWRITTEN, and `paragraph` strips it. Setext
+// headings refuse (their span runs through an underline this rewrite would
+// orphan), and so does any block that is not a top-level paragraph/ATX
+// heading — a list item's own paragraph keeps the list domain's answers.
+//
+// PROVEN, two axes, the same pair every conversion in this file uses:
+//   (a) the block at that start comes back as the TARGET type (and depth), its
+//       content text unchanged;
+//   (b) `outsideSignature` — nothing outside the rewritten line changed
+//       meaning, offsets normalised by the marker's own delta.
+const BLOCK_TARGET_LEVEL = {
+  paragraph: 0,
+  h1: 1, h2: 2, h3: 3, h4: 4, h5: 5, h6: 6,
+  heading1: 1, heading2: 2, heading3: 3, heading4: 4, heading5: 5, heading6: 6
+}
+
+export function convertBlockTypeAtCaret({ doc, index, offset, target }) {
+  const text = doc?.text
+  if (typeof text !== 'string' || !Number.isInteger(doc?.revision)) return { ok: false, code: 'unsupported-structure' }
+  if (!Number.isInteger(offset)) return { ok: false, code: 'unsupported-structure' }
+  const level = BLOCK_TARGET_LEVEL[target]
+  if (!Number.isInteger(level)) return { ok: false, code: 'unsupported-structure' }
+  // A list item's paragraph is the list domain's business, not this one.
+  if (index.listItemAt?.(offset)) return { ok: false, code: 'unsupported-structure' }
+
+  let baseline
+  try {
+    baseline = parseKernelMarkdown(text)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const block = (baseline.children || []).find((node) => {
+    const start = node.position?.start?.offset
+    const end = node.position?.end?.offset
+    return Number.isInteger(start) && Number.isInteger(end) && offset >= start && offset <= end
+  })
+  if (!block || (block.type !== 'paragraph' && block.type !== 'heading')) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const start = block.position.start.offset
+  const end = block.position.end.offset
+  const raw = text.slice(start, end)
+  // Single-line blocks only: a multi-line paragraph would keep its
+  // continuation lines while the first line became a heading, and a SETEXT
+  // heading's span runs through its underline. Both are refusals, not guesses.
+  if (/[\r\n]/.test(raw)) return { ok: false, code: 'unsupported-structure' }
+  const currentMarker = raw.match(/^ {0,3}(#{1,6})[ \t]+/)
+  if (block.type === 'heading' && !currentMarker) return { ok: false, code: 'unsupported-structure' }
+  const contentStart = start + (currentMarker ? currentMarker[0].length : 0)
+  const marker = level === 0 ? '' : '#'.repeat(level) + ' '
+  if (contentStart === start && marker === '') return { ok: false, code: 'unsupported-structure' }
+  // Nothing to do: already this exact shape.
+  if (currentMarker && currentMarker[1].length === level) return { ok: false, code: 'silent-no-op' }
+  if (!currentMarker && level === 0) return { ok: false, code: 'silent-no-op' }
+  // Stripping a heading leaves the content, which must not itself read as a
+  // new block (a line starting `- ` or `> ` would become one).
+  const content = text.slice(contentStart, end)
+  if (!content.length && level === 0) return { ok: false, code: 'unsupported-structure' }
+
+  const candidate = text.slice(0, start) + marker + content + text.slice(end)
+  let candTree
+  try {
+    candTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const converted = (candTree.children || []).find((node) => node.position?.start?.offset === start)
+  if (!converted) return { ok: false, code: 'unsupported-structure' }
+  if (level === 0) {
+    if (converted.type !== 'paragraph') return { ok: false, code: 'unsupported-structure' }
+  } else if (converted.type !== 'heading' || converted.depth !== level) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const plain = (node) => {
+    let out = ''
+    const walk = (n) => {
+      if (typeof n?.value === 'string') out += n.value
+      for (const child of n?.children || []) walk(child)
+    }
+    walk(node)
+    return out
+  }
+  if (plain(converted) !== plain(block)) return { ok: false, code: 'unsupported-structure' }
+  const newEnd = start + marker.length + content.length
+  const delta = newEnd - end
+  const before = outsideSignature(baseline, start, end, 0)
+  const after = outsideSignature(candTree, start, newEnd, delta)
+  if (before === null || before !== after) return { ok: false, code: 'unsupported-structure' }
+  // The caret keeps its distance from the content start, so a conversion does
+  // not move the user's cursor within their own text.
+  const anchor = start + marker.length + Math.max(0, Math.min(offset - contentStart, content.length))
+  return {
+    ok: true,
+    transaction: {
+      baseRevision: doc.revision,
+      from: start,
+      to: end,
+      insert: marker + content,
+      intent: 'set-block-type',
+      selection: { anchor, head: anchor }
+    }
+  }
+}
