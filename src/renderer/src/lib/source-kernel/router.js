@@ -3,7 +3,7 @@
 // 方应改走 replace-text 的字符级路径——not-structural 不是错误，是"用文本
 // 路径"的信号）。
 // 本目录（source-kernel）禁止 import electron/react/@milkdown。
-import { splitTextBlock, splitListItem, exitEmptyListItem, resolveBlock, isVisuallyEmptyListItem } from './commands/enter.js'
+import { splitTextBlock, splitListItem, exitEmptyListItem, exitEmptyQuoteLine, resolveBlock, isVisuallyEmptyListItem } from './commands/enter.js'
 import { indentListItem, outdentListItem } from './commands/indent.js'
 import { liftEmptyListItem, joinParagraphBackward } from './commands/delete.js'
 import { isLedgeredWhitespaceTaskItem } from './commands/task-seed.js'
@@ -70,6 +70,14 @@ export function routeStructuralKey(key, ctx) {
           isVisuallyEmptyListItem(index.text, item)
           ? exitEmptyListItem(ctx)
           : splitListItem(ctx)
+      }
+      // An EMPTY quote line takes the list's exit, for the list's reason: the
+      // only other answer is a second empty quoted line, and the user pressing
+      // Enter on a blank quote line is leaving the quote. See
+      // `exitEmptyQuoteLine` for the measured before/after.
+      {
+        const quoteExit = exitEmptyQuoteLine(ctx)
+        if (quoteExit.ok) return quoteExit
       }
       return splitTextBlock(ctx)
     case 'Tab':

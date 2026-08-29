@@ -1790,6 +1790,20 @@ export function createKernelMode({
       notifyBlocked(routed.code)
       return false
     }
+    // The router now answers an EMPTY QUOTE LINE with the quote exit
+    // (commands/enter.js `exitEmptyQuoteLine`), and that is the right answer
+    // here too: a vouched placeholder sitting on `> ` is the second Enter of
+    // 「引用里连按两次回车」. Extending would add ANOTHER empty quoted line;
+    // what the user is doing is leaving. The exit is an ordinary commit and
+    // ends the session through the ordinary publish path — this branch must
+    // not ALSO run its own view insert (measured: doing both produced
+    // `projection-mismatch` + `unmapped-selection` and swallowed the typing).
+    if (routed.transaction?.intent === 'exit-empty-quote-line') {
+      if (applyKernelTransaction(routed.transaction, view)) {
+        placeholderForUnmappableAnchor(view, routed.transaction.selection?.anchor)
+      }
+      return true
+    }
     const result = applySourceTransaction(kernel.doc, routed.transaction)
     if (!result.ok) {
       notifyBlocked(result.code)
@@ -2094,11 +2108,41 @@ export function createKernelMode({
     if (expectedDoc && (parsed.eq(expectedDoc) || areDurablyEquivalent(parsed, expectedDoc))) {
       return { ok: true, applied, transaction, exact: true }
     }
+    // The seam signature, not `outsideSignature`: a pure deletion leaves the
+    // candidate's region DEGENERATE ([from, from)), and the shared helper's
+    // `start <= regionStart` boundary then declines to shift a node that
+    // starts exactly at the cut — the block right after a deleted table reads
+    // as "moved" and every deletion refuses (measured on an empty table).
+    // Stated directly instead: every node is entirely before the cut or
+    // entirely after it (a straddling node means the deletion reached into a
+    // block), and the after-side offsets are compared with the cut removed.
+    const seamSignature = (tree, cutFrom, cutTo) => {
+      const rows = []
+      let ok = true
+      const shift = cutTo - cutFrom
+      const walk = (node) => {
+        if (!ok) return
+        const nodeStart = node.position?.start?.offset
+        const nodeEnd = node.position?.end?.offset
+        if (!Number.isInteger(nodeStart) || !Number.isInteger(nodeEnd)) { ok = false; return }
+        if (nodeEnd <= cutFrom) rows.push(`${node.type}:${nodeStart}:${nodeEnd}`)
+        else if (nodeStart >= cutTo) rows.push(`${node.type}:${nodeStart - shift}:${nodeEnd - shift}`)
+        // Entirely INSIDE the cut: this is the block being deleted (and its
+        // children). It contributes nothing to either side.
+        else if (nodeStart >= cutFrom && nodeEnd <= cutTo) return
+        // Anything else genuinely straddles the cut, which means the deletion
+        // reached into a block it was not supposed to touch.
+        else { ok = false; return }
+        for (const child of node.children || []) walk(child)
+      }
+      for (const child of tree.children || []) walk(child)
+      return ok ? rows.join('\n') : null
+    }
     let before = null
     let afterSig = null
     try {
-      before = outsideSignature(parseKernelMarkdown(text), from, to, 0)
-      afterSig = outsideSignature(parseKernelMarkdown(applied.doc.text), from, from, -(to - from))
+      before = seamSignature(parseKernelMarkdown(text), from, to)
+      afterSig = seamSignature(parseKernelMarkdown(applied.doc.text), from, from)
     } catch {
       return { ok: false, code: KERNEL_CODES.UNSUPPORTED, stage: 'outside-parse-failed' }
     }
@@ -3092,6 +3136,37 @@ export function createKernelMode({
   // both under that one PM type (PM_TO_MD `code_block: ['code', 'math']`) —
   // and `frontmatter` is deliberately absent: it is the document's own header,
   // not a block a stray keystroke should be able to select and drop.
+  // The table the caret sits in, when the caret is at the first cell's content
+  // start AND no cell in the table holds anything. Returns its top-level span,
+  // or null. The walk short-circuits on the first non-empty cell.
+  const emptyTableAtCaret = (state) => {
+    const $head = state.selection.$head
+    if (!$head || $head.parentOffset !== 0) return null
+    let tableDepth = -1
+    for (let depth = $head.depth; depth > 0; depth -= 1) {
+      if ($head.node(depth).type?.name === 'table') { tableDepth = depth; break }
+    }
+    if (tableDepth < 1) return null
+    // Top-level tables only: a table nested in a quote/list is a container
+    // shape this deletion has not proven.
+    if (tableDepth !== 1) return null
+    const table = $head.node(tableDepth)
+    // The caret must be in the FIRST cell, so the gesture reads as "delete
+    // backwards past the start of this table" rather than "clear this cell".
+    for (let depth = tableDepth + 1; depth <= $head.depth; depth += 1) {
+      if ($head.index(depth - 1) !== 0) return null
+    }
+    let empty = true
+    table.descendants((node) => {
+      if (!empty) return false
+      if (node.isText && node.text?.length) { empty = false; return false }
+      return true
+    })
+    if (!empty) return null
+    const from = $head.before(tableDepth)
+    return { from, to: from + table.nodeSize }
+  }
+
   const ATOM_BLOCK_TYPES = new Set(['hr', 'image-block', 'image', 'table', 'code_block', 'html'])
   // Backspace at a textblock start selects the block ABOVE; Delete at a
   // textblock end selects the block BELOW. Same rule, both directions — the
@@ -3232,6 +3307,27 @@ export function createKernelMode({
         return true
       }
     }
+    // AN EMPTY TABLE, from inside it (2026-08-29, user: 「如果表头第一个及全部
+    // 内容为空就应该是删除，但是如果表格很大这样是否判断也很麻烦」). The
+    // emptiness scan is not the expensive thing it sounds like: it only runs
+    // when the caret is at the very START of the FIRST cell and that cell is
+    // already empty, and it stops at the first cell that has content — a big
+    // table with data pays for one cell. A big table with data also does not
+    // need this gesture at all: selecting it from the block below and pressing
+    // Backspace again deletes it whatever its size (test:kernel-block-delete).
+    if (key === 'Backspace' && state.selection.empty) {
+      const emptyTable = emptyTableAtCaret(state)
+      if (emptyTable) {
+        const committed = commitBlockDeletion({ pmFrom: emptyTable.from, pmTo: emptyTable.to })
+        if (!committed.ok) {
+          pushKernelDiagnostic({ type: 'block-delete-unprovable', code: committed.code, stage: committed.stage })
+          notifyBlocked(committed.code)
+          return true
+        }
+        applyKernelTransaction(committed.transaction, view)
+        return true
+      }
+    }
     // A SELECTED atom block + Backspace/Delete is a deletion, and the kernel
     // performs it itself rather than letting the node view answer: measured,
     // Crepe's code-block view turns the press into "become a paragraph holding
@@ -3306,7 +3402,8 @@ export function createKernelMode({
       // tossed to a neighbour. Same vouched placeholder, same fail-closed
       // machinery — this is the half `runDeleteEmptyCodeBlock` does explicitly
       // for the code twin.
-      if (exitIntent || routed.transaction.intent === 'delete-empty-blockquote') {
+      if (exitIntent || routed.transaction.intent === 'delete-empty-blockquote' ||
+          routed.transaction.intent === 'exit-empty-quote-line') {
         placeholderForUnmappableAnchor(view, exitAnchor)
       }
       return true

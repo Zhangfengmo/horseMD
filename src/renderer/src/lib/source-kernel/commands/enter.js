@@ -497,6 +497,91 @@ export const isVisuallyEmptyListItem = (text, item) => {
   return content.length > 0 && /^[\u00A0 \t]+$/.test(content)
 }
 
+// EXITING AN EMPTY QUOTE LINE (2026-08-29, user: 「引用有时候按回车是换行但是
+// 有时候又能切到引用第二行，这个状态切换需要明确而不是随机触发」).
+//
+// It was never random — it was UNFINISHED. Measured before this command:
+//   `> 引用内容`, Enter at the end   -> `> 引用内容\n>\n> ` — a new quoted
+//                                       line, correct.
+//   the empty quote line, Enter again -> the caret left the quote (typing
+//                                       landed at top level) but the `>` and
+//                                       `> ` lines STAYED, so the document
+//                                       kept junk the user did not write.
+//   legacy, same keys                 -> the quote is gone entirely.
+// So the exit existed for the CARET and not for the BYTES, and that gap is
+// what read as a random state switch.
+//
+// The rule is now the list's rule, stated once and true both times:
+//   * Enter on a quote line WITH content -> stay in the quote, new quoted line
+//   * Enter on an EMPTY quote line       -> leave the quote, and that line
+//                                           goes with you
+// The edit is `exitEmptyListItem`'s edit: delete from the OUTER prefix (so a
+// nested quote drops one level and keeps its parent) through the line's end,
+// leaving one prefix-only line for the controller's placeholder machinery.
+export function exitEmptyQuoteLine({ doc, index, offset }) {
+  if (index.listItemAt(offset)) return { ok: false, code: 'unsupported-structure' }
+  const line = index.lineAt(offset)
+  if (!line) return { ok: false, code: 'unsupported-structure' }
+  // The line must be quote markers and nothing else — `>`, `> `, `> > `.
+  const match = line.text.match(/^([ \t]*(?:>[ \t]*)*?)(>[ \t]*)$/)
+  if (!match) return { ok: false, code: 'unsupported-structure' }
+  // And the caret must be ON that line, at its content position (its end).
+  if (offset < line.start || offset > line.end) return { ok: false, code: 'unsupported-structure' }
+  // Walk UP through any contiguous quote-only lines: `> 甲\n>\n> ` is what
+  // two Enters produce, and the `>` separator exists only to hold the line we
+  // are now abandoning. Legacy removes both (measured), and leaving one behind
+  // is exactly the junk that made this gesture feel unfinished.
+  let firstIndex = index.lineIndexAt(line.start)
+  while (firstIndex > 0) {
+    const above = index.lines[firstIndex - 1]
+    if (!above || !/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(above.text)) break
+    firstIndex -= 1
+  }
+  const firstLine = index.lines[firstIndex]
+  const from = firstLine.start + match[1].length
+  const to = line.end
+  if (to <= from) return { ok: false, code: 'unsupported-structure' }
+  const text = index.text
+  const candidate = text.slice(0, from) + text.slice(to)
+  let baseTree
+  let candTree
+  try {
+    baseTree = parseKernelMarkdown(text)
+    candTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  // PROVEN: the leaves are untouched (an empty quote line owns none) and the
+  // document loses exactly one blockquote when the line was the whole quote,
+  // or keeps its count when the quote still has content lines. Anything else
+  // means the deletion reached content, and it refuses.
+  const leaves = (tree) => {
+    const out = []
+    const walk = (node) => {
+      if (typeof node?.value === 'string') out.push(node.value)
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return out.sort()
+  }
+  if (JSON.stringify(leaves(candTree)) !== JSON.stringify(leaves(baseTree))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  const countQuotes = (tree) => {
+    let n = 0
+    const walk = (node) => {
+      if (node?.type === 'blockquote') n += 1
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return n
+  }
+  const before = countQuotes(baseTree)
+  const after = countQuotes(candTree)
+  if (after !== before && after !== before - 1) return { ok: false, code: 'unsupported-structure' }
+  return txn(doc, from, to, '', 'exit-empty-quote-line', from)
+}
+
 export function exitEmptyListItem({ doc, index, offset }) {
   const item = index.listItemAt(offset)
   if (!item) return { ok: false, code: 'unsupported-structure' }
