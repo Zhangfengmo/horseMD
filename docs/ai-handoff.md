@@ -529,6 +529,8 @@ beforeinput insertText data="2." trusted=true  ← 146ms / 156ms 后（两次复
 
 **测试工具的盲区（记录，勿踩）**：`scripts/lib/human-input.mjs` 的 `typeTextLikeUser` 是**每字符一次 `Input.insertText`**，不带 keydown——在本判别式下与面板提交同形。所以回归里代表"真人按键"必须用 `keyDown`(带 text)+`keyUp`（`pressKey` 只发 `rawKeyDown`，有 keydown 但**不插字符**；`keyDown`(带 text) 再加 `char` 会**插两遍**，均为实测）。钉：`test:slash-ime-panel-guard-ui`（Case 1 用 `Input.insertText` 重放面板提交、字节须为 `1. `；Case 2 用物理按键、字节须为 `1. a`），已入 `test:kernel-ui`。回归复跑绿：blocktype / blockinsert / slash-combo(LF+CRLF) / leaf-insert / task-item / ime / ime-marker-escape / undecided-ordinal / manual-number。
 
+**2026-08-30 空行显形裁决（用户报告「富文本第二行/源码第一行,删除失败」→ 调研后定案:不改投影,保持现架构）**。用户先报告任务列表退出后留下的空行「删不掉」——实测 0.14.24 已不复现(中部空行 Backspace 消失+光标回上一行;尾部为 Crepe 常驻尾行,光标回上一行,legacy 同),用户截图时装的是旧版。随后用户提出不变式「视图每行↔源码有字节,源码空行↔视图可见」,实测**两个方向在 kernel 与 legacy 都不成立**(字节 `甲\n\n乙\n\n\n丙\n\n\n\n丁` 两种模式视图都只显示四段,但**字节原样保存、一字不动**)。开源调研:MarkText/Muya(同为块树+Markdown)两个方向都坏且更糟——保存即**删除**作者空行([#1354](https://github.com/marktext/marktext/issues/1354)/[#3442](https://github.com/marktext/marktext/issues/3442)/[#3455](https://github.com/marktext/marktext/issues/3455)),又在块周围**塞入**规范空行([#3772](https://github.com/marktext/marktext/issues/3772));Typora 同为块树、同样不显示多余空行;文本模型流派(Obsidian 实时预览/CodeMirror 系)天然满足不变式但架构不同源。**裁决(按用户两条核心诉求——内核稳定+降低 Typora 系用户切换不适)**:不做「空行由字节推导显形」的投影重构(方案 A)——它是唯一动投影配对基础的改动,与稳定诉求正面冲突,且 Typora 系用户的旧文档会突然显形一堆空行,反而增加不适;也不走塞字符流派(`<br>`/`&nbsp;`/U+00A0 占位)——那是 MarkText #3772 被用户抱怨的病。现状定版:**字节忠实(作者空行 run 逐字节保存)+ 删除行为正确 + 视觉上与 Typora 一致**。A 留作远期可开关的显示选项,触发条件:用户反馈集中于「源码里的空行看不见」。
+
 ### 5.3 PDF 导出
 
 - PDF 导出读取 `getPdfSource()` 生成的结构化 `{ html, headings, title }`，不是直接打印 live editor DOM。
