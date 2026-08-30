@@ -2408,4 +2408,29 @@ console.log('PASS source-kernel commands (whole-branch review: link-boundary wra
   }
 }
 
+// The DOWN-walk (2026-08-31, the `>nihao` report): blank quote lines below
+// the caret go with the exit too — deleting only the upper half used to
+// split the quote in two and the count proof refused, so Enter piled `>`
+// lines up instead of leaving. Content past the run still refuses (the
+// deletion would merge the paragraphs).
+{
+  const text = '>nihao\n>\n>\n>\n>'
+  const r = routeStructuralKey('Enter', {
+    doc: createMarkdownDocument(text), index: buildSyntaxIndex(text), offset: 10, empty: true
+  })
+  assert.equal(r.ok, true, `mid-run blank quote Enter must exit, got ${r.code}`)
+  assert.equal(r.transaction.intent, 'exit-empty-quote-line')
+  const applied = applySourceTransaction(createMarkdownDocument(text), r.transaction)
+  assert.equal(applied.doc.text, '>nihao\n', 'the WHOLE contiguous blank-quote run goes with the exit')
+}
+{
+  const text = '> 甲\n>\n> \n>\n> 乙\n'
+  const r = routeStructuralKey('Enter', {
+    doc: createMarkdownDocument(text), index: buildSyntaxIndex(text), offset: 8, empty: true
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.transaction.intent, 'split-block',
+    'blank line BETWEEN quote content must NOT exit (the deletion would merge 甲 and 乙)')
+}
+
 console.log('PASS source-kernel commands (quote-line Enter: whole-empty quote swallows, content quote exits staged, list-boundary guard holds)')

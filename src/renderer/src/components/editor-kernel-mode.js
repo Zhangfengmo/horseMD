@@ -2504,10 +2504,18 @@ export function createKernelMode({
     // the honest home is the vouched split placeholder INSIDE the quote —
     // suppress the trailing target and let ensureSplitPlaceholder below
     // materialize it after the origin block.
-    if (target && txn.intent === 'split-block' && anchor === result.doc.text.length) {
+    // Generalized 2026-08-31 (same session, the `>nihao` follow-up): the
+    // anchor can sit on a blank quote line ANYWHERE — mid-document blank
+    // quote lines have no pair either, and a wrong/absent resolution left
+    // the view caret behind, so every further Enter re-split from the same
+    // spot and piled `>` lines up. Any split-block anchor at the END of a
+    // quote-prefix-only line takes the in-quote placeholder.
+    if (target && txn.intent === 'split-block' && Number.isFinite(anchor)) {
       const text = result.doc.text
-      const lastLineStart = text.lastIndexOf('\n', Math.max(0, anchor - 1)) + 1
-      if (/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(text.slice(lastLineStart, anchor))) {
+      const lineStart = text.lastIndexOf('\n', Math.max(0, anchor - 1)) + 1
+      let lineEnd = text.indexOf('\n', anchor)
+      if (lineEnd < 0) lineEnd = text.length
+      if (anchor === lineEnd && /^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(text.slice(lineStart, lineEnd))) {
         target = null
       }
     }

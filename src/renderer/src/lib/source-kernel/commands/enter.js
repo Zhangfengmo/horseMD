@@ -543,9 +543,22 @@ export function exitEmptyQuoteLine({ doc, index, offset }) {
     if (!above || !/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(above.text)) break
     firstIndex -= 1
   }
+  // …and DOWN (2026-08-31, the `>nihao` report): blank quote lines can sit
+  // BELOW the caret too (an authored trailing run, or lines earlier Enters
+  // piled up). Deleting only the upper half used to split the quote in two
+  // — the count proof refused it, the key fell through to splitTextBlock,
+  // and every further Enter grew the run instead of leaving. The whole
+  // contiguous quote-only run goes; the leaf/count proofs below still gate
+  // (content past the run makes the deletion a merge, which refuses).
+  let lastIndex = index.lineIndexAt(line.start)
+  while (lastIndex < index.lines.length - 1) {
+    const below = index.lines[lastIndex + 1]
+    if (!below || !/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(below.text)) break
+    lastIndex += 1
+  }
   const firstLine = index.lines[firstIndex]
   const from = firstLine.start + match[1].length
-  const to = line.end
+  const to = index.lines[lastIndex].end
   if (to <= from) return { ok: false, code: 'unsupported-structure' }
   const text = index.text
   const candidate = text.slice(0, from) + text.slice(to)
