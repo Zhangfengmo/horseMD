@@ -109,6 +109,31 @@ await withApp('开头段。\n\n> 引用内容\n\n尾段。\n', async (ctx) => {
     'the second Enter leaves the quote and takes its empty lines with it')
 })
 
+// 1d) Quote CONTINUATION at the document end of a FILE WITHOUT A TRAILING
+//     TERMINATOR (FIXED 2026-08-31, the 500.md report): the split's anchor
+//     (after the written `>` prefix) EQUALS text.length, which is also the
+//     trailing virtual pair's raw anchor — the resolver answered the
+//     paragraph OUTSIDE the quote, the caret was thrown out, and the next
+//     keystroke committed outside with the blank quote lines left as junk.
+//     The anchor now takes the vouched in-quote split placeholder instead.
+await withApp('尾段。\n\n>你好啊', async (ctx) => {
+  const { send, save, noRefusal, evaluate } = ctx
+  await clickQuoteEnd(ctx)
+  await pressKey(send, { key: 'Enter', code: 'Enter' })
+  await sleep(800)
+  const inQuote = await evaluate(`(() => {
+    const sel = document.getSelection()
+    const bq = (${V}).querySelector('blockquote')
+    return sel?.anchorNode ? !!bq?.contains(sel.anchorNode) : null
+  })()`)
+  assert.equal(inQuote, true, 'the continuation caret must stay INSIDE the quote')
+  await send('Input.insertText', { text: '乙' })
+  await sleep(800)
+  await noRefusal('quote continuation at an unterminated document end')
+  assert.equal(await save(), '尾段。\n\n>你好啊\n>\n>乙',
+    'the typed character continues the quote — never a paragraph outside it')
+})
+
 // 1c) A standalone (whole-empty) quote: Enter is a SILENT NO-OP.
 //     FLIPPED 2026-08-31 (user decision 「改成不退」): this case used to pin
 //     "one Enter and the quote is gone" — a freshly created quote the user

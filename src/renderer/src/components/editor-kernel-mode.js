@@ -2492,6 +2492,25 @@ export function createKernelMode({
         }
       }
     }
+    // A quoted split whose continuation lands at the DOCUMENT END of a file
+    // without a terminator: the anchor (after the trailing `> ` prefix)
+    // EQUALS text.length, which is also the trailing virtual pair's raw
+    // anchor — so the resolver answers the paragraph OUTSIDE the quote and
+    // the caret is thrown out of the quote the user is typing in (measured
+    // 2026-08-31, the 500.md report: view caret below the quote, bytes
+    // still `>\n>`; the next keystroke then committed OUTSIDE with the
+    // blank quote lines left as junk). The blank quote line has no pair of
+    // its own here (the quote has content, so no bare-quote synthesis), so
+    // the honest home is the vouched split placeholder INSIDE the quote —
+    // suppress the trailing target and let ensureSplitPlaceholder below
+    // materialize it after the origin block.
+    if (target && txn.intent === 'split-block' && anchor === result.doc.text.length) {
+      const text = result.doc.text
+      const lastLineStart = text.lastIndexOf('\n', Math.max(0, anchor - 1)) + 1
+      if (/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(text.slice(lastLineStart, anchor))) {
+        target = null
+      }
+    }
     let reconciled = false
     try {
       reconciled = reconcileProjection({
