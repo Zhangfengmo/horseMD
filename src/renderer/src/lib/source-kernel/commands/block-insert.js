@@ -388,6 +388,95 @@ function caretAfterInsert(candidate, candidateTree, inserted) {
 // lands in it. Two positions, two homes, one dispatcher:
 //   * the query is the document's LAST root child -> revertAtDocEnd;
 //   * anything else -> revertMidDocument (2026-08-21).
+// `/text` INSIDE A QUOTE (2026-08-31): delete the query block's content
+// bytes and leave its line as the quote-prefix-only `> ` — a blank quote
+// line, CommonMark's own separator, so no neighbour can merge across it.
+// Proven by reparse: outside the deleted span (walked THROUGH containers,
+// the quoted convention) nothing changes meaning, and the query's line in
+// the candidate really is quote markers and nothing else. The caret anchors
+// after the prefix and rides the same bare-quote virtual pair / vouched
+// placeholder the staged exit and the quote-end /divider use
+// (`quotePlaceholder` — the controller places or materializes it).
+function revertQuotedText({ doc, index, start, end }) {
+  const text = doc.text
+  let baselineTree
+  let candidateTree
+  const candidate = text.slice(0, start) + text.slice(end)
+  try {
+    baselineTree = parseKernelMarkdown(text)
+    candidateTree = parseKernelMarkdown(candidate)
+  } catch {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  // PROOF SHAPE (differs from the shared container-walk signature on
+  // purpose): the deletion legitimately SHRINKS the enclosing blockquote's
+  // reported span — remark stops counting the now-blank trailing quote
+  // lines — so an overlap-driven walk signs the container on one side only
+  // (measured: quote-end /text refused while mid-quote passed). Containers
+  // are therefore NEVER signed: both walks descend through blockquotes
+  // unconditionally, every non-container node must match (candidate offsets
+  // past the deletion shifted back), the baseline skips exactly the query
+  // block, and the blockquote COUNT is asserted unchanged — the quote
+  // itself must survive the revert.
+  const shift = end - start
+  const signThroughQuotes = (tree, skipQuery) => {
+    const parts = []
+    let ok = true
+    const walk = (node) => {
+      if (!ok) return
+      const s = node.position?.start?.offset
+      const e = node.position?.end?.offset
+      if (!Number.isInteger(s) || !Number.isInteger(e)) { ok = false; return }
+      if (node.type === 'blockquote') {
+        for (const child of node.children || []) walk(child)
+        return
+      }
+      if (skipQuery && s >= start && e <= end) return
+      const from = skipQuery ? s : s <= start ? s : s + shift
+      const to = skipQuery ? e : e <= start ? e : e + shift
+      parts.push(`${node.type}:${from}:${to}`)
+      for (const child of node.children || []) walk(child)
+    }
+    for (const child of tree.children || []) walk(child)
+    return ok ? parts.join('\n') : null
+  }
+  const countQuotes = (tree) => {
+    let n = 0
+    const walk = (node) => {
+      if (node?.type === 'blockquote') n += 1
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(tree)
+    return n
+  }
+  const before = signThroughQuotes(baselineTree, true)
+  const after = signThroughQuotes(candidateTree, false)
+  if (before === null || after === null || before !== after) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (countQuotes(baselineTree) !== countQuotes(candidateTree)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  // The candidate's line at the anchor must be quote markers and nothing
+  // else — the exact spelling the placeholder machinery vouches for.
+  const lineStart = candidate.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+  let lineEnd = candidate.indexOf('\n', start)
+  if (lineEnd < 0) lineEnd = candidate.length
+  if (!/^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(candidate.slice(lineStart, lineEnd))) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  return {
+    ok: true,
+    quotePlaceholder: true,
+    transaction: {
+      baseRevision: doc.revision,
+      edits: [{ from: start, to: end, insert: '' }],
+      intent: 'insert-block',
+      selection: { anchor: start, head: start }
+    }
+  }
+}
+
 function revertToTextFromQuery({ doc, start, end }) {
   const text = doc.text
   let baselineTree
@@ -859,11 +948,14 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   }
 
   // `/text` writes no block — its whole edit is a proven suffix deletion, so
-  // it branches before the build/spelling machinery. Inside a quote it stays
-  // refused: its caret homes (trailing pair / vouched placeholders) are
-  // unproven under a quote prefix.
+  // it branches before the build/spelling machinery. Inside a quote
+  // (2026-08-31, the quote-context audit) the honest edit is smaller than
+  // the top-level one: deleting the query's content bytes leaves its line
+  // as `> ` — a BLANK QUOTE LINE, which is a first-class separator (never a
+  // merge risk), and exactly the caret home the staged exit and quote-end
+  // /divider already ride (bare-quote virtual pair / vouched placeholder).
   if (target === 'text') {
-    if (quoteDepth > 0) return { ok: false, code: 'unsupported-structure' }
+    if (quoteDepth > 0) return revertQuotedText({ doc, index, start, end })
     return revertToTextFromQuery({ doc, start, end })
   }
 
@@ -875,18 +967,38 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   // behind it) this command has not proven under a quote prefix.
   let quotePrefix = ''
   if (quoteDepth > 0) {
-    // Caret-AFTER targets used to refuse wholesale here. `/divider` is now
-    // proven (2026-08-30, user: 「引用无法插入分割符」): its quoted caret home
-    // is the NEXT quoted textblock's content anchor, derived below by
-    // `caretAfterInsert`'s quote-chain walk — and when no quoted line
-    // follows, the same NAMED no-caret-home refusal as at top level guides
-    // the user ("add a line below"). `/image` keeps the refusal: its
-    // insertion becomes an image-block ATOM whose quoted caret story is
-    // unproven.
-    if (built.caretAfter && target !== 'divider') return { ok: false, code: 'unsupported-structure' }
+    // Caret-AFTER targets used to refuse wholesale here. `/divider` is
+    // proven since 2026-08-30 (user: 「引用无法插入分割符」) and `/image`
+    // since 2026-08-31 (the quote-context audit): the quoted caret home is
+    // the NEXT quoted textblock's content anchor (caretAfterInsert's
+    // quote-chain walk), and when no quoted line follows, the home is
+    // WRITTEN — the `quoteTail` blank quoted line below, served by the
+    // controller's vouched in-quote placeholder.
     const prefix = quotePrefixOf(text, start, quoteDepth)
     if (prefix === null) return { ok: false, code: 'unsupported-structure' }
     quotePrefix = prefix
+  }
+
+  // QUOTE-END /divider (2026-08-31, user report: 「引用为啥无法使用分隔符」).
+  // When NO quoted content line follows the query block, caretAfterInsert
+  // has no next-sibling home and used to refuse by name. The home is now
+  // WRITTEN: the divider bytes gain a trailing blank quoted line
+  // (`> ---` + ending + `> `), the anchor sits after that prefix, and the
+  // controller serves typing there through the same vouched placeholder the
+  // staged quote exit's stage 3 uses (`\n> `-prefixed commits, in-quote).
+  // The line scan is conservative: a false "has next" just keeps the old
+  // refusal; a blank `>` separator run before real content still counts as
+  // "has next" (caretAfterInsert walks to that sibling as before).
+  let quoteTail = ''
+  if (quoteDepth > 0 && built.caretAfter) {
+    const startLineIndex = index.lineIndexAt(start)
+    let hasQuotedNext = false
+    for (let i = startLineIndex + 1; i < index.lines.length; i += 1) {
+      const lineText = index.lines[i].text
+      if (!/^[ \t]*>/.test(lineText)) break
+      if (lineText.replace(/[>\t ]+/g, '') !== '') { hasQuotedNext = true; break }
+    }
+    if (!hasQuotedNext) quoteTail = (index.dominantEnding || '\n') + quotePrefix
   }
 
   let baselineTree
@@ -918,7 +1030,7 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
     const spelled = quoteDepth > 0
       ? quoteSpelling(rawBytes, index.dominantEnding || '\n', quotePrefix, built.anchor ?? 0)
       : { bytes: rawBytes, anchor: built.anchor ?? 0 }
-    const bytes = spelled.bytes
+    const bytes = spelled.bytes + quoteTail
     const candidate = text.slice(0, start) + bytes + text.slice(end)
     const insertedEnd = start + bytes.length
 
@@ -953,6 +1065,15 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
       const nodeEnd = nodeArg.position?.end?.offset
       if (nodeEnd === insertedEnd) return true
       if (quoteDepth === 0) return false
+      // The MIRROR direction (2026-08-31, quote-end /divider): the command
+      // itself appended a blank quoted line (`quoteTail`) as the caret's
+      // byte home, so the inserted node legitimately ends BEFORE our bytes
+      // do. Proven the same way: every byte between the node's end and ours
+      // must be quote-prefix/whitespace — and only when the tail was ours.
+      if (Number.isInteger(nodeEnd) && nodeEnd < insertedEnd) {
+        return quoteTail !== '' && nodeEnd >= insertedEnd - quoteTail.length &&
+          /^[>\t \r\n]*$/.test(candidate.slice(nodeEnd, insertedEnd))
+      }
       if (!Number.isInteger(nodeEnd) || nodeEnd < insertedEnd) return false
       if (!/^[>\t \r\n]*$/.test(candidate.slice(insertedEnd, nodeEnd))) return false
       let maxDescendantEnd = null
@@ -1024,10 +1145,19 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   const { bytes, candidate, candidateTree, inserted } = accepted
 
   let anchor
+  let quotePlaceholder = false
   if (built.caretAfter) {
     const caret = caretAfterInsert(candidate, candidateTree, inserted)
-    if (!caret.ok) return { ok: false, code: caret.code }
-    anchor = caret.anchor
+    if (caret.ok) {
+      anchor = caret.anchor
+    } else if (caret.code === NO_CARET_HOME && quoteTail) {
+      // The written trailing quoted line IS the home: anchor right after its
+      // prefix; the controller materializes the vouched placeholder there.
+      anchor = start + bytes.length
+      quotePlaceholder = true
+    } else {
+      return { ok: false, code: caret.code }
+    }
   } else {
     anchor = start + accepted.anchorOffset
   }
@@ -1043,6 +1173,7 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   if (built.seed && !seedMarks) return { ok: false, code: 'unsupported-structure' }
   return {
     ok: true,
+    ...(quotePlaceholder ? { quotePlaceholder: true } : {}),
     transaction: {
       baseRevision: doc.revision,
       edits: [{ from: start, to: end, insert: bytes }],

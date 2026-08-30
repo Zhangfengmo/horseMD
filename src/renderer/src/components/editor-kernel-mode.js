@@ -3233,6 +3233,21 @@ export function createKernelMode({
       probe -= 1
       mapped = kernel.map.rawToPmPos(probe)
     }
+    if (!mapped || !Number.isFinite(mapped.pos)) {
+      // ATOM-ONLY NEIGHBOURHOOD (quote-end /divider, 2026-08-31): every
+      // byte before the anchor belongs to charMap-less pairs (the hr atom,
+      // quote prefixes), so the byte probe finds nothing. The nearest
+      // preceding BLOCK PAIR still names the position — its pmPos sits
+      // inside the same blockquote the anchor's line continues.
+      let best = null
+      for (const pair of kernel.map.blockPairs || []) {
+        const s = pair.mdBlock?.position?.start?.offset
+        if (Number.isFinite(s) && s < anchor && Number.isFinite(pair.pmPos)) {
+          if (!best || s > best.s) best = { s, pos: pair.pmPos }
+        }
+      }
+      if (best) mapped = { pos: best.pos }
+    }
     if (!mapped || !Number.isFinite(mapped.pos)) return
     try {
       const docNode = view.state.doc
@@ -4296,6 +4311,27 @@ export function createKernelMode({
   // delegates to that same machinery (block-type.js), so both entry points
   // must apply its flags identically.
   const applyRoutedBlockResult = (routed, view) => {
+    // QUOTE-END /divider (2026-08-31): the command wrote a trailing blank
+    // quoted line as the caret's byte home; the reparse drops that line, so
+    // the anchor is unmappable by design — the same in-quote vouched
+    // placeholder the staged exit's stage 3 rides serves typing there
+    // (`\n> `-prefixed commits, fail-closed voucher).
+    if (routed.quotePlaceholder) {
+      if (applyKernelTransaction(routed.transaction, view)) {
+        const anchor = routed.transaction.selection?.anchor
+        // The written `> ` line can pair as the bare-quote VIRTUAL pair (the
+        // /quote machinery), in which case the anchor RESOLVES — the caret
+        // just was not placed (the commit resolver refused it, measured:
+        // typing then landed outside the quote). Place it directly; only an
+        // unresolvable anchor needs the materialized placeholder.
+        if (Number.isFinite(anchor) && kernel.map?.rawToPmPos?.(anchor)) {
+          setCaretFromRaw(view, anchor)
+        } else {
+          placeholderForUnmappableAnchor(view, anchor)
+        }
+      }
+      return true
+    }
     // `/text` onto a paragraph/heading-ending document (2026-08-20): the
     // command proved the bytes (a pure suffix deletion) but its caret anchor
     // — the document end — is a position the reparse CANNOT represent (no

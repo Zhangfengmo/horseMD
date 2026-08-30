@@ -488,8 +488,10 @@ guide/                 VitePress user tutorial + versioned current-app screensho
   continuation lines carry the full quote prefix byte-for-byte, both proof
   axes run against the chain, and empty-code-insert gained the
   'fill-after-prefix' spelling for the quoted empty content line;
-  list-ancestor shapes and /divider//image//text-in-quote still refuse
-  fail-closed). Updated 2026-08-20: hard-break
+  list-ancestor shapes still refuse fail-closed; /divider, /image AND /text
+  work in pure quote chains since 2026-08-31 — at quote END the caret home
+  is a WRITTEN blank quoted line served by the vouched in-quote
+  placeholder, quotePlaceholder on the routed result). Updated 2026-08-20: hard-break
   paragraphs are typable (`hardBreakUnitEnd` folds the continuation prefix
   into the break's unit, `6560df5`), and the ENTIRE slash menu now works in
   kernel mode — `/quote` (empty blockquote synthesized like an empty list

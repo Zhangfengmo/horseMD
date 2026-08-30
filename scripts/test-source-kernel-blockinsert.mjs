@@ -489,13 +489,18 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   refuses('divider inside a list item', '- /hr\n', 5, 'divider')
   // FLIPPED 2026-08-30 (user: 「引用无法插入分割符」). A quoted /divider now
   // INSERTS when a quoted line follows (its caret home — the next quoted
-  // textblock's content anchor, the same rule as top level), and the
-  // quote-END shape gives the NAMED no-caret-home refusal whose message tells
-  // the user to add a line below — better than the old generic refusal.
+  // textblock's content anchor, the same rule as top level).
+  // FLIPPED AGAIN 2026-08-31 (user: 「引用为啥无法使用分隔符」, the empty-quote
+  // screenshot): the quote-END shape now INSERTS too — the caret home is
+  // WRITTEN as a trailing blank quoted line and the transaction carries
+  // `quotePlaceholder` so the controller vouches the in-quote placeholder.
   {
-    const { r } = run('> /hr\n', 5, 'divider')
-    assert.equal(r.ok, false, 'divider at a quote END still refuses')
-    assert.equal(r.code, 'no-caret-home-after-insert', 'and names the remedy')
+    const { c, r } = run('> /hr\n', 5, 'divider')
+    assert.equal(r.ok, true, 'divider at a quote END inserts: ' + (r.code || ''))
+    assert.equal(r.quotePlaceholder, true, 'the caret rides the vouched in-quote placeholder')
+    const out = apply(c.doc, r)
+    assert.equal(out, '> ---\n> \n', 'the divider gains its blank quoted caret-home line')
+    assert.equal(r.transaction.selection.anchor, out.length - 1, 'anchor sits after the trailing prefix, before its line ending')
   }
   {
     const src = '> 首行\n>\n> /hr\n>\n> 尾行\n'
@@ -573,7 +578,21 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   refusesCaretHome('before a divider', '/image\n\n---\n', 6)
   // (f) The generic guards hold too.
   refuses('image inside a list item', '- /image\n', 8, 'image')
-  refuses('image inside a blockquote', '> /image\n', 8, 'image')
+  // FLIPPED 2026-08-31 (quote-context audit): /image in a quote INSERTS —
+  // quoted spelling, and at quote END the written blank quoted line is the
+  // caret home (quotePlaceholder), same machinery as /divider.
+  {
+    const { c, r } = run('> /image\n', 8, 'image')
+    assert.equal(r.ok, true, 'quoted /image inserts: ' + (r.code || ''))
+    assert.equal(r.quotePlaceholder, true)
+    assert.equal(apply(c.doc, r), '> ![]()\n> \n')
+  }
+  {
+    const src = '> 首行\n>\n> /image\n>\n> 尾行\n'
+    const { c, r } = run(src, src.indexOf('/image') + 6, 'image')
+    assert.equal(r.ok, true, 'mid-quote /image inserts: ' + (r.code || ''))
+    assert.equal(apply(c.doc, r), '> 首行\n>\n> ![]()\n>\n> 尾行\n')
+  }
   refuses('image with an info string', '/image\n', 6, 'image', 'x')
   refuses('image mid-block caret', '/image tail\n', 6, 'image')
 }
@@ -632,7 +651,9 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
 
   // (i) The generic guards hold for this target too.
   refuses('text inside a list item', '- /text\n', 7, 'text')
-  refuses('text inside a blockquote', '> /text\n', 7, 'text')
+  // FLIPPED 2026-08-31 (quote-context audit): quoted /text reverts the
+  // query line to the blank quote line `> ` — see the quoted section below.
+  assert.equal(run('> /text\n', 7, 'text').r.ok, true)
   refuses('text with an info string', '/text\n', 5, 'text', 'x')
   refuses('text mid-block caret', '/text tail\n', 5, 'text')
   refuses('text on a setext heading', '/text\n===\n', 5, 'text')
@@ -807,7 +828,13 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   // a blockquote or a list item is never a ROOT child, so the command refuses
   // before either proof runs — the same guard every other slash-insert target
   // takes (`unsupported-structure`).
-  refuses('text mid-document inside a blockquote', '甲\n\n> /text\n\n乙\n', 10, 'text')
+  {
+    // FLIPPED 2026-08-31: mid-document quoted /text reverts to the blank
+    // quote line, neighbours untouched.
+    const { c, r } = run('甲\n\n> /text\n\n乙\n', 10, 'text')
+    assert.equal(r.ok, true, 'mid-document quoted /text reverts: ' + (r.code || ''))
+    assert.equal(apply(c.doc, r), '甲\n\n> \n\n乙\n')
+  }
   refuses('text mid-document inside a list item', '甲\n\n- /text\n\n乙\n', 10, 'text')
 }
 
@@ -1079,12 +1106,25 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   //     the divider section above); the quote-END shape keeps a NAMED
   //     no-caret-home refusal.
   {
+    // FLIPPED 2026-08-31: quote-END /divider inserts with its written
+    // caret-home line (see the divider section above for the full pin).
     const { r } = run('> /hr\n', 5, 'divider')
-    assert.equal(r.ok, false)
-    assert.equal(r.code, 'no-caret-home-after-insert')
+    assert.equal(r.ok, true)
+    assert.equal(r.quotePlaceholder, true)
   }
-  refuses('image inside a quote', '> /image\n', 8, 'image')
-  refuses('text inside a quote', '> /text\n', 7, 'text')
+  // FLIPPED 2026-08-31 (quote-context audit): /image and /text now work in
+  // quotes — see their own sections; a quoted LIST chain still refuses.
+  {
+    const { r } = run('> /image\n', 8, 'image')
+    assert.equal(r.ok, true)
+  }
+  {
+    const { c, r } = run('> /text\n', 7, 'text')
+    assert.equal(r.ok, true, 'quoted /text reverts: ' + (r.code || ''))
+    assert.equal(r.quotePlaceholder, true)
+    assert.equal(apply(c.doc, r), '> \n', 'the query line becomes the blank quote line')
+  }
+  refuses('text inside a quoted list item', '> - /text\n', 9, 'text')
   refuses('table inside a quoted list item', '> - /table\n', 10, 'table')
 }
 
