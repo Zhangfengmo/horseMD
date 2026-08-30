@@ -531,6 +531,10 @@ beforeinput insertText data="2." trusted=true  ← 146ms / 156ms 后（两次复
 
 **2026-08-30 空行显形裁决（用户报告「富文本第二行/源码第一行,删除失败」→ 调研后定案:不改投影,保持现架构）**。用户先报告任务列表退出后留下的空行「删不掉」——实测 0.14.24 已不复现(中部空行 Backspace 消失+光标回上一行;尾部为 Crepe 常驻尾行,光标回上一行,legacy 同),用户截图时装的是旧版。随后用户提出不变式「视图每行↔源码有字节,源码空行↔视图可见」,实测**两个方向在 kernel 与 legacy 都不成立**(字节 `甲\n\n乙\n\n\n丙\n\n\n\n丁` 两种模式视图都只显示四段,但**字节原样保存、一字不动**)。开源调研:MarkText/Muya(同为块树+Markdown)两个方向都坏且更糟——保存即**删除**作者空行([#1354](https://github.com/marktext/marktext/issues/1354)/[#3442](https://github.com/marktext/marktext/issues/3442)/[#3455](https://github.com/marktext/marktext/issues/3455)),又在块周围**塞入**规范空行([#3772](https://github.com/marktext/marktext/issues/3772));Typora 同为块树、同样不显示多余空行;文本模型流派(Obsidian 实时预览/CodeMirror 系)天然满足不变式但架构不同源。**裁决(按用户两条核心诉求——内核稳定+降低 Typora 系用户切换不适)**:不做「空行由字节推导显形」的投影重构(方案 A)——它是唯一动投影配对基础的改动,与稳定诉求正面冲突,且 Typora 系用户的旧文档会突然显形一堆空行,反而增加不适;也不走塞字符流派(`<br>`/`&nbsp;`/U+00A0 占位)——那是 MarkText #3772 被用户抱怨的病。现状定版:**字节忠实(作者空行 run 逐字节保存)+ 删除行为正确 + 视觉上与 Typora 一致**。A 留作远期可开关的显示选项,触发条件:用户反馈集中于「源码里的空行看不见」。
 
+### 5.2h 引用内空列表项的分级退出（2026-08-30）
+
+用户报告：引用里删掉/回车空任务项后「一下就被甩出引用区域」。实测三个缺陷叠加：占位光标落在 `> ` 行行尾边界时 `listItemAt` 仍把它算进邻近列表（mdast span 触边），Enter 被路由成 split-list-item、凭空造出 `> - [ ]  `、证明失败后回滚 + projection-mismatch，且视图光标已被甩到引用外（字节还留着 `> ` 行——字节/视图分裂）。修复后是 Typora/飞书式**分级退出**，每次 Enter 只走一级：嵌套空项 → 先降一级（`exitEmptyListItem` 对 depth>0 委托 `outdentListItem`，降不动才退回整行删除）；顶层空项 → 引用内空行（占位在引用内，可继续写引用内容）；空引用行 → 退出引用（`exitEmptyQuoteLine` 删掉 `> ` 行；旧的 `listItemAt` 前置守卫已删——纯引用行正则本身更强，且该守卫正是误拒来源；router 的 Enter 分支加了同款 quote-only-line 守卫）。退出后的占位新增 `outsideQuote` 落点（`placeholderForUnmappableAnchor`）：放到引用节点**之后**而非引用内容尾（否则打字会写成 `> 正文` 重新入引）；实测打字得 `...1231312\n\n新\n\n尾段`，无 lazy continuation。钉子：`test:kernel-quote-staged-exit-ui`（四段阶梯逐级断言光标归属 + 零错误 toast + 最终字节）；quote-enter-table / list-exit-placeholder / indent-empty-item / structural-matrix / position-matrix / quote-delete / task-item / gesture-loop 复跑全绿。
+
 ### 5.3 PDF 导出
 
 - PDF 导出读取 `getPdfSource()` 生成的结构化 `{ html, headings, title }`，不是直接打印 live editor DOM。

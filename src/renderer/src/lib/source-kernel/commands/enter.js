@@ -5,6 +5,7 @@ import { parseKernelMarkdown, buildSyntaxIndex } from '../syntax-index.js'
 import { buildCharacterMap } from '../character-map.js'
 import { NO_BREAK_SPACE, blockText } from './trailing-whitespace.js'
 import { isLedgeredWhitespaceTaskItem } from './task-seed.js'
+import { outdentListItem } from './indent.js'
 
 const endingAt = (index, offset) => {
   const line = index.lineAt(offset)
@@ -519,10 +520,15 @@ export const isVisuallyEmptyListItem = (text, item) => {
 // nested quote drops one level and keeps its parent) through the line's end,
 // leaving one prefix-only line for the controller's placeholder machinery.
 export function exitEmptyQuoteLine({ doc, index, offset }) {
-  if (index.listItemAt(offset)) return { ok: false, code: 'unsupported-structure' }
   const line = index.lineAt(offset)
   if (!line) return { ok: false, code: 'unsupported-structure' }
   // The line must be quote markers and nothing else — `>`, `> `, `> > `.
+  // This is strictly stronger than the old `listItemAt(offset)` guard (a
+  // quote-only line is never an item's line), and that guard actively
+  // misfired: at the line-end boundary of a trailing `> ` line, listItemAt
+  // still claimed the NEIGHBOURING list whose mdast span touches the
+  // boundary, refusing the exit (measured 2026-08-30 — the caret then fell
+  // through to split-list-item and was tossed out of the quote).
   const match = line.text.match(/^([ \t]*(?:>[ \t]*)*?)(>[ \t]*)$/)
   if (!match) return { ok: false, code: 'unsupported-structure' }
   // And the caret must be ON that line, at its content position (its end).
@@ -588,6 +594,15 @@ export function exitEmptyListItem({ doc, index, offset }) {
   if (!item.empty && !isLedgeredWhitespaceTaskItem(doc, index.text, item) &&
       !isVisuallyEmptyListItem(index.text, item)) {
     return { ok: false, code: 'unsupported-structure' }
+  }
+  // STAGED EXIT (2026-08-30 user report). A NESTED empty item outdents one
+  // level per Enter (Typora/Feishu convention) instead of jumping straight
+  // to the container line — inside a quote that jump read as "one Enter
+  // threw me out". The line-delete below stays the top-level answer, and
+  // the fallback when the outdent cannot prove itself.
+  if (item.depth > 0) {
+    const outdented = outdentListItem({ doc, index, offset })
+    if (outdented.ok) return outdented
   }
   const line = index.lines[item.markerLineIndex]
   const from = line.start + item.quotePrefix.length

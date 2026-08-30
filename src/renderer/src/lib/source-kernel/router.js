@@ -12,6 +12,13 @@ import { insertTableCellBreak } from './commands/table-ops.js'
 import { splitsCrlfPair } from './character-map.js'
 
 const NOT_STRUCTURAL = { ok: false, code: 'not-structural' }
+
+// The line at `offset` is quote markers and nothing else (`>`, `> `,
+// `> > `) — the same spelling exitEmptyQuoteLine recognizes.
+const isQuoteOnlyLine = (index, offset) => {
+  const line = index.lineAt(offset)
+  return !!line && /^[ \t]*(?:>[ \t]*)*>[ \t]*$/.test(line.text)
+}
 // "This key has nothing to do HERE, and that is not an error." Distinct from
 // not-structural (which sends the key to the text path, where Tab would write
 // a literal tab) and from a refusal (which toasts). Added 2026-08-29 for the
@@ -82,7 +89,14 @@ export function routeStructuralKey(key, ctx) {
       // was about the CHARACTER-delete the text path produces (which demotes
       // to `- [ ] ` and is the empty-task wall's refusal), not about routing
       // the key structurally, which deletes the whole representable line.
-      if (item) {
+      // A caret on a QUOTE-ONLY line (`> ` — the line an in-quote lift
+      // leaves behind, where the vouched placeholder anchors) is not inside
+      // any list item, even when the neighbouring list's mdast span reaches
+      // the line's end boundary. Measured (2026-08-30): the placeholder's
+      // Enter routed to split-list-item and manufactured `> - [ ]  ` out of
+      // thin air, then failed its proof and tossed the caret out of the
+      // quote. The quote-line answer below must run first there.
+      if (item && !isQuoteOnlyLine(index, offset)) {
         return item.empty || isLedgeredWhitespaceTaskItem(ctx.doc, index.text, item) ||
           isVisuallyEmptyListItem(index.text, item)
           ? exitEmptyListItem(ctx)

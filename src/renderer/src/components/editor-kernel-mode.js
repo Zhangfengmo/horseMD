@@ -1847,7 +1847,7 @@ export function createKernelMode({
     // `projection-mismatch` + `unmapped-selection` and swallowed the typing).
     if (routed.transaction?.intent === 'exit-empty-quote-line') {
       if (applyKernelTransaction(routed.transaction, view)) {
-        placeholderForUnmappableAnchor(view, routed.transaction.selection?.anchor)
+        placeholderForUnmappableAnchor(view, routed.transaction.selection?.anchor, { outsideQuote: true })
       }
       return true
     }
@@ -3216,7 +3216,14 @@ export function createKernelMode({
   // line right after `> - item` is a lazy continuation CommonMark absorbs —
   // measured 2026-08-22). Outside quotes the line prefix is empty and the
   // voucher stays prefix-less. materializePlaceholder remains fail-closed.
-  const placeholderForUnmappableAnchor = (view, anchor) => {
+  // `outsideQuote`: the caller's intent LEFT the quote (exit-empty-quote-line
+  // deleted the trailing `> ` line), so the caret home is AFTER the quote's
+  // top-level node — the backward probe below otherwise lands on the quote's
+  // last content line and would materialize the placeholder back INSIDE the
+  // quote the user just exited (measured 2026-08-30: Enter x4 of the staged
+  // exit put the caret in a quoted placeholder; typing would have written
+  // `> 正文`, re-entering the quote).
+  const placeholderForUnmappableAnchor = (view, anchor, { outsideQuote = false } = {}) => {
     if (!Number.isFinite(anchor) || !kernel.map || kernel.map.rawToPmPos(anchor)) return
     let probe = anchor
     let mapped = null
@@ -3232,7 +3239,7 @@ export function createKernelMode({
       for (let d = $p.depth; d > 0; d -= 1) {
         if ($p.node(d).type.name === 'blockquote') { quoteDepth = d; break }
       }
-      const insertPos = quoteDepth ? $p.end(quoteDepth) : $p.after(1)
+      const insertPos = quoteDepth && !outsideQuote ? $p.end(quoteDepth) : $p.after(1)
       const text = kernel.doc.text
       const lineStart = text.lastIndexOf('\n', anchor - 1) + 1
       const linePrefix = text.slice(lineStart, anchor)
@@ -3248,7 +3255,7 @@ export function createKernelMode({
         ? text.slice(prevLineStart, lineStart - (text[lineStart - 2] === '\r' ? 2 : 1))
         : ''
       const prevLineHasContent = prevLineText.replace(/[>\t ]+/g, '') !== ''
-      const insertPrefix = /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
+      const insertPrefix = !outsideQuote && /^[>\t ]+$/.test(linePrefix) && linePrefix.includes('>')
         ? ending + linePrefix
         : prevLineHasContent ? ending : ''
       materializePlaceholder(view, insertPos, anchor, insertPrefix)
@@ -3638,7 +3645,9 @@ export function createKernelMode({
       // for the code twin.
       if (exitIntent || routed.transaction.intent === 'delete-empty-blockquote' ||
           routed.transaction.intent === 'exit-empty-quote-line') {
-        placeholderForUnmappableAnchor(view, exitAnchor)
+        placeholderForUnmappableAnchor(view, exitAnchor, {
+          outsideQuote: routed.transaction.intent === 'exit-empty-quote-line'
+        })
       }
       return true
     }
