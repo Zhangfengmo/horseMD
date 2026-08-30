@@ -2069,14 +2069,16 @@ const toggleVia = (h, markType, from, to) => {
     'edge insert also verifies cleanly'
   )
 
-  // (c) typing WITH the inherited strong mark (real keystroke inside the
-  // run) → marked slice → veto + toast: the inheritance trap stays closed.
-  const notifBefore = h.notifications.length
+  // (c) typing WITH the inherited strong mark at the run's trailing edge —
+  // FLIPPED 2026-08-30 (the 「续加粗」 batch): the continuation char joins the
+  // run INSIDE its delimiters, legacy's own answer. The inheritance trap
+  // stays closed for marks the context does not carry (gateway pin).
   const trMarked = h.view.state.tr.replaceWith(3, 3, schema.text('Y', [schema.mark('strong')]))
   const verdictMarked = dispatchThrough(h, trMarked)
-  assert.deepEqual(verdictMarked, { veto: true })
-  assert.equal(h.controller.kernel.doc.text, '甲**乙**X丙\n', 'kernel bytes untouched')
-  assert.ok(h.notifications.length > notifBefore, 'marked-slice refusal notifies')
+  await flushMicrotasks()
+  assert.equal(verdictMarked, undefined)
+  assert.equal(h.controller.kernel.doc.text, '甲**乙Y**X丙\n',
+    'the inherited-mark char continues the run inside the markers')
 }
 
 // Case M5 (FLIPPED by P5-6 — the link flow works): this used to pin "link has

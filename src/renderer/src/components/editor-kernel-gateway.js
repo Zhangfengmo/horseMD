@@ -430,6 +430,61 @@ export const __atomGuards = { stepRespectsAtoms, rangeSplitsAtomUnit }
 // doc-after-step-(N-1) coordinate space. That per-step doc is exactly what
 // prosemirror-transform records for this purpose (`Transform.docs`, see
 // node_modules/prosemirror-transform/dist/index.d.ts:295).
+// TYPING INSIDE A MARKED RUN (2026-08-30, the 「续加粗」 batch, phase A). A
+// character typed with the caret strictly INSIDE a bold/italic/etc. run
+// arrives as a MARKED text slice — ProseMirror inherits the surrounding
+// marks — and `plainSliceText` refused it, which meant a user could not type
+// inside a bold word AT ALL in kernel mode (measured: click mid-word, type,
+// 「无效操作」; legacy commits `**加x粗**`). The refusal exists to keep the
+// storedMarks trap closed: an insert whose marks DIFFER from its context
+// would need delimiter bytes this path cannot write. But when every inserted
+// child carries EXACTLY the mark set already present on BOTH neighbours, the
+// byte edit is a plain character insert INSIDE the existing delimiters — the
+// same interior offsets the in-run DELETE pins already prove — and nothing
+// about the marks moves.
+const sameMarkSet = (a, b) => {
+  const left = a || []
+  const right = b || []
+  if (left.length !== right.length) return false
+  return left.every((mark) => right.some((other) => mark.eq(other)))
+}
+
+const interiorMarkedSliceText = (step, $from, $to, { allowNewline = false } = {}) => {
+  const slice = step.slice
+  if (!slice || slice.size === 0 || slice.content?.size === 0) return null
+  if (slice.openStart || slice.openEnd) return null
+  let marks = null
+  let text = ''
+  let valid = true
+  slice.content.forEach((node) => {
+    if (!valid) return
+    if (!node?.isText || !node.marks || !node.marks.length) { valid = false; return }
+    if (marks === null) marks = node.marks
+    else if (!sameMarkSet(marks, node.marks)) { valid = false; return }
+    text += node.text || ''
+  })
+  if (!valid || marks === null) return null
+  if (!allowNewline && /[\r\n]/.test(text)) return null
+  // The text node BEFORE the step's start must carry exactly the inserted
+  // mark set — an insert whose marks are not already there would need new
+  // delimiter bytes, which stays refused (the storedMarks trap).
+  const before = $from.nodeBefore
+  if (!before?.isText || !sameMarkSet(before.marks, marks)) return null
+  const after = $to.nodeAfter
+  if (after?.isText && sameMarkSet(after.marks, marks)) {
+    // STRICT INTERIOR: both neighbours share the marks; the ordinary interior
+    // raw offsets land inside the delimiters by themselves.
+    return { text, bias: null }
+  }
+  // TRAILING EDGE — the 「续加粗」 gesture itself (phase B): the caret sits at
+  // the run's end, ProseMirror inherits the run's marks, and the character
+  // must land INSIDE the closing delimiter (`**加粗词x**`, legacy's answer).
+  // Only a PURE INSERT takes the bias; a replacement ending on the edge keeps
+  // the refusal.
+  if (step.from !== step.to) return null
+  return { text, bias: 'inside-end' }
+}
+
 function extractPlainTextSteps(transactions, oldState) {
   const steps = []
   let expectedBefore = oldState?.doc || null
@@ -473,9 +528,17 @@ function extractPlainTextSteps(transactions, oldState) {
         return null
       }
       const allowNewline = $from.parent.type?.name === 'code_block'
-      const insertText = plainSliceText(step.slice, { allowNewline })
+      let insertText = plainSliceText(step.slice, { allowNewline })
+      let markBias = null
+      if (insertText == null) {
+        const marked = interiorMarkedSliceText(step, $from, $to, { allowNewline })
+        if (marked != null) {
+          insertText = marked.text
+          markBias = marked.bias
+        }
+      }
       if (insertText == null) return null
-      steps.push({ from: step.from, to: step.to, insertText })
+      steps.push({ from: step.from, to: step.to, insertText, ...(markBias ? { markBias } : {}) })
     }
   }
   return steps
@@ -2069,9 +2132,15 @@ function commitPlainTextSteps({ kernel, map, steps }) {
     // value. Using one resolver for both ends keeps `rawFrom === rawTo`
     // structurally (never a spurious non-zero-width edit); the legacy
     // `pmPosToRaw` fallback covers hand-built maps in older tests.
-    const insertPoint = typeof map.pmPosToRawInsert === 'function'
-      ? map.pmPosToRawInsert
-      : map.pmPosToRaw
+    // `markBias: 'inside-end'` (the marked trailing-edge continuation): the
+    // char belongs INSIDE the run's closing delimiter, which is exactly what
+    // the PLAIN `pmPosToRaw` answers at that boundary — the neutral resolver
+    // exists to move a PLAIN char OUTSIDE, and this insert is not plain.
+    const insertPoint = step.markBias === 'inside-end'
+      ? map.pmPosToRaw
+      : typeof map.pmPosToRawInsert === 'function'
+        ? map.pmPosToRawInsert
+        : map.pmPosToRaw
     const rawFrom = virtualBlock
       ? virtualBlock.raw
       : oldFrom < oldTo ? map.pmPosToRawStart(oldFrom) : insertPoint(oldFrom)

@@ -1241,9 +1241,17 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(committed.ok, true, committed.code)
   assert.equal(committed.applied.doc.text, 'a **bold**X b\n')
 
-  // inherited-mark typing at the run's trailing edge → refused (trap pin).
+  // Inherited-mark typing at the run's trailing edge — FLIPPED 2026-08-30
+  // (the 「续加粗」 batch): the marked insert now classifies as plain text
+  // with the inside-end bias, and the char lands INSIDE the closing
+  // delimiter, legacy's own answer. The storedMarks trap stays closed for
+  // marks the context does not already carry (pinned below).
   const trInherit = state.tr.insertText('X', 7)
-  assert.equal(classifyTransactions([trInherit], state).kind, 'blocked')
+  assert.equal(classifyTransactions([trInherit], state).kind, 'plain-text')
+  const inherited = commitOf(md, map, state, trInherit)
+  assert.equal(inherited.committed.ok, true, inherited.committed.code)
+  assert.equal(inherited.committed.applied.doc.text, 'a **boldX** b\n',
+    'the continuation char joins the run inside its delimiters')
 }
 
 // (c) type in the PLAIN run of the marked paragraph.
@@ -1272,12 +1280,27 @@ const commitOf = (md, map, state, tr) => {
   assert.equal(committed.applied.doc.text, '**a**X_b_\n')
 }
 
-// (e) type INSIDE the bold run with an inherited mark (real typing inside a
-// run inserts a MARKED slice) → still refused: the storedMarks/
-// mark-inheritance trap stays closed.
+// (e) type INSIDE the bold run with an inherited mark — FLIPPED 2026-08-30
+// (the 「续加粗」 batch): a marked insert whose marks the surrounding context
+// ALREADY carries is plain typing inside the delimiters (measured: kernel
+// refused it outright, so bold words could not be typed into at all; legacy
+// commits `**加x粗**`). The trap this pin guarded stays closed one case
+// below: marks the context does NOT carry keep the refusal.
+{
+  const { md, state, map } = markedFixture()
+  const tr = state.tr.replaceWith(5, 5, schema.text('X', [schema.mark('strong')]))
+  const result = classifyTransactions([tr], state)
+  assert.equal(result.kind, 'plain-text')
+  const { committed } = commitOf(md, map, state, tr)
+  assert.equal(committed.ok, true, committed.code)
+  assert.equal(committed.applied.doc.text, 'a **boXld** b\n', 'the char joins the run interior')
+}
+// …and the ACTUAL trap, pinned on its own: an insert carrying a mark the
+// context does not have (a bare-caret Mod-b then typing would produce this)
+// still refuses — no delimiter bytes are ever invented.
 {
   const { state } = markedFixture()
-  const tr = state.tr.replaceWith(5, 5, schema.text('X', [schema.mark('strong')]))
+  const tr = state.tr.replaceWith(8, 8, schema.text('X', [schema.mark('strong')]))
   const result = classifyTransactions([tr], state)
   assert.equal(result.kind, 'blocked')
   assert.equal(result.blockedCode, KERNEL_CODES.INPUT_TYPE)

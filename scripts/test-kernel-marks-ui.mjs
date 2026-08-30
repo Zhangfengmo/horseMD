@@ -705,14 +705,20 @@ async function run() {
 
     await assertSource(evaluate, AFTER_TYPING, 'the before/after/far-plain typing matrix must commit at the exact derived raw offsets')
 
-    // (d) INSIDE the bold word -> refused. Assert via byte stability only
-    // (content unchanged), never the toast DOM.
+    // (d) INSIDE the bold word — FLIPPED 2026-08-30 (the 「续加粗」 batch):
+    // the inherited-mark char joins the run inside its delimiters, legacy's
+    // own answer (this used to refuse, which meant a bold word could not be
+    // typed into at all).
     await clickAt(evaluate, send, '前X午未申酉后Y段尾Z', 4) // between 未 and 申
-    const beforeInside = await paragraphTexts(evaluate)
     await typeTextLikeUser(send, 'W', { delayMs: delay })
+    await waitFor(async () => (await mounted(evaluate) || '').includes('前X午未W申酉后Y段尾Z'), 'typed W inside the bold run never landed')
+    await sleep(200)
+    await assertSource(evaluate, AFTER_TYPING.replace('**午未申酉**', '**午未W申酉**'),
+      'the char typed inside the bold word joins the run between its delimiters')
+    // put the fixture back so the following sections keep their expectations
+    await pressMod(send, 'z', 'KeyZ', 90)
     await sleep(300)
-    const afterInside = await paragraphTexts(evaluate)
-    assert.deepEqual(afterInside, beforeInside, 'typing inside the bold word content must be refused (bytes unchanged)')
+    await assertSource(evaluate, AFTER_TYPING, 'undo restores the pre-(d) bytes')
 
     // ============================================================
     // 8) `/quote` slash item — the ONLY reachable invocation is on a block
