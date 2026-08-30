@@ -21,7 +21,7 @@
 // to grep the raw Markdown for a matching slot because it had no proven
 // position map; this gateway has one (`buildProjectionMap`'s `pmPosToRaw`,
 // Task 1) and defers all raw-coordinate work to `commitPlainText`.
-import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert, spellMarkerCompletingSpace, spellMarkerRunGrowth, spellMarkerFollowingText } from '../lib/source-kernel/index.js'
+import { KERNEL_CODES, applySourceTransaction, buildSyntaxIndex, parseKernelMarkdown, bisectsLineEnding, toggleTaskMarker, changeCodeLanguage, setImageAttrs, setImageRatio, applyLinkEdit, insertHeadingLeadingWhitespace, looksLikeAtxContentStart, spellBlockTailInsert, literalTailIsStripped, healableTrailingSpace, spellLineStartWhitespace, looksLikeBlockLineStart, healableLineStartRun, dissolvableTaskSeed, spellTaskSeedInsert, taskSeedDeleteRefusal, spellEmptyCodeInsert, EMPTY_VERBATIM_BLOCK_TYPES, spellBlockTailDelete, proveContentDelete, deleteClearsBlockLine, proveBatchDelete, spellEmptyListItemDelete, escapePolicyForInsert, spellMarkerCompletingSpace, spellMarkerRunGrowth, spellMarkerFollowingText } from '../lib/source-kernel/index.js'
 
 // ===========================================================================
 // STEP IDENTITY — ADR (defect D4, 2026-08-26). READ BEFORE ADDING A CHECK.
@@ -657,14 +657,14 @@ function extractLanguageStep(transactions, oldState) {
 //     `setImageAttrs({ caption })` maps caption→title under an extra
 //     schema-projection proof (see that command's CAPTION ADR). Block-image
 //     only: the inline `image` node has no caption concept.
-//   * `ratio` stays DISPLAY-ONLY. Persisting a resize means rewriting alt to
-//     a numeric ratio and migrating the caption into the title slot — a
-//     multi-slot rewrite the kernel deliberately does not own. The batch
-//     falls through to `blocked` as before, but `extractImageDisplayRefusal`
-//     below NAMES it (`image-resize-unsupported`) instead of the generic
-//     INPUT_TYPE (the dispatch veto still refuses the edit and toasts,
-//     rather than silently accepting a PM-only change that the next reparse
-//     from the authoritative source would discard).
+//   * `ratio` routes to `setImageRatio` since 2026-08-30: the legacy
+//     multi-slot rewrite itself (numeric alt + caption migrated into the
+//     title slot), proven through the same scan/reparse machinery. The one
+//     refusal left in the family is the CAPTIONLESS resize
+//     (`image-resize-unsupported`): `![1.50](url)` without a title reparses
+//     as an unscaled image captioned "1.50" — the byte format cannot hold
+//     it. `extractImageDisplayRefusal` below still NAMES the shapes that
+//     fail classification (e.g. a non-finite ratio value).
 //   * An `image-block` currently in the RESIZED state (`isResizedImageBlock`
 //     below — the serializer's own predicate, shared verbatim) is refused for
 //     EVERY attr: in that state the raw `alt`/`title` slots are owned by the
@@ -699,9 +699,11 @@ function extractImageAttrStep(transactions, oldState) {
   if (!Array.isArray(tr.steps) || tr.steps.length !== 1) return null
   const step = tr.steps[0]
   if (!isStep(step, STEP_IDS.ATTR)) return null
-  if (!IMAGE_SOURCE_ATTRS.has(step.attr) && step.attr !== 'caption') return null
+  if (!IMAGE_SOURCE_ATTRS.has(step.attr) && step.attr !== 'caption' && step.attr !== 'ratio') return null
   if (!Number.isFinite(step.pos)) return null
-  if (typeof step.value !== 'string') return null
+  // The resize handle sends a NUMBER (image-block/index.js:436); every other
+  // classified attr is a string.
+  if (step.attr === 'ratio' ? !Number.isFinite(Number(step.value)) : typeof step.value !== 'string') return null
   const stepDoc = tr.docs?.[0] || oldState?.doc
   if (!stepDoc) return null
   let node
@@ -712,10 +714,14 @@ function extractImageAttrStep(transactions, oldState) {
   }
   const typeName = node?.type?.name
   if (!typeName || !IMAGE_NODE_TYPES.has(typeName)) return null
-  // Caption is an image-BLOCK concept only (the inline `image` schema has no
-  // caption attr and no caption UI) — anything else falls through to blocked.
-  if (step.attr === 'caption' && typeName !== 'image-block') return null
-  if (isResizedImageBlock(node)) return null
+  // Caption and ratio are image-BLOCK concepts only (the inline `image`
+  // schema has neither attr and no UI for them) — anything else falls
+  // through to blocked.
+  if ((step.attr === 'caption' || step.attr === 'ratio') && typeName !== 'image-block') return null
+  // The scaled state refuses every attr EXCEPT ratio: re-scaling and
+  // restoring 1x are exactly the gestures that must remain reachable there
+  // (setImageRatio owns both slots in that state by design).
+  if (step.attr !== 'ratio' && isResizedImageBlock(node)) return null
   return { pmPos: step.pos, blockImage: typeName === 'image-block', attr: step.attr, value: step.value }
 }
 
@@ -3043,13 +3049,14 @@ export function commitCodeLanguage({ kernel, index, map, pmPos, language }) {
 export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, value }) {
   if (!kernel?.doc || !map) return { ok: false, code: KERNEL_CODES.UNMAPPED }
   if (!Number.isFinite(pmPos)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
-  if ((!IMAGE_SOURCE_ATTRS.has(attr) && attr !== 'caption') || typeof value !== 'string') {
+  const isRatio = attr === 'ratio'
+  if (isRatio ? !Number.isFinite(Number(value)) : (!IMAGE_SOURCE_ATTRS.has(attr) && attr !== 'caption') || typeof value !== 'string') {
     return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
   }
-  // Caption is image-BLOCK-only (see extractImageAttrStep): the inline
-  // `image` node has no caption attr, so a non-block caption here is a
+  // Caption and ratio are image-BLOCK-only (see extractImageAttrStep): the
+  // inline `image` node has neither attr, so a non-block request here is a
   // caller error, never a byte question.
-  if (attr === 'caption' && !blockImage) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
+  if ((attr === 'caption' || isRatio) && !blockImage) return { ok: false, code: KERNEL_CODES.INPUT_TYPE }
 
   let offset = null
   if (blockImage) {
@@ -3066,7 +3073,9 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
     // node, so the same predicate is re-applied here against proven state.
     // For the caption the refusal keeps its NAME at this boundary too — a
     // bypassed classification must not demote the message to the generic one.
-    if (isResizedImageBlock(pair?.pmNode)) {
+    // Ratio is the one attr ALLOWED on a scaled pair — re-scaling and the
+    // restore-to-1x both operate on the slots the ratio scheme owns.
+    if (!isRatio && isResizedImageBlock(pair?.pmNode)) {
       return {
         ok: false,
         code: attr === 'caption' ? KERNEL_CODES.IMAGE_CAPTION_SCALED : KERNEL_CODES.UNSUPPORTED
@@ -3083,7 +3092,9 @@ export function commitImageAttrs({ kernel, index, map, pmPos, blockImage, attr, 
   if (!Number.isFinite(offset)) return { ok: false, code: KERNEL_CODES.UNMAPPED }
 
   const syntaxIndex = index || buildSyntaxIndex(kernel.doc.text)
-  const routed = setImageAttrs({ doc: kernel.doc, index: syntaxIndex, offset, [attr]: value })
+  const routed = isRatio
+    ? setImageRatio({ doc: kernel.doc, index: syntaxIndex, offset, ratio: Number(value) })
+    : setImageAttrs({ doc: kernel.doc, index: syntaxIndex, offset, [attr]: value })
   if (!routed.ok) return { ok: false, code: routed.code }
 
   const result = applySourceTransaction(kernel.doc, routed.transaction)

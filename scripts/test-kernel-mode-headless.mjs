@@ -2976,9 +2976,10 @@ const toggleVia = (h, markType, from, to) => {
 // 22d: display attrs after kernel/image-caption. An UNSCALED image-block's
 // `caption` is a REAL byte edit now: the AttrStep passes through and the
 // caption commits into the markdown TITLE slot (the legacy scheme's own byte
-// home — editor-image-markdown.js parses `caption: title || alt`). `ratio`
-// (the resize handle) still never reaches the source; its refusal now
-// carries the NAMED code `image-resize-unsupported`.
+// home — editor-image-markdown.js parses `caption: title || alt`).
+// FLIPPED 2026-08-30 (recorded-refusals batch): `ratio` commits too —
+// setImageRatio writes the numeric alt and keeps the caption in the title
+// slot.
 {
   const md = '![a](x.png)\n\n甲乙\n'
   const h = makeHarness(md, stubParse(md))
@@ -2990,14 +2991,11 @@ const toggleVia = (h, markType, from, to) => {
   assert.equal(h.controller.kernel.doc.text, '![a](x.png "新图注")\n\n甲乙\n',
     'the caption commits into the TITLE slot, alt untouched')
 
-  const revision = h.controller.kernel.doc.revision
   const ratio = dispatchThrough(h, h.view.state.tr.setNodeAttribute(0, 'ratio', 0.5))
   await flushMicrotasks()
-  assert.equal(ratio?.veto, true, 'ratio must be vetoed')
-  assert.equal(h.controller.kernel.doc.text, '![a](x.png "新图注")\n\n甲乙\n', 'kernel bytes untouched')
-  assert.equal(h.controller.kernel.doc.revision, revision)
-  assert.ok(h.notifications.some((n) => n.includes('image-resize-unsupported')),
-    `the ratio refusal must carry its NAMED code, got ${JSON.stringify(h.notifications)}`)
+  assert.equal(ratio, undefined, 'the resize passes through like the other attr routes')
+  assert.equal(h.controller.kernel.doc.text, '![0.50](x.png "新图注")\n\n甲乙\n',
+    'the resize commits the legacy spelling: numeric alt, caption kept in the title slot')
 }
 
 // 22d2: the two NAMED caption refusals end to end. A SCALED image's caption

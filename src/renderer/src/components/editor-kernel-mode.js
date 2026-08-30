@@ -1621,9 +1621,9 @@ export function createKernelMode({
         // block, so every raw offset the map serves past this image is stale
         // until it is rebuilt.
         //
-        // Refusal is loud and total: `ratio` and a SCALED image's `caption`
-        // never reach here (the gateway leaves them `blocked`, with their own
-        // named codes — see extractImageDisplayRefusal), and anything
+        // Refusal is loud and total: a SCALED image's `caption` never
+        // reaches here (the gateway leaves it `blocked` with its named code
+        // — see extractImageDisplayRefusal), and anything
         // `setImageAttrs` cannot prove byte-for-byte vetoes the PM
         // transaction too — including the caption's own named refusals
         // (`image-caption-scaled` re-derived at commit,
@@ -1634,6 +1634,15 @@ export function createKernelMode({
         // legacy byte home; commands/image-attrs.js CAPTION ADR): after the
         // commit the view's caption and the projection's `title || alt`
         // agree, so the pass-through costs no projection mismatch.
+        // `ratio` routes here too since 2026-08-30 (`setImageRatio`, the
+        // legacy multi-slot rewrite: numeric alt + caption-in-title). The
+        // pass-through view may briefly hold the raw drag ratio (1.437)
+        // against the persisted 2-decimal bytes (1.44); the debounced verify
+        // snaps the view to the byte truth. A CAPTIONLESS resize refuses
+        // named `image-resize-unsupported` — `![1.50](url)` without a title
+        // reparses as an unscaled image captioned "1.50", so the legacy
+        // format itself cannot hold it (legacy loses such a resize silently;
+        // the kernel refuses instead).
         const committed = commitImageAttrs({
           kernel,
           index: buildSyntaxIndex(kernel.doc.text),

@@ -2081,9 +2081,11 @@ const imgText = (s) => imgSchema.text(s)
 // UNSCALED image-block is a REAL byte edit now: it classifies as
 // `image-attrs` and commits into the markdown TITLE slot — the legacy
 // scheme's own byte home for the caption (editor-image-markdown.js parses
-// `caption: title || alt` and serializes the caption as the title). `ratio`
-// (the resize handle) still has no kernel byte scheme — the refusal stays,
-// but carries its own NAMED code instead of the generic INPUT_TYPE.
+// `caption: title || alt` and serializes the caption as the title).
+// FLIPPED 2026-08-30 (recorded-refusals batch): `ratio` (the resize handle)
+// classifies and COMMITS too — setImageRatio writes the legacy multi-slot
+// spelling (numeric alt + caption in the title slot). This fixture's image
+// carries its caption in the ALT fallback, so the commit also migrates it.
 {
   const md = '![a](x.png)\n'
   const d = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a' }))
@@ -2105,9 +2107,25 @@ const imgText = (s) => imgSchema.text(s)
   assert.equal(committed.transaction.intent, 'image-attrs')
 
   const ratio = classifyTransactions([state.tr.setNodeAttribute(0, 'ratio', 0.5)], state)
-  assert.equal(ratio.kind, 'blocked')
-  assert.equal(ratio.blockedCode, KERNEL_CODES.IMAGE_RESIZE,
-    'the resize refusal must carry its own name — the gesture, not the generic code')
+  assert.equal(ratio.kind, 'image-attrs', 'the resize classifies since 2026-08-30')
+  assert.equal(ratio.attr, 'ratio')
+  const ratioKernel = { doc: createMarkdownDocument(md) }
+  const ratioCommitted = commitImageAttrs({ kernel: ratioKernel, map, ...ratio })
+  assert.equal(ratioCommitted.ok, true, ratioCommitted.code)
+  assert.equal(ratioCommitted.applied.doc.text, '![0.50](x.png "a")\n',
+    'the resize commits the legacy spelling: numeric alt, caption migrated into the title slot')
+
+  // A CAPTIONLESS image's resize refuses with the family's named code — the
+  // byte format cannot hold it (`![0.50](y.png)` would reparse as an
+  // unscaled image captioned "0.50").
+  const bareMd = '![](y.png)\n'
+  const bareDoc = imgDoc(imgSchema.node('image-block', { src: 'y.png', alt: '', caption: '' }))
+  const bareState = EditorState.create({ schema: imgSchema, doc: bareDoc })
+  const bareMap = buildProjectionMap(bareMd, bareState.doc)
+  const bareRatio = classifyTransactions([bareState.tr.setNodeAttribute(0, 'ratio', 0.5)], bareState)
+  assert.equal(bareRatio.kind, 'image-attrs')
+  const bareCommitted = commitImageAttrs({ kernel: { doc: createMarkdownDocument(bareMd) }, map: bareMap, ...bareRatio })
+  assert.deepEqual(bareCommitted, { ok: false, code: KERNEL_CODES.IMAGE_RESIZE })
 }
 
 // Case I4b: the two caption refusals the COMMAND names surface through the
@@ -2172,6 +2190,20 @@ const imgText = (s) => imgSchema.text(s)
   assert.equal(scaledCaption.kind, 'blocked')
   assert.equal(scaledCaption.blockedCode, KERNEL_CODES.IMAGE_CAPTION_SCALED)
 
+  // RATIO is the one attr allowed on the scaled state (2026-08-30): both
+  // re-scaling and restoring 1x operate on the slots the scheme owns.
+  const rescale = classifyTransactions([state.tr.setNodeAttribute(0, 'ratio', 2)], state)
+  assert.equal(rescale.kind, 'image-attrs')
+  const rescaled = commitImageAttrs({ kernel: { doc: createMarkdownDocument(md) }, map, ...rescale })
+  assert.equal(rescaled.ok, true, rescaled.code)
+  assert.equal(rescaled.applied.doc.text, '![2.00](x.png "说明")\n', 'a re-scale rewrites only the numeric alt')
+  const restore = classifyTransactions([state.tr.setNodeAttribute(0, 'ratio', 1)], state)
+  assert.equal(restore.kind, 'image-attrs')
+  const restored = commitImageAttrs({ kernel: { doc: createMarkdownDocument(md) }, map, ...restore })
+  assert.equal(restored.ok, true, restored.code)
+  assert.equal(restored.applied.doc.text, '![](x.png "说明")\n',
+    'restoring 1x empties the alt and keeps the caption in the title slot')
+
   // A ratio of exactly 1 (and one within the 0.001 tolerance) is NOT resized —
   // those keep routing normally, caption included.
   const unresized = imgDoc(imgSchema.node('image-block', { src: 'x.png', alt: 'a', caption: 'a', ratio: 1.0005 }))
@@ -2199,8 +2231,10 @@ const imgText = (s) => imgSchema.text(s)
     commitImageAttrs({ kernel, map, pmPos: 99, blockImage: true, attr: 'src', value: 'y' }),
     { ok: false, code: KERNEL_CODES.UNMAPPED }
   )
+  // FLIPPED 2026-08-30: a numeric ratio value commits now; the fail-closed
+  // pin keeps its meaning on a value no Number can be made of.
   assert.deepEqual(
-    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'ratio', value: '2' }),
+    commitImageAttrs({ kernel, map, pmPos: 0, blockImage: true, attr: 'ratio', value: 'x' }),
     { ok: false, code: KERNEL_CODES.INPUT_TYPE }
   )
   assert.deepEqual(

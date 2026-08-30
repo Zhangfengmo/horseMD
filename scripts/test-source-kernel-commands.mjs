@@ -6,7 +6,7 @@ import { replaceVisibleText } from '../src/renderer/src/lib/source-kernel/comman
 import { toggleTaskMarker } from '../src/renderer/src/lib/source-kernel/commands/task-toggle.js'
 import { splitTextBlock, splitListItem, exitEmptyListItem, shrinkBlankRun } from '../src/renderer/src/lib/source-kernel/commands/enter.js'
 import { changeCodeLanguage } from '../src/renderer/src/lib/source-kernel/commands/code-language.js'
-import { setImageAttrs } from '../src/renderer/src/lib/source-kernel/commands/image-attrs.js'
+import { setImageAttrs, setImageRatio } from '../src/renderer/src/lib/source-kernel/commands/image-attrs.js'
 import { toggleInlineMark } from '../src/renderer/src/lib/source-kernel/commands/mark-toggle.js'
 import { applyLinkEdit } from '../src/renderer/src/lib/source-kernel/commands/link-toggle.js'
 import { joinParagraphBackward } from '../src/renderer/src/lib/source-kernel/commands/delete.js'
@@ -1626,6 +1626,42 @@ console.log('PASS source-kernel commands (image attrs: minimal segment rewrites,
 }
 
 console.log('PASS source-kernel commands (image caption: title-slot byte home, scaled/shadowed shapes named-refused)')
+
+// ---- Image RATIO — the drag-resize (2026-08-30) ----
+//
+// setImageRatio writes the legacy scheme's own spelling (numeric alt +
+// caption migrated into the title slot; editor-image-markdown.js serializer,
+// mirrored). The captionless resize refuses by name: `![1.50](url)` without
+// a title reparses as an UNSCALED image captioned "1.50" — the byte format
+// cannot hold it (legacy silently loses such a resize on the round trip).
+{
+  const setRatio = (text, offset, ratio) => {
+    const { doc, index } = imageSetup(text)
+    const routed = setImageRatio({ doc, index, offset, ratio })
+    if (!routed.ok) return { ok: false, code: routed.code }
+    const applied = applySourceTransaction(doc, routed.transaction)
+    assert.equal(applied.ok, true, applied.code)
+    return { ok: true, text: applied.doc.text }
+  }
+  // Scale a captioned (titled) image: alt := ratio, title keeps the caption.
+  assert.equal(setRatio('![描述](b.png "图注")\n', 0, 1.5).text, '![1.50](b.png "图注")\n')
+  // Caption living in the ALT fallback (no title): it migrates to the title.
+  assert.equal(setRatio('![纯说明](b.png)\n', 0, 2).text, '![2.00](b.png "纯说明")\n')
+  // Re-scale an already-scaled image: only the numeric alt changes.
+  assert.equal(setRatio('![1.50](b.png "图注")\n', 0, 0.75).text, '![0.75](b.png "图注")\n')
+  // Back to 1x from scaled: `![](url "caption")` — projects exactly
+  // {alt:'', caption, ratio:1}, the attrs the view holds after the AttrStep.
+  assert.equal(setRatio('![1.50](b.png "图注")\n', 0, 1).text, '![](b.png "图注")\n')
+  // CAPTIONLESS resize: named refusal, zero bytes.
+  assert.deepEqual(setRatio('![](b.png)\n', 0, 1.5), { ok: false, code: 'image-resize-unsupported' })
+  // Already unscaled and ratio ~1: a well-formed no-op, text unchanged.
+  assert.equal(setRatio('![a](b.png)\n', 0, 1).text, '![a](b.png)\n')
+  // Invalid ratios refuse.
+  assert.deepEqual(setRatio('![a](b.png "t")\n', 0, 0), { ok: false, code: 'unsupported-structure' })
+  assert.deepEqual(setRatio('![a](b.png "t")\n', 0, NaN), { ok: false, code: 'unsupported-structure' })
+}
+
+console.log('PASS source-kernel commands (image ratio: legacy multi-slot rewrite, captionless resize named-refused)')
 
 // ---- Link editing (Plan 5 Task 6) ----
 //

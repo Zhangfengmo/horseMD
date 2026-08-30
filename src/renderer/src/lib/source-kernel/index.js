@@ -12,7 +12,7 @@ export { wrapReviewMarkup, resolveReviewMarker } from './commands/review-markup.
 export { replaceVisibleText } from './commands/replace-text.js'
 export { toggleTaskMarker } from './commands/task-toggle.js'
 export { changeCodeLanguage } from './commands/code-language.js'
-export { setImageAttrs } from './commands/image-attrs.js'
+export { setImageAttrs, setImageRatio } from './commands/image-attrs.js'
 export { applyLinkEdit } from './commands/link-toggle.js'
 export { exitCodeBlock, deleteEmptyCodeBlock } from './commands/code-exit.js'
 export { splitTextBlock, splitListItem, exitEmptyListItem, shrinkBlankRun } from './commands/enter.js'
@@ -137,10 +137,12 @@ export const KERNEL_CODES = Object.freeze({
   // straight back into the caption slot. Same family as EMPTY_TASK: the
   // state itself is unrepresentable, and the refusal names the exits.
   IMAGE_CAPTION_EMPTY: 'empty-image-caption-unrepresentable',
-  // The drag-resize gesture (an image-block `ratio` AttrStep). Persisting a
-  // resize means rewriting alt to a numeric ratio and migrating the caption
-  // into the title slot — a multi-slot byte scheme the kernel deliberately
-  // does not own (see the CAPTION ADR). A NAMING code only: the refusal
-  // itself predates it, this gives the toast the gesture and its exits.
+  // The drag-resize gesture (an image-block `ratio` AttrStep). Since
+  // 2026-08-30 the resize itself COMMITS (`setImageRatio`: numeric alt +
+  // caption migrated into the title slot — the legacy scheme's own
+  // spelling). This code now names the one refusal left in the family: a
+  // resize on a CAPTIONLESS image, whose byte form `![1.50](url)` reparses
+  // as an unscaled image captioned "1.50" — unrepresentable, so refused
+  // instead of silently lost the way legacy loses it.
   IMAGE_RESIZE: 'image-resize-unsupported'
 })

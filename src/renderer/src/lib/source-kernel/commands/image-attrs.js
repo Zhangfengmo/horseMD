@@ -535,6 +535,78 @@ export function setImageAttrs({ doc, index, offset, src, alt, title, caption }) 
   return { ok: false, code: 'unsupported-structure' }
 }
 
+// ---------------------------------------------------------------------------
+// setImageRatio — the drag-resize, as the legacy scheme's own multi-slot
+// rewrite (2026-08-30, recorded-refusals batch item 3). The byte convention
+// is editor-image-markdown.js's serializer, mirrored exactly:
+//   * RESIZED (|ratio-1| > 0.001): alt slot := ratio.toFixed(2), title slot
+//     := the caption. Requires a NON-EMPTY caption — `![1.50](url)` without
+//     a title reparses as an UNSCALED image whose caption is "1.50" (the
+//     legacy format itself cannot express a captionless resize; legacy
+//     silently loses it on the round trip, the kernel refuses by name
+//     instead of copying that corruption).
+//   * BACK TO 1x from the scaled state: alt slot := '' and title := the
+//     caption — `![](url "caption")` projects exactly {alt:'', caption,
+//     ratio:1}, the attrs the view holds after the AttrStep.
+// Both delegate to setImageAttrs' raw alt+title path, so every scan/reparse/
+// escape proof covers them unchanged; the scaled-reading flip is additionally
+// pre-checked through `projectBlockAttrs` (the parse runner's pure mirror).
+// ---------------------------------------------------------------------------
+export function setImageRatio({ doc, index, offset, ratio }) {
+  const rawOffset = Number(offset)
+  const nextRatio = Number(ratio)
+  if (!doc || !index?.tree || !Number.isFinite(rawOffset)) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+  if (!Number.isFinite(nextRatio) || nextRatio <= 0) {
+    return { ok: false, code: 'unsupported-structure' }
+  }
+
+  let node = null
+  const visit = (candidate) => {
+    const start = candidate?.position?.start?.offset
+    const end = candidate?.position?.end?.offset
+    if (candidate?.type === 'image' && Number.isInteger(start) && Number.isInteger(end) &&
+        rawOffset >= start && rawOffset <= end) {
+      if (!node || start >= node.position.start.offset) node = candidate
+    }
+    for (const child of candidate?.children || []) visit(child)
+  }
+  visit(index.tree)
+  if (!node) return { ok: false, code: 'unsupported-structure' }
+
+  const current = projectBlockAttrs(node.alt ?? '', node.title ?? null)
+  const resized = Math.abs(nextRatio - 1) > 0.001
+
+  if (!resized) {
+    if (Math.abs(current.ratio - 1) <= 0.001) {
+      // Already unscaled: a well-formed no-op (revision bookkeeping, same
+      // convention as setImageAttrs' zero-width branch).
+      const start = node.position.start.offset
+      return {
+        ok: true,
+        transaction: {
+          baseRevision: doc.revision,
+          edits: [{ from: start, to: start, insert: '' }],
+          intent: 'image-attrs',
+          selection: { anchor: rawOffset, head: rawOffset }
+        }
+      }
+    }
+    return setImageAttrs({ doc, index, offset: rawOffset, alt: '', title: current.caption })
+  }
+
+  if (!current.caption) {
+    return { ok: false, code: 'image-resize-unsupported' }
+  }
+  const ratioBytes = nextRatio.toFixed(2)
+  const predicted = projectBlockAttrs(ratioBytes, current.caption)
+  if (!sameProjection(predicted, { alt: '', caption: current.caption, ratio: Number(ratioBytes) })) {
+    return { ok: false, code: 'image-resize-unsupported' }
+  }
+  return setImageAttrs({ doc, index, offset: rawOffset, alt: ratioBytes, title: current.caption })
+}
+
 // Pre-order `{type, start, end}` list — the whole document's structure reduced
 // to something two parses can be compared on.
 function treeSignature(tree) {

@@ -324,9 +324,12 @@ async function run() {
     assert.equal(scaledAfter.caption, '缩放图注', 'the scaled caption survives the veto')
 
     // ============================================================
-    // 5) NAMED refusal: drag-resize. The pointerup dispatches
-    //    `setAttr('ratio', …)`; the kernel has no byte scheme for it — zero
-    //    bytes, named toast, PM ratio unchanged.
+    // 5) DRAG-RESIZE COMMITS (FLIPPED 2026-08-30, recorded-refusals batch).
+    //    The pointerup dispatches `setAttr('ratio', …)` and the kernel now
+    //    writes the legacy spelling: numeric alt + the caption migrated
+    //    into the title slot. The exact ratio depends on the drag geometry,
+    //    so the pin is the SPELLING (numeric alt, caption preserved) plus
+    //    alt/ratio agreement with the live node.
     // ============================================================
     await waitFor(() => evaluate(`(() => {
       const img = [...((${VISIBLE_EDITOR})?.querySelectorAll('.milkdown-image-block img') || [])][0]
@@ -346,15 +349,25 @@ async function run() {
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: handle.x, y: handle.y + 60 })
     await sleep(100)
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x: handle.x, y: handle.y + 60 })
-    await sleep(400)
+    await sleep(600)
     const resizeToasts = JSON.parse(await toasts(evaluate))
-    console.log('  [resize refusal] ->', JSON.stringify(resizeToasts))
-    assert.ok(resizeToasts.some((t) => /拖拽缩放|drag-resizing/.test(t)),
-      `the drag-resize must raise its NAMED toast (it proves the ratio AttrStep really fired), got ${JSON.stringify(resizeToasts)}`)
-    await assertSource(evaluate, EXP2, 'a refused resize must write NOTHING')
+    console.log('  [resize commit] toasts ->', JSON.stringify(resizeToasts))
+    assert.ok(!resizeToasts.some((t) => /无效操作|未做任何修改|not supported|nothing was changed/i.test(t)),
+      `the resize must not refuse, got ${JSON.stringify(resizeToasts)}`)
+    const resizedSource = await readSource(evaluate, 'post-resize source')
+    const resizedLine = resizedSource.split('\n').find((l) => l.includes('"新图注"'))
+    console.log('  [resize commit] line ->', JSON.stringify(resizedLine))
+    const ratioMatch = resizedLine && resizedLine.match(/^!\[(\d+(?:\.\d+)?)\]\(\.\/pic\.png "新图注"\)$/)
+    assert.ok(ratioMatch,
+      `the resized image must spell numeric-alt + caption-in-title, got ${JSON.stringify(resizedLine)}`)
+    const persistedRatio = Number(ratioMatch[1])
+    assert.ok(persistedRatio > 0 && Math.abs(persistedRatio - 1) > 0.001,
+      `the persisted ratio must be a real resize, got ${ratioMatch[1]}`)
+    const EXP3 = EXP2.replace('![描述](./pic.png "新图注")', `![${ratioMatch[1]}](./pic.png "新图注")`)
+    assert.equal(resizedSource, EXP3, 'only the resized image line may change')
     const resizedAfter = await imageAttrsAt(evaluate, 0)
-    assert.ok(Math.abs(Number(resizedAfter.ratio) - 1) < 0.001,
-      `the veto discards the ratio AttrStep, got ${JSON.stringify(resizedAfter)}`)
+    assert.ok(Math.abs(Number(resizedAfter.ratio) - persistedRatio) < 0.011,
+      `the live ratio must agree with the persisted bytes, got ${JSON.stringify(resizedAfter)} vs ${ratioMatch[1]}`)
 
     // ============================================================
     // 6) Disk bytes (the only place CRLF is provable), then a COLD RELAUNCH.
@@ -363,7 +376,7 @@ async function run() {
     await evaluate(`document.querySelector('.hm-save-fab')?.click()`)
     await waitFor(() => evaluate(`!document.querySelector('.hm-save-fab')`), 'save did not finish')
     const disk = await readFile(file, 'utf8')
-    const expectedDisk = EXP2.split('\n').join(EOL)
+    const expectedDisk = EXP3.split('\n').join(EOL)
     if (disk !== expectedDisk) {
       console.error('  disk    :', JSON.stringify(disk))
       console.error('  expected:', JSON.stringify(expectedDisk))
@@ -392,7 +405,7 @@ async function run() {
       'the committed captions round-trip through the title slot on a cold reopen')
     assert.equal(reopened.dialogs.length, 0, 'no dialog on cold relaunch')
 
-    console.log(`PASS kernel-mode image caption UI regression (${crlf ? 'CRLF' : 'LF'}): retyping a caption rewrites the TITLE slot byte-exactly, a title-less image gains one, the shadowed clear and the scaled image refuse with their NAMED toasts and zero bytes, drag-resize refuses by name with the ratio intact, and the bytes survive save + cold relaunch`)
+    console.log(`PASS kernel-mode image caption UI regression (${crlf ? 'CRLF' : 'LF'}): retyping a caption rewrites the TITLE slot byte-exactly, a title-less image gains one, the shadowed clear and the scaled image refuse with their NAMED toasts and zero bytes, drag-resize COMMITS the numeric-alt spelling with the caption in the title slot, and the bytes survive save + cold relaunch`)
   } finally {
     await stopBuiltElectron(app, { removeProfile: true })
   }
