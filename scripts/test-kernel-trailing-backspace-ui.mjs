@@ -208,8 +208,14 @@ async function run() {
         const blocks = JSON.parse(await evaluate(`JSON.stringify(
           [...((${VISIBLE_EDITOR})?.children || [])].map((n) => n.tagName)
         )`))
-        assert.deepEqual(blocks, ['P', 'HR'],
-          `the fixture must render prose + hr with NO placeholder yet — got ${JSON.stringify(blocks)}`)
+        // FLIPPED 2026-08-30: a document ending in a non-textblock now mounts
+        // WITH the trailing convenience paragraph (Editor.jsx appends it at
+        // create — before, a trailing table/hr had no line below until the
+        // first edit and could not be reached or selected from underneath:
+        // 「整个表格无法删除」). The gesture under test — click ON the hr,
+        // type — is unchanged.
+        assert.deepEqual(blocks, ['P', 'HR', 'P'],
+          `the fixture must render prose + hr + the initial trailing line — got ${JSON.stringify(blocks)}`)
       }
       await resetToasts(evaluate)
       // Click ON the hr (its own element box — the blank area BELOW the last

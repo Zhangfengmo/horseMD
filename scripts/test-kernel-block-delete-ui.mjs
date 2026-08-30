@@ -33,7 +33,7 @@ async function waitFor(fn, message, tries = 80) {
   throw new Error(message)
 }
 
-async function withApp(fixture, body) {
+async function withApp(fixture, body, readyText = '尾段') {
   const root = `/tmp/horsemd-block-delete-${process.pid}-${Math.abs(fixture.length * 7 + fixture.charCodeAt(6))}`
   const file = join(root, 'doc.md')
   await rm(root, { recursive: true, force: true })
@@ -42,7 +42,7 @@ async function withApp(fixture, body) {
   const app = await launchBuiltElectron({ profileDir: join(root, 'profile'), port, appArgs: [file], kernelDefault: true })
   try {
     const { evaluate, send } = app
-    await waitFor(() => evaluate(`(${V})?.textContent?.includes('尾段')`), 'editor mount')
+    await waitFor(() => evaluate(`(${V})?.textContent?.includes(${JSON.stringify(readyText)})`), 'editor mount')
     await waitFor(() => evaluate(`[...document.querySelectorAll('.hm-kernel-mode')].some((n) => n.offsetParent)`), 'kernel mode')
     await sleep(800)
     await evaluate(`(() => {
@@ -213,5 +213,36 @@ await withApp('开头段。\n\n| A | B |\n| --- | --- |\n| 甲甲甲 | 乙乙乙
   const bytes = await save()
   assert.equal(bytes.includes('|'), false, `the table inside the selection must be gone: ${bytes}`)
 })
+
+// 7) THE TABLE AS THE DOCUMENT'S LAST BLOCK (2026-08-30, user: 「整个表格
+//    无法删除」). Before this fix the document mounted with NO line below a
+//    trailing table (plugin-trailing only appends on the first transaction),
+//    so there was nowhere to stand to select it — and even after an edit, the
+//    trailing line's Backspace was claimed by the placeholder machinery,
+//    which dropped the caret INTO the last cell. Now: the trailing line
+//    exists from mount, and Backspace on it SELECTS the table; the second
+//    press deletes it, absorbing the separator on the EOF side.
+await withApp('开头段。\n\n| A | B |\n| --- | --- |\n| 甲 | 乙 |\n', async (ctx) => {
+  const { evaluate, send, save } = ctx
+  const box = await evaluate(`(() => {
+    const e = ${V}
+    const trailing = [...e.querySelectorAll(':scope > p')].reverse().find((p) => p.textContent === '')
+    if (!trailing) return null
+    const r = trailing.getBoundingClientRect()
+    return { x: r.left + 10, y: r.top + r.height / 2 }
+  })()`)
+  assert.ok(box, 'a trailing-table document must mount WITH its trailing line')
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+  await sleep(400)
+  await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+  await sleep(700)
+  assert.equal(await evaluate(`!!document.querySelector('.ProseMirror-selectednode')`), true,
+    'the first Backspace on the trailing line must SELECT the table, not enter a cell')
+  await pressKey(send, { key: 'Backspace', code: 'Backspace' })
+  await sleep(900)
+  await noRefusal(evaluate, 'trailing-table deletion')
+  assert.equal(await save(), '开头段。\n', 'the trailing table deletes cleanly, EOF separator absorbed')
+}, '甲')
 
 console.log('PASS kernel block delete: divider, image, table and block math delete from either side (one press selects, one deletes), the selecting press writes nothing, and the deletion never disturbs its neighbours')

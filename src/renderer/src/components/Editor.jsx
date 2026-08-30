@@ -2229,6 +2229,28 @@ export default function Editor({
           // unprovable document degrades this tab to complete legacy behavior
           // with a visible notification — never a silent half-takeover.
           kernelController?.attachAfterCreate()
+          // A document ENDING in a non-textblock (table, divider, image,
+          // fence) mounts with no line below it — plugin-trailing only
+          // appends its convenience paragraph on the first TRANSACTION, so
+          // until the user edits somewhere, there is nowhere to click below
+          // the block and no way to select it from underneath (measured
+          // 2026-08-30, both modes: 「整个表格无法删除」 — a trailing table
+          // was unreachable). Append the same view-only paragraph
+          // plugin-trailing would: no bytes, no history; the kernel gateway
+          // classifies it `trailing-append` and pairs it as the trailing
+          // placeholder like every other instance of that node.
+          try {
+            const lastChild = view.state.doc.lastChild
+            const lastName = lastChild?.type?.name
+            if (lastName && lastName !== 'paragraph' && lastName !== 'heading') {
+              const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
+              if (paragraph) {
+                const tr = view.state.tr.insert(view.state.doc.content.size, paragraph)
+                tr.setMeta('addToHistory', false)
+                view.dispatch(tr)
+              }
+            }
+          } catch { /* the trailing convenience must never break mounting */ }
           ready = true
           interactionReadyRef.current = true
           try { view.setProps({ editable: () => !readOnlyRef.current }) } catch { /* editor teardown */ }

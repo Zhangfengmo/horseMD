@@ -3460,6 +3460,18 @@ export function createKernelMode({
         return true
       }
     }
+    // The atom-neighbour selection is asked BEFORE the trailing-placeholder
+    // edge (2026-08-30, user: 「整个表格无法删除」): Backspace on the trailing
+    // line below a table used to be claimed by the placeholder machinery,
+    // which moved the caret INTO the table's last cell — so the two-press
+    // select-and-delete could never begin when the table was the document's
+    // last block. The branch fires only when the neighbour is an opaque atom
+    // (hr / image / table / fence / block html), so the list and paragraph
+    // placeholder behaviours are untouched.
+    if ((key === 'Backspace' || key === 'Delete') && state.selection.empty &&
+        selectNeighbourAtomBlock(state, view, key === 'Backspace' ? -1 : 1)) {
+      return true
+    }
     if (commitTrailingPlaceholderEdge(key, state, view) === 'handled') return true
     let offset = kernel.map.pmPosToRaw(state.selection.head)
     // An unmappable caret is FIRST given the native self-heal: if the view
@@ -3567,14 +3579,6 @@ export function createKernelMode({
         return true
       }
       applyKernelTransaction(committed.transaction, view)
-      return true
-    }
-    // See selectNeighbourAtomBlock: one press selects the divider / image /
-    // table / fence / block-math / block-HTML next to the caret, the next
-    // deletes it through the gateway's `delete-blocks` route. Asked before the
-    // router so the paragraph-join refusal can never claim the gesture.
-    if ((key === 'Backspace' || key === 'Delete') && state.selection.empty &&
-        selectNeighbourAtomBlock(state, view, key === 'Backspace' ? -1 : 1)) {
       return true
     }
     let routed = routeStructuralKey(key, {
