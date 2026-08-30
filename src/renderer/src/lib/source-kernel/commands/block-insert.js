@@ -328,11 +328,32 @@ function buildBlock(target, language, ending) {
 //   * anything else -> `no-caret-home-after-insert`, whose message names the
 //     workaround (document end, or a text line below first).
 function caretAfterInsert(candidate, candidateTree, inserted) {
-  const children = candidateTree.children || []
+  // The sibling list the inserted node lives in: root children when the
+  // insert was top-level, the enclosing blockquote's children when it was
+  // quoted (2026-08-30, the quoted /divider). Found by identity, walking
+  // through blockquotes only — the same chain the insert itself used.
+  const siblingsOf = (tree) => {
+    let found = null
+    const walk = (list) => {
+      if (found) return
+      for (const node of list) {
+        if (node === inserted) { found = list; return }
+        if (node.type === 'blockquote') walk(node.children || [])
+      }
+    }
+    walk(tree.children || [])
+    return found
+  }
+  const children = siblingsOf(candidateTree) || []
   const index = children.indexOf(inserted)
   if (index < 0) return { ok: false, code: 'unsupported-structure' }
   const next = children[index + 1] || null
-  if (!next) return { ok: true, anchor: candidate.length }
+  const quoted = children !== (candidateTree.children || []) &&
+    !(candidateTree.children || []).includes(inserted)
+  // No sibling after: at top level the document end is a proven home (the
+  // trailing pair); inside a quote it is not — the named refusal's message
+  // tells the user to add a line below first.
+  if (!next) return quoted ? { ok: false, code: NO_CARET_HOME } : { ok: true, anchor: candidate.length }
   if (next.type !== 'paragraph' && next.type !== 'heading') {
     return { ok: false, code: NO_CARET_HOME }
   }
@@ -854,7 +875,15 @@ export function insertBlockFromQuery({ doc, index, offset, target, language }) {
   // behind it) this command has not proven under a quote prefix.
   let quotePrefix = ''
   if (quoteDepth > 0) {
-    if (built.caretAfter) return { ok: false, code: 'unsupported-structure' }
+    // Caret-AFTER targets used to refuse wholesale here. `/divider` is now
+    // proven (2026-08-30, user: 「引用无法插入分割符」): its quoted caret home
+    // is the NEXT quoted textblock's content anchor, derived below by
+    // `caretAfterInsert`'s quote-chain walk — and when no quoted line
+    // follows, the same NAMED no-caret-home refusal as at top level guides
+    // the user ("add a line below"). `/image` keeps the refusal: its
+    // insertion becomes an image-block ATOM whose quoted caret story is
+    // unproven.
+    if (built.caretAfter && target !== 'divider') return { ok: false, code: 'unsupported-structure' }
     const prefix = quotePrefixOf(text, start, quoteDepth)
     if (prefix === null) return { ok: false, code: 'unsupported-structure' }
     quotePrefix = prefix

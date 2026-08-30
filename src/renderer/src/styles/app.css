@@ -6137,7 +6137,66 @@ body.hm-preserve-soft-breaks
   display: none;
 }
 .milkdown .milkdown-table-block .cell-handle .button-group.hm-table-menu-below {
-  top: calc(100% + 8px);
+  /* When flipped below (table near the viewport top), clear the header row
+     instead of sitting on it — the flipped menu used to cover the first
+     row's text (user screenshot, 2026-08-30). */
+  top: calc(100% + 14px);
+}
+
+/* ---- Table handle visual polish (2026-08-30, user: 「表格的按钮不舒服,视觉
+   能优化一下」 + 「触发按钮的逻辑浮动效果」). Crepe's defaults are a flat
+   surface box with no entry motion; these overrides give the floating pieces
+   real elevation, a soft entrance, and calmer hover states. Layout and the
+   component's own show/hide logic are untouched — colors ride the crepe
+   variables so every theme keeps working. ---- */
+.milkdown .milkdown-table-block .cell-handle {
+  border: 1px solid color-mix(in srgb, var(--crepe-color-outline) 22%, transparent);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 4px 12px rgba(0, 0, 0, 0.08);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+.milkdown .milkdown-table-block .cell-handle:hover {
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.08),
+    0 6px 18px rgba(0, 0, 0, 0.10);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group {
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--crepe-color-outline) 20%, transparent);
+  background-color: color-mix(in srgb, var(--crepe-color-surface) 88%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  backdrop-filter: blur(10px) saturate(1.2);
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.08),
+    0 10px 28px rgba(0, 0, 0, 0.12);
+  padding: 2px;
+}
+/* Entry motion: the group is display-toggled, so a keyframe (not a
+   transition) is what can animate its appearance. */
+@keyframes hm-table-menu-pop {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(0.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+.milkdown .milkdown-table-block .cell-handle .button-group[data-show='true'] {
+  animation: hm-table-menu-pop 0.16s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button {
+  margin: 3px;
+  padding: 5px;
+  border-radius: 7px;
+  transition: background-color 0.12s ease, transform 0.12s ease;
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button:hover {
+  border-radius: 7px;
+  transform: scale(1.06);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button:active {
+  transform: scale(0.94);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button svg {
+  width: 20px;
+  height: 20px;
 }
 /* Large-document virtualization paint-contains each top-level block. Relax it
    only while this table's action menu is open so the menu can float above the

@@ -487,7 +487,23 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   refusesCaretHome('before a standalone image', '/hr\n\n![a](x.png)\n', 3)
   // (h) The generic guards hold for this target too.
   refuses('divider inside a list item', '- /hr\n', 5, 'divider')
-  refuses('divider inside a blockquote', '> /hr\n', 5, 'divider')
+  // FLIPPED 2026-08-30 (user: 「引用无法插入分割符」). A quoted /divider now
+  // INSERTS when a quoted line follows (its caret home — the next quoted
+  // textblock's content anchor, the same rule as top level), and the
+  // quote-END shape gives the NAMED no-caret-home refusal whose message tells
+  // the user to add a line below — better than the old generic refusal.
+  {
+    const { r } = run('> /hr\n', 5, 'divider')
+    assert.equal(r.ok, false, 'divider at a quote END still refuses')
+    assert.equal(r.code, 'no-caret-home-after-insert', 'and names the remedy')
+  }
+  {
+    const src = '> 首行\n>\n> /hr\n>\n> 尾行\n'
+    const { r } = run(src, src.indexOf('/hr') + 3, 'divider')
+    assert.equal(r.ok, true, 'divider MID-quote inserts: ' + (r.code || ''))
+    const editsApplied = src.slice(0, r.transaction.edits[0].from) + r.transaction.edits[0].insert + src.slice(r.transaction.edits[0].to)
+    assert.equal(editsApplied, '> 首行\n>\n> ---\n>\n> 尾行\n', 'the quoted divider spells `> ---`')
+  }
   refuses('divider with an info string', '/hr\n', 3, 'divider', 'x')
   refuses('divider mid-block caret', '/hr tail\n', 3, 'divider')
 }
@@ -1057,9 +1073,16 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
   //     byte-identical.
   insertQuoted('> 甲\n>\n> /math\n', 13, 'math', undefined,
     '> 甲\n>\n> $$\n> \n> $$\n', 11, 'quoted /math below a sibling')
-  // (h) refusals: the caret-after family and /text stay refused in quotes,
-  //     and a list on the chain still refuses everything.
-  refuses('divider inside a quote', '> /hr\n', 5, 'divider')
+  // (h) refusals: /image and /text stay refused in quotes, and a list on the
+  //     chain still refuses everything. /divider moved OUT of this list
+  //     2026-08-30 — its quoted insert is proven (see the flipped case in
+  //     the divider section above); the quote-END shape keeps a NAMED
+  //     no-caret-home refusal.
+  {
+    const { r } = run('> /hr\n', 5, 'divider')
+    assert.equal(r.ok, false)
+    assert.equal(r.code, 'no-caret-home-after-insert')
+  }
   refuses('image inside a quote', '> /image\n', 8, 'image')
   refuses('text inside a quote', '> /text\n', 7, 'text')
   refuses('table inside a quoted list item', '> - /table\n', 10, 'table')
