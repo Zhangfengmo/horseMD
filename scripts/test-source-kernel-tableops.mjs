@@ -15,6 +15,8 @@ import {
   insertTableColumn,
   deleteTableRow,
   deleteTableColumn,
+  moveTableRow,
+  moveTableColumn,
   setTableColumnAlignment,
   TABLE_OP_CODES
 } from '../src/renderer/src/lib/source-kernel/commands/table-ops.js'
@@ -583,6 +585,118 @@ const tableAt = (text) => text.indexOf('| a | b |')
   refuse('trailing prose absorbed as a ragged row',
     D(['| a | b |', '| --- | --- |', '| c | d |', '后面']),
     (c) => insertTableRow({ ...c, offset: 0, rowIndex: 1 }))
+}
+
+// ===========================================================================
+// 11. moveTableRow / moveTableColumn — the drag-reorder as byte permutation.
+//     Row indices are the drag UI's ABSOLUTE indices (0 = header). A header
+//     move refuses with `table-header-row` by DESIGN: upstream
+//     prosemirror-tables permutes content arrays with no header protection,
+//     but in GFM the first row is structurally the header — copying that
+//     would re-label a body row as the header on serialize.
+// ===========================================================================
+const MBASE = [
+  '前文',
+  '',
+  '| h1 | h2 | h3 |',
+  '| --- | :---: | ---: |',
+  '| a1 | a2 | a3 |',
+  '| b1 | b2 | b3 |',
+  '| c1 | c2 | c3 |',
+  '',
+  '后文'
+]
+const mline = (i) => MBASE[i]
+{
+  // (a) Body row 1 → 3, LF and CRLF: whole lines permute, terminators stay
+  // with their slots.
+  for (const eol of ['\n', '\r\n']) {
+    const text = D(MBASE, eol)
+    const c = ctx(text)
+    const r = moveTableRow({ ...c, offset: text.indexOf('| h1'), from: 1, to: 3 })
+    const out = apply(c.doc, r, `move-row 1->3 (${JSON.stringify(eol)})`)
+    assert.equal(out, D([...MBASE.slice(0, 4), mline(5), mline(6), mline(4), ...MBASE.slice(7)], eol))
+    assert.deepEqual(tableShape(out).rows.map((row) => row[0]), ['h1', 'b1', 'c1', 'a1'])
+    assert.deepEqual(tableShape(out).align, [null, 'center', 'right'])
+  }
+}
+{
+  // (b) Body row 3 → 1 (the inverse gesture).
+  const text = D(MBASE)
+  const c = ctx(text)
+  const r = moveTableRow({ ...c, offset: text.indexOf('| h1'), from: 3, to: 1 })
+  const out = apply(c.doc, r, 'move-row 3->1')
+  assert.deepEqual(tableShape(out).rows.map((row) => row[0]), ['h1', 'c1', 'a1', 'b1'])
+}
+{
+  // (c) Header participation refuses with the NAMED code, bytes untouched —
+  // both directions.
+  const text = D(MBASE)
+  const c = ctx(text)
+  for (const [from, to] of [[0, 2], [2, 0]]) {
+    const r = moveTableRow({ ...c, offset: text.indexOf('| h1'), from, to })
+    assert.equal(r.ok, false, `header move ${from}->${to} must refuse`)
+    assert.equal(r.code, TABLE_OP_CODES.HEADER_ROW)
+  }
+  assert.equal(c.doc.text, text)
+}
+{
+  // (d) from === to is a NOOP (no bytes canonicalized for a no-move drop);
+  // out-of-range refuses generically.
+  const text = D(MBASE)
+  const c = ctx(text)
+  assert.deepEqual(moveTableRow({ ...c, offset: text.indexOf('| h1'), from: 2, to: 2 }), { ok: true, noop: true })
+  assert.equal(moveTableRow({ ...c, offset: text.indexOf('| h1'), from: 1, to: 4 }).code, TABLE_OP_CODES.UNSUPPORTED)
+  assert.equal(moveTableColumn({ ...c, offset: text.indexOf('| h1'), from: 0, to: 3 }).code, TABLE_OP_CODES.UNSUPPORTED)
+}
+{
+  // (e) Document-final table WITHOUT a trailing terminator: the final slot
+  // keeps "no terminator" — the moved-in row text ends the document.
+  const lines = MBASE.slice(0, 7)
+  const text = D(lines, '\n', false)
+  const c = ctx(text)
+  const r = moveTableRow({ ...c, offset: text.indexOf('| h1'), from: 1, to: 3 })
+  const out = apply(c.doc, r, 'move-row into unterminated final slot')
+  assert.equal(out, D([...lines.slice(0, 4), mline(5), mline(6), mline(4)], '\n', false))
+  assert.ok(!out.endsWith('\n'))
+}
+{
+  // (f) Column 0 → 2: every physical line re-joins its segments; the
+  // alignment spec travels with its column.
+  const text = D(MBASE)
+  const c = ctx(text)
+  const r = moveTableColumn({ ...c, offset: text.indexOf('| h1'), from: 0, to: 2 })
+  const out = apply(c.doc, r, 'move-col 0->2')
+  assert.equal(out, D([
+    ...MBASE.slice(0, 2),
+    '| h2 | h3 | h1 |',
+    '| :---: | ---: | --- |',
+    '| a2 | a3 | a1 |',
+    '| b2 | b3 | b1 |',
+    '| c2 | c3 | c1 |',
+    ...MBASE.slice(7)
+  ]))
+  assert.deepEqual(tableShape(out).align, ['center', 'right', null])
+}
+{
+  // (g) Column 2 → 0 (the inverse), and an escaped pipe rides its column as
+  // cell CONTENT.
+  const lines = ['| x | y | a\\|b |', '| --- | --- | --- |', '| 1 | 2 | 3 |']
+  const text = D(lines)
+  const c = ctx(text)
+  const r = moveTableColumn({ ...c, offset: 0, from: 2, to: 0 })
+  const out = apply(c.doc, r, 'move-col 2->0 escaped pipe')
+  assert.equal(out, D(['| a\\|b | x | y |', '| --- | --- | --- |', '| 3 | 1 | 2 |']))
+  assert.deepEqual(tableShape(out).rows[0], ['a|b', 'x', 'y'])
+}
+{
+  // (h) Quoted table: whole-line permutation carries each line's `> ` prefix.
+  const lines = ['> | a | b |', '> | --- | --- |', '> | 1 | 2 |', '> | 3 | 4 |']
+  const text = D(lines)
+  const c = ctx(text)
+  const r = moveTableRow({ ...c, offset: text.indexOf('| a'), from: 1, to: 2 })
+  const out = apply(c.doc, r, 'quoted move-row')
+  assert.equal(out, D([lines[0], lines[1], lines[3], lines[2]]))
 }
 
 // ===========================================================================

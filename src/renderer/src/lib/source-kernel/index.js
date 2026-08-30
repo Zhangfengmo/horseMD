@@ -25,6 +25,8 @@ export {
   insertTableColumn,
   deleteTableRow,
   deleteTableColumn,
+  moveTableRow,
+  moveTableColumn,
   setTableColumnAlignment,
   TABLE_OP_CODES
 } from './commands/table-ops.js'

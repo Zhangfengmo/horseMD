@@ -62,7 +62,8 @@ import { buildTableSourceMaps } from '../table-map.js'
 export const TABLE_OP_CODES = Object.freeze({
   UNSUPPORTED: 'table-op-unsupported',
   LAST_ROW: 'table-last-row',
-  LAST_COLUMN: 'table-last-column'
+  LAST_COLUMN: 'table-last-column',
+  HEADER_ROW: 'table-header-row'
 })
 
 const REFUSE = Object.freeze({ ok: false, code: TABLE_OP_CODES.UNSUPPORTED })
@@ -682,6 +683,111 @@ export function setTableColumnAlignment({ doc, offset, columnIndex, alignment })
   })
 }
 
+
+// ---------------------------------------------------------------------------
+// moveTableRow — the row drag-reorder, as a whole-line permutation of the
+// BODY region. `from`/`to` are the drag UI's absolute row indices (0 = the
+// header). Upstream prosemirror-tables' moveRow has NO header protection —
+// it permutes content arrays, header included — but in GFM the first row IS
+// the header structurally, so moving it would silently re-label a body row
+// as the header on serialize. The kernel refuses header participation with
+// its own named code instead of copying that.
+// ---------------------------------------------------------------------------
+export function moveTableRow({ doc, offset, from, to }) {
+  const resolved = resolveBaseline({ doc, offset })
+  if (!resolved) return REFUSE
+  const { text, baselineTree, table, quoteDepth, source, analysis } = resolved
+  const rowCount = analysis.rows.length
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return REFUSE
+  if (from === 0 || to === 0) return { ok: false, code: TABLE_OP_CODES.HEADER_ROW }
+  if (from < 1 || from > rowCount - 1 || to < 1 || to > rowCount - 1) return REFUSE
+  if (from === to) return { ok: true, noop: true }
+
+  // Rebuild the body region as line SLOTS: each slot keeps its own original
+  // terminator (a document-final row without one stays final), and the row
+  // texts are permuted through the slots. Whole physical lines move, so a
+  // quoted table's per-line prefix travels with each row untouched.
+  const body = analysis.rows.slice(1)
+  const texts = body.map((line) => text.slice(line.lineStart, line.lineEnd))
+  const order = body.map((_, i) => i)
+  const [moved] = order.splice(from - 1, 1)
+  order.splice(to - 1, 0, moved)
+  const rebuilt = order.map((src, slot) => texts[src] + body[slot].ending).join('')
+  const first = body[0]
+  const last = body[body.length - 1]
+  const edits = [{ from: first.lineStart, to: last.lineEnd + last.ending.length, insert: rebuilt }]
+
+  return proveAndPackage({
+    doc,
+    text,
+    edits,
+    intent: 'table-move-row',
+    table,
+    baselineTree,
+    baselineSource: source,
+    baselineAnalysis: analysis,
+    quoteDepth,
+    predict: {
+      rowCount,
+      width: analysis.width,
+      align: table.align || [],
+      cellFor: (r, c) => (r === 0 ? { row: 0, column: c } : { row: order[r - 1] + 1, column: c }),
+      caret: { row: to, column: 0 }
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// moveTableColumn — the column drag-reorder: every physical line (header,
+// delimiter, body) re-joins its per-column segments in the new order. Each
+// segment — opening pipe through the byte before the next boundary — moves
+// intact, so cell bytes, padding and the delimiter's alignment spec travel
+// with their column. Columns are structurally symmetric in GFM (unlike
+// rows), so no index is privileged.
+// ---------------------------------------------------------------------------
+export function moveTableColumn({ doc, offset, from, to }) {
+  const resolved = resolveBaseline({ doc, offset })
+  if (!resolved) return REFUSE
+  const { text, baselineTree, table, quoteDepth, source, analysis } = resolved
+  const width = analysis.width
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return REFUSE
+  if (from < 0 || from > width - 1 || to < 0 || to > width - 1) return REFUSE
+  if (from === to) return { ok: true, noop: true }
+
+  const order = Array.from({ length: width }, (_, i) => i)
+  const [moved] = order.splice(from, 1)
+  order.splice(to, 0, moved)
+
+  const lineEdit = (bounds) => ({
+    from: bounds[0],
+    to: bounds[width],
+    insert: order.map((k) => text.slice(bounds[k], bounds[k + 1])).join('')
+  })
+  const edits = []
+  edits.push(lineEdit(analysis.rows[0].boundaries))
+  edits.push(lineEdit(analysis.delimiter.pipes))
+  for (let r = 1; r < analysis.rows.length; r += 1) edits.push(lineEdit(analysis.rows[r].boundaries))
+
+  const align = table.align || []
+  return proveAndPackage({
+    doc,
+    text,
+    edits,
+    intent: 'table-move-column',
+    table,
+    baselineTree,
+    baselineSource: source,
+    baselineAnalysis: analysis,
+    quoteDepth,
+    predict: {
+      rowCount: analysis.rows.length,
+      width,
+      align: order.map((k) => align[k] ?? null),
+      cellFor: (r, c) => ({ row: r, column: order[c] }),
+      caret: { row: 0, column: to }
+    }
+  })
+}
 
 // ENTER INSIDE A TABLE CELL (2026-08-29 matrix sweep). GFM cells are
 // single-line, so the editor's own convention for a break inside one is the

@@ -242,9 +242,81 @@ export function reconcileProjectionRegions({ view, newDoc, regions, mapMeta = nu
 // selection is exactly how PM's own commands behave, and the DOM caret
 // follows correctly. Kept as a callback (not a position parameter) so this
 // module stays free of prosemirror-state imports.
+// Nearest `table` ancestor of a resolved position: its span, the row index
+// the position sits in (null when the position is at the table's own child
+// boundary — i.e. BETWEEN rows), and whether it is deeper than the row
+// (inside a cell).
+function tableLocusAt($pos) {
+  for (let depth = $pos.depth; depth >= 1; depth -= 1) {
+    if ($pos.node(depth).type.name === 'table') {
+      return {
+        start: $pos.before(depth),
+        end: $pos.after(depth),
+        row: $pos.depth > depth ? $pos.index(depth) : null,
+        insideCell: $pos.depth > depth + 1
+      }
+    }
+  }
+  return null
+}
+
+// The pathological shape: the range's ends sit in DIFFERENT rows and at
+// least one is inside a cell — the deep-open slice then crosses a row
+// boundary mid-cell. Row-boundary-aligned multi-row replaces (add/delete
+// row) and same-row/cell edits are the historically safe shapes and stay
+// minimal.
+function crossesRowsInsideCells(a, b) {
+  if (!a || !b) return false
+  if (a.row === null && b.row === null) return false
+  if (a.row === b.row && a.start === b.start) return false
+  return a.insideCell || b.insideCell
+}
+
+// A minimal replace range whose ends land INSIDE table cells produces a
+// deep-open slice across row boundaries; ProseMirror's replace fitting can
+// then close rows with the wrong cell count and prosemirror-tables'
+// fixTables pads the ragged rows with empty cells (measured on the row
+// drag-reorder: bytes right, view grew a third column). Widening each end
+// that sits inside a table to that table's NODE boundary makes the replace
+// node-level — one valid table swaps for another, nothing to pad. The
+// start widening is symmetric by construction (both docs are identical
+// before `start`, so the table starts coincide); each end widens against
+// its own document.
+export function widenReplaceForTables(oldDoc, newDoc, diff) {
+  let { from, to, insertFrom, insertTo } = diff
+  const startOld = tableLocusAt(oldDoc.resolve(from))
+  const endOld = tableLocusAt(oldDoc.resolve(to))
+  const startNew = tableLocusAt(newDoc.resolve(insertFrom))
+  const endNew = tableLocusAt(newDoc.resolve(insertTo))
+  // Only the pathological shape widens — a whole-table replace remounts the
+  // table-block component, so the safe shapes must keep their cheap minimal
+  // range.
+  if (!crossesRowsInsideCells(startOld, endOld) && !crossesRowsInsideCells(startNew, endNew)) {
+    return diff
+  }
+  // Start: everything before `from` (=== `insertFrom`) is a shared prefix,
+  // so a table containing both starts begins at the same position in both
+  // docs — widening reproduces prefix bytes verbatim. Positions differing
+  // means structurally different tables: leave that side alone.
+  if (startOld && startNew && startOld.start === startNew.start) {
+    from = startOld.start
+    insertFrom = startNew.start
+  }
+  // End: everything after `to`/`insertTo` is a shared suffix, so the two
+  // table ends must sit the same distance into it for the widened ranges to
+  // still describe identical content.
+  if (endOld && endNew && endOld.end - to === endNew.end - insertTo) {
+    to = endOld.end
+    insertTo = endNew.end
+  }
+  if (from === diff.from && to === diff.to) return diff
+  return { from, to, insertFrom, insertTo }
+}
+
 export function reconcileProjection({ view, newDoc, mapMeta = null, decorateTransaction = null }) {
-  const diff = diffReplaceRange(view.state.doc, newDoc)
-  if (!diff) return false
+  const minimal = diffReplaceRange(view.state.doc, newDoc)
+  if (!minimal) return false
+  const diff = widenReplaceForTables(view.state.doc, newDoc, minimal)
 
   const { from, to, insertFrom, insertTo } = diff
   const tr = view.state.tr

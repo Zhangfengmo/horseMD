@@ -13,6 +13,8 @@ import {
   addRowAfterCommand,
   addRowBeforeCommand,
   deleteSelectedCellsCommand,
+  moveColCommand,
+  moveRowCommand,
   setAlignCommand
 } from '@milkdown/kit/preset/gfm'
 import { imageBlockConfig } from '@milkdown/kit/component/image-block'
@@ -238,10 +240,12 @@ function kernelSlashInsertRoute(id) {
 // tables dispatch the structural transaction the gateway would veto.
 //
 // Commands deliberately NOT wrapped: selectRowCommand / selectColCommand
-// (selection-only — no bytes, the gateway passes them), and moveRowCommand /
-// moveColCommand (row/col DRAG-reorder — no kernel byte command yet, so the
-// drag keeps dispatching and the gateway's veto stays as the fail-closed
-// net; the drop is refused with a toast, bytes untouched).
+// (selection-only — no bytes, the gateway passes them). moveRowCommand /
+// moveColCommand (the drag-reorder drop) ARE wrapped: body-row and column
+// permutations commit as proven byte rewrites; a HEADER row move refuses
+// with its own named code, because in GFM the first row is structurally the
+// header and upstream's unprotected content permutation would re-label a
+// body row as the header on serialize.
 //
 // Re-registration goes through CommandManager.create(key, fn) — the same
 // channel $command used to register the original, so the override is a
@@ -275,6 +279,8 @@ export function routeTableCommandsThroughKernel(crepe, kernelPlugins) {
   route(addColAfterCommand, 'add-col-after')
   route(deleteSelectedCellsCommand, 'delete-selected')
   route(setAlignCommand, 'align')
+  route(moveRowCommand, 'move-row')
+  route(moveColCommand, 'move-col')
 }
 
 export function applyImageText(ctx, tt) {

@@ -237,6 +237,47 @@ async function openHandleButtons(evaluate, send, row, col, role, message) {
   throw lastError
 }
 
+// Row/col DRAG-reorder. A real hover (CDP mouse) arms the component's
+// hoverIndex; the HTML5 drag itself is dispatched synthetically — CDP mouse
+// events cannot produce DragEvents, and the table-block listens for exactly
+// dragstart (handle) / dragover+drop (window) / dragend. The event stream
+// mirrors a real drag's: start on the handle at the source cell, move over
+// the target, drop.
+async function dragHandleTo(evaluate, send, { fromRow, fromCol, toRow, toCol, role }) {
+  const axis = role === 'row-drag-handle' ? 'y' : 'x'
+  const rect = await waitFor(() => cellRect(evaluate, fromRow, fromCol), `cell (${fromRow},${fromCol}) not found`)
+  const center = {
+    x: rect.left + (rect.right - rect.left) / 2,
+    y: rect.top + (rect.bottom - rect.top) / 2
+  }
+  await hoverForStableHandle(evaluate, send, center, role, null, `${role} did not appear for drag`)
+  const target = await waitFor(() => cellRect(evaluate, toRow, toCol), `cell (${toRow},${toCol}) not found`)
+  const end = {
+    x: axis === 'x' ? target.left + (target.right - target.left) / 2 : center.x,
+    y: axis === 'y' ? target.top + (target.bottom - target.top) / 2 : center.y
+  }
+  await evaluate(`(async () => {
+    const handle = ${HANDLE(role)}
+    if (!handle) return 'no-handle'
+    const ev = (type, x, y) => new DragEvent(type, {
+      bubbles: true, cancelable: true, composed: true,
+      clientX: x, clientY: y, dataTransfer: new DataTransfer()
+    })
+    handle.dispatchEvent(ev('dragstart', ${center.x}, ${center.y}))
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+    const xs = [${center.x}, ${(center.x + end.x) / 2}, ${end.x}]
+    const ys = [${center.y}, ${(center.y + end.y) / 2}, ${end.y}]
+    for (let i = 0; i < xs.length; i += 1) {
+      window.dispatchEvent(ev('dragover', xs[i], ys[i]))
+      await new Promise((r) => setTimeout(r, 80))
+    }
+    window.dispatchEvent(ev('drop', ${end.x}, ${end.y}))
+    window.dispatchEvent(ev('dragend', ${end.x}, ${end.y}))
+    return 'ok'
+  })()`)
+  await sleep(700)
+}
+
 // Row handle -> the single delete button.
 async function deleteRowAt(evaluate, send, row) {
   const buttons = await openHandleButtons(evaluate, send, row, 0, 'row-drag-handle', `delete row ${row}`)
@@ -369,6 +410,39 @@ async function run() {
     await pressKey(send, { key: 'z', code: 'KeyZ', modifiers: 12 })
     await sleep(500)
     await assertSource(evaluate, docOf(afterE, '\n'), 'redo must re-apply the column delete')
+
+    // ============================================================
+    // F2) DRAG-REORDER. Body row 1 -> 2 (丙丁/戊己 swap), then column
+    //     0 -> 1 — the alignment spec must travel with its column. Then a
+    //     HEADER row drag: refused with the NAMED table-header-row toast,
+    //     bytes untouched (upstream would happily re-label a body row as
+    //     the header; the kernel does not copy that). Undo x2 restores
+    //     afterE for the sections downstream.
+    // ============================================================
+    await dragHandleTo(evaluate, send, { fromRow: 1, fromCol: 0, toRow: 2, toCol: 0, role: 'row-drag-handle' })
+    const afterRowMove = ['| 甲 | 乙 |', '| :---: | --- |', '| 戊 | 己 |', '| 丙 | 丁 |']
+    assert.deepEqual((await tableShape(evaluate))?.rows,
+      [['甲', '乙'], ['戊', '己'], ['丙', '丁']], 'row drag must swap the two body rows in the view')
+    await assertSource(evaluate, docOf(afterRowMove, '\n'), 'row drag bytes (whole-line permutation)')
+
+    await dragHandleTo(evaluate, send, { fromRow: 0, fromCol: 0, toRow: 0, toCol: 1, role: 'col-drag-handle' })
+    const afterColMove = ['| 乙 | 甲 |', '| --- | :---: |', '| 己 | 戊 |', '| 丁 | 丙 |']
+    assert.deepEqual((await tableShape(evaluate))?.rows,
+      [['乙', '甲'], ['己', '戊'], ['丁', '丙']], 'col drag must swap the columns in the view')
+    await assertSource(evaluate, docOf(afterColMove, '\n'), 'col drag bytes (the :---: spec travels with its column)')
+
+    await dragHandleTo(evaluate, send, { fromRow: 0, fromCol: 0, toRow: 2, toCol: 0, role: 'row-drag-handle' })
+    const headerToast = await waitFor(() => evaluate(`document.querySelector('.hm-toast .hm-toast-msg')?.textContent || null`),
+      'dragging the header row must raise the named refusal toast')
+    assert.ok(/表头|header/.test(headerToast), `the toast must be the table-header-row message, got ${JSON.stringify(headerToast)}`)
+    await assertSource(evaluate, docOf(afterColMove, '\n'), 'the refused header drag must not change the bytes')
+
+    await evaluate(`(${VISIBLE_EDITOR})?.focus()`)
+    for (let i = 0; i < 2; i += 1) {
+      await pressKey(send, { key: 'z', code: 'KeyZ', modifiers: 4 })
+      await sleep(500)
+    }
+    await assertSource(evaluate, docOf(afterE, '\n'), 'undo x2 must restore the pre-drag bytes byte-for-byte')
 
     // ============================================================
     // G) DELETE row 戊己, then attempt to delete the ONLY remaining body row:

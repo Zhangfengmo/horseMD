@@ -9,7 +9,8 @@ import { Schema } from '@milkdown/prose/model'
 import { EditorState } from '@milkdown/prose/state'
 import {
   diffReplaceRange,
-  reconcileProjection
+  reconcileProjection,
+  widenReplaceForTables
 } from '../src/renderer/src/components/editor-kernel-reconciler.js'
 
 const schema = new Schema({
@@ -200,4 +201,129 @@ function makeStubView(initialDoc) {
 }
 
 console.log('PASS reconcileProjection (3 cases)')
+
+// --- widenReplaceForTables: table-interior diffs replace whole tables ------
+//
+// A row PERMUTATION (the drag-reorder) puts both minimal-diff ends INSIDE
+// cell text; the deep-open slice then crosses row boundaries and
+// ProseMirror's replace fitting can close rows with the wrong cell count
+// (measured in the built app: bytes right, fixTables padded a third
+// column). The widening makes the replace node-level. The master invariant
+// here is structural: after reconcile the view equals newDoc — including
+// per-row cell counts.
+const tSchema = new Schema({
+  nodes: {
+    doc: { content: 'block+' },
+    paragraph: { content: 'inline*', group: 'block' },
+    table: { content: 'table_row+', group: 'block', tableRole: 'table' },
+    table_row: { content: 'table_cell+', tableRole: 'row' },
+    table_cell: { content: 'paragraph+', tableRole: 'cell' },
+    text: { group: 'inline' }
+  }
+})
+const tText = (v) => (v ? tSchema.text(v) : null)
+const tPara = (v) => tSchema.node('paragraph', null, tText(v))
+const tCell = (v) => tSchema.node('table_cell', null, tPara(v))
+const tRow = (...cells) => tSchema.node('table_row', null, cells.map(tCell))
+const tTable = (...rows) => tSchema.node('table', null, rows)
+const tDoc = (...blocks) => tSchema.node('doc', null, blocks)
+const tStubView = (initialDoc) => {
+  const view = {
+    state: EditorState.create({ schema: tSchema, doc: initialDoc }),
+    dispatchCount: 0,
+    lastTr: null,
+    dispatch(tr) {
+      view.dispatchCount += 1
+      view.lastTr = tr
+      view.state = view.state.apply(tr)
+    }
+  }
+  return view
+}
+const rowCellCounts = (docNode) => {
+  const counts = []
+  docNode.descendants((node) => {
+    if (node.type.name === 'table_row') counts.push(node.childCount)
+    return true
+  })
+  return counts
+}
+
+// Case 12: body-row swap — both diff ends inside cell text. The widened
+// replace must land the exact permuted table: every row keeps 2 cells.
+{
+  const oldDoc = tDoc(
+    tPara('前'),
+    tTable(tRow('甲', '乙'), tRow('丙', '丁'), tRow('戊', '己')),
+    tPara('后')
+  )
+  const newDoc = tDoc(
+    tPara('前'),
+    tTable(tRow('甲', '乙'), tRow('戊', '己'), tRow('丙', '丁')),
+    tPara('后')
+  )
+  const widened = widenReplaceForTables(oldDoc, newDoc, diffReplaceRange(oldDoc, newDoc))
+  assert.equal(oldDoc.resolve(widened.from).depth, 0, 'widened start must sit at the table node boundary')
+  assert.equal(oldDoc.resolve(widened.to).depth, 0, 'widened end must sit at the table node boundary')
+  const view = tStubView(oldDoc)
+  assert.equal(reconcileProjection({ view, newDoc }), true)
+  assert.ok(view.state.doc.eq(newDoc), 'reconcile must land the permuted table exactly')
+  assert.deepEqual(rowCellCounts(view.state.doc), [2, 2, 2], 'no row may gain or lose cells')
+}
+
+// Case 13: column swap (every row changes, first/last rows included).
+{
+  const oldDoc = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁')), tPara('后'))
+  const newDoc = tDoc(tTable(tRow('乙', '甲'), tRow('丁', '丙')), tPara('后'))
+  const view = tStubView(oldDoc)
+  assert.equal(reconcileProjection({ view, newDoc }), true)
+  assert.ok(view.state.doc.eq(newDoc))
+  assert.deepEqual(rowCellCounts(view.state.doc), [2, 2])
+}
+
+// Case 14: a diff OUTSIDE any table is returned untouched (the hot text
+// path pays two resolves and nothing else).
+{
+  const oldDoc = tDoc(tPara('甲'), tTable(tRow('丙', '丁')), tPara('乙'))
+  const newDoc = tDoc(tPara('甲'), tTable(tRow('丙', '丁')), tPara('乙丁'))
+  const minimal = diffReplaceRange(oldDoc, newDoc)
+  assert.deepEqual(widenReplaceForTables(oldDoc, newDoc, minimal), minimal)
+}
+
+// Case 14b: SAFE table shapes stay minimal — a whole-table replace remounts
+// the table-block component, so widening must fire only on the pathological
+// cross-row-inside-cell shape. (b1) a text edit inside one cell; (b2) a
+// whole-row delete (boundary-aligned); (b3) a whole-row append.
+{
+  const b1old = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁')))
+  const b1new = tDoc(tTable(tRow('甲', '乙'), tRow('丙丙', '丁')))
+  const m1 = diffReplaceRange(b1old, b1new)
+  assert.deepEqual(widenReplaceForTables(b1old, b1new, m1), m1, 'in-cell edit must stay minimal')
+
+  const b2old = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁'), tRow('戊', '己')))
+  const b2new = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁')))
+  const m2 = diffReplaceRange(b2old, b2new)
+  assert.deepEqual(widenReplaceForTables(b2old, b2new, m2), m2, 'row delete must stay minimal')
+  const v2 = tStubView(b2old)
+  assert.equal(reconcileProjection({ view: v2, newDoc: b2new }), true)
+  assert.ok(v2.state.doc.eq(b2new))
+
+  const b3old = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁')))
+  const b3new = tDoc(tTable(tRow('甲', '乙'), tRow('丙', '丁'), tRow('x', 'y')))
+  const m3 = diffReplaceRange(b3old, b3new)
+  assert.deepEqual(widenReplaceForTables(b3old, b3new, m3), m3, 'row append must stay minimal')
+}
+
+// Case 15: table -> non-table structural change (the whole table deleted):
+// asymmetric ends must not desynchronize — the widened diff still
+// reproduces newDoc via the master invariant.
+{
+  const oldDoc = tDoc(tPara('甲'), tTable(tRow('丙', '丁')), tPara('乙'))
+  const newDoc = tDoc(tPara('甲'), tPara('乙'))
+  const view = tStubView(oldDoc)
+  assert.equal(reconcileProjection({ view, newDoc }), true)
+  assert.ok(view.state.doc.eq(newDoc), 'table deletion must still reconcile exactly')
+}
+
+console.log('PASS widenReplaceForTables (4 cases)')
 console.log('PASS kernel reconciler')

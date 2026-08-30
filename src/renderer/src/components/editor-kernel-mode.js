@@ -72,6 +72,8 @@ import {
   insertTableColumn,
   deleteTableRow,
   deleteTableColumn,
+  moveTableRow,
+  moveTableColumn,
   setTableColumnAlignment,
   TABLE_OP_CODES,
   toggleInlineMark,
@@ -4459,6 +4461,15 @@ export function createKernelMode({
         notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
         return true
       }
+    } else if (kind === 'move-row' || kind === 'move-col') {
+      // The drag handle's payload carries the absolute indices (row 0 = the
+      // header); the preceding selectRowCommand/selectColCommand dispatch
+      // already put the selection in the table, so rect/rawOffset above are
+      // the dragged table's.
+      const payload = request?.payload || {}
+      routed = kind === 'move-row'
+        ? moveTableRow({ doc, offset: rawOffset, from: payload.from, to: payload.to })
+        : moveTableColumn({ doc, offset: rawOffset, from: payload.from, to: payload.to })
     } else {
       notifyBlocked(TABLE_OP_CODES.UNSUPPORTED)
       return true
