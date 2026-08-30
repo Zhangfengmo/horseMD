@@ -1834,6 +1834,8 @@ export function createKernelMode({
       empty: true
     })
     if (!routed.ok) {
+      // The whole-empty quote's silent no-op: consume the key, no toast.
+      if (routed.code === KERNEL_CODES.SILENT_NO_OP) return true
       notifyBlocked(routed.code)
       return false
     }

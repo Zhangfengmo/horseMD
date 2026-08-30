@@ -2350,3 +2350,62 @@ console.log('PASS source-kernel commands (link: wrap/unwrap/url+title edits, pro
 }
 
 console.log('PASS source-kernel commands (whole-branch review: link-boundary wraps + CRLF bisection chokepoint)')
+
+// ===========================================================================
+// QUOTE-LINE ENTER ROUTING (2026-08-30/31). Three-way split, all through the
+// router (the reachable-from-a-keypress surface):
+//   * a WHOLE-empty quote (`> ` and nothing else — a freshly created quote
+//     the user has not written into) answers the SILENT no-op: Enter must
+//     neither delete the quote nor fall through to splitTextBlock
+//     (2026-08-31 user decision 「改成不退」; Backspace remains the keyboard
+//     delete for it);
+//   * a blank quote line in a quote that KEEPS content lines is the staged
+//     exit (exit-empty-quote-line — the deletion is proven to remove only
+//     blank quote lines);
+//   * the quote-only-line guard: at the `> ` line's end boundary listItemAt
+//     still claims a neighbouring list whose mdast span touches the
+//     boundary — the router must not route the caret into split-list-item
+//     there (measured 2026-08-30: it manufactured `> - [ ]  ` and tossed
+//     the caret out of the quote).
+// ===========================================================================
+{
+  const route = (text, offset) => routeStructuralKey('Enter', {
+    doc: createMarkdownDocument(text),
+    index: buildSyntaxIndex(text),
+    offset,
+    empty: true
+  })
+
+  // Whole-empty quote, mid-document and at the document end: silent no-op.
+  assert.deepEqual(route('前文\n\n> \n\n尾段。\n', 6), { ok: false, code: 'silent-no-op' },
+    'a fresh empty quote must swallow Enter, not exit')
+  assert.deepEqual(route('前文\n\n>\n\n尾段。\n', 5), { ok: false, code: 'silent-no-op' },
+    'the bare-> spelling gets the same no-op')
+  assert.deepEqual(route('前文\n\n> \n', 6), { ok: false, code: 'silent-no-op' },
+    'a document-final empty quote gets the same no-op')
+
+  // A quote that keeps content: the blank tail line still EXITS.
+  {
+    const text = '> 甲\n>\n> \n\n尾段。\n'
+    const r = route(text, 8)
+    assert.equal(r.ok, true, `content quote's blank line must exit, got ${r.code}`)
+    assert.equal(r.transaction.intent, 'exit-empty-quote-line')
+    const applied = applySourceTransaction(createMarkdownDocument(text), r.transaction)
+    assert.equal(applied.doc.text, '> 甲\n\n\n尾段。\n',
+      'the exit removes the blank quote lines and nothing else')
+  }
+
+  // The boundary guard: a trailing `> ` line right below a nested task list
+  // (the staged-exit shape) must route to the quote answer, never to
+  // split-list-item.
+  {
+    const text = '> - [ ] 甲\n>   - [ ] 乙\n> \n\n尾段。\n'
+    const off = text.indexOf('> \n') + 2
+    const r = route(text, off)
+    assert.equal(r.ok, true, `the trailing quote line must exit, got ${r.code}`)
+    assert.equal(r.transaction.intent, 'exit-empty-quote-line',
+      'the neighbouring list must not claim the quote-only line')
+  }
+}
+
+console.log('PASS source-kernel commands (quote-line Enter: whole-empty quote swallows, content quote exits staged, list-boundary guard holds)')

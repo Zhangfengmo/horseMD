@@ -585,6 +585,13 @@ export function exitEmptyQuoteLine({ doc, index, offset }) {
   const before = countQuotes(baseTree)
   const after = countQuotes(candTree)
   if (after !== before && after !== before - 1) return { ok: false, code: 'unsupported-structure' }
+  // The deletion would remove a whole blockquote: the quote is ONLY this
+  // blank line — a freshly created quote the user has not written into yet.
+  // Enter must NOT throw it away (2026-08-31 user decision: 「改成不退」);
+  // the key is swallowed silently, the caret stays, and Backspace remains
+  // the keyboard way to delete the empty quote. The exit below now runs
+  // only for a quote that still keeps content lines.
+  if (after === before - 1) return { ok: false, code: 'silent-no-op' }
   return txn(doc, from, to, '', 'exit-empty-quote-line', from)
 }
 

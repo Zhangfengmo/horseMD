@@ -115,7 +115,10 @@ export function routeStructuralKey(key, ctx) {
       // `exitEmptyQuoteLine` for the measured before/after.
       {
         const quoteExit = exitEmptyQuoteLine(ctx)
-        if (quoteExit.ok) return quoteExit
+        // The silent no-op (a WHOLE-empty quote's Enter, 2026-08-31) must
+        // propagate — falling through to splitTextBlock would write the very
+        // split the no-op exists to withhold.
+        if (quoteExit.ok || quoteExit.code === 'silent-no-op') return quoteExit
       }
       return splitTextBlock(ctx)
     case 'Tab': {

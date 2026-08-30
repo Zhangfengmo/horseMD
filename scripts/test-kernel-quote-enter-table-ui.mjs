@@ -109,7 +109,13 @@ await withApp('开头段。\n\n> 引用内容\n\n尾段。\n', async (ctx) => {
     'the second Enter leaves the quote and takes its empty lines with it')
 })
 
-// 1c) A standalone empty quote: one Enter and it is gone.
+// 1c) A standalone (whole-empty) quote: Enter is a SILENT NO-OP.
+//     FLIPPED 2026-08-31 (user decision 「改成不退」): this case used to pin
+//     "one Enter and the quote is gone" — a freshly created quote the user
+//     had not written into was thrown away by the very key that elsewhere
+//     CONTINUES a quote, and the user hit exactly that. Now the key is
+//     swallowed (no toast, no bytes), typing fills the quote's first line,
+//     and Backspace remains the keyboard way to delete the empty quote.
 await withApp('开头段。\n\n>\n\n尾段。\n', async (ctx) => {
   const { send, save, noRefusal, evaluate } = ctx
   const box = await evaluate(`(() => {
@@ -125,8 +131,8 @@ await withApp('开头段。\n\n>\n\n尾段。\n', async (ctx) => {
   await send('Input.insertText', { text: '甲' })
   await sleep(800)
   await noRefusal('Enter in a standalone empty quote')
-  assert.equal(await save(), '开头段。\n\n甲\n\n尾段。\n',
-    'an empty quote is left behind entirely, and the typing lands where it stood')
+  assert.equal(await save(), '开头段。\n\n>甲\n\n尾段。\n',
+    'Enter is swallowed and the typing fills the quote\'s first line — the quote survives')
 })
 
 // 2a) An EMPTY table: Backspace at the first cell's start deletes it.
