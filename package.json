@@ -385,14 +385,12 @@
         {
           "ext": "md",
           "name": "Markdown Document",
-          "role": "Editor",
-          "icon": "build/icon.ico"
+          "role": "Editor"
         },
         {
           "ext": "markdown",
           "name": "Markdown Document",
-          "role": "Editor",
-          "icon": "build/icon.ico"
+          "role": "Editor"
         }
       ]
     },
