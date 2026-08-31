@@ -359,7 +359,47 @@ export function indentListItem({ doc, index, offset }) {
     return { from: at, to: at, insert: pad }
   })
   const refused = provenNestingOnly(index.text, edits, item)
-  if (!refused) return multiTxn(doc, edits, 'indent-list-item', offset)
+  if (!refused) {
+    // ORDINAL CONTINUATION (2026-08-31 user report: Tab 降级后「标号没有
+    // 修改」). The pad alone keeps the item's AUTHORED number, and this
+    // kernel displays authored ordinals faithfully — so a `3.` demoted
+    // under a sublist ending in `1.` reads 1, 3. The Typora gesture
+    // renumbers the demoted item to CONTINUE its destination run (last
+    // nested ordered sibling + 1; 1 when it opens the sublist). Proven the
+    // same way as the pad, and only taken when provable — an unprovable
+    // rewrite falls back to the plain pad, which was already accepted.
+    if (item.ordered) {
+      const targetIndentLen = item.indent.length + width
+      let lastNumber = null
+      for (let li = item.markerLineIndex - 1; li > prev.markerLineIndex; li -= 1) {
+        const line = index.lines[li]
+        const body = index.text.slice(line.start + item.quotePrefix.length, line.end)
+        const match = body.match(/^([ ]*)(\d+)([.)])[ \t]/)
+        if (match && match[1].length === targetIndentLen) {
+          lastNumber = Number(match[2])
+          break
+        }
+      }
+      const desired = lastNumber === null ? 1 : lastNumber + 1
+      if (desired !== item.ordered.number) {
+        const markerLine = index.lines[item.markerLineIndex]
+        const prefixEnd = markerLine.start + item.quotePrefix.length
+        const renumbered = rows.map((i) => {
+          const at = index.lines[i].start + item.quotePrefix.length
+          if (i !== item.markerLineIndex) return { from: at, to: at, insert: pad }
+          return {
+            from: prefixEnd,
+            to: prefixEnd + item.indent.length + item.marker.length,
+            insert: pad + item.indent + String(desired) + item.ordered.delimiter
+          }
+        })
+        if (!provenNestingOnly(index.text, renumbered, item)) {
+          return multiTxn(doc, renumbered, 'indent-list-item', offset)
+        }
+      }
+    }
+    return multiTxn(doc, edits, 'indent-list-item', offset)
+  }
 
   // ORDERED-MARKER RESCUE (2026-08-22, from a user report with both refusal
   // toasts on screen). When the indented line opens a NEW sublist directly

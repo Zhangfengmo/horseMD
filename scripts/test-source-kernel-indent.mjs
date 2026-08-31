@@ -612,3 +612,40 @@ console.log('PASS source-kernel delete + router')
 }
 
 console.log('PASS source-kernel delete + router (list-boundary guard)')
+
+// ORDINAL CONTINUATION on Tab (2026-08-31 user report: 「一级的开头按 tab,
+// 退到二级,但是这个时候标号没有修改」). A demoted ORDERED item continues
+// its destination run — last nested ordered sibling + 1, or 1 when it
+// opens the sublist — instead of keeping the authored top-level number
+// (this kernel displays authored ordinals faithfully, so `3.` after a
+// nested `1.` read 1, 3).
+{
+  const run = (text, at) => {
+    const off = text.indexOf(at)
+    const r = indentListItem({ doc: createMarkdownDocument(text), index: buildSyntaxIndex(text), offset: off })
+    assert.equal(r.ok, true, `indent must accept: ${r.code}`)
+    return applySourceTransaction(createMarkdownDocument(text), r.transaction).doc.text
+  }
+  assert.equal(
+    run('1. 你是谁\n   1. 12321312\n2. 23121\n   1. 213123\n3. 我抄了\n', '我抄了'),
+    '1. 你是谁\n   1. 12321312\n2. 23121\n   1. 213123\n   2. 我抄了\n',
+    'the demoted item continues the destination sublist (1 -> 2)')
+  assert.equal(
+    run('1. 甲\n2. 乙\n3. 丙\n', '丙'),
+    '1. 甲\n2. 乙\n   1. 丙\n',
+    'opening a fresh sublist renumbers to 1')
+  assert.equal(
+    run('1. 甲\n   1. x\n   2. y\n2. 乙\n', '乙'),
+    '1. 甲\n   1. x\n   2. y\n   3. 乙\n',
+    'a longer destination run continues at its tail + 1')
+  assert.equal(
+    run('1) 甲\n2) 乙\n', '乙'),
+    '1) 甲\n   1) 乙\n',
+    'the item keeps its own paren delimiter')
+  assert.equal(
+    run('- 甲\n- 乙\n', '乙'),
+    '- 甲\n  - 乙\n',
+    'bullet items are untouched by the ordinal logic')
+}
+
+console.log('PASS source-kernel indent: demoted ordered items continue the destination run')
