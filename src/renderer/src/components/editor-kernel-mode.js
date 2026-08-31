@@ -1384,6 +1384,7 @@ export function createKernelMode({
         //     debouncing would leave it refusing keystrokes for the whole
         //     interval (Case I5's dissolve pin).
         const hadPlaceholders = splitPlaceholders.length > 0
+        const priorPlaceholders = splitPlaceholders
         // An emptying delete on a root/quote paragraph opens a placeholder
         // session for the surviving empty PM paragraph (the gateway's
         // `emptiedBlock` voucher) — the same session Enter opens, so typing
@@ -1405,6 +1406,7 @@ export function createKernelMode({
         } else {
           requestVerify(newState?.doc, caretRide, newState?.selection?.head)
         }
+        reclaimAbandonedQuoteLines(getView?.(), priorPlaceholders, committed.transaction, caretRide)
         onChange?.(kernel.doc.text, false)
         return undefined
       }
@@ -1731,6 +1733,91 @@ export function createKernelMode({
   // invert that command byte-for-byte (shrinkSplitPlaceholder); vouchers
   // without a span (an emptied paragraph, an exit anchor on a pre-existing
   // line) take shrinkBlankRun's one-line fallback instead.
+  // ABANDONED-SESSION RECLAIM (2026-08-31, user: 「立即修复」the leftover
+  // blank quote lines). A split-placeholder session that ends WITHOUT being
+  // filled — the user clicked away and typed somewhere else — leaves the
+  // session-written blank quote lines (`\n>` / `\n> `) in the bytes: the
+  // view never shows them (CommonMark renders nothing for a blank quote
+  // line), so source and rich drift apart visually. Legacy cannot
+  // accumulate them (its serializer rewrites the whole document); the
+  // kernel reclaims exactly what the SESSION wrote, nothing authored:
+  //   * only spans recorded by the voucher (`writtenFrom/To` — the same
+  //     record the placeholder-Backspace reclaim uses) are candidates;
+  //   * a session the ending commit FILLED (an edit touching the span or
+  //     the anchor) is not abandoned — skipped;
+  //   * the span is re-checked byte-for-byte to still be blank quote lines
+  //     after adjusting for the ending commit's own deltas; any overlap or
+  //     mismatch skips (fail-closed: leftovers are legal, deletion of a
+  //     wrong byte is not);
+  //   * the reclaim is an ordinary RECORDED kernel transaction (its own
+  //     undo step — an unrecorded byte change would corrupt the source
+  //     history's inverse replay).
+  let reclaimRunning = false
+  const reclaimAbandonedQuoteLines = (view, priorPlaceholders, endingTxn, caretFallback = null) => {
+    if (globalThis.__hmReclaimDebug) pushKernelDiagnostic({ type: 'reclaim-enter', prior: priorPlaceholders?.length ?? -1, splits: splitPlaceholders.length, running: reclaimRunning, hasView: !!view })
+    if (reclaimRunning || !view || !Array.isArray(priorPlaceholders) || !priorPlaceholders.length) return
+    if (splitPlaceholders.length) return
+    const edits = Array.isArray(endingTxn?.edits)
+      ? endingTxn.edits
+      : Number.isFinite(endingTxn?.from)
+        ? [{ from: endingTxn.from, to: endingTxn.to, insert: endingTxn.insert || '' }]
+        : []
+    const entry = priorPlaceholders[priorPlaceholders.length - 1]
+    const dbg = (why, extra) => { if (globalThis.__hmReclaimDebug) pushKernelDiagnostic({ type: 'reclaim-bail', why, ...extra }) }
+    if (!Number.isFinite(entry?.writtenFrom) || !Number.isFinite(entry?.writtenTo)) return dbg('no-written', { keys: Object.keys(entry || {}) })
+    let from = entry.writtenFrom
+    let to = entry.writtenTo
+    for (const edit of edits) {
+      const editTo = Number.isFinite(edit.to) ? edit.to : edit.from
+      if (edit.from < to && editTo > from) return dbg('overlap', { ef: edit.from, et: editTo, from, to })
+      // An insert AT the span's end (`edit.from === rawOffset`) is the FILL
+      // gesture — unless it starts with a line ending: a fill is typed
+      // content (a newline there is Enter, which extends the session, never
+      // fills it), while the trailing-pair commit's `\n\n…` separator
+      // legitimately lands at the same offset (measured: it blocked the
+      // reclaim entirely).
+      if (edit.from === to && !/^[\r\n]/.test(edit.insert || '')) return dbg('fill', { ef: edit.from, ins: (edit.insert || '').slice(0, 3) })
+      if (editTo <= from) {
+        const delta = (edit.insert || '').length - (editTo - edit.from)
+        from += delta
+        to += delta
+      }
+    }
+    const text = kernel.doc.text
+    if (from < 0 || to > text.length || to <= from) return dbg('bounds', { from, to, len: text.length })
+    if (!/^(?:\r?\n[ \t]*(?:>[ \t]*)+)+$/.test(text.slice(from, to))) return dbg('shape', { span: text.slice(from, to).slice(0, 12) })
+    let caretRaw = null
+    try {
+      caretRaw = kernel.map?.pmPosToRaw?.(view.state.selection.head)
+    } catch {
+      caretRaw = null
+    }
+    // The ending commit can leave the map mid-repair (the orphaned
+    // placeholder fails the rebind until verify runs) — its own committed
+    // selection anchor is the reliable fallback.
+    if (!Number.isFinite(caretRaw) && Number.isFinite(endingTxn?.selection?.anchor)) {
+      caretRaw = endingTxn.selection.anchor
+    }
+    if (!Number.isFinite(caretRaw) && Number.isFinite(caretFallback)) caretRaw = caretFallback
+    if (!Number.isFinite(caretRaw)) return dbg('caret-null', {})
+    if (caretRaw > from && caretRaw <= to) return dbg('caret-inside', { caretRaw, from, to })
+    const anchor = caretRaw > to ? caretRaw - (to - from) : caretRaw
+    reclaimRunning = true
+    try {
+      applyKernelTransaction({
+        baseRevision: kernel.doc.revision,
+        edits: [{ from, to, insert: '' }],
+        intent: 'reclaim-quote-line',
+        selection: { anchor, head: anchor }
+      }, view)
+      pushKernelDiagnostic({ type: 'quote-line-reclaimed', from, to })
+    } catch {
+      pushKernelDiagnostic({ type: 'quote-line-reclaim-failed', from, to })
+    } finally {
+      reclaimRunning = false
+    }
+  }
+
   const materializePlaceholder = (view, insertPos, rawOffset, insertPrefix = '', written = null) => {
     try {
       const paragraph = view.state.schema?.nodes?.paragraph?.createAndFill?.()
@@ -2416,6 +2503,7 @@ export function createKernelMode({
   }
 
   const applyKernelTransaction = (txn, view, { record = true, requireMap = false, repairOnUnmapped = false } = {}) => {
+    const priorPlaceholders = splitPlaceholders
     const result = applySourceTransaction(kernel.doc, txn)
     if (!result.ok) {
       notifyBlocked(result.code)
@@ -2614,6 +2702,7 @@ export function createKernelMode({
       // misplaced continuation keystroke is diagnosable instead of silent.
       pushKernelDiagnostic({ type: 'caret-unmappable', intent: txn.intent, rawOffset: anchor })
     }
+    reclaimAbandonedQuoteLines(view, priorPlaceholders, txn, anchor)
     onChange?.(kernel.doc.text, false)
     return true
   }

@@ -134,6 +134,33 @@ await withApp('尾段。\n\n>你好啊', async (ctx) => {
     'the typed character continues the quote — never a paragraph outside it')
 })
 
+// 1e) ABANDONED-SESSION RECLAIM (2026-08-31, user: 「立即修复」). Enter in a
+//     quote opens the in-quote placeholder session and writes its blank
+//     quote lines; CLICKING AWAY and typing somewhere else abandons the
+//     session — the session-written `>` lines must be reclaimed (legacy
+//     cannot accumulate them; the kernel deletes exactly what the session
+//     wrote, as a recorded transaction). The typed edit itself lands where
+//     the caret shows it.
+await withApp('> 引用内容\n\n尾段。\n', async (ctx) => {
+  const { send, save, noRefusal, evaluate } = ctx
+  await clickQuoteEnd(ctx)
+  await pressKey(send, { key: 'Enter', code: 'Enter' })
+  await sleep(800)
+  const tail = await evaluate(`(() => {
+    const p = [...(${V}).querySelectorAll('p')].find((n) => n.textContent.includes('尾段'))
+    const r = p.getBoundingClientRect()
+    return { x: r.right - 3, y: r.top + r.height / 2 }
+  })()`)
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: tail.x, y: tail.y, button: 'left', clickCount: 1 })
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: tail.x, y: tail.y, button: 'left', clickCount: 1 })
+  await sleep(500)
+  await send('Input.insertText', { text: '甲' })
+  await sleep(800)
+  await noRefusal('typing away from an abandoned quote session')
+  assert.equal(await save(), '> 引用内容\n\n尾段。甲\n',
+    'the abandoned session\'s blank quote lines are reclaimed; the typed byte lands where the caret showed it')
+})
+
 // 1c) A standalone (whole-empty) quote: Enter is a SILENT NO-OP.
 //     FLIPPED 2026-08-31 (user decision 「改成不退」): this case used to pin
 //     "one Enter and the quote is gone" — a freshly created quote the user
