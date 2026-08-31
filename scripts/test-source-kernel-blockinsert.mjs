@@ -1124,6 +1124,21 @@ refuses('caret on a blank line', '甲\n\n\n', 3, 'table')
     assert.equal(r.quotePlaceholder, true)
     assert.equal(apply(c.doc, r), '> \n', 'the query line becomes the blank quote line')
   }
+  // BELOW a quoted list (2026-08-31, the recursive-clamp review): the
+  // deletion moves the list's RECORDED end (neighbour-dependent
+  // bookkeeping), which used to fail signThroughQuotes — the signature now
+  // clamps container ends like every other axis-(b) walk.
+  {
+    const { c, r } = run('> - 甲\n>\n> /text\n', '> - 甲\n>\n> /text\n'.indexOf('/text') + 5, 'text')
+    assert.equal(r.ok, true, '/text below a flat quoted list: ' + (r.code || ''))
+    assert.equal(apply(c.doc, r), '> - 甲\n>\n> \n')
+  }
+  {
+    const src = '> - 甲\n>   - 乙\n>\n> /text\n'
+    const { c, r } = run(src, src.indexOf('/text') + 5, 'text')
+    assert.equal(r.ok, true, '/text below a NESTED quoted list: ' + (r.code || ''))
+    assert.equal(apply(c.doc, r), '> - 甲\n>   - 乙\n>\n> \n')
+  }
   refuses('text inside a quoted list item', '> - /text\n', 9, 'text')
   refuses('table inside a quoted list item', '> - /table\n', 10, 'table')
 }

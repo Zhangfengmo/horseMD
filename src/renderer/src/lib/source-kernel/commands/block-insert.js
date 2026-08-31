@@ -419,13 +419,20 @@ function revertQuotedText({ doc, index, start, end }) {
   // block, and the blockquote COUNT is asserted unchanged — the quote
   // itself must survive the revert.
   const shift = end - start
-  const signThroughQuotes = (tree, skipQuery) => {
+  const signThroughQuotes = (tree, skipQuery, sourceText) => {
     const parts = []
     let ok = true
     const walk = (node) => {
       if (!ok) return
       const s = node.position?.start?.offset
-      const e = node.position?.end?.offset
+      // Container-end bookkeeping is neighbour-dependent (a quoted list's
+      // recorded end moves when the block BELOW it changes — measured: the
+      // deletion pulled it from 7 to 10 while the list never moved), so the
+      // signature uses the clamped content end, same as every other axis-(b)
+      // walk in this file.
+      const e = Number.isInteger(node.position?.end?.offset)
+        ? clampedNodeEnd(node, sourceText)
+        : null
       if (!Number.isInteger(s) || !Number.isInteger(e)) { ok = false; return }
       if (node.type === 'blockquote') {
         for (const child of node.children || []) walk(child)
@@ -449,8 +456,8 @@ function revertQuotedText({ doc, index, start, end }) {
     walk(tree)
     return n
   }
-  const before = signThroughQuotes(baselineTree, true)
-  const after = signThroughQuotes(candidateTree, false)
+  const before = signThroughQuotes(baselineTree, true, text)
+  const after = signThroughQuotes(candidateTree, false, candidate)
   if (before === null || after === null || before !== after) {
     return { ok: false, code: 'unsupported-structure' }
   }
