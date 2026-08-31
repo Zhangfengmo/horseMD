@@ -426,15 +426,17 @@ function provenQuoteConversion({ text, start, end, marker, target, quoteDepth })
 const clampedNodeEnd = (node, text) => {
   const end = node.position.end.offset
   if (!node.children?.length || typeof text !== 'string') return end
+  // RECURSIVE (2026-08-31, the nested-quoted-list report): a nested
+  // container child carries the SAME inflated bookkeeping, so taking raw
+  // child ends let one level of nesting pin `last` at the inflated value
+  // and the clamp never fired (measured: `> - 甲\n>   - 乙` above a quoted
+  // slash query refused every list conversion). Each child is clamped
+  // first; the walk then sees content ends only.
   let last = null
-  const walk = (n) => {
-    for (const child of n.children || []) {
-      const e = child.position?.end?.offset
-      if (Number.isInteger(e) && (last === null || e > last)) last = e
-      walk(child)
-    }
+  for (const child of node.children) {
+    const e = clampedNodeEnd(child, text)
+    if (Number.isInteger(e) && (last === null || e > last)) last = e
   }
-  walk(node)
   if (last === null || last >= end) return end
   return /^[>\t \r\n]*$/.test(text.slice(last, end)) ? last : end
 }

@@ -451,4 +451,27 @@ demoteSkips('space-less bare marker (a valid empty heading, but read-only)', '#\
     '> 1. 甲1\r\n>\r\n> - \r\n>\r\n> 乙\r\n', 16, 'CRLF quote /ul after a quoted ordered list')
 }
 
+// NESTED-QUOTED-LIST NEIGHBOUR (2026-08-31 user report: 「多级列表后再唤醒
+// 另一种列表就报错」). clampedNodeEnd took RAW child ends, so a NESTED
+// container child pinned `last` at its own inflated bookkeeping and the
+// clamp never fired — every list conversion below a nested quoted list
+// refused. The clamp is recursive now.
+{
+  const user = '> 你好啊\n>\n> - 甲\n>   - 乙\n>\n> /x\n'
+  const off = user.indexOf('/x') + 2
+  const r = setBlockTypeFromQuery({ doc: createMarkdownDocument(user), index: buildSyntaxIndex(user), offset: off, target: 'ordered' })
+  assert.equal(r.ok, true, `ordered below a nested quoted list must convert, got ${r.code}`)
+  const applied = applySourceTransaction(createMarkdownDocument(user), r.transaction)
+  assert.equal(applied.doc.text, '> 你好啊\n>\n> - 甲\n>   - 乙\n>\n> 1. \n')
+
+  const deep = '> - 甲\n>   - 乙\n>     - 丙\n>\n> /x\n'
+  const r2 = setBlockTypeFromQuery({ doc: createMarkdownDocument(deep), index: buildSyntaxIndex(deep), offset: deep.indexOf('/x') + 2, target: 'ordered' })
+  assert.equal(r2.ok, true, `3-deep nesting must convert too, got ${r2.code}`)
+
+  // SAME-marker adjacency stays refused: a bullet right below a bullet list
+  // merges into it (blank quote lines are absorbed), which axis (a) rejects.
+  const r3 = setBlockTypeFromQuery({ doc: createMarkdownDocument(user), index: buildSyntaxIndex(user), offset: off, target: 'bullet' })
+  assert.equal(r3.ok, false)
+}
+
 console.log('ok - source kernel block-type')
